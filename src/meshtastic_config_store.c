@@ -318,6 +318,27 @@ static bool config_is_valid(const meshtastic_Config *config)
 		    meshtastic_Config_LoRaConfig_RegionCode_LORA_24) {
 			return false;
 		}
+		/* RF-compliance hard lock: this is a US-only firmware build. Reject
+		 * any config that would move TX off the US 902-928 MHz band — a
+		 * non-US region, or an override_frequency outside the band.
+		 * RegionCode_UNSET is allowed: it leaves the US compile-time default
+		 * unchanged. This gates both the admin-set and NVS-load paths
+		 * (config_is_valid callers), so a non-US config can neither be stored
+		 * nor loaded. */
+		if (config->payload_variant.lora.region !=
+			    meshtastic_Config_LoRaConfig_RegionCode_UNSET &&
+		    config->payload_variant.lora.region !=
+			    meshtastic_Config_LoRaConfig_RegionCode_US) {
+			return false;
+		}
+		if (config->payload_variant.lora.override_frequency > 0.0f) {
+			uint32_t hz = (uint32_t)(config->payload_variant.lora
+						 .override_frequency * 1000000.0f);
+
+			if (hz < 902000000U || hz > 928000000U) {
+				return false;
+			}
+		}
 		return config->payload_variant.lora.hop_limit <= 7U;
 	case meshtastic_Config_bluetooth_tag:
 		return config->payload_variant.bluetooth.mode <=
@@ -495,10 +516,18 @@ int meshtastic_config_store_apply_core(void)
 	}
 
 	if (lora.override_frequency > 0.0f) {
-		mt.frequency = (uint32_t)(lora.override_frequency * 1000000.0f);
+		uint32_t hz = (uint32_t)(lora.override_frequency * 1000000.0f);
+
+		/* Defense in depth (US-only firmware): ignore an out-of-band override
+		 * even if one reached here without config_is_valid gating it. */
+		if (hz >= 902000000U && hz <= 928000000U) {
+			mt.frequency = hz;
+		}
 	} else {
 		frequency = frequency_from_region(lora.region);
-		if (frequency != 0U) {
+		/* Only honor a US region's frequency; UNSET/other keeps the default. */
+		if (frequency != 0U &&
+		    lora.region == meshtastic_Config_LoRaConfig_RegionCode_US) {
 			mt.frequency = frequency;
 		}
 	}
