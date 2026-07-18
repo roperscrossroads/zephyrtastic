@@ -15,6 +15,8 @@
 
 #include <pb_decode.h>
 
+#include <esp_attr.h>
+
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
 
@@ -50,7 +52,9 @@ struct nodedb_entry {
 };
 
 static K_MUTEX_DEFINE(nodedb_lock);
-static struct nodedb_entry nodedb_entries[CONFIG_MESHTASTIC_NODEDB_MAX_NODES];
+/* EXT_RAM_BSS_ATTR: no-op unless CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY (V4-only) —
+ * places this table in PSRAM instead of internal DRAM. See PSRAM-NEXT-STEPS.md. */
+static EXT_RAM_BSS_ATTR struct nodedb_entry nodedb_entries[CONFIG_MESHTASTIC_NODEDB_MAX_NODES];
 static size_t nodedb_entry_count;
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
@@ -243,7 +247,7 @@ struct warm_key {
  * LRU meaningful across reboots. Legacy records are key-only (32 B) — see set. */
 #define MTNODE_REC_LEN (sizeof(uint32_t) + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN)
 
-static struct warm_key warm_keys[CONFIG_MESHTASTIC_NODEDB_WARM_KEYS];
+static EXT_RAM_BSS_ATTR struct warm_key warm_keys[CONFIG_MESHTASTIC_NODEDB_WARM_KEYS];
 
 /* Set when a warm eviction (or boot) may have orphaned an NVS record. The
  * save-work handler then prunes any persisted mtnode/<id> whose node is no
