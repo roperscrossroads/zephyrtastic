@@ -21,6 +21,9 @@ manifest:
           - tf-psa-crypto
           - nanopb
           - picolibc
+          - mcuboot # needed for sysbuild/OTA (MCUboot A/B) builds; the upstream trimmed
+                    # manifest didn't need it since it targets simple-boot only
+          - zcbor   # needed by MESHTASTIC_OTA's MCUmgr/SMP transport, same reason as mcuboot
           - loramac-node # drop me eventually, not used but there's a kconfig issue preventing
                          # build when HAS_SEMTECH_SX126X=y but module is not present, even when
                          # using native lora backend
