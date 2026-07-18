@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Adam Roper
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_OTA
+	bool "OTA firmware update over SMP/UDP (mcumgr)"
+	depends on NETWORKING && NET_UDP && BOOTLOADER_MCUBOOT
+	select MCUMGR
+	select NET_BUF          # mcumgr core dependency
+	select ZCBOR            # mcumgr core dependency
+	select CRC              # SMP framing checksum
+	select MCUMGR_TRANSPORT_UDP
+	select MCUMGR_GRP_IMG
+	select MCUMGR_GRP_OS
+	select IMG_MANAGER
+	select STREAM_FLASH
+	help
+	  Run an mcumgr SMP server over UDP so the node can be updated over WiFi
+	  into the MCUboot slot1 partition (image upload -> test -> reset -> swap ->
+	  confirm), with automatic MCUboot revert if a swapped image is never
+	  confirmed. The UDP transport self-starts, so no application code is
+	  required for the core update path. Requires the MCUboot A/B build
+	  (sysbuild); opt-in per variant via overlay-ota.conf. Only the net (WiFi)
+	  variant can carry it — netserial does not build and ble has no IP stack.
+
+if MESHTASTIC_OTA
+
+config MESHTASTIC_OTA_AUTOCONFIRM
+	bool "Auto-confirm the running image after a healthy delay"
+	default n
+	help
+	  After MESHTASTIC_OTA_CONFIRM_DELAY_SEC of healthy uptime, call
+	  boot_write_img_confirmed() so a freshly-swapped image becomes permanent
+	  without a manual `mcumgr image confirm`. Leave OFF for the safest story:
+	  an unconfirmed image is reverted by MCUboot on the next unexpected reset.
+
+config MESHTASTIC_OTA_CONFIRM_DELAY_SEC
+	int "Auto-confirm delay (seconds)"
+	default 120
+	depends on MESHTASTIC_OTA_AUTOCONFIRM
+
+endif # MESHTASTIC_OTA
