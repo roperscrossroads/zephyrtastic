@@ -17,6 +17,20 @@
 
 #include <esp_attr.h>
 
+/* EXT_RAM_BSS_ATTR is gated on CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY, which — a real
+ * Kconfig footgun found 2026-07-17 — depends on the vendored ESP-IDF "SPIRAM" symbol, NOT
+ * Zephyr's board-level CONFIG_ESP_SPIRAM. On V3 (no PSRAM, ESP_SPIRAM unset) that vendored
+ * symbol is still =y, so EXT_RAM_BSS_ATTR is NOT the no-op it looks like — it emits an
+ * .ext_ram.bss section with nowhere to go (V3's linker script has no ext_ram output region
+ * at all), and the build fails to link (".ext_ram.bss.N will not fit in region IDT_LIST").
+ * Gate on CONFIG_ESP_SPIRAM directly instead — the symbol that actually reflects whether
+ * THIS board has a real PSRAM-backed linker region. */
+#if defined(CONFIG_ESP_SPIRAM)
+#define MESHTASTIC_EXT_RAM_BSS_ATTR EXT_RAM_BSS_ATTR
+#else
+#define MESHTASTIC_EXT_RAM_BSS_ATTR
+#endif
+
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
 
@@ -52,9 +66,9 @@ struct nodedb_entry {
 };
 
 static K_MUTEX_DEFINE(nodedb_lock);
-/* EXT_RAM_BSS_ATTR: no-op unless CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY (V4-only) —
- * places this table in PSRAM instead of internal DRAM. See PSRAM-NEXT-STEPS.md. */
-static EXT_RAM_BSS_ATTR struct nodedb_entry nodedb_entries[CONFIG_MESHTASTIC_NODEDB_MAX_NODES];
+/* MESHTASTIC_EXT_RAM_BSS_ATTR: no-op unless CONFIG_ESP_SPIRAM (V4-only) — places this table
+ * in PSRAM instead of internal DRAM. See PSRAM-NEXT-STEPS.md. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR struct nodedb_entry nodedb_entries[CONFIG_MESHTASTIC_NODEDB_MAX_NODES];
 static size_t nodedb_entry_count;
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
@@ -247,7 +261,7 @@ struct warm_key {
  * LRU meaningful across reboots. Legacy records are key-only (32 B) — see set. */
 #define MTNODE_REC_LEN (sizeof(uint32_t) + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN)
 
-static EXT_RAM_BSS_ATTR struct warm_key warm_keys[CONFIG_MESHTASTIC_NODEDB_WARM_KEYS];
+static MESHTASTIC_EXT_RAM_BSS_ATTR struct warm_key warm_keys[CONFIG_MESHTASTIC_NODEDB_WARM_KEYS];
 
 /* Set when a warm eviction (or boot) may have orphaned an NVS record. The
  * save-work handler then prunes any persisted mtnode/<id> whose node is no
