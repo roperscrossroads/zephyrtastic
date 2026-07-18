@@ -1049,8 +1049,10 @@ static void send_reliable_dm(uint32_t id)
 	zassert_ok(meshtastic_send_packet(&dm, K_NO_WAIT));
 }
 
-/* Inject a ROUTING ACK (or NAK) from PEER to us correlating request_id. */
-static void inject_routing_ack(uint32_t request_id, meshtastic_Routing_Error err)
+/* Inject a ROUTING ACK (or NAK) from PEER to us correlating request_id, with an
+ * explicit relay_node byte (0 = arrived direct). */
+static void inject_routing_ack_via(uint32_t request_id, meshtastic_Routing_Error err,
+				   uint8_t relay_node)
 {
 	meshtastic_Routing routing = meshtastic_Routing_init_zero;
 	uint8_t rbuf[16];
@@ -1063,6 +1065,7 @@ static void inject_routing_ack(uint32_t request_id, meshtastic_Routing_Error err
 		.request_id = request_id,
 		.hop_limit = 3U,
 		.hop_start = 3U,
+		.relay_node = relay_node,
 		.channel_index = meshtastic_channels_primary_index(),
 	};
 	uint8_t wire[MESHTASTIC_PKT_MAX];
@@ -1075,6 +1078,11 @@ static void inject_routing_ack(uint32_t request_id, meshtastic_Routing_Error err
 	ack.payload_len = os.bytes_written;
 	zassert_ok(meshtastic_build_wire_packet(&ack, wire, &wire_len));
 	inject_rx_frame(wire, wire_len, -40, 5);
+}
+
+static void inject_routing_ack(uint32_t request_id, meshtastic_Routing_Error err)
+{
+	inject_routing_ack_via(request_id, err, 0U);
 }
 
 /* Verifies an explicit ROUTING ACK for a want_ack DM we sent cancels
@@ -1391,30 +1399,124 @@ static void inject_with_relay(uint32_t from, uint32_t to, uint32_t id, uint8_t r
 	inject_rx_frame(wire, wire_len, -40, 5);
 }
 
-/* A unicast addressed to us teaches the next hop back to its source: the
- * relay_node byte becomes the learned route toward that node. */
-ZTEST(protocol_stack, test_learn_next_hop_from_unicast_to_us)
+/* Drive the full (M2-gated) learn round-trip for a route to PEER via
+ * @p relayer_num: prime the relayer as a known node, send a want_ack DM
+ * (id @p dm_id), overhear our own DM rebroadcast by that relayer (two-way
+ * correlation evidence), then take PEER's ROUTING ACK carried by the same
+ * relayer. Leaves next_hop(PEER) == low byte of @p relayer_num. */
+static void learn_route_via(uint32_t dm_id, uint32_t relayer_num)
 {
-	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xB100U, 0x99U);
+	uint8_t rbyte = (uint8_t)(relayer_num & 0xFFU);
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_wire_header *whdr;
+
+	/* The relayer must be a known node for unique last-byte resolution. */
+	inject_with_relay(relayer_num, MESHTASTIC_NODE_BROADCAST, dm_id ^ 0x10000U, 0U);
 	k_sleep(K_MSEC(30));
 
-	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x99U,
-		      "relay_node of a unicast to us should be learned as its next hop");
+	send_reliable_dm(dm_id);
+	k_sleep(K_MSEC(30));
+
+	/* Our own DM echoed back, rebroadcast by the relayer. */
+	build_wire_packet(TEST_NODE_ID, PEER_NODE_ID, dm_id, 2U, MESHTASTIC_PORT_TEXT_MESSAGE,
+			  (const uint8_t *)"hi", 2U, wire, &wire_len);
+	whdr = (struct meshtastic_wire_header *)wire;
+	whdr->relay_node = rbyte;
+	inject_rx_frame(wire, wire_len, -40, 5);
+	k_sleep(K_MSEC(30));
+
+	/* PEER's ACK for the DM, carried by the same relayer. */
+	inject_routing_ack_via(dm_id, meshtastic_Routing_Error_NONE, rbyte);
+	k_sleep(K_MSEC(30));
+}
+
+/* M2 positive path: an ACK correlated to our own send (request_id), carried by
+ * a relayer that provably also relayed our original (we overheard the echo) and
+ * whose last byte resolves to exactly one known node, teaches the next hop. */
+ZTEST(protocol_stack, test_learn_next_hop_from_correlated_ack)
+{
+	/* OTHER_NODE_ID low byte 0x68 — unique among known nodes. */
+	learn_route_via(0xC101U, OTHER_NODE_ID);
+
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID),
+		      (uint8_t)(OTHER_NODE_ID & 0xFFU),
+		      "correlated + unique relayer should be learned as the next hop");
+}
+
+/* M2: a plain unicast to us (not an ACK/reply to anything we sent) must no
+ * longer teach a route — no correlation, nothing to trust. */
+ZTEST(protocol_stack, test_no_learn_next_hop_from_plain_unicast)
+{
+	/* Clear any route to PEER left behind by other tests. */
+	(void)meshtastic_nodedb_set_next_hop(PEER_NODE_ID, 0U);
+
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xC111U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0U,
+		      "an uncorrelated unicast must not set a next hop");
+}
+
+/* M2: an ACK whose relayer never relayed our original (no overheard echo) must
+ * not teach a route, even if the byte is unique. */
+ZTEST(protocol_stack, test_no_learn_next_hop_without_correlation)
+{
+	/* Clear any route to PEER left behind by other tests. */
+	(void)meshtastic_nodedb_set_next_hop(PEER_NODE_ID, 0U);
+
+	/* Make OTHER known so the byte would resolve uniquely. */
+	inject_with_relay(OTHER_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0xC120U, 0U);
+	k_sleep(K_MSEC(30));
+
+	send_reliable_dm(0xC121U);
+	k_sleep(K_MSEC(30));
+
+	/* ACK arrives via OTHER's byte, but we never heard OTHER relay the DM. */
+	inject_routing_ack_via(0xC121U, meshtastic_Routing_Error_NONE,
+			       (uint8_t)(OTHER_NODE_ID & 0xFFU));
+	k_sleep(K_MSEC(30));
+
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0U,
+		      "an uncorrelated ACK relayer must not be learned");
+}
+
+/* M2: a relayer byte shared by two known nodes is ambiguous and must not be
+ * learned even when fully correlated. */
+ZTEST(protocol_stack, test_no_learn_next_hop_ambiguous_relayer_byte)
+{
+	/* Clear any route to PEER left behind by other tests. */
+	(void)meshtastic_nodedb_set_next_hop(PEER_NODE_ID, 0U);
+
+	/* A second known node sharing OTHER's low byte 0x68. */
+	inject_with_relay(0x44556668U, MESHTASTIC_NODE_BROADCAST, 0xC130U, 0U);
+	k_sleep(K_MSEC(30));
+
+	learn_route_via(0xC131U, OTHER_NODE_ID);
+
+	uint8_t learned = meshtastic_nodedb_get_next_hop(PEER_NODE_ID);
+
+	/* Un-pollute the shared NodeDB before asserting: later tests rely on
+	 * OTHER's low byte resolving uniquely again. */
+	zassert_ok(meshtastic_nodedb_remove(0x44556668U));
+
+	zassert_equal(learned, 0U, "an ambiguous relayer byte must not be learned");
 }
 
 /* Broadcasts have no confirmed return path, so they must not set a next hop. */
 ZTEST(protocol_stack, test_no_learn_next_hop_from_broadcast)
 {
 	/* Establish a known route first. */
-	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xB110U, 0x11U);
-	k_sleep(K_MSEC(30));
-	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x11U, "baseline learn failed");
+	learn_route_via(0xC141U, OTHER_NODE_ID);
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID),
+		      (uint8_t)(OTHER_NODE_ID & 0xFFU), "baseline learn failed");
 
 	/* A broadcast from the same node with a different relay_node must not change it. */
-	inject_with_relay(PEER_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0xB111U, 0x22U);
+	inject_with_relay(PEER_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0xC142U, 0x22U);
 	k_sleep(K_MSEC(30));
 
-	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x11U,
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID),
+		      (uint8_t)(OTHER_NODE_ID & 0xFFU),
 		      "a broadcast must not overwrite the learned next hop");
 }
 
@@ -1422,15 +1524,30 @@ ZTEST(protocol_stack, test_no_learn_next_hop_from_broadcast)
  * it must be rejected rather than learned. */
 ZTEST(protocol_stack, test_no_learn_next_hop_when_relay_is_self)
 {
-	/* OTHER_NODE_ID low byte 0x68; our low byte is 0x78. */
-	inject_with_relay(OTHER_NODE_ID, TEST_NODE_ID, 0xB120U, 0x33U);
-	k_sleep(K_MSEC(30));
-	zassert_equal(meshtastic_nodedb_get_next_hop(OTHER_NODE_ID), 0x33U, "baseline learn failed");
+	uint8_t self_byte = (uint8_t)(TEST_NODE_ID & 0xFFU);
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_wire_header *whdr;
 
-	inject_with_relay(OTHER_NODE_ID, TEST_NODE_ID, 0xB121U, (uint8_t)(TEST_NODE_ID & 0xFFU));
+	/* Establish a known route first. */
+	learn_route_via(0xC151U, OTHER_NODE_ID);
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID),
+		      (uint8_t)(OTHER_NODE_ID & 0xFFU), "baseline learn failed");
+
+	/* A full round trip whose relayer byte is our own must not change it. */
+	send_reliable_dm(0xC152U);
+	k_sleep(K_MSEC(30));
+	build_wire_packet(TEST_NODE_ID, PEER_NODE_ID, 0xC152U, 2U, MESHTASTIC_PORT_TEXT_MESSAGE,
+			  (const uint8_t *)"hi", 2U, wire, &wire_len);
+	whdr = (struct meshtastic_wire_header *)wire;
+	whdr->relay_node = self_byte;
+	inject_rx_frame(wire, wire_len, -40, 5);
+	k_sleep(K_MSEC(30));
+	inject_routing_ack_via(0xC152U, meshtastic_Routing_Error_NONE, self_byte);
 	k_sleep(K_MSEC(30));
 
-	zassert_equal(meshtastic_nodedb_get_next_hop(OTHER_NODE_ID), 0x33U,
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID),
+		      (uint8_t)(OTHER_NODE_ID & 0xFFU),
 		      "our own low byte must not be learned as a next hop");
 }
 
@@ -1442,14 +1559,14 @@ ZTEST(protocol_stack, test_no_learn_next_hop_from_mqtt_downlink)
 	int ret;
 
 	/* Establish a known route first. */
-	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xB130U, 0x55U);
-	k_sleep(K_MSEC(30));
-	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x55U, "baseline learn failed");
+	learn_route_via(0xC161U, OTHER_NODE_ID);
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID),
+		      (uint8_t)(OTHER_NODE_ID & 0xFFU), "baseline learn failed");
 
 	/* An MQTT downlink to us from the same node, carrying a different relay_node. */
 	mesh.from = PEER_NODE_ID;
 	mesh.to = TEST_NODE_ID;
-	mesh.id = 0xB131U;
+	mesh.id = 0xC162U;
 	mesh.channel = meshtastic_channels_primary_index();
 	mesh.hop_limit = 3U;
 	mesh.hop_start = 3U;
@@ -1463,27 +1580,89 @@ ZTEST(protocol_stack, test_no_learn_next_hop_from_mqtt_downlink)
 	zassert_ok(ret, "downlink inject failed: %d", ret);
 	k_sleep(K_MSEC(30));
 
-	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x55U,
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID),
+		      (uint8_t)(OTHER_NODE_ID & 0xFFU),
 		      "an MQTT-injected packet must not overwrite the learned next hop");
 }
 
-/* When a reliable send exhausts its retransmits, the learned (now stale) next
- * hop toward that destination is cleared so future sends flood and rediscover. */
-ZTEST(protocol_stack, test_reliable_failure_clears_learned_next_hop)
+/* M4: repeated delivery failures decay a learned route back to flood — but a
+ * single exhausted send must not (3-strike tolerance, upstream RouteHealth). */
+ZTEST(protocol_stack, test_reliable_failures_decay_learned_next_hop)
 {
-	/* Learn a route to PEER. */
-	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xB140U, 0x66U);
-	k_sleep(K_MSEC(30));
-	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x66U, "baseline learn failed");
+	uint8_t rbyte = (uint8_t)(OTHER_NODE_ID & 0xFFU);
 
-	/* A reliable DM to PEER that is never ACKed exhausts its retransmits. */
-	zassert_ok(meshtastic_sched_set("reliable.retries", "2"));
+	learn_route_via(0xC171U, OTHER_NODE_ID);
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), rbyte, "baseline learn failed");
+
+	zassert_ok(meshtastic_sched_set("reliable.retries", "1"));
 	zassert_ok(meshtastic_sched_set("reliable.timeout", "100"));
-	send_reliable_dm(0xB141U);
-	k_sleep(K_MSEC(450)); /* original + 2 retransmits, then exhaustion */
+
+	/* First exhausted send: one strike, route still trusted. */
+	send_reliable_dm(0xC172U);
+	k_sleep(K_MSEC(350));
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), rbyte,
+		      "one failure must not drop the route");
+
+	/* Second strike: still trusted. */
+	send_reliable_dm(0xC173U);
+	k_sleep(K_MSEC(350));
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), rbyte,
+		      "two failures must not drop the route");
+
+	/* Third strike: decay to flood. */
+	send_reliable_dm(0xC174U);
+	k_sleep(K_MSEC(350));
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0U,
+		      "three failures should decay the route to flood");
+}
+
+/* M4: a stale route (past route.ttl) is decayed to flood at read time. */
+ZTEST(protocol_stack, test_route_ttl_decay_returns_to_flood)
+{
+	uint8_t rbyte = (uint8_t)(OTHER_NODE_ID & 0xFFU);
+
+	learn_route_via(0xC181U, OTHER_NODE_ID);
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), rbyte, "baseline learn failed");
+
+	zassert_ok(meshtastic_sched_set("route.ttl", "1"));
+	k_sleep(K_MSEC(1500));
 
 	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0U,
-		      "delivery failure should clear the stale next hop");
+		      "a stale route must decay to flood");
+}
+
+/* M4: a delivered send resets the failure strike count. */
+ZTEST(protocol_stack, test_route_success_resets_failure_count)
+{
+	uint8_t rbyte = (uint8_t)(OTHER_NODE_ID & 0xFFU);
+
+	learn_route_via(0xC191U, OTHER_NODE_ID);
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), rbyte, "baseline learn failed");
+
+	zassert_ok(meshtastic_sched_set("reliable.retries", "1"));
+	zassert_ok(meshtastic_sched_set("reliable.timeout", "100"));
+
+	/* Two strikes... */
+	send_reliable_dm(0xC192U);
+	k_sleep(K_MSEC(350));
+	send_reliable_dm(0xC193U);
+	k_sleep(K_MSEC(350));
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), rbyte,
+		      "two failures: route still trusted");
+
+	/* ...then a delivered send resets the count... */
+	send_reliable_dm(0xC194U);
+	k_sleep(K_MSEC(30));
+	inject_routing_ack(0xC194U, meshtastic_Routing_Error_NONE);
+	k_sleep(K_MSEC(50));
+
+	/* ...so two MORE failures still leave the route trusted. */
+	send_reliable_dm(0xC195U);
+	k_sleep(K_MSEC(350));
+	send_reliable_dm(0xC196U);
+	k_sleep(K_MSEC(350));
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), rbyte,
+		      "a delivered send should have reset the strike count");
 }
 
 /* A want_ack unicast addressed to us that we cannot decode is NAKed back to the
@@ -1575,12 +1754,13 @@ ZTEST(protocol_stack, test_undecodable_broadcast_is_not_naked)
  * and the learned routes toward the wiped peers are gone. */
 ZTEST(protocol_stack, test_nodedb_reset_removes_all_peers)
 {
-	/* Populate the DB with two peers and learn a route to each. */
-	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xC100U, 0x99U);
-	inject_with_relay(OTHER_NODE_ID, TEST_NODE_ID, 0xC101U, 0x33U);
+	/* Populate the DB with two peers and plant a route to each (learning is
+	 * correlation-gated — M2 — so set the routes directly). */
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xD100U, 0x99U);
+	inject_with_relay(OTHER_NODE_ID, TEST_NODE_ID, 0xD101U, 0x33U);
 	k_sleep(K_MSEC(30));
-	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x99U, "peer route not learned");
-	zassert_equal(meshtastic_nodedb_get_next_hop(OTHER_NODE_ID), 0x33U, "other route not learned");
+	zassert_ok(meshtastic_nodedb_set_next_hop(PEER_NODE_ID, 0x99U), "peer route not set");
+	zassert_ok(meshtastic_nodedb_set_next_hop(OTHER_NODE_ID, 0x33U), "other route not set");
 
 	meshtastic_nodedb_reset(false);
 
@@ -1596,14 +1776,16 @@ ZTEST(protocol_stack, test_nodedb_reset_removes_all_peers)
  * NodeDB::resetNodes) while still evicting the rest. */
 ZTEST(protocol_stack, test_nodedb_reset_keeps_favorites)
 {
-	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xC110U, 0x99U);
-	inject_with_relay(OTHER_NODE_ID, TEST_NODE_ID, 0xC111U, 0x33U);
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xD110U, 0x99U);
+	inject_with_relay(OTHER_NODE_ID, TEST_NODE_ID, 0xD111U, 0x33U);
 	k_sleep(K_MSEC(30));
+	zassert_ok(meshtastic_nodedb_set_next_hop(PEER_NODE_ID, 0x99U), "peer route not set");
+	zassert_ok(meshtastic_nodedb_set_next_hop(OTHER_NODE_ID, 0x33U), "other route not set");
 	zassert_ok(meshtastic_nodedb_set_favorite(PEER_NODE_ID, true), "favorite set failed");
 
 	meshtastic_nodedb_reset(true);
 
-	/* The favorite (and its learned route) survives; the non-favorite is gone. */
+	/* The favorite (and its planted route) survives; the non-favorite is gone. */
 	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x99U,
 		      "favorite peer should be retained across reset");
 	zassert_equal(meshtastic_nodedb_get_next_hop(OTHER_NODE_ID), 0U,

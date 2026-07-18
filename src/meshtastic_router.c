@@ -316,7 +316,9 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 
 	if (src == mt.node_id) {
 		/* A neighbour rebroadcast one of our own packets: implicit ACK that it
-		 * reached the mesh. We never relay or deliver our own echo. */
+		 * reached the mesh. We never relay or deliver our own echo. The
+		 * relayer byte feeds the next-hop learn correlation (M2). */
+		meshtastic_routing_note_own_echo(pkt_id, hdr->relay_node);
 		meshtastic_reliable_on_implicit_ack(pkt_id);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX, airtime_ms);

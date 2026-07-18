@@ -20,6 +20,44 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 #define ROUTING_REPLY_HOP_MARGIN 2U
 
+/* Relayers we overheard rebroadcasting OUR OWN packets (the own-echo RX
+ * branch), keyed by wire packet id. This is the outbound half of the two-way
+ * correlation the next-hop learn gate needs: a relayer is only trusted when it
+ * carried our packet toward the destination AND the ACK/reply back (upstream
+ * NextHopRouter checkRelayers). Small ring — the correlation window is the few
+ * seconds between a send and its ACK. */
+#define ROUTING_RELAYER_LOG_SIZE 8U
+
+static struct {
+	uint32_t id;
+	uint8_t relayer;
+} relayer_log[ROUTING_RELAYER_LOG_SIZE];
+static uint8_t relayer_log_head;
+
+void meshtastic_routing_note_own_echo(uint32_t id, uint8_t relay_node)
+{
+	uint8_t self_byte = (uint8_t)(mt.node_id & 0xFFU);
+
+	if (relay_node == 0U || relay_node == self_byte) {
+		return;
+	}
+
+	relayer_log[relayer_log_head].id = id;
+	relayer_log[relayer_log_head].relayer = relay_node;
+	relayer_log_head = (uint8_t)((relayer_log_head + 1U) % ROUTING_RELAYER_LOG_SIZE);
+}
+
+static bool relayer_carried_our_packet(uint32_t id, uint8_t relayer)
+{
+	for (size_t i = 0U; i < ROUTING_RELAYER_LOG_SIZE; i++) {
+		if (relayer_log[i].id == id && relayer_log[i].relayer == relayer) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static bool packet_is_to_us(const struct meshtastic_packet *packet)
 {
 	return packet != NULL &&
@@ -205,6 +243,22 @@ void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet)
 	 * through ourselves, which is never a valid next hop. */
 	self_byte = (uint8_t)(mt.node_id & 0xFFU);
 	if (packet->relay_node == 0U || packet->relay_node == self_byte) {
+		return;
+	}
+
+	/* Learn gates (M2, upstream NextHopRouter::sniffReceived +
+	 * resolveUniqueLastByte): only an ACK/reply correlated to a packet we
+	 * sent (request_id) may teach a route; its relayer must provably have
+	 * carried our original outbound too (we overheard the rebroadcast); and
+	 * the one-byte relayer id must resolve to exactly one known node — a
+	 * colliding low byte could point the route at the wrong neighbour. */
+	if (packet->request_id == 0U) {
+		return;
+	}
+	if (!relayer_carried_our_packet(packet->request_id, packet->relay_node)) {
+		return;
+	}
+	if (meshtastic_nodedb_resolve_unique_last_byte(packet->relay_node) == 0U) {
 		return;
 	}
 

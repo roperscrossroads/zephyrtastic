@@ -20,6 +20,7 @@
 
 #include "meshtastic_clock.h"
 #include "meshtastic_modules.h"
+#include "meshtastic_sched.h"
 #if defined(CONFIG_MESHTASTIC_PKI)
 #include "meshtastic_pki.h"
 #endif
@@ -640,6 +641,103 @@ static void fill_snapshot(const struct nodedb_entry *entry, struct meshtastic_no
 	}
 }
 
+/* Read-time route health (M4, upstream RouteHealth): freshness + failure
+ * tracking for learned next hops, consulted by get_next_hop so a stale or
+ * repeatedly failing route decays back to flood instead of being trusted on
+ * the first (slowest) attempt of each DM. RAM-only, advisory: a route without
+ * a record (ring-evicted, or planted before tracking) stays trusted and only
+ * decays through failures. All access under nodedb_lock. */
+#define ROUTE_HEALTH_SIZE     16U
+#define ROUTE_HEALTH_MAX_FAIL 3U
+
+struct route_health {
+	uint32_t dest;       /* 0 = empty slot */
+	uint32_t learned_at; /* uptime seconds at learn / last confirmed delivery */
+	uint8_t fail_count;  /* consecutive reliable-exhaustion strikes */
+};
+
+static struct route_health route_health[ROUTE_HEALTH_SIZE];
+
+static struct route_health *route_health_find_locked(uint32_t dest)
+{
+	for (size_t i = 0U; i < ARRAY_SIZE(route_health); i++) {
+		if (route_health[i].dest == dest) {
+			return &route_health[i];
+		}
+	}
+
+	return NULL;
+}
+
+static void route_health_upsert_locked(uint32_t dest)
+{
+	struct route_health *rh = route_health_find_locked(dest);
+
+	if (rh == NULL) {
+		/* Prefer an empty slot, else evict the oldest record. */
+		rh = &route_health[0];
+		for (size_t i = 0U; i < ARRAY_SIZE(route_health); i++) {
+			if (route_health[i].dest == 0U) {
+				rh = &route_health[i];
+				break;
+			}
+			if (route_health[i].learned_at < rh->learned_at) {
+				rh = &route_health[i];
+			}
+		}
+	}
+
+	rh->dest = dest;
+	rh->learned_at = uptime_seconds();
+	rh->fail_count = 0U;
+}
+
+static void route_health_drop_locked(uint32_t dest)
+{
+	struct route_health *rh = route_health_find_locked(dest);
+
+	if (rh != NULL) {
+		*rh = (struct route_health){0};
+	}
+}
+
+void meshtastic_nodedb_note_route_failure(uint32_t dest)
+{
+	struct nodedb_entry *entry;
+	struct route_health *rh;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	rh = route_health_find_locked(dest);
+	if (rh != NULL && rh->fail_count < UINT8_MAX) {
+		rh->fail_count++;
+	}
+	if (rh == NULL || rh->fail_count >= ROUTE_HEALTH_MAX_FAIL) {
+		/* Untracked route, or three strikes: back to flood so the next
+		 * send rediscovers a working path (self-healing). */
+		entry = find_entry_locked(dest);
+		if (entry != NULL && entry->node.next_hop != 0U) {
+			LOG_DBG("route health: next_hop(0x%08x) decayed (failures)",
+				(unsigned int)dest);
+			entry->node.next_hop = 0U;
+		}
+		route_health_drop_locked(dest);
+	}
+	k_mutex_unlock(&nodedb_lock);
+}
+
+void meshtastic_nodedb_note_route_success(uint32_t dest)
+{
+	struct route_health *rh;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	rh = route_health_find_locked(dest);
+	if (rh != NULL) {
+		rh->fail_count = 0U;
+		rh->learned_at = uptime_seconds();
+	}
+	k_mutex_unlock(&nodedb_lock);
+}
+
 /* Next-hop routing support (Increment 1: foundation). The on-wire next_hop /
  * relay_node fields are only the *last byte* of a node number, so a byte can be
  * ambiguous on a large mesh — resolve one back to a node only when exactly one
@@ -683,6 +781,24 @@ uint8_t meshtastic_nodedb_get_next_hop(uint32_t dest)
 	if (entry != NULL) {
 		next_hop = entry->node.next_hop;
 	}
+
+	/* Read-time decay (M4): a tracked route that is stale (past route.ttl)
+	 * or has struck out is cleared and the caller floods. A single aligned
+	 * scalar read of the TTL is atomic (see meshtastic_sched.h). */
+	if (next_hop != 0U) {
+		struct route_health *rh = route_health_find_locked(dest);
+		uint16_t ttl = meshtastic_sched_get()->route_ttl_sec;
+
+		if (rh != NULL &&
+		    (rh->fail_count >= ROUTE_HEALTH_MAX_FAIL ||
+		     (ttl != 0U && (uptime_seconds() - rh->learned_at) > (uint32_t)ttl))) {
+			LOG_DBG("route health: next_hop(0x%08x) decayed (stale)",
+				(unsigned int)dest);
+			entry->node.next_hop = 0U;
+			route_health_drop_locked(dest);
+			next_hop = 0U;
+		}
+	}
 	k_mutex_unlock(&nodedb_lock);
 
 	return next_hop;
@@ -697,6 +813,11 @@ int meshtastic_nodedb_set_next_hop(uint32_t dest, uint8_t next_hop)
 	entry = find_entry_locked(dest);
 	if (entry != NULL) {
 		entry->node.next_hop = next_hop;
+		if (next_hop != 0U) {
+			route_health_upsert_locked(dest);
+		} else {
+			route_health_drop_locked(dest);
+		}
 		ret = 0;
 	}
 	k_mutex_unlock(&nodedb_lock);
@@ -897,6 +1018,7 @@ int meshtastic_nodedb_remove(uint32_t node_num)
 		}
 		nodedb_entries[last] = (struct nodedb_entry){0};
 		nodedb_entry_count--;
+		route_health_drop_locked(node_num);
 		k_mutex_unlock(&nodedb_lock);
 		LOG_DBG("NodeDB removed 0x%08x", node_num);
 		return 0;
@@ -937,6 +1059,10 @@ void meshtastic_nodedb_reset(bool keep_favorites)
 		nodedb_entries[i] = (struct nodedb_entry){0};
 	}
 	nodedb_entry_count = kept;
+
+	/* Route-health records are advisory and cheap to relearn; drop them all.
+	 * A kept favorite's route simply becomes untracked (still trusted). */
+	memset(route_health, 0, sizeof(route_health));
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
 	/* Warm keys are never favorites (self's key lives in config/security), so a

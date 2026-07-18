@@ -74,6 +74,10 @@ struct meshtastic_sched_config {
 				   * originate, before giving up. 0 = disable
 				   * sender-side reliable delivery. */
 	uint16_t reliable_timeout_ms; /* base interval between those retransmits */
+	uint16_t route_ttl_sec;   /* learned next-hop route lifetime in seconds; a
+				   * route older than this decays back to flood at
+				   * read time (upstream RouteHealth staleness).
+				   * 0 = never expire. */
 };
 
 struct meshtastic_sched_stats {
@@ -133,7 +137,8 @@ int meshtastic_sched_apply_preset(const char *name);
 
 /**
  * Set one knob by key ("tx.order", "tx.overflow", "tx.depth", "phone.evict",
- * "airtime.max", "dedup.ttl") to a string value. A successful change resets the
+ * "airtime.max", "dedup.ttl", "reliable.retries", "reliable.timeout",
+ * "route.ttl") to a string value. A successful change resets the
  * live stats so behavior can be evaluated from a clean slate ("change modes,
  * fresh counters").
  * @retval 0 applied, -ENOENT unknown key, -EINVAL bad value.

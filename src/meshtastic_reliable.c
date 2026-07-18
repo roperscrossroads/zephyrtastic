@@ -87,11 +87,11 @@ static void notify_failure(uint32_t id, uint32_t to)
 	LOG_WRN("reliable: id=0x%08x to 0x%08x exhausted retries", id, to);
 
 	/* The learned next hop toward this destination just failed to deliver
-	 * despite retransmits: treat the route as stale and drop it so the next send
-	 * floods and rediscovers a working path (self-healing). No-op if nothing was
-	 * learned. Note this fires only on retransmit exhaustion, not on a NAK — a
-	 * NAK means the peer received it, so its route is fine. */
-	(void)meshtastic_nodedb_set_next_hop(to, 0U);
+	 * despite retransmits: strike its route health (three strikes decay the
+	 * route to flood so the next send rediscovers a working path — M4,
+	 * upstream RouteHealth). Note this fires only on retransmit exhaustion,
+	 * not on a NAK — a NAK means the peer received it, so its route is fine. */
+	meshtastic_nodedb_note_route_failure(to);
 
 	meshtastic_emit_event(MESHTASTIC_EVENT_TX_FAILED, -ETIMEDOUT,
 			      &(struct meshtastic_packet){
@@ -255,6 +255,11 @@ void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing)
 	}
 	reschedule_locked(k_uptime_get());
 	k_mutex_unlock(&pend_lock);
+
+	/* Either way the peer answered, so the route that carried the exchange
+	 * works: reset its failure strikes (M4). A NAK is a delivery failure for
+	 * the app, not for the route. */
+	meshtastic_nodedb_note_route_success(routing->from);
 
 	if (is_nak) {
 		meshtastic_sched_stat_reliable_fail();

@@ -107,6 +107,17 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
 				   meshtastic_Routing_Error err);
 
 /**
+ * @brief Record that a neighbour rebroadcast one of our own packets.
+ *
+ * Called from the own-echo RX branch (wire src == this node) with the echo's
+ * @c relay_node byte. Feeds the two-way relayer correlation that gates
+ * next-hop learning (@ref meshtastic_routing_learn_next_hop): a relayer is
+ * only trusted once it demonstrably carried our packet outbound and the
+ * ACK/reply back. Zero / own-byte relayers are ignored.
+ */
+void meshtastic_routing_note_own_echo(uint32_t id, uint8_t relay_node);
+
+/**
  * @brief Re-ACK the retransmission of a reliable unicast we already handled.
  *
  * Called from the dedup drop path when a duplicate arrives with the

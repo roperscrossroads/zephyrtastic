@@ -27,6 +27,7 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define DEDUP_TTL_DEFAULT   300U   /* seconds a (src,id) is remembered as a duplicate */
 #define RELIABLE_RETRIES_DEFAULT 3U    /* retransmits before giving up (Meshtastic default) */
 #define RELIABLE_TIMEOUT_DEFAULT 3000U /* ms between retransmits of an unacked send */
+#define ROUTE_TTL_DEFAULT        1800U /* s a learned next-hop stays trusted (upstream 30 min) */
 
 /* Guards writes to, and whole-struct snapshots of, cfg. A leaf mutex: nothing is
  * called while it is held, so it may be nested under any other lock. */
@@ -42,6 +43,7 @@ static struct meshtastic_sched_config cfg = {
 	.dedup_ttl_sec = DEDUP_TTL_DEFAULT,
 	.reliable_retries = RELIABLE_RETRIES_DEFAULT,
 	.reliable_timeout_ms = RELIABLE_TIMEOUT_DEFAULT,
+	.route_ttl_sec = ROUTE_TTL_DEFAULT,
 };
 
 struct preset {
@@ -54,12 +56,12 @@ static const struct preset presets[] = {
 	{"default",
 	 {MT_SCHED_ORDER_PRIORITY, MT_SCHED_OVF_DROP_LOWEST, OB_DEFAULT, MT_SCHED_PHONE_PROTECT,
 	  AIRTIME_MAX_DEFAULT, DEDUP_TTL_DEFAULT, RELIABLE_RETRIES_DEFAULT,
-	  RELIABLE_TIMEOUT_DEFAULT}},
-	/* Reliable delivery is a correctness feature, not an egress-policy choice, so
-	 * "legacy" keeps the same retransmit behavior as "default". */
+	  RELIABLE_TIMEOUT_DEFAULT, ROUTE_TTL_DEFAULT}},
+	/* Reliable delivery and route health are correctness features, not
+	 * egress-policy choices, so "legacy" keeps the "default" behavior for both. */
 	{"legacy",
 	 {MT_SCHED_ORDER_FIFO, MT_SCHED_OVF_DROP_NEWEST, OB_DEFAULT, MT_SCHED_PHONE_DROP_OLDEST,
-	  0U, 0U, RELIABLE_RETRIES_DEFAULT, RELIABLE_TIMEOUT_DEFAULT}},
+	  0U, 0U, RELIABLE_RETRIES_DEFAULT, RELIABLE_TIMEOUT_DEFAULT, ROUTE_TTL_DEFAULT}},
 };
 
 const struct meshtastic_sched_config *meshtastic_sched_get(void)
@@ -210,6 +212,11 @@ int meshtastic_sched_set(const char *key, const char *val)
 		ret = parse_uint(val, 50, 60000, &v);
 		if (ret == 0) {
 			cfg.reliable_timeout_ms = (uint16_t)v;
+		}
+	} else if (strcmp(key, "route.ttl") == 0) {
+		ret = parse_uint(val, 0, UINT16_MAX, &v);
+		if (ret == 0) {
+			cfg.route_ttl_sec = (uint16_t)v;
 		}
 	}
 

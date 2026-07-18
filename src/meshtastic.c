@@ -794,6 +794,16 @@ int meshtastic_nodedb_set_next_hop(uint32_t dest, uint8_t next_hop)
 	return -ENOTSUP;
 }
 
+void meshtastic_nodedb_note_route_failure(uint32_t dest)
+{
+	ARG_UNUSED(dest);
+}
+
+void meshtastic_nodedb_note_route_success(uint32_t dest)
+{
+	ARG_UNUSED(dest);
+}
+
 int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite)
 {
 	ARG_UNUSED(node_num);

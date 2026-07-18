@@ -125,11 +125,32 @@ uint8_t meshtastic_nodedb_get_next_hop(uint32_t dest);
 /**
  * @brief Set the learned next-hop byte for @p dest.
  *
+ * A non-zero @p next_hop also (re)starts the route's health record (fresh
+ * timestamp, zero failures); 0 drops it.
+ *
  * @retval 0 Updated.
  * @retval -ENOENT @p dest is not in the NodeDB.
  * @retval -ENOTSUP NodeDB support is not enabled.
  */
 int meshtastic_nodedb_set_next_hop(uint32_t dest, uint8_t next_hop);
+
+/**
+ * @brief Record a delivery failure (reliable-retransmit exhaustion) toward @p dest.
+ *
+ * Three consecutive strikes decay the learned route back to flood; an
+ * untracked route is cleared immediately (legacy self-heal). No-op when
+ * NodeDB support is not enabled.
+ */
+void meshtastic_nodedb_note_route_failure(uint32_t dest);
+
+/**
+ * @brief Record a confirmed delivery toward @p dest.
+ *
+ * Resets the route's failure strikes and refreshes its freshness timestamp so
+ * an actively working route does not TTL-decay. No-op for untracked routes or
+ * when NodeDB support is not enabled.
+ */
+void meshtastic_nodedb_note_route_success(uint32_t dest);
 
 /**
  * @brief Mark a node favorited / un-favorited in the in-RAM NodeDB.

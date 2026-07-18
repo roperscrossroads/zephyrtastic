@@ -1165,6 +1165,11 @@ static int cmd_sched_show(const struct shell *sh, size_t argc, char **argv)
 	} else {
 		shell_print(sh, "  reliable.retries off   [0=off]");
 	}
+	if (c.route_ttl_sec != 0U) {
+		shell_print(sh, "  route.ttl    %us       [0=never expire]", c.route_ttl_sec);
+	} else {
+		shell_print(sh, "  route.ttl    off       [0=never expire]");
+	}
 
 	shell_fprintf(sh, SHELL_NORMAL, "presets:");
 	for (int i = 0; meshtastic_sched_preset_name(i) != NULL; i++) {
@@ -1200,7 +1205,8 @@ static int cmd_sched_set(const struct shell *sh, size_t argc, char **argv)
 	if (argc < 3U) {
 		shell_error(sh, "usage: meshtastic sched set <key> <value>");
 		shell_print(sh, "keys: tx.order tx.overflow tx.depth phone.evict "
-				"airtime.max dedup.ttl reliable.retries reliable.timeout");
+				"airtime.max dedup.ttl reliable.retries reliable.timeout "
+				"route.ttl");
 		return -EINVAL;
 	}
 
