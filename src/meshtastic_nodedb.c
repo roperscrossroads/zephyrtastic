@@ -824,6 +824,21 @@ int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored)
 	return nodedb_set_bit(node_num, NODEINFO_BITFIELD_IS_IGNORED_BIT, ignored);
 }
 
+bool meshtastic_nodedb_is_ignored(uint32_t node_num)
+{
+	struct nodedb_entry *entry;
+	bool ignored = false;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = find_entry_locked(node_num);
+	if (entry != NULL) {
+		ignored = IS_BIT_SET(entry->node.bitfield, NODEINFO_BITFIELD_IS_IGNORED_BIT);
+	}
+	k_mutex_unlock(&nodedb_lock);
+
+	return ignored;
+}
+
 int meshtastic_nodedb_remove(uint32_t node_num)
 {
 	/* The local node is always present and must never be evicted or removed. */

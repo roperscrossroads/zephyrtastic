@@ -264,6 +264,27 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 	log_wire_rx(buf, len, rssi, snr);
 #endif
 
+	/* Ingress guards, before anything touches the dedup cache or NodeDB
+	 * (upstream Router::perhapsHandleReceived order: ignored-node,
+	 * broadcast-source, via_mqtt). */
+	if (meshtastic_nodedb_is_ignored(src)) {
+		LOG_DBG("Ignoring packet from ignored node 0x%08x", src);
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+#endif
+		return;
+	}
+
+	if (src == MESHTASTIC_NODE_BROADCAST) {
+		/* A source claiming the broadcast address is spoofed/broken; it would
+		 * poison the dedup cache and NodeDB if processed. */
+		LOG_DBG("Ignoring packet with broadcast source");
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+#endif
+		return;
+	}
+
 	if (IS_ENABLED(CONFIG_MESHTASTIC_MQTT_IGNORE_MQTT) &&
 	    ((hdr->flags & MESHTASTIC_FLAGS_VIA_MQTT) != 0U)) {
 		LOG_DBG("Ignoring packet with via_mqtt set");
@@ -456,6 +477,7 @@ void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, co
 				      size_t wire_len, bool decoded)
 {
 	const struct meshtastic_wire_header *hdr = NULL;
+	bool suppress_relay = false;
 
 	if (packet == NULL) {
 		return;
@@ -478,6 +500,10 @@ void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, co
 		    packet->portnum != MESHTASTIC_PORT_ROUTING &&
 		    packet->portnum != MESHTASTIC_PORT_TELEMETRY) {
 			LOG_DBG("CORE_PORTNUMS_ONLY: drop port %u", (unsigned int)packet->portnum);
+			/* The mode suppresses this portnum: not delivered above, and not
+			 * relayed either (upstream's skipHandle covers both with one gate).
+			 * Encrypted relays (the !decoded branch) are unaffected. */
+			suppress_relay = true;
 		} else if (packet->to == mt.node_id || packet->to == MESHTASTIC_NODE_BROADCAST) {
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 			/* Remote admin: an ADMIN_APP unicast to us from another node is
@@ -506,7 +532,7 @@ void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, co
 			packet->id);
 	}
 
-	if (hdr != NULL) {
+	if (hdr != NULL && !suppress_relay) {
 		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, packet);
 	}
 }

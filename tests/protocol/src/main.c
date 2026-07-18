@@ -1590,6 +1590,97 @@ ZTEST(protocol_stack, test_rebroadcast_policy_can_suppress_foreign_relay)
 		      "relay counter should not change when policy suppresses relay");
 }
 
+/* Verifies a frame whose source claims the broadcast address is dropped at
+ * ingress, before it can poison the dedup cache or the NodeDB. */
+ZTEST(protocol_stack, test_broadcast_source_frame_dropped_at_ingress)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_status before;
+	struct meshtastic_status after;
+
+	zassert_ok(meshtastic_get_status(&before));
+
+	build_wire_packet(MESHTASTIC_NODE_BROADCAST, TEST_NODE_ID, 0x7001U, 3U,
+			  MESHTASTIC_PORT_TEXT_MESSAGE, (const uint8_t *)"bad", 3U, wire,
+			  &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 4);
+	k_sleep(K_MSEC(50));
+
+	zassert_equal(state.recv_count, 0U, "broadcast-source frame must not be delivered");
+	zassert_equal(mt.dup_head, 0U, "broadcast-source frame must not enter the dup cache");
+	zassert_equal(mt.dup_cache[0].src, 0U, "dup cache should be untouched");
+	zassert_ok(meshtastic_get_status(&after));
+	zassert_equal(after.rx_packets, before.rx_packets,
+		      "broadcast-source frame must not count as RX");
+
+	/* A legit frame from a real source still processes normally afterward. */
+	build_peer_wire_packet(TEST_NODE_ID, 0x7002U, 3U, "ok", wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 4);
+	k_sleep(K_MSEC(50));
+	zassert_equal(state.recv_count, 1U, "legit frame after the drop must deliver");
+}
+
+/* Verifies frames from a node on the ignore-list are dropped at ingress, and
+ * flow again once un-ignored. */
+ZTEST(protocol_stack, test_ignored_node_frames_dropped)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	/* Make PEER known to the NodeDB, then ignore it. */
+	build_peer_wire_packet(MESHTASTIC_NODE_BROADCAST, 0x7101U, 3U, "hello", wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 4);
+	k_sleep(K_MSEC(50));
+	zassert_equal(state.recv_count, 1U, "baseline delivery failed");
+	zassert_ok(meshtastic_nodedb_set_ignored(PEER_NODE_ID, true));
+
+	build_peer_wire_packet(MESHTASTIC_NODE_BROADCAST, 0x7102U, 3U, "nope", wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 4);
+	k_sleep(K_MSEC(50));
+	zassert_equal(state.recv_count, 1U, "ignored node's frame must not be delivered");
+
+	zassert_ok(meshtastic_nodedb_set_ignored(PEER_NODE_ID, false));
+	build_peer_wire_packet(MESHTASTIC_NODE_BROADCAST, 0x7103U, 3U, "back", wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 4);
+	k_sleep(K_MSEC(50));
+	zassert_equal(state.recv_count, 2U, "un-ignored node should deliver again");
+}
+
+/* Verifies CORE_PORTNUMS_ONLY also suppresses the *relay* of a decoded non-core
+ * portnum (not just its local delivery), while core portnums still relay. */
+ZTEST(protocol_stack, test_core_portnums_only_suppresses_non_core_relay)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_status before;
+	struct meshtastic_status after;
+
+	/* Track the relay counter, not raw sends: hearing an unknown node can also
+	 * TX a NodeInfo request, which is not a relay. */
+	zassert_ok(meshtastic_get_status(&before));
+
+	meshtastic_set_rebroadcast_mode(
+		meshtastic_Config_DeviceConfig_RebroadcastMode_CORE_PORTNUMS_ONLY);
+
+	/* Foreign non-core packet (PRIVATE_APP): must not be relayed. */
+	build_wire_packet(PEER_NODE_ID, OTHER_NODE_ID, 0x6001U, 3U, MESHTASTIC_PORT_PRIVATE,
+			  (const uint8_t *)"nc", 2U, wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -45, 3);
+	k_sleep(K_MSEC(100));
+	zassert_ok(meshtastic_get_status(&after));
+	zassert_equal(after.relayed_packets, before.relayed_packets,
+		      "non-core portnum must not be relayed in CORE_PORTNUMS_ONLY");
+
+	/* Foreign core packet (TEXT_MESSAGE): still relayed in the same mode. */
+	build_peer_wire_packet(OTHER_NODE_ID, 0x6002U, 3U, "core", wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -45, 3);
+	k_sleep(K_MSEC(100));
+	zassert_ok(meshtastic_get_status(&after));
+	zassert_equal(after.relayed_packets, before.relayed_packets + 1U,
+		      "core portnum should still relay in CORE_PORTNUMS_ONLY");
+}
+
 /* Verifies decoded MQTT downlink broadcasts are delivered locally and marked via MQTT. */
 ZTEST(protocol_stack, test_downlink_decoded_broadcast_delivers_locally_via_mqtt)
 {

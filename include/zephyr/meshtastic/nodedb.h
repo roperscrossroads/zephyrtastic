@@ -153,6 +153,15 @@ int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite);
 int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored);
 
 /**
+ * @brief Whether a node is marked ignored in the in-RAM NodeDB.
+ *
+ * Consulted by the router at RX ingress: frames from an ignored node are
+ * dropped before dedup/decode. A node not present in the NodeDB (or a build
+ * without NodeDB support) is never ignored.
+ */
+bool meshtastic_nodedb_is_ignored(uint32_t node_num);
+
+/**
  * @brief Remove a node from the in-RAM NodeDB.
  *
  * The local node cannot be removed.

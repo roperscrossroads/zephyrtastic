@@ -810,6 +810,13 @@ int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored)
 	return -ENOTSUP;
 }
 
+bool meshtastic_nodedb_is_ignored(uint32_t node_num)
+{
+	ARG_UNUSED(node_num);
+
+	return false;
+}
+
 int meshtastic_nodedb_remove(uint32_t node_num)
 {
 	ARG_UNUSED(node_num);
