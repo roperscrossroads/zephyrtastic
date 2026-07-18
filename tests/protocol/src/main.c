@@ -1291,6 +1291,81 @@ ZTEST(protocol_stack, test_hop_limit_upgraded_duplicate_relays_once)
 	zassert_equal(state.recv_count, 1U, "upgrade must not re-deliver");
 }
 
+/* Inject an on-air NodeInfo broadcast from @p from carrying @p user. */
+static void inject_nodeinfo(uint32_t from, uint32_t id, const meshtastic_User *user)
+{
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	zassert_true(pb_encode(&os, meshtastic_User_fields, user), "User encode failed");
+	build_wire_packet(from, MESHTASTIC_NODE_BROADCAST, id, 1U, MESHTASTIC_PORT_NODEINFO, buf,
+			  os.bytes_written, wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 5);
+	k_sleep(K_MSEC(50));
+}
+
+/* B-1: once a peer's 32-byte public key is pinned, a NodeInfo carrying a
+ * different key must not replace it (or the identity it authenticates), and a
+ * keyless NodeInfo must not wipe it. A matching key keeps updating normally. */
+ZTEST(protocol_stack, test_nodeinfo_pubkey_pinning_refuses_key_change)
+{
+	const uint32_t node = 0x22334455U;
+	struct meshtastic_nodedb_node snap;
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t key_a[32];
+	uint8_t key_b[32];
+
+	memset(key_a, 0xA5, sizeof(key_a));
+	memset(key_b, 0x5B, sizeof(key_b));
+
+	/* First NodeInfo pins key A. */
+	strcpy(user.id, "!22334455");
+	strcpy(user.long_name, "Genuine");
+	strcpy(user.short_name, "GN");
+	user.public_key.size = 32U;
+	memcpy(user.public_key.bytes, key_a, 32U);
+	inject_nodeinfo(node, 0xB201U, &user);
+
+	zassert_ok(meshtastic_nodedb_get(node, &snap));
+	zassert_equal(snap.public_key_len, 32U, "key A should be stored");
+	zassert_mem_equal(snap.public_key, key_a, 32U, "key A should be stored");
+
+	/* Spoofed NodeInfo with key B: key AND identity update refused. */
+	strcpy(user.long_name, "Impostor");
+	strcpy(user.short_name, "IM");
+	memcpy(user.public_key.bytes, key_b, 32U);
+	inject_nodeinfo(node, 0xB202U, &user);
+
+	zassert_ok(meshtastic_nodedb_get(node, &snap));
+	zassert_equal(snap.public_key_len, 32U, "pinned key must survive");
+	zassert_mem_equal(snap.public_key, key_a, 32U, "pinned key must not be replaced");
+	zassert_equal(strcmp(snap.long_name, "Genuine"), 0,
+		      "a mismatched key must not rename the node");
+
+	/* Keyless NodeInfo: benign metadata applies, pinned key kept. */
+	strcpy(user.long_name, "Renamed");
+	strcpy(user.short_name, "RN");
+	user.public_key.size = 0U;
+	inject_nodeinfo(node, 0xB203U, &user);
+
+	zassert_ok(meshtastic_nodedb_get(node, &snap));
+	zassert_equal(snap.public_key_len, 32U, "keyless NodeInfo must not wipe the pinned key");
+	zassert_mem_equal(snap.public_key, key_a, 32U, "pinned key kept");
+	zassert_equal(strcmp(snap.long_name, "Renamed"), 0,
+		      "keyless NodeInfo still updates benign metadata");
+
+	/* The same key A again: normal updates keep flowing. */
+	strcpy(user.long_name, "Genuine2");
+	user.public_key.size = 32U;
+	memcpy(user.public_key.bytes, key_a, 32U);
+	inject_nodeinfo(node, 0xB204U, &user);
+
+	zassert_ok(meshtastic_nodedb_get(node, &snap));
+	zassert_equal(strcmp(snap.long_name, "Genuine2"), 0, "matching key updates apply");
+}
+
 /* --- Next-hop route learning (increment 3) -------------------------------- */
 
 /* Inject a decoded TEXT frame from @p from to @p to carrying an explicit

@@ -20,6 +20,9 @@
 
 #include "meshtastic_clock.h"
 #include "meshtastic_modules.h"
+#if defined(CONFIG_MESHTASTIC_PKI)
+#include "meshtastic_pki.h"
+#endif
 
 #include "meshtastic/deviceonly.pb.h"
 
@@ -76,15 +79,48 @@ static void copy_string(char *dst, size_t dst_len, const char *src)
 static void apply_user(struct nodedb_entry *entry, const meshtastic_User *user)
 {
 	meshtastic_NodeInfoLite *node = &entry->node;
-	size_t key_len;
+	size_t key_len = MIN((size_t)user->public_key.size, sizeof(node->public_key.bytes));
+	bool pinned = (node->public_key.size == MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+	bool incoming_full = (key_len == MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+
+	/* Public-key pinning: once a peer's 32-byte key is known, a NodeInfo
+	 * carrying a DIFFERENT key is treated as impersonation — refuse the whole
+	 * identity update so a spoofer can neither replace the key nor rename the
+	 * node (upstream NodeDB mismatch-drop). RX metadata already applied by
+	 * apply_basic_packet (snr/last_heard/...) is unaffected. A legitimately
+	 * re-keyed peer needs an operator remove (admin remove_by_nodenum) first. */
+	if (pinned && incoming_full &&
+	    memcmp(node->public_key.bytes, user->public_key.bytes, key_len) != 0) {
+		LOG_WRN("NodeInfo for 0x%08x carries a different public key — dropped "
+			"(possible impersonation)",
+			(unsigned int)node->num);
+		return;
+	}
+
+#if defined(CONFIG_MESHTASTIC_PKI)
+	/* Someone advertising OUR node id with a key that is not our real public
+	 * key is impersonating this node: never store it, and say so loudly. */
+	if (node->num == meshtastic_get_node_id() && incoming_full) {
+		uint8_t own[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
+
+		if (meshtastic_pki_get_public_key(own) == sizeof(own) &&
+		    memcmp(own, user->public_key.bytes, sizeof(own)) != 0) {
+			LOG_WRN("NodeInfo advertises our node id 0x%08x with a foreign "
+				"public key — dropped (possible impersonation)",
+				(unsigned int)node->num);
+			return;
+		}
+	}
+#endif
 
 	copy_string(node->long_name, sizeof(node->long_name), user->long_name);
 	copy_string(node->short_name, sizeof(node->short_name), user->short_name);
 	node->hw_model = (uint8_t)user->hw_model;
 	node->role = (uint8_t)user->role;
 
-	key_len = MIN((size_t)user->public_key.size, sizeof(node->public_key.bytes));
-	{
+	/* Key write: an absent/short incoming key never wipes a pinned one (a
+	 * keyless NodeInfo would otherwise downgrade the peer back to PSK DMs). */
+	if (incoming_full || !pinned) {
 		bool key_changed = (node->public_key.size != (pb_size_t)key_len) ||
 				   (key_len > 0U && memcmp(node->public_key.bytes,
 							  user->public_key.bytes, key_len) != 0);
