@@ -15,6 +15,8 @@
  * CONFIG_MESHTASTIC_NODE_ID_SOURCE.
  */
 
+#include <string.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
@@ -23,6 +25,8 @@
 #include <zephyr/net/net_event.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_mgmt.h>
+
+#include <esp_attr.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
 
@@ -40,14 +44,50 @@ static const struct device *lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
  * collector). So: read+clear the cause immediately (the value doesn't survive
  * past the next reset), but defer the LOG_INF to the first NET_EVENT_IPV4_ADDR_ADD,
  * by which point NETLOG can actually deliver it.
+ *
+ * 2026-07-18: a single last-cause reading isn't enough — several wedge cycles
+ * this session never reached NETLOG at all before the *next* reset (the crash's
+ * own boot attempt failed to reconnect in time). RTC_NOINIT_ATTR memory survives
+ * warm resets (software/watchdog/panic — the interesting cases) even though the
+ * app's own RAM gets reinitialized, so a small ring of {boot_count, reset_cause}
+ * kept there accumulates across cycles and gets logged in full on ANY later boot
+ * that does reach the network — even if several intermediate crashes never got
+ * a chance to report themselves individually. (A genuine POR — or any reset that
+ * cuts the RTC power domain, which V3's EN-based resets appear to do — clears
+ * this memory too; the magic-value check below just starts a fresh history in
+ * that case rather than trusting garbage.)
  */
-static uint32_t boot_reset_cause;
+#define RESET_HISTORY_LEN   8U
+#define RESET_HISTORY_MAGIC 0x4D455348U /* "MESH" */
+
+struct reset_history_entry {
+	uint32_t boot_count;
+	uint32_t reset_cause;
+};
+
+static RTC_NOINIT_ATTR uint32_t rtc_magic;
+static RTC_NOINIT_ATTR uint32_t rtc_boot_count;
+static RTC_NOINIT_ATTR uint32_t rtc_history_next;
+static RTC_NOINIT_ATTR struct reset_history_entry rtc_history[RESET_HISTORY_LEN];
+
 static struct net_mgmt_event_callback ipv4_ready_cb;
+
+static void log_reset_cause_line(const char *prefix, uint32_t boot_num, uint32_t cause)
+{
+	LOG_INF("%sboot #%u: cause 0x%08x:%s%s%s%s%s%s", prefix, boot_num, cause,
+		(cause & RESET_POR) ? " POR" : "",
+		(cause & RESET_PIN) ? " PIN" : "",
+		(cause & RESET_SOFTWARE) ? " SOFTWARE" : "",
+		(cause & RESET_WATCHDOG) ? " WATCHDOG" : "",
+		(cause & RESET_CPU_LOCKUP) ? " PANIC" : "",
+		(cause & RESET_BROWNOUT) ? " BROWNOUT" : "");
+}
 
 static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 				  struct net_if *iface)
 {
 	static bool logged;
+	uint32_t i;
 
 	ARG_UNUSED(cb);
 	ARG_UNUSED(iface);
@@ -57,13 +97,15 @@ static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mg
 	}
 	logged = true;
 
-	LOG_INF("Reset cause 0x%08x:%s%s%s%s%s%s", boot_reset_cause,
-		(boot_reset_cause & RESET_POR) ? " POR" : "",
-		(boot_reset_cause & RESET_PIN) ? " PIN" : "",
-		(boot_reset_cause & RESET_SOFTWARE) ? " SOFTWARE" : "",
-		(boot_reset_cause & RESET_WATCHDOG) ? " WATCHDOG" : "",
-		(boot_reset_cause & RESET_CPU_LOCKUP) ? " PANIC" : "",
-		(boot_reset_cause & RESET_BROWNOUT) ? " BROWNOUT" : "");
+	LOG_INF("Reset-cause history (RTC-persistent across warm resets, oldest first):");
+	for (i = 0; i < RESET_HISTORY_LEN; i++) {
+		uint32_t idx = (rtc_history_next + i) % RESET_HISTORY_LEN;
+
+		if (rtc_history[idx].boot_count == 0U) {
+			continue; /* slot never used yet */
+		}
+		log_reset_cause_line("  ", rtc_history[idx].boot_count, rtc_history[idx].reset_cause);
+	}
 }
 
 static const char *packet_channel_name(const struct meshtastic_packet *packet)
@@ -118,11 +160,29 @@ int main(void)
 #endif
 	};
 	int ret;
+	uint32_t cause = 0;
 
-	/* Read+clear now (value doesn't survive past the next reset); the
-	 * matching LOG_INF fires later, once IPv4 is up — see log_boot_reset_cause(). */
-	(void)hwinfo_get_reset_cause(&boot_reset_cause);
+	/* Read+clear now (the hwinfo register doesn't survive past the next reset);
+	 * append to the RTC-persistent ring immediately too, so it's captured even if
+	 * this boot never reaches NETLOG. The matching LOG_INF of the full history
+	 * fires later, once IPv4 is up — see log_boot_reset_cause(). */
+	(void)hwinfo_get_reset_cause(&cause);
 	(void)hwinfo_clear_reset_cause();
+
+	if (rtc_magic != RESET_HISTORY_MAGIC) {
+		/* Uninitialized RTC memory: first boot ever, or the RTC power domain
+		 * itself got cut (genuine POR, or an EN-based reset that cuts it too
+		 * on this board) — start a fresh history rather than trust garbage. */
+		rtc_magic = RESET_HISTORY_MAGIC;
+		rtc_boot_count = 0;
+		rtc_history_next = 0;
+		memset(rtc_history, 0, sizeof(rtc_history));
+	}
+	rtc_boot_count++;
+	rtc_history[rtc_history_next].boot_count = rtc_boot_count;
+	rtc_history[rtc_history_next].reset_cause = cause;
+	rtc_history_next = (rtc_history_next + 1U) % RESET_HISTORY_LEN;
+
 	net_mgmt_init_event_callback(&ipv4_ready_cb, log_boot_reset_cause, NET_EVENT_IPV4_ADDR_ADD);
 	net_mgmt_add_event_callback(&ipv4_ready_cb);
 
