@@ -90,6 +90,7 @@ rsource "Kconfig.telemetry"
 rsource "Kconfig.mqtt"
 rsource "Kconfig.wifi_auto"
 rsource "Kconfig.sntp"
+rsource "Kconfig.pki"
 
 menu "LoRa transmit retry"
 

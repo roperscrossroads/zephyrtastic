@@ -1,0 +1,19 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_PKI
+	bool "PKC for direct messages (Curve25519/X25519 + AES-CCM)"
+	depends on MESHTASTIC_NODEDB && MESHTASTIC_SETTINGS
+	help
+	  Implements Meshtastic public-key cryptography for direct messages,
+	  interoperable with the reference firmware: an X25519 keypair (generated
+	  once, persisted in the SecurityConfig NVS partition — survives reboot and
+	  reflash), advertised via User.public_key, with AES-256-CCM DM
+	  encrypt/decrypt (key = SHA256(ECDH shared secret)). Fixes both the
+	  "PKI send failed, no public key" a peer sees and the NO_CHANNEL a peer
+	  returns for our PSK-only DMs.
+
+	  Requires PSA crypto: ECDH + ECC Montgomery-255 (key pair
+	  generate/import/export + public key), AES, CCM and SHA-256. On the net
+	  build the ECC/AES/SHA pieces come from the TLS overlay; the overlay adds
+	  PSA_WANT_ALG_CCM.

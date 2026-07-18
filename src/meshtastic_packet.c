@@ -23,6 +23,16 @@
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_mqtt.h"
+#if defined(CONFIG_MESHTASTIC_PKI)
+#include "meshtastic_pki.h"
+#include <zephyr/meshtastic/nodedb.h>
+#include <zephyr/meshtastic/nodeinfo.h>
+/* Module-internal (meshtastic_nodeinfo.c): send our NodeInfo with want_response
+ * to pull a peer's NodeInfo — and thus its public key. Not in the public
+ * header, so declared here. */
+int meshtastic_send_node_info_ex(uint32_t dest, bool want_response, uint8_t channel,
+				 uint32_t response_to_id);
+#endif
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -287,6 +297,39 @@ static int try_decrypt_wire_hash(uint8_t wire_hash, uint32_t from, uint32_t id, 
 	return -EBADMSG;
 }
 
+#if defined(CONFIG_MESHTASTIC_PKI)
+/* PKC (X25519 + AES-CCM) decrypt of a DM addressed to us, then decode the Data
+ * protobuf. Mirrors decrypt_mesh_encrypted_key() but for the PKI path; uses the
+ * shared rx workspace under its lock. */
+static int try_decrypt_pki(uint32_t from, uint32_t id, const uint8_t *enc, size_t enc_len,
+			   meshtastic_Data *data)
+{
+	size_t plain_len;
+	pb_istream_t stream;
+	int ret;
+
+	k_mutex_lock(&mt_ws.lock, K_FOREVER);
+	ret = meshtastic_pki_decrypt(from, id, enc, enc_len, mt_ws.rx_dec, sizeof(mt_ws.rx_dec),
+				     &plain_len);
+	if (ret < 0) {
+		k_mutex_unlock(&mt_ws.lock);
+		return ret;
+	}
+
+	stream = pb_istream_from_buffer(mt_ws.rx_dec, plain_len);
+	if (!pb_decode(&stream, meshtastic_Data_fields, data)) {
+		k_mutex_unlock(&mt_ws.lock);
+		return -EIO;
+	}
+	k_mutex_unlock(&mt_ws.lock);
+
+	if (data->portnum == meshtastic_PortNum_UNKNOWN_APP) {
+		return -EIO;
+	}
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_PKI */
+
 int meshtastic_mesh_pb_try_decode(meshtastic_MeshPacket *mesh)
 {
 	meshtastic_Data data = meshtastic_Data_init_zero;
@@ -321,6 +364,28 @@ int meshtastic_mesh_pb_try_decode(meshtastic_MeshPacket *mesh)
 		ret = try_decrypt_wire_hash(wire_hash, mesh->from, mesh->id, mesh->encrypted.bytes,
 					    enc_len, &data, &ch_index);
 		if (ret < 0) {
+#if defined(CONFIG_MESHTASTIC_PKI)
+			/* PSK decode failed. A DM to us with no matching channel is
+			 * likely PKC — try X25519+AES-CCM with the sender's pubkey. */
+			if (mesh->to == mt.node_id && meshtastic_pki_have_key() &&
+			    try_decrypt_pki(mesh->from, mesh->id, mesh->encrypted.bytes, enc_len,
+					    &data) == 0) {
+				struct meshtastic_nodedb_node node;
+
+				mesh->decoded = data;
+				mesh->which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+				mesh->channel = 0U;
+				mesh->pki_encrypted = true;
+
+				if (meshtastic_nodedb_get(mesh->from, &node) == 0 &&
+				    node.public_key_len == MESHTASTIC_PKI_KEY_LEN) {
+					memcpy(mesh->public_key.bytes, node.public_key,
+					       MESHTASTIC_PKI_KEY_LEN);
+					mesh->public_key.size = MESHTASTIC_PKI_KEY_LEN;
+				}
+				return 0;
+			}
+#endif
 			return ret;
 		}
 
@@ -460,7 +525,29 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 				    buf + MESHTASTIC_HDR_LEN,
 				    (size_t)(len - (int)MESHTASTIC_HDR_LEN), &data, &channel_index);
 	if (ret < 0) {
+#if defined(CONFIG_MESHTASTIC_PKI)
+		/* PSK decode failed. A DM to us with no matching channel is likely
+		 * PKC — try X25519+AES-CCM with the sender's public key. */
+		int pret = -EBADMSG;
+
+		if (packet->to == mt.node_id && meshtastic_pki_have_key()) {
+			pret = try_decrypt_pki(packet->from, packet->id, buf + MESHTASTIC_HDR_LEN,
+					       (size_t)(len - (int)MESHTASTIC_HDR_LEN), &data);
+			if (pret == -ENOENT) {
+				/* We hold no public key for the sender yet — request
+				 * their NodeInfo so the next DM decodes. */
+				(void)meshtastic_send_node_info_ex(packet->from, true, 0U, 0U);
+			}
+		}
+
+		if (pret != 0) {
+			return 0;
+		}
+
+		channel_index = 0U; /* PKC pseudo-channel */
+#else
 		return 0;
+#endif
 	}
 
 	ret = copy_data_payload(&data, payload, payload_len, &packet_payload);
@@ -514,6 +601,8 @@ int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t
 	uint8_t ch_index;
 	uint8_t wire_hash;
 	size_t encoded_len;
+	size_t payload_len;
+	bool pki_done = false;
 	int ret;
 
 	ret = encode_packet_data(packet, mt_ws.pb_buf, sizeof(mt_ws.pb_buf), &encoded_len);
@@ -529,14 +618,40 @@ int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t
 	}
 
 	wire_hash = meshtastic_channels_get_hash(ch_index);
+	payload_len = encoded_len;
 
-	memset(nonce, 0, sizeof(nonce));
-	sys_put_le32(packet->id, nonce);
-	sys_put_le32(packet->from, nonce + 8U);
+#if defined(CONFIG_MESHTASTIC_PKI)
+	/* Prefer PKC for a directed DM when we hold the peer's public key:
+	 * AES key = SHA256(X25519(our_priv, peer_pub)); the wire channel-hash
+	 * byte is 0x00 (the PKC marker the reference firmware uses). Falls back
+	 * to the PSK channel path when we have no key for the peer (-ENOENT) or
+	 * the packet is a broadcast. Guarded so ct||tag||extra (+12) still fits
+	 * the wire buffer. */
+	if (packet->to != MESHTASTIC_NODE_BROADCAST && packet->to != 0U &&
+	    meshtastic_pki_have_key() &&
+	    (MESHTASTIC_HDR_LEN + encoded_len + MESHTASTIC_PKI_OVERHEAD) <= MESHTASTIC_PKT_MAX) {
+		size_t pki_len;
+		int pret = meshtastic_pki_encrypt(packet->to, packet->from, packet->id,
+						  mt_ws.pb_buf, encoded_len, mt_ws.enc_buf,
+						  sizeof(mt_ws.enc_buf), &pki_len);
+		if (pret == 0) {
+			wire_hash = 0x00U;
+			payload_len = pki_len;
+			pki_done = true;
+		}
+	}
+#endif
 
-	ret = ctr_crypt(key.bytes, key.len, nonce, mt_ws.pb_buf, mt_ws.enc_buf, encoded_len);
-	if (ret < 0) {
-		return ret;
+	if (!pki_done) {
+		memset(nonce, 0, sizeof(nonce));
+		sys_put_le32(packet->id, nonce);
+		sys_put_le32(packet->from, nonce + 8U);
+
+		ret = ctr_crypt(key.bytes, key.len, nonce, mt_ws.pb_buf, mt_ws.enc_buf,
+				encoded_len);
+		if (ret < 0) {
+			return ret;
+		}
 	}
 
 	hdr = (struct meshtastic_wire_header *)out;
@@ -555,8 +670,8 @@ int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t
 	hdr->next_hop = packet->next_hop;
 	hdr->relay_node = packet->relay_node;
 
-	memcpy(out + MESHTASTIC_HDR_LEN, mt_ws.enc_buf, encoded_len);
-	*out_len = (uint32_t)(MESHTASTIC_HDR_LEN + encoded_len);
+	memcpy(out + MESHTASTIC_HDR_LEN, mt_ws.enc_buf, payload_len);
+	*out_len = (uint32_t)(MESHTASTIC_HDR_LEN + payload_len);
 
 	return 0;
 }

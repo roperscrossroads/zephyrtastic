@@ -32,6 +32,7 @@
 #include "meshtastic_sched.h"
 
 #include "meshtastic_settings.h"
+#include "meshtastic_pki.h"
 #include "meshtastic_gnss.h"
 #include "meshtastic_mqtt.h"
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
@@ -200,6 +201,17 @@ void meshtastic_fill_user(meshtastic_User *user)
 
 	meshtastic_config_store_get_owner_flags(&user->is_licensed, &user->is_unmessagable);
 	user->has_is_unmessagable = true;
+
+#if defined(CONFIG_MESHTASTIC_PKI)
+	{
+		uint8_t pub[MESHTASTIC_PKI_KEY_LEN];
+
+		if (meshtastic_pki_get_public_key(pub) == MESHTASTIC_PKI_KEY_LEN) {
+			memcpy(user->public_key.bytes, pub, MESHTASTIC_PKI_KEY_LEN);
+			user->public_key.size = MESHTASTIC_PKI_KEY_LEN;
+		}
+	}
+#endif
 }
 
 void meshtastic_fill_device_metadata(meshtastic_DeviceMetadata *md)
@@ -212,7 +224,11 @@ void meshtastic_fill_device_metadata(meshtastic_DeviceMetadata *md)
 	md->hasEthernet = IS_ENABLED(CONFIG_NET_L2_ETHERNET);
 	md->canShutdown = false;       /* no PM/poweroff path in the port */
 	md->hasRemoteHardware = false; /* no RemoteHardware module */
-	md->hasPKC = false;            /* no ECDH/PKC key agreement yet */
+#if defined(CONFIG_MESHTASTIC_PKI)
+	md->hasPKC = meshtastic_pki_have_key();
+#else
+	md->hasPKC = false;            /* no ECDH/PKC key agreement */
+#endif
 	md->role = meshtastic_device_role();
 	md->hw_model = meshtastic_hw_model();
 
@@ -371,6 +387,16 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 		mt.status.initialized = false;
 		return ret;
 	}
+
+#if defined(CONFIG_MESHTASTIC_PKI)
+	/* Load-or-generate our X25519 keypair now that settings are applied (so the
+	 * persisted key is visible). Non-fatal: PSK channels still work if this
+	 * fails, so don't abort init. */
+	ret = meshtastic_pki_init();
+	if (ret < 0) {
+		LOG_WRN("PKI init failed (%d); continuing with PSK channels only", ret);
+	}
+#endif
 
 	ret = meshtastic_radio_init();
 	if (ret < 0) {
