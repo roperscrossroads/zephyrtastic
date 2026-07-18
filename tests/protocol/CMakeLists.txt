@@ -5,8 +5,9 @@ project(meshtastic_protocol_tests)
 
 target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/..
   ${CMAKE_BINARY_DIR}/modules/meshtastic-zephyr/src
   ${CMAKE_BINARY_DIR}/modules/meshtastic-zephyr/src/proto
 )
 
-target_sources(app PRIVATE src/main.c src/sched.c src/phonequeue.c)
+target_sources(app PRIVATE src/main.c src/sched.c src/phonequeue.c src/vectors.c)
