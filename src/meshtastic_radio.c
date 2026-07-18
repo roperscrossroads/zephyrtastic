@@ -14,6 +14,8 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include <zephyr/meshtastic/fem.h>
+
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
@@ -101,6 +103,16 @@ static uint32_t mt_busy_backoff_ms(void)
 	return min_ms + (sys_rand32_get() % (max_ms - min_ms + 1U));
 }
 
+/*
+ * Default RF front-end hook: no-op. Boards with an external PA/LNA front-end
+ * whose mode pin must follow TX/RX (e.g. Heltec V4) override this with a strong
+ * definition. See <zephyr/meshtastic/fem.h>.
+ */
+__weak void meshtastic_radio_fem_set_tx(bool tx)
+{
+	ARG_UNUSED(tx);
+}
+
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 {
 	int ret;
@@ -128,6 +140,9 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_LBT;
 	mt_lora_cfg.cad.symbol_num = LORA_CAD_SYMB_2;
 
+	/* Steer any RF front-end to its TX path before keying the transmitter. */
+	meshtastic_radio_fem_set_tx(true);
+
 	ret = lora_config(mt.lora_dev, &mt_lora_cfg);
 	if (ret == 0) {
 		retries = CONFIG_MESHTASTIC_TX_BUSY_RETRIES;
@@ -146,6 +161,9 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	mt_lora_cfg.tx = false;
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_NONE;
 	(void)lora_config(mt.lora_dev, &mt_lora_cfg);
+
+	/* Return the front-end to its RX path (e.g. re-enable the LNA). */
+	meshtastic_radio_fem_set_tx(false);
 
 	k_mutex_unlock(&mt.lock);
 
