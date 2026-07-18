@@ -226,7 +226,7 @@ MESHTASTIC_MODULE_DEFINE(device_telemetry, MESHTASTIC_PORT_TELEMETRY, 0, NULL,
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND) ||                                         \
 	(defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                         \
 	 defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND))
-static K_THREAD_STACK_DEFINE(telemetry_stack, 2048);
+static K_THREAD_STACK_DEFINE(telemetry_stack, 4096);
 static struct k_thread telemetry_thread;
 
 static uint32_t telemetry_period_sec(void)
