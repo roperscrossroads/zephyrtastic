@@ -18,7 +18,11 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/net/net_event.h>
+#include <zephyr/net/net_if.h>
+#include <zephyr/net/net_mgmt.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
 
@@ -26,6 +30,41 @@ LOG_MODULE_REGISTER(meshtastic_sample, LOG_LEVEL_INF);
 
 /* Obtain LoRa device from the "lora0" devicetree alias. */
 static const struct device *lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
+
+/*
+ * Reset-cause logging (wedge/reboot investigation, 2026-07-17): hwinfo's reset-
+ * cause register is readable the instant we boot, but a log emitted that early
+ * is silently lost — NETLOG has no route until the WiFi interface actually has
+ * an IPv4 lease (confirmed: the pre-existing "Meshtastic sample started" boot
+ * line, logged after meshtastic_init() completes, has *never* once reached the
+ * collector). So: read+clear the cause immediately (the value doesn't survive
+ * past the next reset), but defer the LOG_INF to the first NET_EVENT_IPV4_ADDR_ADD,
+ * by which point NETLOG can actually deliver it.
+ */
+static uint32_t boot_reset_cause;
+static struct net_mgmt_event_callback ipv4_ready_cb;
+
+static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
+				  struct net_if *iface)
+{
+	static bool logged;
+
+	ARG_UNUSED(cb);
+	ARG_UNUSED(iface);
+
+	if (mgmt_event != NET_EVENT_IPV4_ADDR_ADD || logged) {
+		return;
+	}
+	logged = true;
+
+	LOG_INF("Reset cause 0x%08x:%s%s%s%s%s%s", boot_reset_cause,
+		(boot_reset_cause & RESET_POR) ? " POR" : "",
+		(boot_reset_cause & RESET_PIN) ? " PIN" : "",
+		(boot_reset_cause & RESET_SOFTWARE) ? " SOFTWARE" : "",
+		(boot_reset_cause & RESET_WATCHDOG) ? " WATCHDOG" : "",
+		(boot_reset_cause & RESET_CPU_LOCKUP) ? " PANIC" : "",
+		(boot_reset_cause & RESET_BROWNOUT) ? " BROWNOUT" : "");
+}
 
 static const char *packet_channel_name(const struct meshtastic_packet *packet)
 {
@@ -79,6 +118,13 @@ int main(void)
 #endif
 	};
 	int ret;
+
+	/* Read+clear now (value doesn't survive past the next reset); the
+	 * matching LOG_INF fires later, once IPv4 is up — see log_boot_reset_cause(). */
+	(void)hwinfo_get_reset_cause(&boot_reset_cause);
+	(void)hwinfo_clear_reset_cause();
+	net_mgmt_init_event_callback(&ipv4_ready_cb, log_boot_reset_cause, NET_EVENT_IPV4_ADDR_ADD);
+	net_mgmt_add_event_callback(&ipv4_ready_cb);
 
 	if (!device_is_ready(lora_dev)) {
 		LOG_ERR("LoRa device not ready");
