@@ -24,14 +24,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: zephyrtastic
 
       # Only src/mesh sources and the generated protobuf headers are read, so
       # a shallow clone is enough. No submodules are needed.
       - name: Checkout upstream firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: meshtastic/firmware
           path: firmware
