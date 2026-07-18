@@ -109,6 +109,29 @@ size_t meshtastic_nodedb_warm_count(void);
 int meshtastic_nodedb_warm_get(size_t index, uint32_t *num, uint32_t *last_seen);
 
 /**
+ * @brief Resolve a 1-byte next_hop/relay id back to a full node number.
+ *
+ * On-wire next_hop/relay_node carry only the low byte of a node number. Returns
+ * the unique known node (never the local node) whose low byte matches, or 0 if
+ * no match or the byte is ambiguous (>1 match) — callers then fall back to flood.
+ */
+uint32_t meshtastic_nodedb_resolve_unique_last_byte(uint8_t last_byte);
+
+/**
+ * @brief Learned next-hop (low byte of the relay to reach @p dest), 0 if none.
+ */
+uint8_t meshtastic_nodedb_get_next_hop(uint32_t dest);
+
+/**
+ * @brief Set the learned next-hop byte for @p dest.
+ *
+ * @retval 0 Updated.
+ * @retval -ENOENT @p dest is not in the NodeDB.
+ * @retval -ENOTSUP NodeDB support is not enabled.
+ */
+int meshtastic_nodedb_set_next_hop(uint32_t dest, uint8_t next_hop);
+
+/**
  * @brief Mark a node favorited / un-favorited in the in-RAM NodeDB.
  *
  * Favorited nodes are protected from cache eviction. Best-effort: acting on a

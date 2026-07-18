@@ -95,6 +95,10 @@ static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wi
 	relay_hdr = (struct meshtastic_wire_header *)relay_buf;
 	relay_hdr->flags = (hdr->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) |
 			   ((hop_limit - 1U) & MESHTASTIC_FLAGS_HOP_LIMIT_MASK);
+	/* Stamp ourselves as the relayer (low byte of our node id) so downstream
+	 * nodes can attribute the rebroadcast — required for next-hop learning and
+	 * loop attribution. */
+	relay_hdr->relay_node = (uint8_t)(mt.node_id & 0xFFU);
 
 	ret = meshtastic_radio_send_wire(relay_buf, (uint32_t)len);
 	if (ret < 0) {

@@ -512,7 +512,9 @@ static void apply_basic_packet(struct nodedb_entry *entry, const struct meshtast
 	entry->node.channel = (packet->channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID)
 				      ? packet->channel_index
 				      : 0U;
-	entry->node.next_hop = packet->next_hop;
+	/* node.next_hop is the *learned route to reach this node* (next-hop router),
+	 * set from ACK/relay correlation — NOT the packet's outbound next_hop hint.
+	 * Don't overwrite it with the incoming wire field. */
 	WRITE_BIT(entry->node.bitfield, NODEINFO_BITFIELD_VIA_MQTT_BIT, packet->via_mqtt);
 
 	if (packet_hops_away(packet, &hops_away)) {
@@ -593,6 +595,70 @@ static void fill_snapshot(const struct nodedb_entry *entry, struct meshtastic_no
 	if (key_len > 0U) {
 		memcpy(out->public_key, node->public_key.bytes, key_len);
 	}
+}
+
+/* Next-hop routing support (Increment 1: foundation). The on-wire next_hop /
+ * relay_node fields are only the *last byte* of a node number, so a byte can be
+ * ambiguous on a large mesh — resolve one back to a node only when exactly one
+ * known node (never self) matches, else return 0 (caller falls back to flood). */
+uint32_t meshtastic_nodedb_resolve_unique_last_byte(uint8_t last_byte)
+{
+	uint32_t local = meshtastic_get_node_id();
+	uint32_t match = 0U;
+	size_t count = 0U;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	for (size_t i = 0U; i < nodedb_entry_count; i++) {
+		uint32_t num;
+
+		if (!nodedb_entries[i].used) {
+			continue;
+		}
+		num = nodedb_entries[i].node.num;
+		if (num == local) {
+			continue;
+		}
+		if ((uint8_t)(num & 0xFFU) == last_byte) {
+			match = num;
+			if (++count > 1U) {
+				break;
+			}
+		}
+	}
+	k_mutex_unlock(&nodedb_lock);
+
+	return (count == 1U) ? match : 0U;
+}
+
+uint8_t meshtastic_nodedb_get_next_hop(uint32_t dest)
+{
+	struct nodedb_entry *entry;
+	uint8_t next_hop = 0U;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = find_entry_locked(dest);
+	if (entry != NULL) {
+		next_hop = entry->node.next_hop;
+	}
+	k_mutex_unlock(&nodedb_lock);
+
+	return next_hop;
+}
+
+int meshtastic_nodedb_set_next_hop(uint32_t dest, uint8_t next_hop)
+{
+	struct nodedb_entry *entry;
+	int ret = -ENOENT;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = find_entry_locked(dest);
+	if (entry != NULL) {
+		entry->node.next_hop = next_hop;
+		ret = 0;
+	}
+	k_mutex_unlock(&nodedb_lock);
+
+	return ret;
 }
 
 size_t meshtastic_nodedb_count(void)

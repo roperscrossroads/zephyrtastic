@@ -764,6 +764,28 @@ int meshtastic_nodedb_warm_get(size_t index, uint32_t *num, uint32_t *last_seen)
 	return -ENOTSUP;
 }
 
+uint32_t meshtastic_nodedb_resolve_unique_last_byte(uint8_t last_byte)
+{
+	ARG_UNUSED(last_byte);
+
+	return 0U;
+}
+
+uint8_t meshtastic_nodedb_get_next_hop(uint32_t dest)
+{
+	ARG_UNUSED(dest);
+
+	return 0U;
+}
+
+int meshtastic_nodedb_set_next_hop(uint32_t dest, uint8_t next_hop)
+{
+	ARG_UNUSED(dest);
+	ARG_UNUSED(next_hop);
+
+	return -ENOTSUP;
+}
+
 int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite)
 {
 	ARG_UNUSED(node_num);
