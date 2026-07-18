@@ -183,6 +183,12 @@ static const struct mt_vec_preset_name mt_vec_preset_names[] = {
  * duty_cycle_pct is the regulatory ceiling. The port measures TX
  * airtime but never gates on it, so EU/UA builds can transmit past
  * the legal limit -- these are the numbers that enforcement needs.
+ *
+ * spacing/padding come from the region's profile and feed the slot
+ * arithmetic; num_freq_slots and slot_width_mhz are that arithmetic's
+ * result, so a port can be checked against both its inputs and its
+ * output. override_slot picks how the default slot is chosen:
+ * 0 = hash the channel name, -1 = hash the preset name, >0 = fixed slot.
  */
 struct mt_vec_region {
 	const char *name;
@@ -192,36 +198,48 @@ struct mt_vec_region {
 	float power_limit_dbm;
 	uint8_t wide_lora;
 	const char *default_preset;
+	float spacing_mhz;
+	float padding_mhz;
+	int override_slot;
 	uint32_t num_freq_slots;
 	float slot_width_mhz;
 };
 static const struct mt_vec_region mt_vec_regions[] = {
-	{ "US", 902.0f, 928.0f, 100.0f, 30.0f, 0, "LONG_FAST", 104u, 0.25f },
-	{ "EU_433", 433.0f, 434.0f, 10.0f, 10.0f, 0, "LONG_FAST", 4u, 0.25f },
-	{ "EU_868", 869.4f, 869.65f, 10.0f, 27.0f, 0, "LONG_FAST", 1u, 0.25f },
-	{ "CN", 470.0f, 510.0f, 100.0f, 19.0f, 0, "LONG_FAST", 160u, 0.25f },
-	{ "JP", 920.5f, 923.5f, 100.0f, 13.0f, 0, "LONG_FAST", 12u, 0.25f },
-	{ "ANZ", 915.0f, 928.0f, 100.0f, 30.0f, 0, "LONG_FAST", 52u, 0.25f },
-	{ "ANZ_433", 433.05f, 434.79f, 100.0f, 14.0f, 0, "LONG_FAST", 7u, 0.25f },
-	{ "RU", 868.7f, 869.2f, 100.0f, 20.0f, 0, "LONG_FAST", 2u, 0.25f },
-	{ "KR", 920.0f, 923.0f, 100.0f, 23.0f, 0, "LONG_FAST", 12u, 0.25f },
-	{ "TW", 920.0f, 925.0f, 100.0f, 27.0f, 0, "LONG_FAST", 20u, 0.25f },
-	{ "IN", 865.0f, 867.0f, 100.0f, 30.0f, 0, "LONG_FAST", 8u, 0.25f },
-	{ "NZ_865", 864.0f, 868.0f, 100.0f, 36.0f, 0, "LONG_FAST", 16u, 0.25f },
-	{ "TH", 920.0f, 925.0f, 10.0f, 27.0f, 0, "LONG_FAST", 20u, 0.25f },
-	{ "UA_433", 433.0f, 434.7f, 10.0f, 10.0f, 0, "LONG_FAST", 7u, 0.25f },
-	{ "MY_433", 433.0f, 435.0f, 100.0f, 20.0f, 0, "LONG_FAST", 8u, 0.25f },
-	{ "MY_919", 919.0f, 924.0f, 100.0f, 27.0f, 0, "LONG_FAST", 20u, 0.25f },
-	{ "SG_923", 917.0f, 925.0f, 100.0f, 20.0f, 0, "LONG_FAST", 32u, 0.25f },
-	{ "PH_433", 433.0f, 434.7f, 100.0f, 10.0f, 0, "LONG_FAST", 7u, 0.25f },
-	{ "PH_868", 868.0f, 869.4f, 100.0f, 14.0f, 0, "LONG_FAST", 6u, 0.25f },
-	{ "PH_915", 915.0f, 918.0f, 100.0f, 24.0f, 0, "LONG_FAST", 12u, 0.25f },
-	{ "KZ_433", 433.075f, 434.775f, 100.0f, 10.0f, 0, "LONG_FAST", 7u, 0.25f },
-	{ "KZ_863", 863.0f, 868.0f, 100.0f, 30.0f, 0, "LONG_FAST", 20u, 0.25f },
-	{ "NP_865", 865.0f, 868.0f, 100.0f, 30.0f, 0, "LONG_FAST", 12u, 0.25f },
-	{ "BR_902", 902.0f, 907.5f, 100.0f, 30.0f, 0, "LONG_FAST", 22u, 0.25f },
-	{ "LORA_24", 2400.0f, 2483.5f, 100.0f, 10.0f, 1, "LONG_FAST", 103u, 0.8125f },
-	{ "UNSET", 902.0f, 928.0f, 100.0f, 30.0f, 0, "LONG_FAST", 104u, 0.25f },
+	{ "US", 902.0f, 928.0f, 100.0f, 30.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 104u, 0.25f },
+	{ "EU_433", 433.0f, 434.0f, 10.0f, 10.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 4u, 0.25f },
+	{ "EU_868", 869.4f, 869.65f, 10.0f, 27.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 1u, 0.25f },
+	{ "EU_866", 865.6f, 867.6f, 2.5f, 27.0f, 0, "LITE_FAST", 0.4f, 0.0375f, 0, 4u, 0.6f },
+	{ "EU_N_868", 869.4f, 869.65f, 10.0f, 27.0f, 0, "NARROW_SLOW", 0.0f, 0.0104f, 1, 3u, 0.0833f },
+	{ "CN", 470.0f, 510.0f, 100.0f, 19.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 160u, 0.25f },
+	{ "JP", 920.5f, 923.5f, 100.0f, 13.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 12u, 0.25f },
+	{ "ANZ", 915.0f, 928.0f, 100.0f, 30.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 52u, 0.25f },
+	{ "ANZ_433", 433.05f, 434.79f, 100.0f, 14.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 7u, 0.25f },
+	{ "RU", 868.7f, 869.2f, 100.0f, 20.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 2u, 0.25f },
+	{ "KR", 920.0f, 923.0f, 100.0f, 23.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 12u, 0.25f },
+	{ "TW", 920.0f, 925.0f, 100.0f, 27.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 20u, 0.25f },
+	{ "IN", 865.0f, 867.0f, 100.0f, 30.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 8u, 0.25f },
+	{ "NZ_865", 864.0f, 868.0f, 100.0f, 36.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 16u, 0.25f },
+	{ "TH", 920.0f, 925.0f, 10.0f, 27.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 20u, 0.25f },
+	{ "UA_433", 433.0f, 434.7f, 10.0f, 10.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 7u, 0.25f },
+	{ "MY_433", 433.0f, 435.0f, 100.0f, 20.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 8u, 0.25f },
+	{ "MY_919", 919.0f, 924.0f, 100.0f, 27.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 20u, 0.25f },
+	{ "SG_923", 917.0f, 925.0f, 100.0f, 20.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 32u, 0.25f },
+	{ "PH_433", 433.0f, 434.7f, 100.0f, 10.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 7u, 0.25f },
+	{ "PH_868", 868.0f, 869.4f, 100.0f, 14.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 6u, 0.25f },
+	{ "PH_915", 915.0f, 918.0f, 100.0f, 24.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 12u, 0.25f },
+	{ "KZ_433", 433.075f, 434.775f, 100.0f, 10.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 7u, 0.25f },
+	{ "KZ_863", 863.0f, 868.0f, 100.0f, 30.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 20u, 0.25f },
+	{ "NP_865", 865.0f, 868.0f, 100.0f, 30.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 12u, 0.25f },
+	{ "BR_902", 902.0f, 907.5f, 100.0f, 30.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 22u, 0.25f },
+	{ "ITU1_2M", 144.0f, 146.0f, 100.0f, 30.0f, 0, "TINY_FAST", 0.0f, 0.0022f, 26, 100u, 0.02f },
+	{ "ITU2_2M", 144.0f, 148.0f, 100.0f, 30.0f, 0, "TINY_FAST", 0.0f, 0.0022f, 51, 200u, 0.02f },
+	{ "ITU3_2M", 144.0f, 148.0f, 100.0f, 30.0f, 0, "TINY_FAST", 0.0f, 0.0022f, 33, 200u, 0.02f },
+	{ "ITU2_125CM", 220.0f, 225.0f, 100.0f, 30.0f, 0, "NARROW_SLOW", 0.0f, 0.01875f, 37, 50u, 0.1f },
+	{ "ITU1_70CM", 430.0f, 440.0f, 100.0f, 30.0f, 0, "NARROW_SLOW", 0.0f, 0.01875f, 37, 100u, 0.1f },
+	{ "ITU2_70CM", 420.0f, 450.0f, 100.0f, 30.0f, 0, "NARROW_SLOW", 0.0f, 0.01875f, 137, 300u, 0.1f },
+	{ "ITU3_70CM", 430.0f, 450.0f, 100.0f, 30.0f, 0, "NARROW_SLOW", 0.0f, 0.01875f, 37, 200u, 0.1f },
+	{ "LORA_24", 2400.0f, 2483.5f, 100.0f, 10.0f, 1, "LONG_FAST", 0.0f, 0.0f, 0, 103u, 0.8125f },
+	{ "UNSET", 902.0f, 928.0f, 100.0f, 30.0f, 0, "LONG_FAST", 0.0f, 0.0f, 0, 104u, 0.25f },
 };
 
 /* --- Nonce layout (parity: crypto, security H1) ----------------------

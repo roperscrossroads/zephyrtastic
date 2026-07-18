@@ -166,6 +166,11 @@ def parse_preset_enum(upstream: Path) -> dict[str, int]:
     return out
 
 
+def cfloat(tok: str) -> float:
+    """Parse a C float literal. `0.0375f` is not valid Python."""
+    return float(tok.strip().rstrip("fF"))
+
+
 def parse_profiles(upstream: Path) -> dict[str, dict]:
     """Parse `const RegionProfile PROFILE_X = {presets, spacing, padding, ...}`.
 
@@ -180,15 +185,19 @@ def parse_profiles(upstream: Path) -> dict[str, dict]:
         name, body = m.group(1), m.group(2)
         parts = [p.strip() for p in body.split(",")]
         if len(parts) < 3:
-            continue
+            sys.exit(f"error: profile {name} has too few fields: {body!r}")
+        # A profile that fails to parse is a HARD error, never a skip: silently
+        # dropping one silently drops every region that references it, and the
+        # header still looks complete.
         try:
             out[name] = {
                 "presets": parts[0],
-                "spacing": float(parts[1]),
-                "padding": float(parts[2]),
+                "spacing": cfloat(parts[1]),
+                "padding": cfloat(parts[2]),
             }
-        except ValueError:
-            continue
+        except ValueError as e:
+            sys.exit(f"error: profile {name}: cannot parse spacing/padding "
+                     f"from {body!r} ({e})")
     if not out:
         sys.exit("error: parsed zero region profiles")
     return out
@@ -508,13 +517,17 @@ def slot_math(regions_tbl: list[dict], profiles: dict[str, dict],
     """
     out = []
     for r in regions_tbl:
+        # Dropping a region here would leave a header that looks complete while
+        # silently omitting rows, so both lookups are hard errors.
         prof = profiles.get(r["profile"])
         if not prof:
-            continue
+            sys.exit(f"error: region {r['region']} references unknown profile "
+                     f"{r['profile']}; parsed profiles: {sorted(profiles)}")
         key = r["default_preset"] + ("_wide" if r["wide_lora"] else "")
         p = presets_out.get(key) or presets_out.get(r["default_preset"])
         if not p:
-            continue
+            sys.exit(f"error: region {r['region']} references unknown preset "
+                     f"{r['default_preset']}")
         width = prof["spacing"] + prof["padding"] * 2 + p["bw"] / 1000.0
         if width <= 0:
             continue
@@ -522,6 +535,8 @@ def slot_math(regions_tbl: list[dict], profiles: dict[str, dict],
         raw = (r["freq_end"] - r["freq_start"] + prof["spacing"]) / width
         num = int(math_round_half_away(raw))
         entry = dict(r)
+        entry["spacing_mhz"] = prof["spacing"]
+        entry["padding_mhz"] = prof["padding"]
         entry["slot_width_mhz"] = round(width, 6)
         entry["num_freq_slots"] = num
         entry["default_preset_bw_khz"] = p["bw"]
@@ -643,6 +658,12 @@ def emit_header(data: dict, regions: dict[str, Region], upstream: Path,
     a(" * duty_cycle_pct is the regulatory ceiling. The port measures TX")
     a(" * airtime but never gates on it, so EU/UA builds can transmit past")
     a(" * the legal limit -- these are the numbers that enforcement needs.")
+    a(" *")
+    a(" * spacing/padding come from the region's profile and feed the slot")
+    a(" * arithmetic; num_freq_slots and slot_width_mhz are that arithmetic's")
+    a(" * result, so a port can be checked against both its inputs and its")
+    a(" * output. override_slot picks how the default slot is chosen:")
+    a(" * 0 = hash the channel name, -1 = hash the preset name, >0 = fixed slot.")
     a(" */")
     a("struct mt_vec_region {")
     a("\tconst char *name;")
@@ -652,6 +673,9 @@ def emit_header(data: dict, regions: dict[str, Region], upstream: Path,
     a("\tfloat power_limit_dbm;")
     a("\tuint8_t wide_lora;")
     a("\tconst char *default_preset;")
+    a("\tfloat spacing_mhz;")
+    a("\tfloat padding_mhz;")
+    a("\tint override_slot;")
     a("\tuint32_t num_freq_slots;")
     a("\tfloat slot_width_mhz;")
     a("};")
@@ -660,6 +684,8 @@ def emit_header(data: dict, regions: dict[str, Region], upstream: Path,
         a(f"\t{{ {json.dumps(r['region'])}, {r['freq_start']}f, {r['freq_end']}f, "
           f"{r['duty_cycle']}f, {r['power_limit']}f, "
           f"{1 if r['wide_lora'] else 0}, {json.dumps(r['default_preset'])}, "
+          f"{r.get('spacing_mhz', 0)}f, {r.get('padding_mhz', 0)}f, "
+          f"{r.get('override_slot', 0)}, "
           f"{r.get('num_freq_slots', 0)}u, {r.get('slot_width_mhz', 0)}f }},")
     a("};")
     a("")
@@ -757,6 +783,9 @@ def main() -> int:
     data["preset_enum"] = presets
     data["regions"] = slot_math(regions_tbl, profiles, data["presets"],
                                 data["djb2_names"])
+    if len(data["regions"]) != len(regions_tbl):
+        sys.exit(f"error: emitted {len(data['regions'])} regions from "
+                 f"{len(regions_tbl)} parsed — refusing to write a partial table")
     print(f"  probe produced {len(data['xor_hash_names'])} name hashes, "
           f"{len(data['presets'])} preset params, {len(data['nonces'])} nonces")
 
