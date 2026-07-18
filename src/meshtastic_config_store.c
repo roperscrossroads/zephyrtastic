@@ -515,6 +515,24 @@ int meshtastic_config_store_apply_core(void)
 		mt.tx_power = lora.tx_power;
 	}
 
+	/* Resolve the modem preset. wide_lora is hardcoded false: it is a
+	 * per-region property, and the only region that sets it is the 2.4 GHz
+	 * band, which no supported board targets. It becomes a real lookup when
+	 * the region table lands (parity: radio D3).
+	 */
+	if (lora.use_preset) {
+		(void)meshtastic_preset_to_params(lora.modem_preset, false, &mt.modem);
+	} else {
+		/* Custom SF/BW/CR is not honoured yet: the bandwidth field carries
+		 * "special" codes needing the reference's bwCodeToKHz decode, which
+		 * is not ported. Say so rather than silently running the preset
+		 * config while the app displays custom values.
+		 */
+		LOG_WRN("lora.use_preset=false is not supported; keeping preset %d",
+			(int)lora.modem_preset);
+		(void)meshtastic_preset_to_params(lora.modem_preset, false, &mt.modem);
+	}
+
 	if (lora.override_frequency > 0.0f) {
 		uint32_t hz = (uint32_t)(lora.override_frequency * 1000000.0f);
 

@@ -25,6 +25,51 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
+/* Bandwidth in Hz -> the driver's kHz-labelled code. The labels are rounded
+ * (BW_62_KHZ is 62.5 kHz, BW_400_KHZ is 406.25, BW_800_KHZ is 812.5,
+ * BW_1600_KHZ is 1625), so this must be a table rather than a division.
+ */
+int meshtastic_radio_bw_hz_to_code(uint32_t bandwidth_hz)
+{
+	switch (bandwidth_hz) {
+	case 15600U:
+		return BW_15_KHZ;
+	case 62500U:
+		return BW_62_KHZ;
+	case 125000U:
+		return BW_125_KHZ;
+	case 250000U:
+		return BW_250_KHZ;
+	case 406250U:
+		return BW_400_KHZ;
+	case 500000U:
+		return BW_500_KHZ;
+	case 812500U:
+		return BW_800_KHZ;
+	case 1625000U:
+		return BW_1600_KHZ;
+	default:
+		return -EINVAL;
+	}
+}
+
+/* The reference carries coding rate as 5..8 meaning 4/5..4/8; the driver's
+ * enum is CR_4_5=1 .. CR_4_8=4. An off-by-four here misconfigures the radio
+ * without any error, so it is a named, tested conversion rather than an
+ * inline subtraction.
+ */
+int meshtastic_radio_cr_to_code(uint8_t coding_rate)
+{
+	if (coding_rate < 5U || coding_rate > 8U) {
+		return -EINVAL;
+	}
+
+	return (int)CR_4_5 + (int)(coding_rate - 5U);
+}
+
+/* Initialised to LongFast, the value mt.modem also defaults to. Overwritten
+ * from mt.modem before every lora_config().
+ */
 static struct lora_modem_config mt_lora_cfg = {
 	.bandwidth = BW_250_KHZ,
 	.datarate = SF_11,
@@ -39,6 +84,43 @@ static struct lora_modem_config mt_lora_cfg = {
 			.symbol_num = 0,
 		},
 };
+
+/* Push the resolved modem params into the driver config. Called under mt.lock
+ * at both lora_config() sites.
+ *
+ * A value the driver cannot represent keeps whatever was configured before
+ * rather than failing the operation: the config validator rejects illegal
+ * combinations long before here, so reaching this path means a bug, and going
+ * off the air is a worse response to it than staying on the previous config.
+ * It is logged loudly either way.
+ */
+static void apply_modem_params(void)
+{
+	int bw = meshtastic_radio_bw_hz_to_code(mt.modem.bandwidth_hz);
+	int cr = meshtastic_radio_cr_to_code(mt.modem.coding_rate);
+
+	if (bw >= 0) {
+		mt_lora_cfg.bandwidth = (enum lora_signal_bandwidth)bw;
+	} else {
+		LOG_WRN("bandwidth %u Hz has no driver code; keeping %d kHz",
+			mt.modem.bandwidth_hz, (int)mt_lora_cfg.bandwidth);
+	}
+
+	if (cr >= 0) {
+		mt_lora_cfg.coding_rate = (enum lora_coding_rate)cr;
+	} else {
+		LOG_WRN("coding rate 4/%u out of range; keeping 4/%d",
+			mt.modem.coding_rate, (int)mt_lora_cfg.coding_rate + 4);
+	}
+
+	if (mt.modem.spread_factor >= (uint8_t)SF_5 &&
+	    mt.modem.spread_factor <= (uint8_t)SF_12) {
+		mt_lora_cfg.datarate = (enum lora_datarate)mt.modem.spread_factor;
+	} else {
+		LOG_WRN("spread factor %u out of range; keeping SF%d",
+			mt.modem.spread_factor, (int)mt_lora_cfg.datarate);
+	}
+}
 
 static K_THREAD_STACK_DEFINE(mt_stack, CONFIG_MESHTASTIC_THREAD_STACK_SIZE);
 static struct k_thread mt_thread;
@@ -135,6 +217,7 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	k_mutex_lock(&mt.lock, K_FOREVER);
 
 	mt_lora_cfg.frequency = mt.frequency;
+	apply_modem_params();
 	mt_lora_cfg.tx_power = mt.tx_power;
 	mt_lora_cfg.tx = true;
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_LBT;
@@ -256,6 +339,7 @@ int meshtastic_radio_init(void)
 	int ret;
 
 	mt_lora_cfg.frequency = mt.frequency;
+	apply_modem_params();
 	mt_lora_cfg.tx_power = mt.tx_power;
 	mt_lora_cfg.tx = false;
 

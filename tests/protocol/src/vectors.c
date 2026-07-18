@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "meshtastic_channels.h"
+#include "meshtastic_core.h"
 #include "meshtastic_region_presets.h"
 #include "vectors/meshtastic_vectors.h"
 
@@ -345,6 +346,42 @@ ZTEST(wire_vectors, test_unknown_preset_falls_back_to_longfast)
 			      meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST, false,
 			      NULL),
 		      -EINVAL, "NULL out must be rejected");
+}
+
+/* Every bandwidth and coding rate any preset can produce must convert to a
+ * real LoRa driver code (parity: radio D2).
+ *
+ * This is the seam where units change: the reference carries coding rate as
+ * 5..8 and the driver's enum is 1..4, and driver bandwidth codes are rounded
+ * kHz labels (BW_62_KHZ is 62.5 kHz, BW_1600_KHZ is 1625). Both conversions
+ * fail silently if wrong -- the radio configures happily at the wrong
+ * settings -- so drive them from the harvested vectors rather than by hand.
+ */
+ZTEST(wire_vectors, test_every_preset_converts_to_driver_codes)
+{
+	for (unsigned i = 0; i < MT_VEC_COUNT(mt_vec_presets); i++) {
+		const struct mt_vec_preset *v = &mt_vec_presets[i];
+
+		zassert_true(meshtastic_radio_bw_hz_to_code(v->bw_hz) >= 0,
+			     "%s%s: bandwidth %u Hz has no driver code", v->name,
+			     v->wide ? " (wide)" : "", v->bw_hz);
+		zassert_true(meshtastic_radio_cr_to_code(v->cr) >= 0,
+			     "%s%s: coding rate 4/%u has no driver code", v->name,
+			     v->wide ? " (wide)" : "", v->cr);
+	}
+
+	/* Pin the conversions themselves. CR_4_5 is 1, not 5 -- the whole point. */
+	zassert_equal(meshtastic_radio_cr_to_code(5), 1, "4/5 must map to CR_4_5 (1)");
+	zassert_equal(meshtastic_radio_cr_to_code(8), 4, "4/8 must map to CR_4_8 (4)");
+	zassert_equal(meshtastic_radio_cr_to_code(4), -EINVAL, "4/4 is not a rate");
+	zassert_equal(meshtastic_radio_cr_to_code(9), -EINVAL, "4/9 is not a rate");
+
+	/* The rounded labels: 62.5 kHz is BW_62_KHZ, 1625 kHz is BW_1600_KHZ. */
+	zassert_equal(meshtastic_radio_bw_hz_to_code(62500), 62, "62.5 kHz -> BW_62_KHZ");
+	zassert_equal(meshtastic_radio_bw_hz_to_code(1625000), 1600, "1625 kHz -> BW_1600_KHZ");
+	zassert_equal(meshtastic_radio_bw_hz_to_code(250000), 250, "250 kHz -> BW_250_KHZ");
+	zassert_equal(meshtastic_radio_bw_hz_to_code(123456), -EINVAL,
+		      "an arbitrary bandwidth must be rejected");
 }
 
 /* Reference data the port does not consume yet (parity: airtime CP-1).

@@ -19,6 +19,8 @@
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic/telemetry.pb.h"
 
+#include "meshtastic_region_presets.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -45,6 +47,7 @@ struct meshtastic_context {
 	uint8_t hop_limit;
 	int8_t tx_power;
 	uint32_t frequency;
+	struct meshtastic_modem_params modem; /* resolved from the active preset */
 	const char *channel_name;
 	const char *long_name;
 	const char *short_name;
@@ -88,6 +91,27 @@ uint8_t meshtastic_runtime_hop_limit(void);
 void meshtastic_set_ble_connected(bool connected);
 
 int meshtastic_radio_init(void);
+
+/**
+ * @brief Convert a bandwidth in Hz to the LoRa driver's bandwidth code.
+ *
+ * The driver's codes are kHz-labelled and lossy — @c BW_62_KHZ is 62.5 kHz and
+ * @c BW_1600_KHZ is 1625 kHz — so this is a lookup, not arithmetic.
+ *
+ * @return the driver code, or -EINVAL if no code represents @p hz.
+ */
+int meshtastic_radio_bw_hz_to_code(uint32_t bandwidth_hz);
+
+/**
+ * @brief Convert a 4/5..4/8 coding rate to the LoRa driver's coding-rate code.
+ *
+ * The reference firmware carries coding rate as 5..8; the driver's enum is
+ * 1..4. Getting this wrong is silent — the radio configures happily at the
+ * wrong rate — so the conversion is exposed to be asserted directly.
+ *
+ * @return the driver code, or -EINVAL if @p coding_rate is outside 5..8.
+ */
+int meshtastic_radio_cr_to_code(uint8_t coding_rate);
 
 struct meshtastic_settings_apply {
 	const char *name;

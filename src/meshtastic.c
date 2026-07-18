@@ -333,6 +333,14 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	}
 
 	mt.frequency = cfg->frequency;
+
+	/* Default the modem to LONG_FAST. Stored config replaces this during
+	 * settings load; without it mt.modem would be zeroed and every
+	 * lora_config() would fall back with a warning.
+	 */
+	(void)meshtastic_preset_to_params(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					  false, &mt.modem);
+
 	mt.hop_limit = (cfg->hop_limit == 0U) ? (uint8_t)CONFIG_MESHTASTIC_DEFAULT_HOP_LIMIT
 					      : cfg->hop_limit;
 	mt.tx_power = (cfg->tx_power == 0) ? (int8_t)CONFIG_MESHTASTIC_TX_POWER : cfg->tx_power;

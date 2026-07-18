@@ -52,12 +52,16 @@ if(CONFIG_MESHTASTIC)
     meshtastic_router.c
     meshtastic_routing.c
     meshtastic_settings_apply.c
+    # Was PHONEAPI-only when it just built the want_config preset map. The radio
+    # path now resolves modem presets through it, so it must build even in a
+    # phone-less image. The map builder itself is dropped by --gc-sections when
+    # PHONEAPI is off.
+    meshtastic_region_presets.c
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SETTINGS meshtastic_settings.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_PHONEAPI
     meshtastic_phoneapi.c
     meshtastic_phoneapi_config.c
-    meshtastic_region_presets.c
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN
     meshtastic_admin.c
