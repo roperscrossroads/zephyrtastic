@@ -15,7 +15,9 @@
 
 #include <pb_decode.h>
 
+#if defined(CONFIG_ESP_SPIRAM)
 #include <esp_attr.h>
+#endif
 
 /* EXT_RAM_BSS_ATTR is gated on CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY, which — a real
  * Kconfig footgun found 2026-07-17 — depends on the vendored ESP-IDF "SPIRAM" symbol, NOT
