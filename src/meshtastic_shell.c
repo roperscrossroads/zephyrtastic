@@ -229,11 +229,6 @@ static int32_t scaled_tenths(float value)
 	return (int32_t)(value * 10.0f);
 }
 
-static int32_t scaled_thousandths(float value)
-{
-	return (int32_t)(value * 1000.0f);
-}
-
 static int32_t scaled_whole(int32_t scaled, int32_t divisor)
 {
 	return scaled / divisor;
@@ -915,32 +910,6 @@ static int cmd_nodedb_list(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-static void shell_print_optional_voltage(const struct shell *sh, const char *label, bool has_value,
-					 float value)
-{
-	int32_t mv;
-
-	if (!has_value) {
-		return;
-	}
-
-	mv = scaled_thousandths(value);
-	shell_print(sh, "%s: %d.%03u", label, scaled_whole(mv, 1000), scaled_fraction(mv, 1000));
-}
-
-static void shell_print_optional_tenths(const struct shell *sh, const char *label, bool has_value,
-					float value)
-{
-	int32_t tenths;
-
-	if (!has_value) {
-		return;
-	}
-
-	tenths = scaled_tenths(value);
-	shell_print(sh, "%s: %d.%u", label, scaled_whole(tenths, 10), scaled_fraction(tenths, 10));
-}
-
 static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 {
 	struct meshtastic_nodedb_node node;
@@ -985,40 +954,6 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 			shell_print(sh, "unmessagable: %s", node.is_unmessagable ? "yes" : "no");
 		}
 		shell_print(sh, "public key bytes: %u", (unsigned int)node.public_key_len);
-	}
-
-	if (node.has_position) {
-		shell_print(sh, "position: lat_i=%d lon_i=%d alt=%d time=%u precision=%u",
-			    node.position.latitude_i, node.position.longitude_i,
-			    node.position.altitude, node.position.time,
-			    node.position.precision_bits);
-	}
-
-	if (node.has_device_metrics) {
-		if (node.device_metrics.has_battery_level) {
-			shell_print(sh, "battery: %u%%", node.device_metrics.battery_level);
-		}
-		shell_print_optional_voltage(sh, "voltage", node.device_metrics.has_voltage,
-					     node.device_metrics.voltage);
-		if (node.device_metrics.has_uptime_seconds) {
-			shell_print(sh, "uptime: %us", node.device_metrics.uptime_seconds);
-		}
-	}
-
-	if (node.has_environment_metrics) {
-		shell_print_optional_tenths(sh, "temperature",
-					    node.environment_metrics.has_temperature,
-					    node.environment_metrics.temperature);
-		shell_print_optional_tenths(sh, "humidity",
-					    node.environment_metrics.has_relative_humidity,
-					    node.environment_metrics.relative_humidity);
-		shell_print_optional_tenths(sh, "pressure",
-					    node.environment_metrics.has_barometric_pressure,
-					    node.environment_metrics.barometric_pressure);
-	}
-
-	if (node.has_status) {
-		shell_print(sh, "status: %s", node.status);
 	}
 
 	return 0;

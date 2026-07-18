@@ -120,46 +120,9 @@ static void fill_other_node_info(meshtastic_FromRadio *from,
 		}
 	}
 
-	if (node->has_position) {
-		ni->has_position = true;
-		ni->position.has_latitude_i = true;
-		ni->position.latitude_i = node->position.latitude_i;
-		ni->position.has_longitude_i = true;
-		ni->position.longitude_i = node->position.longitude_i;
-		ni->position.has_altitude = true;
-		ni->position.altitude = node->position.altitude;
-		ni->position.time = node->position.time;
-		ni->position.location_source =
-			(meshtastic_Position_LocSource)node->position.location_source;
-		ni->position.precision_bits = node->position.precision_bits;
-	}
-
-	if (node->has_device_metrics) {
-		const struct meshtastic_nodedb_device_metrics *dm = &node->device_metrics;
-		meshtastic_DeviceMetrics *out = &ni->device_metrics;
-
-		ni->has_device_metrics = true;
-		if (dm->has_battery_level) {
-			out->has_battery_level = true;
-			out->battery_level = dm->battery_level;
-		}
-		if (dm->has_voltage) {
-			out->has_voltage = true;
-			out->voltage = dm->voltage;
-		}
-		if (dm->has_channel_utilization) {
-			out->has_channel_utilization = true;
-			out->channel_utilization = dm->channel_utilization;
-		}
-		if (dm->has_air_util_tx) {
-			out->has_air_util_tx = true;
-			out->air_util_tx = dm->air_util_tx;
-		}
-		if (dm->has_uptime_seconds) {
-			out->has_uptime_seconds = true;
-			out->uptime_seconds = dm->uptime_seconds;
-		}
-	}
+	/* Position and device metrics are not retained per node (full-lean NodeDB),
+	 * so peer NodeInfo streamed to the phone carries identity + pubkey only; the
+	 * app fills position/metrics from packets it receives directly. */
 }
 
 static void fill_metadata_frame(meshtastic_FromRadio *from)

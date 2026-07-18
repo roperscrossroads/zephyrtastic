@@ -4,10 +4,12 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/util.h>
 
 #include <pb_decode.h>
@@ -21,8 +23,10 @@
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-/* NodeInfoLite.bitfield bit indices (Meshtastic upstream layout). The DB is
- * in-RAM only (never serialized), so these are internal to this firmware. */
+/* NodeInfoLite.bitfield bit indices (Meshtastic upstream layout). Only peer
+ * public keys are persisted (see MESHTASTIC_NODEDB_PERSIST_KEYS); the bitfield
+ * and everything else stays in RAM, so these indices are internal to this
+ * firmware. */
 #define NODEINFO_BITFIELD_IS_FAVORITE_BIT         0
 #define NODEINFO_BITFIELD_IS_IGNORED_BIT          1
 #define NODEINFO_BITFIELD_VIA_MQTT_BIT            2
@@ -31,22 +35,23 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define NODEINFO_BITFIELD_IS_UNMESSAGABLE_BIT     7
 #define NODEINFO_BITFIELD_HAS_IS_UNMESSAGABLE_BIT 8
 
+/* Full-lean: the DB retains only the NodeInfoLite core (identity + pubkey).
+ * Position / device+environment telemetry / status are report-and-forget (as in
+ * the reference firmware) — not retained per node. */
 struct nodedb_entry {
 	bool used;
 	meshtastic_NodeInfoLite node;
-	bool has_position;
-	meshtastic_PositionLite position;
-	bool has_device_metrics;
-	meshtastic_DeviceMetrics device_metrics;
-	bool has_environment_metrics;
-	meshtastic_EnvironmentMetrics environment_metrics;
-	bool has_status;
-	meshtastic_StatusMessage status;
 };
 
 static K_MUTEX_DEFINE(nodedb_lock);
 static struct nodedb_entry nodedb_entries[CONFIG_MESHTASTIC_NODEDB_MAX_NODES];
 static size_t nodedb_entry_count;
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+static void nodekeys_schedule_save(void);
+static void warm_upsert_locked(uint32_t num, const uint8_t *pub);
+static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
+#endif
 
 static uint32_t uptime_seconds(void)
 {
@@ -77,9 +82,28 @@ static void apply_user(struct nodedb_entry *entry, const meshtastic_User *user)
 	node->role = (uint8_t)user->role;
 
 	key_len = MIN((size_t)user->public_key.size, sizeof(node->public_key.bytes));
-	node->public_key.size = (pb_size_t)key_len;
-	if (key_len > 0U) {
-		memcpy(node->public_key.bytes, user->public_key.bytes, key_len);
+	{
+		bool key_changed = (node->public_key.size != (pb_size_t)key_len) ||
+				   (key_len > 0U && memcmp(node->public_key.bytes,
+							  user->public_key.bytes, key_len) != 0);
+
+		node->public_key.size = (pb_size_t)key_len;
+		if (key_len > 0U) {
+			memcpy(node->public_key.bytes, user->public_key.bytes, key_len);
+		}
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+		/* Mirror a peer's key into the warm tier + NVS, only when it first
+		 * appears or changes, so a known peer re-broadcasting its NodeInfo
+		 * does not rewrite NVS. Our own key is excluded (SecurityConfig).
+		 * Caller (apply_user) holds nodedb_lock, as warm_upsert requires. */
+		if (key_changed && key_len == MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN &&
+		    node->num != meshtastic_get_node_id()) {
+			warm_upsert_locked(node->num, node->public_key.bytes);
+			nodekeys_schedule_save();
+		}
+#else
+		ARG_UNUSED(key_changed);
+#endif
 	}
 
 	WRITE_BIT(node->bitfield, NODEINFO_BITFIELD_HAS_USER_BIT, true);
@@ -88,17 +112,6 @@ static void apply_user(struct nodedb_entry *entry, const meshtastic_User *user)
 		  user->has_is_unmessagable);
 	WRITE_BIT(node->bitfield, NODEINFO_BITFIELD_IS_UNMESSAGABLE_BIT,
 		  user->has_is_unmessagable && user->is_unmessagable);
-}
-
-static void apply_position(struct nodedb_entry *entry, const meshtastic_Position *position)
-{
-	entry->has_position = true;
-	entry->position.latitude_i = position->has_latitude_i ? position->latitude_i : 0;
-	entry->position.longitude_i = position->has_longitude_i ? position->longitude_i : 0;
-	entry->position.altitude = position->has_altitude ? position->altitude : 0;
-	entry->position.time = position->time;
-	entry->position.location_source = position->location_source;
-	entry->position.precision_bits = position->precision_bits;
 }
 
 static struct nodedb_entry *find_entry_locked(uint32_t node_num)
@@ -168,6 +181,153 @@ static struct nodedb_entry *get_or_create_entry_locked(uint32_t node_num)
 	return entry;
 }
 
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+/*
+ * Warm key tier + peer public-key persistence. The warm tier is an in-RAM
+ * {node id -> 32-byte X25519 pubkey} cache, sized larger than the hot store and
+ * mirrored to NVS ("mtnode/<id>"). It decouples "peers we can PKC-encrypt to"
+ * from the hot record cap: a key here stays usable after the peer's full record
+ * is evicted from the hot store. Persisted keys are restored into this tier at
+ * boot (not the hot store), so a large key set never thrashes the hot store.
+ * Our own key is not stored here (it lives in the SecurityConfig). Guarded by
+ * nodedb_lock: the "_locked" helpers require the caller to hold it.
+ */
+#define MTNODE_SUBTREE "mtnode"
+
+struct warm_key {
+	uint32_t num;       /* 0 == empty slot */
+	uint32_t last_seen; /* uptime seconds; least-recently-seen evicted first */
+	uint8_t pub[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
+};
+
+static struct warm_key warm_keys[CONFIG_MESHTASTIC_NODEDB_WARM_KEYS];
+
+static struct warm_key *warm_find_locked(uint32_t num)
+{
+	for (size_t i = 0U; i < ARRAY_SIZE(warm_keys); i++) {
+		if (warm_keys[i].num == num) {
+			return &warm_keys[i];
+		}
+	}
+	return NULL;
+}
+
+static void warm_upsert_locked(uint32_t num, const uint8_t *pub)
+{
+	struct warm_key *slot;
+
+	if (num == 0U) {
+		return;
+	}
+
+	slot = warm_find_locked(num);
+	if (slot == NULL) {
+		/* Prefer an empty slot; otherwise evict the least-recently-seen. */
+		slot = &warm_keys[0];
+		for (size_t i = 0U; i < ARRAY_SIZE(warm_keys); i++) {
+			if (warm_keys[i].num == 0U) {
+				slot = &warm_keys[i];
+				break;
+			}
+			if (warm_keys[i].last_seen < slot->last_seen) {
+				slot = &warm_keys[i];
+			}
+		}
+	}
+
+	slot->num = num;
+	slot->last_seen = uptime_seconds();
+	memcpy(slot->pub, pub, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+}
+
+static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
+{
+	struct warm_key *slot = warm_find_locked(num);
+
+	if (slot == NULL) {
+		return false;
+	}
+	memcpy(out, slot->pub, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+	return true;
+}
+
+static void nodekeys_save_work_handler(struct k_work *work)
+{
+	int ret;
+
+	ARG_UNUSED(work);
+
+	ret = settings_save_subtree(MTNODE_SUBTREE);
+	if (ret < 0) {
+		LOG_WRN("NodeDB key save failed (%d)", ret);
+	}
+}
+
+static K_WORK_DELAYABLE_DEFINE(nodekeys_save_work, nodekeys_save_work_handler);
+
+static void nodekeys_schedule_save(void)
+{
+	(void)k_work_reschedule(&nodekeys_save_work,
+				K_MSEC(CONFIG_MESHTASTIC_SETTINGS_SAVE_DELAY_MS));
+}
+
+static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	uint8_t buf[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
+	uint32_t node_num;
+	char *endptr;
+	ssize_t read;
+
+	if (len != sizeof(buf)) {
+		LOG_WRN("Ignoring persisted node key '%s' with unexpected size %zu", key, len);
+		return 0;
+	}
+
+	node_num = (uint32_t)strtoul(key, &endptr, 16);
+	if (*endptr != '\0' || node_num == 0U) {
+		return 0;
+	}
+
+	read = read_cb(cb_arg, buf, sizeof(buf));
+	if (read != (ssize_t)sizeof(buf)) {
+		return 0;
+	}
+
+	/* Restore into the warm tier, not the hot store: keeps the key reachable
+	 * for PKC without occupying a hot record slot (avoids restore thrash). */
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	warm_upsert_locked(node_num, buf);
+	k_mutex_unlock(&nodedb_lock);
+
+	return 0;
+}
+
+static int nodekeys_export(int (*export_func)(const char *name, const void *val, size_t val_len))
+{
+	char name[SETTINGS_MAX_NAME_LEN + 1];
+	uint32_t self = meshtastic_get_node_id();
+	int ret = 0;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	for (size_t i = 0U; i < ARRAY_SIZE(warm_keys); i++) {
+		if (warm_keys[i].num == 0U || warm_keys[i].num == self) {
+			continue;
+		}
+
+		(void)snprintk(name, sizeof(name), MTNODE_SUBTREE "/%08x", warm_keys[i].num);
+		ret = export_func(name, warm_keys[i].pub, sizeof(warm_keys[i].pub));
+		if (ret < 0) {
+			break;
+		}
+	}
+	k_mutex_unlock(&nodedb_lock);
+
+	return ret;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mtnode, MTNODE_SUBTREE, NULL, nodekeys_set, NULL, nodekeys_export);
+#endif /* CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS */
+
 static bool decode_user_payload(const struct meshtastic_packet *packet, meshtastic_User *user)
 {
 	pb_istream_t stream;
@@ -179,60 +339,6 @@ static bool decode_user_payload(const struct meshtastic_packet *packet, meshtast
 	stream = pb_istream_from_buffer(packet->payload, packet->payload_len);
 	if (!pb_decode(&stream, meshtastic_User_fields, user)) {
 		LOG_DBG("NodeDB User decode failed: %s", PB_GET_ERROR(&stream));
-		return false;
-	}
-
-	return true;
-}
-
-static bool decode_position_payload(const struct meshtastic_packet *packet,
-				    meshtastic_Position *position)
-{
-	pb_istream_t stream;
-
-	if (packet->payload == NULL || packet->payload_len == 0U) {
-		return false;
-	}
-
-	stream = pb_istream_from_buffer(packet->payload, packet->payload_len);
-	if (!pb_decode(&stream, meshtastic_Position_fields, position)) {
-		LOG_DBG("NodeDB Position decode failed: %s", PB_GET_ERROR(&stream));
-		return false;
-	}
-
-	return true;
-}
-
-static bool decode_telemetry_payload(const struct meshtastic_packet *packet,
-				     meshtastic_Telemetry *telemetry)
-{
-	pb_istream_t stream;
-
-	if (packet->payload == NULL || packet->payload_len == 0U) {
-		return false;
-	}
-
-	stream = pb_istream_from_buffer(packet->payload, packet->payload_len);
-	if (!pb_decode(&stream, meshtastic_Telemetry_fields, telemetry)) {
-		LOG_DBG("NodeDB Telemetry decode failed: %s", PB_GET_ERROR(&stream));
-		return false;
-	}
-
-	return true;
-}
-
-static bool decode_status_payload(const struct meshtastic_packet *packet,
-				  meshtastic_StatusMessage *status)
-{
-	pb_istream_t stream;
-
-	if (packet->payload == NULL || packet->payload_len == 0U) {
-		return false;
-	}
-
-	stream = pb_istream_from_buffer(packet->payload, packet->payload_len);
-	if (!pb_decode(&stream, meshtastic_StatusMessage_fields, status)) {
-		LOG_DBG("NodeDB Status decode failed: %s", PB_GET_ERROR(&stream));
 		return false;
 	}
 
@@ -271,13 +377,7 @@ static void apply_basic_packet(struct nodedb_entry *entry, const struct meshtast
 static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *packet)
 {
 	meshtastic_User user = meshtastic_User_init_zero;
-	meshtastic_Position position = meshtastic_Position_init_zero;
-	meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_zero;
-	meshtastic_StatusMessage status = meshtastic_StatusMessage_init_zero;
 	bool has_user = false;
-	bool has_position = false;
-	bool has_telemetry = false;
-	bool has_status = false;
 	struct nodedb_entry *entry;
 	uint32_t now_sec;
 
@@ -285,23 +385,12 @@ static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *p
 		return;
 	}
 
-	switch (packet->portnum) {
-	case MESHTASTIC_PORT_NODEINFO:
+	/* Every packet refreshes the basic record (last_heard / snr / hops); only
+	 * NodeInfo carries identity + pubkey. Position/telemetry/status are not
+	 * retained (full-lean) — hearing them still updates last_heard via the
+	 * basic-packet path below. */
+	if (packet->portnum == MESHTASTIC_PORT_NODEINFO) {
 		has_user = decode_user_payload(packet, &user);
-		break;
-	case MESHTASTIC_PORT_POSITION:
-		if (!packet->want_response) {
-			has_position = decode_position_payload(packet, &position);
-		}
-		break;
-	case MESHTASTIC_PORT_TELEMETRY:
-		has_telemetry = decode_telemetry_payload(packet, &telemetry);
-		break;
-	case MESHTASTIC_PORT_NODE_STATUS:
-		has_status = decode_status_payload(packet, &status);
-		break;
-	default:
-		break;
 	}
 
 	now_sec = uptime_seconds();
@@ -319,104 +408,11 @@ static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *p
 		apply_user(entry, &user);
 	}
 
-	if (has_position) {
-		apply_position(entry, &position);
-	}
-
-	if (has_telemetry) {
-		if (telemetry.which_variant == meshtastic_Telemetry_device_metrics_tag) {
-			entry->has_device_metrics = true;
-			entry->device_metrics = telemetry.variant.device_metrics;
-		} else if (telemetry.which_variant ==
-			   meshtastic_Telemetry_environment_metrics_tag) {
-			entry->has_environment_metrics = true;
-			entry->environment_metrics = telemetry.variant.environment_metrics;
-		}
-	}
-
-	if (has_status) {
-		entry->has_status = true;
-		entry->status = status;
-	}
-
 	k_mutex_unlock(&nodedb_lock);
 }
 
 MESHTASTIC_MODULE_DEFINE(nodedb, 0, MESHTASTIC_MODULE_ALL_PACKETS,
 			 meshtastic_module_nodedb_on_packet, NULL);
-
-static void copy_device_metrics(struct meshtastic_nodedb_device_metrics *dst,
-				const meshtastic_DeviceMetrics *src)
-{
-	dst->has_battery_level = src->has_battery_level;
-	dst->battery_level = src->battery_level;
-	dst->has_voltage = src->has_voltage;
-	dst->voltage = src->voltage;
-	dst->has_channel_utilization = src->has_channel_utilization;
-	dst->channel_utilization = src->channel_utilization;
-	dst->has_air_util_tx = src->has_air_util_tx;
-	dst->air_util_tx = src->air_util_tx;
-	dst->has_uptime_seconds = src->has_uptime_seconds;
-	dst->uptime_seconds = src->uptime_seconds;
-}
-
-static void copy_environment_metrics(struct meshtastic_nodedb_environment_metrics *dst,
-				     const meshtastic_EnvironmentMetrics *src)
-{
-	size_t count;
-
-	dst->has_temperature = src->has_temperature;
-	dst->temperature = src->temperature;
-	dst->has_relative_humidity = src->has_relative_humidity;
-	dst->relative_humidity = src->relative_humidity;
-	dst->has_barometric_pressure = src->has_barometric_pressure;
-	dst->barometric_pressure = src->barometric_pressure;
-	dst->has_gas_resistance = src->has_gas_resistance;
-	dst->gas_resistance = src->gas_resistance;
-	dst->has_voltage = src->has_voltage;
-	dst->voltage = src->voltage;
-	dst->has_current = src->has_current;
-	dst->current = src->current;
-	dst->has_iaq = src->has_iaq;
-	dst->iaq = src->iaq;
-	dst->has_distance = src->has_distance;
-	dst->distance = src->distance;
-	dst->has_lux = src->has_lux;
-	dst->lux = src->lux;
-	dst->has_white_lux = src->has_white_lux;
-	dst->white_lux = src->white_lux;
-	dst->has_ir_lux = src->has_ir_lux;
-	dst->ir_lux = src->ir_lux;
-	dst->has_uv_lux = src->has_uv_lux;
-	dst->uv_lux = src->uv_lux;
-	dst->has_wind_direction = src->has_wind_direction;
-	dst->wind_direction = src->wind_direction;
-	dst->has_wind_speed = src->has_wind_speed;
-	dst->wind_speed = src->wind_speed;
-	dst->has_weight = src->has_weight;
-	dst->weight = src->weight;
-	dst->has_wind_gust = src->has_wind_gust;
-	dst->wind_gust = src->wind_gust;
-	dst->has_wind_lull = src->has_wind_lull;
-	dst->wind_lull = src->wind_lull;
-	dst->has_radiation = src->has_radiation;
-	dst->radiation = src->radiation;
-	dst->has_rainfall_1h = src->has_rainfall_1h;
-	dst->rainfall_1h = src->rainfall_1h;
-	dst->has_rainfall_24h = src->has_rainfall_24h;
-	dst->rainfall_24h = src->rainfall_24h;
-	dst->has_soil_moisture = src->has_soil_moisture;
-	dst->soil_moisture = src->soil_moisture;
-	dst->has_soil_temperature = src->has_soil_temperature;
-	dst->soil_temperature = src->soil_temperature;
-
-	count = MIN((size_t)src->one_wire_temperature_count, ARRAY_SIZE(dst->one_wire_temperature));
-	dst->one_wire_temperature_count = count;
-	if (count > 0U) {
-		memcpy(dst->one_wire_temperature, src->one_wire_temperature,
-		       count * sizeof(dst->one_wire_temperature[0]));
-	}
-}
 
 static void fill_snapshot(const struct nodedb_entry *entry, struct meshtastic_nodedb_node *out)
 {
@@ -450,31 +446,6 @@ static void fill_snapshot(const struct nodedb_entry *entry, struct meshtastic_no
 	if (key_len > 0U) {
 		memcpy(out->public_key, node->public_key.bytes, key_len);
 	}
-
-	out->has_position = entry->has_position;
-	if (entry->has_position) {
-		out->position.latitude_i = entry->position.latitude_i;
-		out->position.longitude_i = entry->position.longitude_i;
-		out->position.altitude = entry->position.altitude;
-		out->position.time = entry->position.time;
-		out->position.location_source = (uint8_t)entry->position.location_source;
-		out->position.precision_bits = entry->position.precision_bits;
-	}
-
-	out->has_device_metrics = entry->has_device_metrics;
-	if (entry->has_device_metrics) {
-		copy_device_metrics(&out->device_metrics, &entry->device_metrics);
-	}
-
-	out->has_environment_metrics = entry->has_environment_metrics;
-	if (entry->has_environment_metrics) {
-		copy_environment_metrics(&out->environment_metrics, &entry->environment_metrics);
-	}
-
-	out->has_status = entry->has_status;
-	if (entry->has_status) {
-		copy_string(out->status, sizeof(out->status), entry->status.status);
-	}
 }
 
 size_t meshtastic_nodedb_count(void)
@@ -507,6 +478,34 @@ int meshtastic_nodedb_get(uint32_t node_num, struct meshtastic_nodedb_node *out)
 	k_mutex_unlock(&nodedb_lock);
 
 	return 0;
+}
+
+int meshtastic_nodedb_copy_pubkey(uint32_t node_num,
+				  uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
+{
+	struct nodedb_entry *entry;
+	int ret = -ENOENT;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = find_entry_locked(node_num);
+	if (entry != NULL &&
+	    entry->node.public_key.size == MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) {
+		memcpy(out, entry->node.public_key.bytes,
+		       MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+		ret = 0;
+	}
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	else if (warm_copy_key_locked(node_num, out)) {
+		ret = 0;
+	}
+#endif
+	k_mutex_unlock(&nodedb_lock);
+
+	return ret;
 }
 
 int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *out)
@@ -602,6 +601,13 @@ int meshtastic_nodedb_init(void)
 		apply_user(entry, &user);
 	}
 	k_mutex_unlock(&nodedb_lock);
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	/* Restore persisted peer public keys now the array is initialised and the
+	 * settings subsystem is up (settings_subsys_init ran earlier in
+	 * meshtastic_init). Runs outside the lock: nodekeys_set() takes it. */
+	(void)settings_load_subtree(MTNODE_SUBTREE);
+#endif
 
 	return (entry == NULL) ? -ENOMEM : 0;
 }

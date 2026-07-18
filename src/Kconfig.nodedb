@@ -5,18 +5,43 @@ menuconfig MESHTASTIC_NODEDB
 	bool "Meshtastic in-RAM NodeDB"
 	default y
 	help
-	  Track mesh nodes heard by the Meshtastic subsystem in RAM. This
-	  initial implementation is volatile and does not persist entries to
-	  flash.
+	  Track mesh nodes heard by the Meshtastic subsystem in RAM. Node
+	  metadata (names, positions, metrics) is volatile; peer public keys
+	  can be persisted to flash (see MESHTASTIC_NODEDB_PERSIST_KEYS).
 
 if MESHTASTIC_NODEDB
 
 config MESHTASTIC_NODEDB_MAX_NODES
 	int "Maximum NodeDB entries"
-	default 16
+	default 32
 	range 1 256
 	help
 	  Maximum number of nodes kept in the in-RAM Meshtastic NodeDB,
 	  including the local node entry.
+
+config MESHTASTIC_NODEDB_PERSIST_KEYS
+	bool "Persist peer public keys across reboots"
+	depends on MESHTASTIC_SETTINGS
+	default y if MESHTASTIC_PKI
+	help
+	  Persist learned peer X25519 public keys (keyed by node id) to the
+	  settings/NVS store and restore them at boot. Without this, every
+	  reboot drops all peer keys and PKC direct messages fall back to PSK
+	  until each peer re-announces its NodeInfo. Only public keys are
+	  stored; names and other metadata stay in the hot store.
+
+config MESHTASTIC_NODEDB_WARM_KEYS
+	int "Warm key-tier size"
+	depends on MESHTASTIC_NODEDB_PERSIST_KEYS
+	default 32
+	range 8 512
+	help
+	  Size of the in-RAM warm key tier: an {id -> X25519 pubkey} cache
+	  (~40 bytes/entry), sized larger than the hot NodeDB and mirrored to
+	  NVS. A key here stays usable for PKC direct messages after the peer's
+	  full record is evicted from the hot store, so PKC reach is decoupled
+	  from MESHTASTIC_NODEDB_MAX_NODES. Persisted keys are restored into this
+	  tier at boot (not the hot store), so a large key set never thrashes
+	  the hot store. Evicts least-recently-seen when full.
 
 endif # MESHTASTIC_NODEDB

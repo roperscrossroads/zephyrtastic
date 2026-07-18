@@ -216,13 +216,10 @@ static void pki_build_nonce(uint8_t nonce[PKI_NONCE_LEN], uint32_t id, uint32_t 
 
 static int pki_peer_pub(uint32_t node, uint8_t out[PKI_KEY_LEN])
 {
-	struct meshtastic_nodedb_node n;
-
-	if (meshtastic_nodedb_get(node, &n) != 0 || n.public_key_len != PKI_KEY_LEN) {
-		return -ENOENT; /* no public key on record for this node */
-	}
-	memcpy(out, n.public_key, PKI_KEY_LEN);
-	return 0;
+	/* Hot NodeDB first, then the warm key tier, so PKC keeps working for a
+	 * peer whose full record has aged out of the hot store.
+	 */
+	return meshtastic_nodedb_copy_pubkey(node, out);
 }
 
 int meshtastic_pki_decrypt(uint32_t from, uint32_t id, const uint8_t *enc, size_t enc_len,
