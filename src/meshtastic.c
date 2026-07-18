@@ -600,6 +600,9 @@ int meshtastic_send_data(uint32_t dest, uint32_t portnum, const uint8_t *payload
 		.portnum = portnum,
 		.payload = payload,
 		.payload_len = payload_len,
+		/* Request an ack for directed unicasts (reliable delivery, like the
+		 * reference app does for DMs); broadcasts stay unacked. */
+		.want_ack = (dest != MESHTASTIC_NODE_BROADCAST && dest != 0U),
 	};
 
 	return meshtastic_send_packet(&packet, wait);
