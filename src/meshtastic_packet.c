@@ -497,7 +497,8 @@ static void fill_packet_from_header(const struct meshtastic_wire_header *hdr, in
 
 int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi, int8_t snr,
 				      struct meshtastic_packet *packet, uint8_t *payload,
-				      size_t payload_len, bool *decoded)
+				      size_t payload_len, bool *decoded,
+				      enum meshtastic_decode_fail *fail_reason)
 {
 	const struct meshtastic_wire_header *hdr;
 	meshtastic_Data data = meshtastic_Data_init_zero;
@@ -507,6 +508,9 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 
 	if (decoded != NULL) {
 		*decoded = false;
+	}
+	if (fail_reason != NULL) {
+		*fail_reason = MESHTASTIC_DECODE_FAIL_NONE;
 	}
 
 	if (buf == NULL || packet == NULL || len < (int)MESHTASTIC_HDR_LEN) {
@@ -526,6 +530,12 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 				    buf + MESHTASTIC_HDR_LEN,
 				    (size_t)(len - (int)MESHTASTIC_HDR_LEN), &data, &channel_index);
 	if (ret < 0) {
+		/* PSK decode failed: no channel/PSK we hold matched. If a PKC retry
+		 * below succeeds this is cleared; otherwise the router NAKs a want_ack
+		 * unicast to us with this reason instead of dropping it silently. */
+		if (fail_reason != NULL) {
+			*fail_reason = MESHTASTIC_DECODE_FAIL_NO_CHANNEL;
+		}
 #if defined(CONFIG_MESHTASTIC_PKI)
 		/* PSK decode failed. A DM to us with no matching channel is likely
 		 * PKC — try X25519+AES-CCM with the sender's public key. */
@@ -536,7 +546,14 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 					       (size_t)(len - (int)MESHTASTIC_HDR_LEN), &data);
 			if (pret == -ENOENT) {
 				/* We hold no public key for the sender yet — request
-				 * their NodeInfo so the next DM decodes. */
+				 * their NodeInfo so the next DM decodes. Report the more
+				 * specific PKI_UNKNOWN_PUBKEY reason only for the PKC
+				 * marker channel (wire hash byte 0), exactly as the
+				 * reference ReliableRouter does (channel==0 && no key);
+				 * any other unknown channel stays NO_CHANNEL. */
+				if (fail_reason != NULL && hdr->channel == 0U) {
+					*fail_reason = MESHTASTIC_DECODE_FAIL_PKI_UNKNOWN_PUBKEY;
+				}
 				(void)meshtastic_send_node_info_ex(packet->from, true, 0U, 0U);
 			}
 		}
@@ -545,6 +562,9 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 			return 0;
 		}
 
+		if (fail_reason != NULL) {
+			*fail_reason = MESHTASTIC_DECODE_FAIL_NONE; /* PKC succeeded */
+		}
 		channel_index = 0U; /* PKC pseudo-channel */
 #else
 		return 0;
@@ -581,7 +601,7 @@ int meshtastic_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi, int
 	int ret;
 
 	ret = meshtastic_try_decode_wire_packet(buf, len, rssi, snr, packet, payload, payload_len,
-						&decoded);
+						&decoded, NULL);
 	if (ret < 0) {
 		return ret;
 	}

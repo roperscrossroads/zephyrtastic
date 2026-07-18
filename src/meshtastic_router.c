@@ -222,6 +222,14 @@ void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *h
 	relay_packet(wire, (int)wire_len, hdr, hop_limit);
 }
 
+static meshtastic_Routing_Error decode_fail_to_routing_err(enum meshtastic_decode_fail r)
+{
+	if (r == MESHTASTIC_DECODE_FAIL_PKI_UNKNOWN_PUBKEY) {
+		return meshtastic_Routing_Error_PKI_UNKNOWN_PUBKEY;
+	}
+	return meshtastic_Routing_Error_NO_CHANNEL;
+}
+
 void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi, int8_t snr)
 {
 	const struct meshtastic_wire_header *hdr;
@@ -230,6 +238,7 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 	struct meshtastic_packet packet;
 	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	bool decoded = false;
+	enum meshtastic_decode_fail fail_reason = MESHTASTIC_DECODE_FAIL_NONE;
 	int ret;
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 	uint32_t airtime_ms;
@@ -282,7 +291,7 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 	dup_add(src, pkt_id);
 
 	ret = meshtastic_try_decode_wire_packet(buf, len, rssi, snr, &packet, payload,
-						sizeof(payload), &decoded);
+						sizeof(payload), &decoded, &fail_reason);
 	if (ret < 0) {
 		LOG_DBG("RX header parse failed (%d)", ret);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
@@ -301,6 +310,16 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 
 	if (!decoded) {
 		mt.status.decode_failures++;
+
+		/* A want_ack unicast addressed to us that we can't decode: tell the
+		 * sender why (NO_CHANNEL / PKI_UNKNOWN_PUBKEY) so its reliable layer
+		 * stops retransmitting and surfaces the reason, instead of timing out.
+		 * Only for frames to us (never broadcasts/relays) and only want_ack. */
+		if (fail_reason != MESHTASTIC_DECODE_FAIL_NONE && packet.want_ack &&
+		    packet.to == mt.node_id) {
+			meshtastic_routing_send_error(&packet,
+						      decode_fail_to_routing_err(fail_reason));
+		}
 	}
 
 	mt.status.rx_packets++;

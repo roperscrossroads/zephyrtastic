@@ -32,6 +32,20 @@ struct __packed meshtastic_wire_header {
 	uint8_t relay_node;
 };
 
+/**
+ * @brief Why a wire packet could not be decoded.
+ *
+ * Surfaced by @ref meshtastic_try_decode_wire_packet so the router can return a
+ * ROUTING error to the sender of a want_ack unicast addressed to us instead of
+ * silently dropping it (mirrors the reference ReliableRouter). @c NONE covers
+ * both a successful decode and an ignored frame that must never be NAKed.
+ */
+enum meshtastic_decode_fail {
+	MESHTASTIC_DECODE_FAIL_NONE = 0,
+	MESHTASTIC_DECODE_FAIL_NO_CHANNEL,
+	MESHTASTIC_DECODE_FAIL_PKI_UNKNOWN_PUBKEY,
+};
+
 int meshtastic_encode_data(uint32_t portnum, const uint8_t *payload, size_t payload_len,
 			   uint8_t *buf, size_t buf_len, size_t *encoded_len);
 int meshtastic_packet_to_mesh_pb(const struct meshtastic_packet *packet,
@@ -46,7 +60,8 @@ int meshtastic_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi, int
 				  size_t payload_len);
 int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi, int8_t snr,
 				      struct meshtastic_packet *packet, uint8_t *payload,
-				      size_t payload_len, bool *decoded);
+				      size_t payload_len, bool *decoded,
+				      enum meshtastic_decode_fail *fail_reason);
 uint8_t meshtastic_packet_wire_hash_for_index(uint8_t channel_index);
 int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t *out,
 				 uint32_t *out_len);

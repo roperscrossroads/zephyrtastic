@@ -70,11 +70,50 @@ static bool routing_ack_should_request_ack(const struct meshtastic_packet *req)
 		req->portnum == meshtastic_PortNum_TEXT_MESSAGE_COMPRESSED_APP);
 }
 
+/* Build and transmit a ROUTING reply (ACK when err == NONE, otherwise a NAK)
+ * carrying request_id back to the originator. Shared by the ACK path and the
+ * decode-failure NAK path. @p wait is the outbound send timeout: the ACK path
+ * uses K_FOREVER (its historical behaviour); the NAK path uses K_NO_WAIT so it
+ * never blocks the receive thread (the reference queues NAKs fire-and-forget). */
+static int routing_send_reply(uint32_t to, uint32_t request_id, uint8_t ch_index,
+			      meshtastic_Routing_Error err, uint8_t hop_limit, bool want_ack,
+			      k_timeout_t wait)
+{
+	meshtastic_Routing routing = meshtastic_Routing_init_zero;
+	uint8_t rbuf[16];
+	pb_ostream_t stream = pb_ostream_from_buffer(rbuf, sizeof(rbuf));
+	struct meshtastic_packet reply;
+
+	routing.error_reason = err;
+	routing.which_variant = meshtastic_Routing_error_reason_tag;
+
+	if (!pb_encode(&stream, meshtastic_Routing_fields, &routing)) {
+		LOG_ERR("Routing reply encode failed: %s", PB_GET_ERROR(&stream));
+		return -ENOMEM;
+	}
+
+	reply = (struct meshtastic_packet){
+		.from = mt.node_id,
+		.to = to,
+		.id = meshtastic_allocate_packet_id(),
+		.portnum = meshtastic_PortNum_ROUTING_APP,
+		.payload = rbuf,
+		.payload_len = stream.bytes_written,
+		.request_id = request_id,
+		.hop_limit = hop_limit,
+		.hop_start = hop_limit,
+		.want_ack = want_ack,
+		.channel_index = ch_index,
+	};
+
+	LOG_DBG("Sending ROUTING reply err=%d to 0x%08x for id=0x%08x ch=%u want_ack=%u hop=%u",
+		(int)err, to, request_id, ch_index, want_ack ? 1U : 0U, hop_limit);
+
+	return meshtastic_send_packet(&reply, wait);
+}
+
 static int routing_send_ack(const struct meshtastic_packet *req)
 {
-	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
-	meshtastic_Routing routing = meshtastic_Routing_init_zero;
-	pb_ostream_t stream;
 	uint8_t ch_index;
 
 	if (req == NULL || req->to != mt.node_id) {
@@ -85,35 +124,23 @@ static int routing_send_ack(const struct meshtastic_packet *req)
 			   ? req->channel_index
 			   : meshtastic_channels_primary_index();
 
-	routing.error_reason = meshtastic_Routing_Error_NONE;
-	routing.which_variant = meshtastic_Routing_error_reason_tag;
+	return routing_send_reply(req->from, req->id, ch_index, meshtastic_Routing_Error_NONE,
+				  routing_hop_limit_for_reply(req),
+				  routing_ack_should_request_ack(req), K_FOREVER);
+}
 
-	mesh.from = mt.node_id;
-	mesh.to = req->from;
-	mesh.id = meshtastic_allocate_packet_id();
-	mesh.channel = ch_index;
-	mesh.hop_limit = routing_hop_limit_for_reply(req);
-	mesh.hop_start = mesh.hop_limit;
-	mesh.want_ack = routing_ack_should_request_ack(req);
-	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
-	mesh.decoded.portnum = meshtastic_PortNum_ROUTING_APP;
-	mesh.decoded.request_id = req->id;
-	mesh.decoded.want_response = false;
-	mesh.priority = meshtastic_MeshPacket_Priority_ACK;
-
-	stream = pb_ostream_from_buffer(mesh.decoded.payload.bytes,
-					sizeof(mesh.decoded.payload.bytes));
-	if (!pb_encode(&stream, meshtastic_Routing_fields, &routing)) {
-		LOG_ERR("Routing ACK encode failed: %s", PB_GET_ERROR(&stream));
-		return -ENOMEM;
+void meshtastic_routing_send_error(const struct meshtastic_packet *req,
+				   meshtastic_Routing_Error err)
+{
+	if (req == NULL || req->from == 0U || req->from == mt.node_id) {
+		return;
 	}
 
-	mesh.decoded.payload.size = (pb_size_t)stream.bytes_written;
-
-	LOG_DBG("Sending ROUTING ACK to 0x%08x for id=0x%08x ch=%u want_ack=%u hop_limit=%u",
-		mesh.to, req->id, ch_index, mesh.want_ack ? 1U : 0U, mesh.hop_limit);
-
-	return meshtastic_send_mesh_pb(&mesh);
+	/* We could not decode the frame, so its real channel is unknown — reply on
+	 * the primary channel (as the reference does). Never request an ACK for a NAK
+	 * (avoid ack storms), and send fire-and-forget so we don't block RX. */
+	(void)routing_send_reply(req->from, req->id, meshtastic_channels_primary_index(), err,
+				 routing_hop_limit_for_reply(req), false, K_NO_WAIT);
 }
 
 void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet)

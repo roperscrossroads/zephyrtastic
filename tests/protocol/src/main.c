@@ -1238,6 +1238,91 @@ ZTEST(protocol_stack, test_reliable_failure_clears_learned_next_hop)
 		      "delivery failure should clear the stale next hop");
 }
 
+/* A want_ack unicast addressed to us that we cannot decode is NAKed back to the
+ * sender with a ROUTING error (NO_CHANNEL here — PKI is off in this build), so the
+ * sender learns the reason instead of timing out. */
+ZTEST(protocol_stack, test_undecodable_want_ack_dm_nak_to_sender)
+{
+	struct meshtastic_packet dm = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.id = 0x9A01U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"hi",
+		.payload_len = 2U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_ack = true,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	struct meshtastic_wire_header *hdr;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_packet nak;
+	uint8_t nak_payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_Routing routing = meshtastic_Routing_init_zero;
+	pb_istream_t is;
+
+	zassert_ok(meshtastic_build_wire_packet(&dm, wire, &wire_len));
+	/* Corrupt the channel hash so no PSK we hold matches -> undecodable. */
+	hdr = (struct meshtastic_wire_header *)wire;
+	hdr->channel ^= 0xffU;
+
+	inject_rx_frame(wire, wire_len, -20, 4);
+	k_sleep(K_MSEC(50));
+
+	/* Exactly one TX: the ROUTING NAK back to the sender. */
+	assert_mock_send_count(1U);
+	decode_last_tx(&nak, nak_payload, sizeof(nak_payload));
+	zassert_equal(nak.from, TEST_NODE_ID, "NAK should originate from us");
+	zassert_equal(nak.to, PEER_NODE_ID, "NAK should target the sender");
+	zassert_equal(nak.portnum, MESHTASTIC_PORT_ROUTING, "NAK should be a ROUTING packet");
+	zassert_equal(nak.request_id, dm.id, "NAK should reference the failed packet id");
+
+	is = pb_istream_from_buffer(nak_payload, nak.payload_len);
+	zassert_true(pb_decode(&is, meshtastic_Routing_fields, &routing), "routing payload decode");
+	zassert_equal(routing.error_reason, meshtastic_Routing_Error_NO_CHANNEL,
+		      "NAK should carry NO_CHANNEL");
+}
+
+/* A want_ack BROADCAST we cannot decode must NOT be NAKed (no unicast sender to
+ * answer, and NAKing broadcasts would storm the mesh). It is still flood-relayed,
+ * so the single TX must be that relay (to BROADCAST), not a NAK to the sender. */
+ZTEST(protocol_stack, test_undecodable_broadcast_is_not_naked)
+{
+	struct meshtastic_packet bc = {
+		.from = PEER_NODE_ID,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.id = 0x9A02U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"hi",
+		.payload_len = 2U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_ack = true,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	struct meshtastic_wire_header *hdr;
+	struct meshtastic_wire_header tx_hdr;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	zassert_ok(meshtastic_build_wire_packet(&bc, wire, &wire_len));
+	hdr = (struct meshtastic_wire_header *)wire;
+	hdr->channel ^= 0xffU;
+
+	inject_rx_frame(wire, wire_len, -20, 4);
+	k_sleep(K_MSEC(50));
+
+	/* Exactly one TX and it is the relayed broadcast, never a unicast NAK. */
+	assert_mock_send_count(1U);
+	copy_last_tx_header(&tx_hdr);
+	zassert_equal(sys_le32_to_cpu(tx_hdr.dest), MESHTASTIC_NODE_BROADCAST,
+		      "broadcast should be relayed, not NAKed");
+	zassert_equal(sys_le32_to_cpu(tx_hdr.src), PEER_NODE_ID,
+		      "relayed frame keeps the original sender");
+}
+
 /* Verifies duplicate foreign packets do not trigger additional relay transmissions. */
 ZTEST(protocol_stack, test_duplicate_foreign_packets_do_not_relay_again)
 {

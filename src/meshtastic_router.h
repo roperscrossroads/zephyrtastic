@@ -95,6 +95,18 @@ void meshtastic_router_stamp_originated(uint32_t to, uint32_t from, uint8_t *nex
 void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet);
 
 /**
+ * @brief Send a ROUTING error (NAK) to the sender of an undecodable want_ack unicast.
+ *
+ * When a want_ack unicast addressed to us cannot be decoded, reply with a ROUTING
+ * error (e.g. @c NO_CHANNEL / @c PKI_UNKNOWN_PUBKEY) referencing @p req's packet id
+ * so the sender stops retransmitting and surfaces the real reason instead of timing
+ * out (mirrors the reference ReliableRouter). Sent on the primary channel, since the
+ * frame's real channel is unknown. No-op for @p req == NULL or a packet we sourced.
+ */
+void meshtastic_routing_send_error(const struct meshtastic_packet *req,
+				   meshtastic_Routing_Error err);
+
+/**
  * @brief Post-RX hook for relay policy.
  *
  * Currently delegates to @ref meshtastic_routing_sniff_rebroadcast.
