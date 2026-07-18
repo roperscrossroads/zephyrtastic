@@ -127,3 +127,44 @@ int meshtastic_settings_flush(void)
 
 	return settings_save_subtree(MESHTASTIC_SETTINGS_SUBTREE);
 }
+
+static bool wipe_preserve_security;
+
+/* Delete one persisted key. Reuses the config-store key iteration (same as the
+ * export path) so we never duplicate the key-name list: @p name is the unprefixed
+ * store key ("owner", "channel/N", "config/<sec>", "module/<sec>"). */
+static int settings_wipe_one(const char *name, const void *val, size_t val_len)
+{
+	char full_name[SETTINGS_MAX_NAME_LEN + SETTINGS_EXTRA_LEN + 1];
+	int ret;
+
+	ARG_UNUSED(val);
+	ARG_UNUSED(val_len);
+
+	/* Keep the X25519 identity on a config-only factory reset. */
+	if (wipe_preserve_security && strcmp(name, "config/security") == 0) {
+		return 0;
+	}
+
+	ret = snprintk(full_name, sizeof(full_name), MESHTASTIC_SETTINGS_SUBTREE "/%s", name);
+	if (ret < 0 || ret >= (int)sizeof(full_name)) {
+		return -EINVAL;
+	}
+
+	return settings_delete(full_name);
+}
+
+int meshtastic_settings_wipe(bool preserve_security)
+{
+	int ret;
+
+	/* Cancel any pending save so it can't re-persist the still-populated in-RAM
+	 * store after we delete. The caller reboots without a flush. */
+	(void)k_work_cancel_delayable(&save_work);
+
+	wipe_preserve_security = preserve_security;
+	ret = meshtastic_config_store_export(settings_wipe_one);
+	wipe_preserve_security = false;
+
+	return ret;
+}

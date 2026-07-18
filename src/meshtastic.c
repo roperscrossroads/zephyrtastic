@@ -816,6 +816,11 @@ int meshtastic_nodedb_remove(uint32_t node_num)
 
 	return -ENOTSUP;
 }
+
+void meshtastic_nodedb_reset(bool keep_favorites)
+{
+	ARG_UNUSED(keep_favorites);
+}
 #endif
 
 #if !defined(CONFIG_MESHTASTIC_NODEINFO)

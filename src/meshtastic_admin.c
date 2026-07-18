@@ -91,6 +91,21 @@ static void admin_reboot_work_fn(struct k_work *work)
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
+/* Reset variant of the reboot work: deliberately does NOT flush. A factory reset
+ * has already deleted the persisted config keys; flushing here would re-export the
+ * still-populated in-RAM store and resurrect everything just wiped. The next boot
+ * finds an empty store and re-seeds defaults. */
+static void admin_reset_reboot_work_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(admin_reset_reboot_work, admin_reset_reboot_work_fn);
+
+static void admin_reset_reboot_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	LOG_WRN("admin: rebooting now (post-reset, no flush)");
+	sys_reboot(SYS_REBOOT_COLD);
+}
+
 /* Schedule the deferred reboot for a config change that only takes effect on
  * restart, and clear the pending flag. */
 static void admin_schedule_reboot(void)
@@ -516,13 +531,53 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
 		meshtastic_clock_set_epoch(admin_req.payload_variant.set_time_only);
 		break;
 
-	/* Reset ops — deferred in the MVP (ack so the app doesn't hang). */
+	/* Reset ops. The ACK below goes out first; the reset-reboot fires 7 s later
+	 * on a no-flush work item so the wiped store isn't re-persisted. Mirrors
+	 * AdminModule: factoryReset() keeps the private key; factoryReset(true) erases
+	 * everything; resetNodes(keepFavorites) clears only the peer database. */
 	case meshtastic_AdminMessage_factory_reset_config_tag:
-	case meshtastic_AdminMessage_factory_reset_device_tag:
-	case meshtastic_AdminMessage_nodedb_reset_tag:
-		LOG_WRN("admin: reset op (variant %u) not implemented in MVP — acked only",
-			(unsigned int)admin_req.which_payload_variant);
+		LOG_INF("admin: factory_reset_config (preserving security identity)");
+		meshtastic_config_store_set_save_suppressed(true);
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+		(void)meshtastic_settings_wipe(true); /* keep config/security */
+#endif
+		k_work_reschedule(&admin_reset_reboot_work, K_SECONDS(ADMIN_REBOOT_SECONDS));
 		break;
+
+	case meshtastic_AdminMessage_factory_reset_device_tag:
+		LOG_INF("admin: factory_reset_device (full wipe)");
+		meshtastic_config_store_set_save_suppressed(true);
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+		(void)meshtastic_settings_wipe(false); /* wipe everything incl. identity */
+#endif
+		meshtastic_nodedb_reset(false);
+		k_work_reschedule(&admin_reset_reboot_work, K_SECONDS(ADMIN_REBOOT_SECONDS));
+		break;
+
+	case meshtastic_AdminMessage_nodedb_reset_tag: {
+		/* CLIENT_BASE / ROUTER / ROUTER_LATE preserve hop count when relaying
+		 * via a favorited node, so keep their favorites on reset — otherwise
+		 * honor the request's own flag (matches AdminModule.cpp). */
+		meshtastic_Config cfg;
+		bool role_pref = false;
+		bool keep_favorites;
+
+		if (meshtastic_config_store_get_config(meshtastic_Config_device_tag, &cfg) == 0) {
+			meshtastic_Config_DeviceConfig_Role role = cfg.payload_variant.device.role;
+
+			role_pref = (role == meshtastic_Config_DeviceConfig_Role_CLIENT_BASE) ||
+				    (role == meshtastic_Config_DeviceConfig_Role_ROUTER) ||
+				    (role == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE);
+		}
+		keep_favorites = role_pref ? true : admin_req.payload_variant.nodedb_reset;
+
+		LOG_INF("admin: nodedb_reset (keep_favorites=%d)", (int)keep_favorites);
+		meshtastic_nodedb_reset(keep_favorites);
+		/* A node-db reset leaves config untouched, so a normal (flushing)
+		 * reboot is fine — the peer store was already persisted synchronously. */
+		k_work_reschedule(&admin_reboot_work, K_SECONDS(ADMIN_REBOOT_SECONDS));
+		break;
+	}
 
 	default:
 		LOG_WRN("admin: unhandled variant %u (consumed, not forwarded)",

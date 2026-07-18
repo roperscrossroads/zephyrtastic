@@ -1323,6 +1323,50 @@ ZTEST(protocol_stack, test_undecodable_broadcast_is_not_naked)
 		      "relayed frame keeps the original sender");
 }
 
+/* A device/config factory reset clears every peer: only the local node survives,
+ * and the learned routes toward the wiped peers are gone. */
+ZTEST(protocol_stack, test_nodedb_reset_removes_all_peers)
+{
+	/* Populate the DB with two peers and learn a route to each. */
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xC100U, 0x99U);
+	inject_with_relay(OTHER_NODE_ID, TEST_NODE_ID, 0xC101U, 0x33U);
+	k_sleep(K_MSEC(30));
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x99U, "peer route not learned");
+	zassert_equal(meshtastic_nodedb_get_next_hop(OTHER_NODE_ID), 0x33U, "other route not learned");
+
+	meshtastic_nodedb_reset(false);
+
+	/* Both peers gone -> no route survives; only the local node remains. */
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0U,
+		      "peer should be gone after reset");
+	zassert_equal(meshtastic_nodedb_get_next_hop(OTHER_NODE_ID), 0U,
+		      "other should be gone after reset");
+	zassert_equal(meshtastic_nodedb_count(), 1U, "only the local node should remain");
+}
+
+/* A node-db reset with keep_favorites spares favorited peers (mirrors
+ * NodeDB::resetNodes) while still evicting the rest. */
+ZTEST(protocol_stack, test_nodedb_reset_keeps_favorites)
+{
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xC110U, 0x99U);
+	inject_with_relay(OTHER_NODE_ID, TEST_NODE_ID, 0xC111U, 0x33U);
+	k_sleep(K_MSEC(30));
+	zassert_ok(meshtastic_nodedb_set_favorite(PEER_NODE_ID, true), "favorite set failed");
+
+	meshtastic_nodedb_reset(true);
+
+	/* The favorite (and its learned route) survives; the non-favorite is gone. */
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x99U,
+		      "favorite peer should be retained across reset");
+	zassert_equal(meshtastic_nodedb_get_next_hop(OTHER_NODE_ID), 0U,
+		      "non-favorite peer should be evicted");
+	zassert_equal(meshtastic_nodedb_count(), 2U, "self + one favorite should remain");
+
+	/* Leave the DB clean for later tests. */
+	(void)meshtastic_nodedb_set_favorite(PEER_NODE_ID, false);
+	meshtastic_nodedb_reset(false);
+}
+
 /* Verifies duplicate foreign packets do not trigger additional relay transmissions. */
 ZTEST(protocol_stack, test_duplicate_foreign_packets_do_not_relay_again)
 {

@@ -164,6 +164,19 @@ int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored);
  */
 int meshtastic_nodedb_remove(uint32_t node_num);
 
+/**
+ * @brief Clear the in-RAM NodeDB (and persisted peer keys), keeping the local node.
+ *
+ * Mirrors the reference NodeDB::resetNodes: the local node is always retained.
+ * When @p keep_favorites is true, favorited peers survive; otherwise every peer
+ * is removed. Persisted peer public keys (the warm ring and its NVS records) are
+ * always cleared — warm entries are never favorites. The store is persisted
+ * synchronously, so the caller may reboot without flushing the peer-key subtree.
+ *
+ * No-op when NodeDB support is not enabled (weak stub).
+ */
+void meshtastic_nodedb_reset(bool keep_favorites);
+
 #ifdef __cplusplus
 }
 #endif

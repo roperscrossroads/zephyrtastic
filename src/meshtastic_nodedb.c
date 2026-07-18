@@ -354,11 +354,11 @@ static int warm_reconcile_cb(const char *key, size_t len, settings_read_cb read_
 
 static void nodekeys_schedule_save(void);
 
-static void nodekeys_save_work_handler(struct k_work *work)
+/* Prune orphaned mtnode/<id> NVS records (any not in the warm ring) then persist
+ * the ring. Shared by the delayed save-work and the synchronous reset path. */
+static void nodekeys_do_persist(void)
 {
 	int ret;
-
-	ARG_UNUSED(work);
 
 	if (nodekeys_reconcile) {
 		struct warm_reconcile_ctx ctx = {.count = 0U, .overflow = false};
@@ -388,6 +388,13 @@ static void nodekeys_save_work_handler(struct k_work *work)
 	if (nodekeys_reconcile) {
 		nodekeys_schedule_save();
 	}
+}
+
+static void nodekeys_save_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	nodekeys_do_persist();
 }
 
 static K_WORK_DELAYABLE_DEFINE(nodekeys_save_work, nodekeys_save_work_handler);
@@ -846,6 +853,60 @@ int meshtastic_nodedb_remove(uint32_t node_num)
 	k_mutex_unlock(&nodedb_lock);
 
 	return -ENOENT;
+}
+
+void meshtastic_nodedb_reset(bool keep_favorites)
+{
+	uint32_t self = meshtastic_get_node_id();
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+
+	/* Compact the hot store in place, keeping self and (optionally) favorites.
+	 * Mirrors NodeDB::resetNodes: self is never removed; keep_favorites spares
+	 * favorited peers, otherwise every peer goes. */
+	size_t kept = 0U;
+	for (size_t i = 0U; i < nodedb_entry_count; i++) {
+		struct nodedb_entry *e = &nodedb_entries[i];
+		bool keep;
+
+		if (!e->used) {
+			continue;
+		}
+		keep = (e->node.num == self) ||
+		       (keep_favorites &&
+			IS_BIT_SET(e->node.bitfield, NODEINFO_BITFIELD_IS_FAVORITE_BIT));
+		if (keep) {
+			if (kept != i) {
+				nodedb_entries[kept] = *e;
+			}
+			kept++;
+		}
+	}
+	for (size_t i = kept; i < nodedb_entry_count; i++) {
+		nodedb_entries[i] = (struct nodedb_entry){0};
+	}
+	nodedb_entry_count = kept;
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	/* Warm keys are never favorites (self's key lives in config/security), so a
+	 * DB reset clears them wholesale and flags a reconcile to prune the persisted
+	 * mtnode records. */
+	memset(warm_keys, 0, sizeof(warm_keys));
+	nodekeys_reconcile = true;
+#endif
+
+	k_mutex_unlock(&nodedb_lock);
+
+	LOG_INF("NodeDB reset (%s favorites): %zu node(s) retained",
+		keep_favorites ? "keeping" : "removing", kept);
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	/* Persist synchronously: the reset reboot path does not flush the mtnode
+	 * subtree, so prune the now-orphaned records and save the empty ring here.
+	 * Runs outside the lock (the reconcile callback takes it). */
+	(void)k_work_cancel_delayable(&nodekeys_save_work);
+	nodekeys_do_persist();
+#endif
 }
 
 int meshtastic_nodedb_init(void)
