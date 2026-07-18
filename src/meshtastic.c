@@ -223,7 +223,7 @@ void meshtastic_fill_device_metadata(meshtastic_DeviceMetadata *md)
 	md->hasBluetooth = IS_ENABLED(CONFIG_MESHTASTIC_BLE);
 	md->hasWifi = IS_ENABLED(CONFIG_WIFI);
 	md->hasEthernet = IS_ENABLED(CONFIG_NET_L2_ETHERNET);
-	md->canShutdown = false;       /* no PM/poweroff path in the port */
+	md->canShutdown = IS_ENABLED(CONFIG_POWEROFF); /* sys_poweroff() -> deep sleep */
 	md->hasRemoteHardware = false; /* no RemoteHardware module */
 #if defined(CONFIG_MESHTASTIC_PKI)
 	md->hasPKC = meshtastic_pki_have_key();

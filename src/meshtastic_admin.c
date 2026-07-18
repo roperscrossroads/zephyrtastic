@@ -20,6 +20,9 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
+#if defined(CONFIG_POWEROFF)
+#include <zephyr/sys/poweroff.h>
+#endif
 
 #include <zephyr/meshtastic/nodedb.h>
 
@@ -105,6 +108,23 @@ static void admin_reset_reboot_work_fn(struct k_work *work)
 	LOG_WRN("admin: rebooting now (post-reset, no flush)");
 	sys_reboot(SYS_REBOOT_COLD);
 }
+
+#if defined(CONFIG_POWEROFF)
+/* Shutdown work: flush like the reboot path, then power off. On the ESP32-S3
+ * sys_poweroff() enters deep sleep (esp_deep_sleep_start), so the device wakes on
+ * the next reset — as advertised to the app via canShutdown. */
+static void admin_shutdown_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	meshtastic_settings_flush();
+#endif
+	LOG_WRN("admin: powering off now");
+	sys_poweroff();
+}
+static K_WORK_DELAYABLE_DEFINE(admin_shutdown_work, admin_shutdown_work_fn);
+#endif /* CONFIG_POWEROFF */
 
 /* Schedule the deferred reboot for a config change that only takes effect on
  * restart, and clear the pending flag. */
@@ -578,6 +598,33 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
 		k_work_reschedule(&admin_reboot_work, K_SECONDS(ADMIN_REBOOT_SECONDS));
 		break;
 	}
+
+	/* Shutdown: a negative value cancels a pending shutdown, else schedule one
+	 * (mirrors AdminModule shutdownAtMsec). On the ESP32-S3 this deep-sleeps; the
+	 * device wakes on reset. Only wired when the platform has a poweroff path. */
+	case meshtastic_AdminMessage_shutdown_seconds_tag: {
+		int32_t s = admin_req.payload_variant.shutdown_seconds;
+
+#if defined(CONFIG_POWEROFF)
+		if (s < 0) {
+			(void)k_work_cancel_delayable(&admin_shutdown_work);
+			LOG_INF("admin: shutdown cancelled");
+		} else {
+			LOG_INF("admin: shutdown in %d s", s);
+			k_work_reschedule(&admin_shutdown_work, K_SECONDS(s));
+		}
+#else
+		LOG_WRN("admin: shutdown requested (%d s) but no poweroff path — ignored", s);
+#endif
+		break;
+	}
+
+	/* DFU: the ESP32-S3 ROM download mode needs a GPIO0 strap at hardware reset,
+	 * so there is no software path to enter it (unlike nRF52/RP2040/STM32). The
+	 * port's real update route is OTA via mcumgr. Log and drop, don't fake it. */
+	case meshtastic_AdminMessage_enter_dfu_mode_request_tag:
+		LOG_WRN("admin: enter_dfu_mode unsupported on this platform (use OTA) — ignored");
+		break;
 
 	default:
 		LOG_WRN("admin: unhandled variant %u (consumed, not forwarded)",
