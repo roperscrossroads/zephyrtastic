@@ -17,6 +17,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
+#include "meshtastic_region_presets.h"
 #include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
 #include "meshtastic_sched.h"
@@ -1365,6 +1366,94 @@ ZTEST(protocol_stack, test_nodedb_reset_keeps_favorites)
 	/* Leave the DB clean for later tests. */
 	(void)meshtastic_nodedb_set_favorite(PEER_NODE_ID, false);
 	meshtastic_nodedb_reset(false);
+}
+
+/* --- Region -> preset map (want_config handshake) ------------------------- */
+
+/* Find the preset group a region maps to, or -1 if the region is absent. */
+static int region_group_index(const meshtastic_LoRaRegionPresetMap *map,
+			      meshtastic_Config_LoRaConfig_RegionCode region)
+{
+	for (pb_size_t i = 0U; i < map->region_groups_count; i++) {
+		if (map->region_groups[i].region == region) {
+			return (int)map->region_groups[i].group_index;
+		}
+	}
+	return -1;
+}
+
+static bool group_has_preset(const meshtastic_LoRaPresetGroup *grp,
+			     meshtastic_Config_LoRaConfig_ModemPreset preset)
+{
+	for (pb_size_t i = 0U; i < grp->presets_count; i++) {
+		if (grp->presets[i] == preset) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* The region->preset map is well-formed and matches the reference table: US is a
+ * standard, unlicensed LONG_FAST group; HAM regions are licensed; regions sharing
+ * a preset list but differing in licensing land in distinct groups. */
+ZTEST(protocol_stack, test_region_preset_map_matches_reference)
+{
+	meshtastic_LoRaRegionPresetMap map;
+	int gi;
+
+	meshtastic_build_region_preset_map(&map);
+
+	/* Capacities respected; the reference table has 36 regions coalescing into
+	 * 7 distinct (profile, default) groups. */
+	zassert_true(map.region_groups_count <= ARRAY_SIZE(map.region_groups), "region overflow");
+	zassert_true(map.groups_count <= ARRAY_SIZE(map.groups), "group overflow");
+	zassert_equal(map.region_groups_count, 36U, "unexpected region count");
+	zassert_equal(map.groups_count, 7U, "unexpected group count");
+
+	/* US -> standard group: LONG_FAST default, unlicensed, LONG_FAST legal. */
+	gi = region_group_index(&map, meshtastic_Config_LoRaConfig_RegionCode_US);
+	zassert_true(gi >= 0, "US missing from map");
+	zassert_equal(map.groups[gi].default_preset,
+		      meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST, "US default not LONG_FAST");
+	zassert_false(map.groups[gi].licensed_only, "US should not be licensed-only");
+	zassert_true(group_has_preset(&map.groups[gi],
+				      meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST),
+		     "US group should list LONG_FAST");
+
+	/* A HAM 2 m region -> licensed-only group defaulting to TINY_FAST. */
+	gi = region_group_index(&map, meshtastic_Config_LoRaConfig_RegionCode_ITU1_2M);
+	zassert_true(gi >= 0, "ITU1_2M missing from map");
+	zassert_true(map.groups[gi].licensed_only, "HAM region must be licensed-only");
+	zassert_equal(map.groups[gi].default_preset,
+		      meshtastic_Config_LoRaConfig_ModemPreset_TINY_FAST, "HAM default not TINY_FAST");
+
+	/* EU_866 -> LITE profile defaulting to LITE_FAST. */
+	gi = region_group_index(&map, meshtastic_Config_LoRaConfig_RegionCode_EU_866);
+	zassert_true(gi >= 0, "EU_866 missing from map");
+	zassert_equal(map.groups[gi].default_preset,
+		      meshtastic_Config_LoRaConfig_ModemPreset_LITE_FAST, "EU_866 default not LITE_FAST");
+
+	/* EU_N_868 (unlicensed) and ITU1_70CM (licensed) both use the NARROW preset
+	 * list but must NOT be coalesced — licensing differs. */
+	int narrow = region_group_index(&map, meshtastic_Config_LoRaConfig_RegionCode_EU_N_868);
+	int ham = region_group_index(&map, meshtastic_Config_LoRaConfig_RegionCode_ITU1_70CM);
+	zassert_true(narrow >= 0 && ham >= 0, "narrow/ham region missing");
+	zassert_not_equal(narrow, ham, "licensed and unlicensed NARROW must be separate groups");
+	zassert_false(map.groups[narrow].licensed_only, "EU_N_868 must be unlicensed");
+	zassert_true(map.groups[ham].licensed_only, "ITU1_70CM must be licensed");
+
+	/* The whole map must encode inside one FromRadio frame (the PhoneAPI buffer
+	 * is 512 B) or the want_config stage silently drops it on real hardware. */
+	{
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		uint8_t buf[512];
+		pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+
+		from.which_payload_variant = meshtastic_FromRadio_region_presets_tag;
+		from.region_presets = map;
+		zassert_true(pb_encode(&os, meshtastic_FromRadio_fields, &from),
+			     "region preset FromRadio must fit the 512 B frame buffer");
+	}
 }
 
 /* Verifies duplicate foreign packets do not trigger additional relay transmissions. */

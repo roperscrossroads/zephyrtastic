@@ -57,6 +57,7 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_PHONEAPI
     meshtastic_phoneapi.c
     meshtastic_phoneapi_config.c
+    meshtastic_region_presets.c
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN meshtastic_admin.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE meshtastic_ble.c)

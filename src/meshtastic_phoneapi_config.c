@@ -21,6 +21,7 @@
 #include "meshtastic_clock.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_phoneapi.h"
+#include "meshtastic_region_presets.h"
 #if defined(CONFIG_MESHTASTIC_POSITION)
 #include "meshtastic_position.h"
 #endif
@@ -261,13 +262,11 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 			/* region -> valid-modem-preset compatibility map. The official
 			 * apps ASSUME this stage arrives after metadata and before channels
 			 * (see firmware PhoneAPI.cpp STATE_SEND_REGION_PRESETS); omitting it
-			 * stalls the config handshake. The map is informational (UI hints),
-			 * so emit an empty-but-well-formed one until the port carries the
-			 * real region table. */
+			 * stalls the config handshake. Built from the reference region table
+			 * so the app can constrain region+preset selections. */
 			from.id = meshtastic_next_fromradio_id();
 			from.which_payload_variant = meshtastic_FromRadio_region_presets_tag;
-			from.region_presets =
-				(meshtastic_LoRaRegionPresetMap)meshtastic_LoRaRegionPresetMap_init_zero;
+			meshtastic_build_region_preset_map(&from.region_presets);
 			return emit_frame(api, &from, MESHTASTIC_PHONEAPI_CONFIG_CHANNELS, 0U,
 					  frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_CHANNELS:
