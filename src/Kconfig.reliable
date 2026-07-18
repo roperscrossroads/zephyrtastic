@@ -1,0 +1,27 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_RELIABLE_DELIVERY
+	bool "Sender-side reliable delivery (retransmission)"
+	default y
+	help
+	  Track want_ack unicast packets this node originates and retransmit
+	  them until an acknowledgement is received or the retry budget is
+	  exhausted. An explicit ROUTING ACK/NAK from the destination, or an
+	  implicit ACK (hearing a neighbour rebroadcast our packet), stops the
+	  retransmission; exhaustion emits a TX-failed event and hands the
+	  connected app a MAX_RETRANSMIT routing error.
+
+	  Retry count and interval are tunable at runtime via the scheduler
+	  surface (`meshtastic sched set reliable.retries|reliable.timeout`).
+
+config MESHTASTIC_RELIABLE_MAX_PENDING
+	int "Maximum in-flight reliable packets"
+	depends on MESHTASTIC_RELIABLE_DELIVERY
+	default 8
+	range 1 32
+	help
+	  Number of unacknowledged want_ack packets tracked concurrently. Each
+	  slot retains the packet's wire bytes (up to 255 B) for retransmission.
+	  When the table is full, the oldest pending packet stops being tracked
+	  (its delivery becomes best-effort).

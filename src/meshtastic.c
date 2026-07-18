@@ -28,6 +28,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
+#include "meshtastic_reliable.h"
 #include "meshtastic_sched.h"
 
 #include "meshtastic_settings.h"
@@ -554,6 +555,12 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 		ret = meshtastic_radio_send_wire_prio(wire, pkt_len, tier);
 	} else {
 		ret = meshtastic_radio_send_wire_wait_prio(wire, pkt_len, tier, wait);
+	}
+
+	if (ret >= 0) {
+		/* Track for retransmission if it is a want_ack unicast we originate
+		 * (the hook self-filters everything else). */
+		meshtastic_reliable_on_tx(&local, wire, pkt_len);
 	}
 
 	return send_packet_complete(&local, wire, pkt_len, ret, K_TIMEOUT_EQ(wait, K_FOREVER));

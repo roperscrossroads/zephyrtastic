@@ -88,6 +88,11 @@ Legend: ✅ Full · 🟡 Partial · ❌ Not yet
    * - Text messages
      - ✅
      - Send / receive UTF-8 plaintext
+   * - Reliable delivery
+     - ✅
+     - Retransmits unacked want_ack DMs (explicit / implicit ACK, NAK, or
+       give-up with a delivery-failure report to the app); tunable via
+       ``sched reliable.*``
    * - Position / GNSS
      - ✅
      - Integration with Zephyr GNSS subsystem, periodic position broadcast; the
@@ -166,9 +171,9 @@ the Zephyr . Commands marked *(optional)* are only present when their correspond
    * - ``meshtastic sched policy <name>``
      - Apply a policy preset (``default``, ``legacy``)
    * - ``meshtastic sched set <key> <value>``
-     - Tune one knob live: ``tx.order``, ``tx.overflow``, ``tx.depth``, ``phone.evict``, ``airtime.max`` (% channel util that gates background self-broadcasts, 0=off), ``dedup.ttl`` (seconds a duplicate is remembered, 0=never)
+     - Tune one knob live: ``tx.order``, ``tx.overflow``, ``tx.depth``, ``phone.evict``, ``airtime.max`` (% channel util that gates background self-broadcasts, 0=off), ``dedup.ttl`` (seconds a duplicate is remembered, 0=never), ``reliable.retries`` (retransmits of an unacked DM, 0=off), ``reliable.timeout`` (ms between retransmits)
    * - ``meshtastic sched stats [reset]``
-     - Show live TX/RX counters, per-tier egress, phone-queue drops, airtime-gated broadcasts and dedup TTL expiries; ``reset`` to zero them
+     - Show live TX/RX counters, per-tier egress, phone-queue drops, airtime-gated broadcasts, dedup TTL expiries and reliable-delivery acked/failed; ``reset`` to zero them
 
 The scheduler policy is a runtime-tunable QoS surface (RAM-only — a reboot
 restores compiled defaults). Changing a knob or applying a preset resets the

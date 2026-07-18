@@ -73,6 +73,7 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_NODEINFO meshtastic_nodeinfo.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_MESSAGE meshtastic_message.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_TRACEROUTE meshtastic_traceroute.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_RELIABLE_DELIVERY meshtastic_reliable.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_MQTT meshtastic_mqtt.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_WIFI_AUTOCONNECT meshtastic_wifi_auto.c)
 

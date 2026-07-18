@@ -1189,6 +1189,13 @@ static int cmd_sched_show(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "  dedup.ttl    off       [0=never expire] (cache %u entries)",
 			    CONFIG_MESHTASTIC_DUP_CACHE_SIZE);
 	}
+	shell_print(sh, "Reliable delivery:");
+	if (c.reliable_retries != 0U) {
+		shell_print(sh, "  reliable.retries %u     [0=off]", c.reliable_retries);
+		shell_print(sh, "  reliable.timeout %ums", c.reliable_timeout_ms);
+	} else {
+		shell_print(sh, "  reliable.retries off   [0=off]");
+	}
 
 	shell_fprintf(sh, SHELL_NORMAL, "presets:");
 	for (int i = 0; meshtastic_sched_preset_name(i) != NULL; i++) {
@@ -1224,7 +1231,7 @@ static int cmd_sched_set(const struct shell *sh, size_t argc, char **argv)
 	if (argc < 3U) {
 		shell_error(sh, "usage: meshtastic sched set <key> <value>");
 		shell_print(sh, "keys: tx.order tx.overflow tx.depth phone.evict "
-				"airtime.max dedup.ttl");
+				"airtime.max dedup.ttl reliable.retries reliable.timeout");
 		return -EINVAL;
 	}
 
@@ -1268,6 +1275,8 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 		    st.phone_drop_protected);
 	shell_print(sh, "airtime-gated BG broadcasts: %u", st.tx_airtime_drop);
 	shell_print(sh, "dedup TTL expiries: %u", st.dedup_expired);
+	shell_print(sh, "reliable delivery: %u acked, %u failed", st.reliable_acked,
+		    st.reliable_failed);
 	return 0;
 }
 

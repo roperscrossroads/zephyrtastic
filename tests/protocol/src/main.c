@@ -16,6 +16,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
+#include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
 #include "meshtastic_sched.h"
 
@@ -297,6 +298,7 @@ static void protocol_before(void *fixture)
 	memset(mt.dup_cache, 0, sizeof(mt.dup_cache));
 	mt.dup_head = 0U;
 	meshtastic_sched_defaults();
+	meshtastic_reliable_reset();
 	reset_mock_lora();
 	reset_callbacks_state();
 }
@@ -994,6 +996,125 @@ ZTEST(protocol_stack, test_traceroute_appends_to_accumulated_route)
 	zassert_equal(got.snr_towards_count, 2, "our snr appended after the prior hop's");
 	zassert_equal(got.snr_towards[0], 8 * 4, "prior snr preserved");
 	zassert_equal(got.snr_towards[1], (int)rx_snr * 4, "our snr appended last");
+}
+
+/* Send a want_ack unicast text DM from us to PEER with an explicit id. */
+static void send_reliable_dm(uint32_t id)
+{
+	struct meshtastic_packet dm = {
+		.from = 0U, /* filled with our node id */
+		.to = PEER_NODE_ID,
+		.id = id,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"hi",
+		.payload_len = 2U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_ack = true,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	zassert_ok(meshtastic_send_packet(&dm, K_NO_WAIT));
+}
+
+/* Inject a ROUTING ACK (or NAK) from PEER to us correlating request_id. */
+static void inject_routing_ack(uint32_t request_id, meshtastic_Routing_Error err)
+{
+	meshtastic_Routing routing = meshtastic_Routing_init_zero;
+	uint8_t rbuf[16];
+	pb_ostream_t os = pb_ostream_from_buffer(rbuf, sizeof(rbuf));
+	struct meshtastic_packet ack = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.id = request_id ^ 0xACC0U,
+		.portnum = MESHTASTIC_PORT_ROUTING,
+		.request_id = request_id,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	routing.which_variant = meshtastic_Routing_error_reason_tag;
+	routing.error_reason = err;
+	zassert_true(pb_encode(&os, meshtastic_Routing_fields, &routing), "ack encode failed");
+	ack.payload = rbuf;
+	ack.payload_len = os.bytes_written;
+	zassert_ok(meshtastic_build_wire_packet(&ack, wire, &wire_len));
+	inject_rx_frame(wire, wire_len, -40, 5);
+}
+
+/* Verifies an explicit ROUTING ACK for a want_ack DM we sent cancels
+ * retransmission and counts as delivered. */
+ZTEST(protocol_stack, test_reliable_explicit_ack_cancels_retransmit)
+{
+	struct meshtastic_sched_stats st;
+
+	zassert_ok(meshtastic_sched_set("reliable.retries", "3"));
+	zassert_ok(meshtastic_sched_set("reliable.timeout", "120"));
+
+	send_reliable_dm(0x9101U);
+	k_sleep(K_MSEC(30));
+	assert_mock_send_count(1U); /* original transmit only */
+
+	inject_routing_ack(0x9101U, meshtastic_Routing_Error_NONE);
+	k_sleep(K_MSEC(30)); /* processed well before the 120 ms retry */
+
+	k_sleep(K_MSEC(250)); /* past several retry intervals */
+	assert_mock_send_count(1U); /* no retransmissions */
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.reliable_acked, 1U, "ack should mark delivered");
+	zassert_equal(st.reliable_failed, 0U);
+}
+
+/* Verifies a want_ack DM with no ACK is retransmitted reliable.retries times and
+ * then reported as failed. */
+ZTEST(protocol_stack, test_reliable_retransmits_then_fails)
+{
+	struct meshtastic_sched_stats st;
+
+	zassert_ok(meshtastic_sched_set("reliable.retries", "2"));
+	zassert_ok(meshtastic_sched_set("reliable.timeout", "100"));
+
+	send_reliable_dm(0x9201U);
+	/* original at t~0, retransmits at ~100 and ~200 ms, exhaust at ~300 ms. */
+	k_sleep(K_MSEC(450));
+
+	assert_mock_send_count(3U); /* 1 original + 2 retransmits */
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.reliable_failed, 1U, "exhaustion should count as failed");
+	zassert_equal(st.reliable_acked, 0U);
+}
+
+/* Verifies hearing our own packet rebroadcast (implicit ACK) cancels
+ * retransmission. */
+ZTEST(protocol_stack, test_reliable_implicit_ack_cancels_retransmit)
+{
+	struct meshtastic_sched_stats st;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	zassert_ok(meshtastic_sched_set("reliable.retries", "3"));
+	zassert_ok(meshtastic_sched_set("reliable.timeout", "120"));
+
+	send_reliable_dm(0x9301U);
+	k_sleep(K_MSEC(30));
+	assert_mock_send_count(1U);
+
+	/* A neighbour rebroadcasts our packet: same id, wire src is our node id. */
+	build_wire_packet(TEST_NODE_ID, PEER_NODE_ID, 0x9301U, 2U, MESHTASTIC_PORT_TEXT_MESSAGE,
+			  (const uint8_t *)"hi", 2U, wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 5);
+	k_sleep(K_MSEC(30));
+
+	k_sleep(K_MSEC(250));
+	assert_mock_send_count(1U); /* implicit ack stopped retransmission */
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.reliable_acked, 1U, "implicit ack should stop retransmission");
+	zassert_equal(st.reliable_failed, 0U);
 }
 
 /* Verifies duplicate foreign packets do not trigger additional relay transmissions. */

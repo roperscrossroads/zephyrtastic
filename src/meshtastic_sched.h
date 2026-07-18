@@ -70,6 +70,10 @@ struct meshtastic_sched_config {
 				   * (src,id) older than this is treated as fresh so
 				   * a legitimately re-sent packet is not swallowed.
 				   * 0 = never expire (legacy fixed ring). */
+	uint8_t reliable_retries; /* retransmits of an unacked want_ack unicast we
+				   * originate, before giving up. 0 = disable
+				   * sender-side reliable delivery. */
+	uint16_t reliable_timeout_ms; /* base interval between those retransmits */
 };
 
 struct meshtastic_sched_stats {
@@ -80,6 +84,8 @@ struct meshtastic_sched_stats {
 	uint32_t phone_drop_protected;         /* protected frames dropped (queue saturated) */
 	uint32_t tx_airtime_drop;              /* background self-broadcasts suppressed by gate */
 	uint32_t dedup_expired;                /* dup-cache hits ignored because TTL had elapsed */
+	uint32_t reliable_acked;               /* want_ack sends confirmed delivered (ack/implicit) */
+	uint32_t reliable_failed;              /* want_ack sends that exhausted all retransmits */
 };
 
 /*
@@ -151,6 +157,8 @@ void meshtastic_sched_stat_drop(uint8_t tier);
 void meshtastic_sched_stat_phone_drop(bool protected_frame);
 void meshtastic_sched_stat_airtime_drop(void);
 void meshtastic_sched_stat_dedup_expired(void);
+void meshtastic_sched_stat_reliable_ack(void);
+void meshtastic_sched_stat_reliable_fail(void);
 
 #ifdef __cplusplus
 }

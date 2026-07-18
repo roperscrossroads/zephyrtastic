@@ -20,6 +20,7 @@
 
 #include "meshtastic_mqtt.h"
 #include "meshtastic_phoneapi.h"
+#include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
 #include "meshtastic_sched.h"
 
@@ -233,6 +234,16 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 		LOG_DBG("Ignoring packet with via_mqtt set");
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+#endif
+		return;
+	}
+
+	if (src == mt.node_id) {
+		/* A neighbour rebroadcast one of our own packets: implicit ACK that it
+		 * reached the mesh. We never relay or deliver our own echo. */
+		meshtastic_reliable_on_implicit_ack(pkt_id);
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX, airtime_ms);
 #endif
 		return;
 	}

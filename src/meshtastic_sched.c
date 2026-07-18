@@ -23,8 +23,10 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 /* Default airtime gate + dedup TTL. Chosen to protect a congested channel while
  * staying invisible on a quiet one. */
-#define AIRTIME_MAX_DEFAULT 40U  /* % channel util; ~Meshtastic's background gate */
-#define DEDUP_TTL_DEFAULT   300U /* seconds a (src,id) is remembered as a duplicate */
+#define AIRTIME_MAX_DEFAULT 40U    /* % channel util; ~Meshtastic's background gate */
+#define DEDUP_TTL_DEFAULT   300U   /* seconds a (src,id) is remembered as a duplicate */
+#define RELIABLE_RETRIES_DEFAULT 3U    /* retransmits before giving up (Meshtastic default) */
+#define RELIABLE_TIMEOUT_DEFAULT 3000U /* ms between retransmits of an unacked send */
 
 /* Guards writes to, and whole-struct snapshots of, cfg. A leaf mutex: nothing is
  * called while it is held, so it may be nested under any other lock. */
@@ -38,6 +40,8 @@ static struct meshtastic_sched_config cfg = {
 	.phone_evict = MT_SCHED_PHONE_PROTECT,
 	.airtime_max_util = AIRTIME_MAX_DEFAULT,
 	.dedup_ttl_sec = DEDUP_TTL_DEFAULT,
+	.reliable_retries = RELIABLE_RETRIES_DEFAULT,
+	.reliable_timeout_ms = RELIABLE_TIMEOUT_DEFAULT,
 };
 
 struct preset {
@@ -49,10 +53,13 @@ struct preset {
 static const struct preset presets[] = {
 	{"default",
 	 {MT_SCHED_ORDER_PRIORITY, MT_SCHED_OVF_DROP_LOWEST, OB_DEFAULT, MT_SCHED_PHONE_PROTECT,
-	  AIRTIME_MAX_DEFAULT, DEDUP_TTL_DEFAULT}},
+	  AIRTIME_MAX_DEFAULT, DEDUP_TTL_DEFAULT, RELIABLE_RETRIES_DEFAULT,
+	  RELIABLE_TIMEOUT_DEFAULT}},
+	/* Reliable delivery is a correctness feature, not an egress-policy choice, so
+	 * "legacy" keeps the same retransmit behavior as "default". */
 	{"legacy",
 	 {MT_SCHED_ORDER_FIFO, MT_SCHED_OVF_DROP_NEWEST, OB_DEFAULT, MT_SCHED_PHONE_DROP_OLDEST,
-	  0U, 0U}},
+	  0U, 0U, RELIABLE_RETRIES_DEFAULT, RELIABLE_TIMEOUT_DEFAULT}},
 };
 
 const struct meshtastic_sched_config *meshtastic_sched_get(void)
@@ -194,6 +201,16 @@ int meshtastic_sched_set(const char *key, const char *val)
 		if (ret == 0) {
 			cfg.dedup_ttl_sec = (uint16_t)v;
 		}
+	} else if (strcmp(key, "reliable.retries") == 0) {
+		ret = parse_uint(val, 0, 10, &v);
+		if (ret == 0) {
+			cfg.reliable_retries = (uint8_t)v;
+		}
+	} else if (strcmp(key, "reliable.timeout") == 0) {
+		ret = parse_uint(val, 50, 60000, &v);
+		if (ret == 0) {
+			cfg.reliable_timeout_ms = (uint16_t)v;
+		}
 	}
 
 	k_mutex_unlock(&cfg_lock);
@@ -246,6 +263,8 @@ static atomic_t st_phone_drop;
 static atomic_t st_phone_drop_protected;
 static atomic_t st_airtime_drop;
 static atomic_t st_dedup_expired;
+static atomic_t st_reliable_acked;
+static atomic_t st_reliable_failed;
 
 void meshtastic_sched_stat_enq(uint8_t tier, uint8_t occupancy)
 {
@@ -282,6 +301,16 @@ void meshtastic_sched_stat_dedup_expired(void)
 	atomic_inc(&st_dedup_expired);
 }
 
+void meshtastic_sched_stat_reliable_ack(void)
+{
+	atomic_inc(&st_reliable_acked);
+}
+
+void meshtastic_sched_stat_reliable_fail(void)
+{
+	atomic_inc(&st_reliable_failed);
+}
+
 void meshtastic_sched_stats_get(struct meshtastic_sched_stats *out)
 {
 	if (out == NULL) {
@@ -297,6 +326,8 @@ void meshtastic_sched_stats_get(struct meshtastic_sched_stats *out)
 	out->phone_drop_protected = (uint32_t)atomic_get(&st_phone_drop_protected);
 	out->tx_airtime_drop = (uint32_t)atomic_get(&st_airtime_drop);
 	out->dedup_expired = (uint32_t)atomic_get(&st_dedup_expired);
+	out->reliable_acked = (uint32_t)atomic_get(&st_reliable_acked);
+	out->reliable_failed = (uint32_t)atomic_get(&st_reliable_failed);
 }
 
 void meshtastic_sched_stats_reset(void)
@@ -310,4 +341,6 @@ void meshtastic_sched_stats_reset(void)
 	atomic_set(&st_phone_drop_protected, 0);
 	atomic_set(&st_airtime_drop, 0);
 	atomic_set(&st_dedup_expired, 0);
+	atomic_set(&st_reliable_acked, 0);
+	atomic_set(&st_reliable_failed, 0);
 }

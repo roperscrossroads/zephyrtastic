@@ -34,6 +34,8 @@ ZTEST(sched, test_compiled_defaults)
 	zassert_true(c->airtime_max_util > 0 && c->airtime_max_util <= 100,
 		     "default airtime gate should be enabled and a valid percent");
 	zassert_true(c->dedup_ttl_sec > 0, "default dedup TTL should be enabled");
+	zassert_true(c->reliable_retries > 0, "default reliable retries should be enabled");
+	zassert_true(c->reliable_timeout_ms > 0, "default reliable timeout should be positive");
 }
 
 ZTEST(sched, test_tier_mapping)
@@ -76,6 +78,13 @@ ZTEST(sched, test_set_valid_knobs)
 	zassert_equal(meshtastic_sched_get()->dedup_ttl_sec, 0);
 	zassert_ok(meshtastic_sched_set("dedup.ttl", "600"));
 	zassert_equal(meshtastic_sched_get()->dedup_ttl_sec, 600);
+
+	zassert_ok(meshtastic_sched_set("reliable.retries", "0"));
+	zassert_equal(meshtastic_sched_get()->reliable_retries, 0);
+	zassert_ok(meshtastic_sched_set("reliable.retries", "5"));
+	zassert_equal(meshtastic_sched_get()->reliable_retries, 5);
+	zassert_ok(meshtastic_sched_set("reliable.timeout", "2500"));
+	zassert_equal(meshtastic_sched_get()->reliable_timeout_ms, 2500);
 }
 
 ZTEST(sched, test_set_invalid_rejected)
@@ -92,6 +101,8 @@ ZTEST(sched, test_set_invalid_rejected)
 	zassert_equal(meshtastic_sched_set("airtime.max", "101"), -EINVAL);
 	zassert_equal(meshtastic_sched_set("airtime.max", "-1"), -EINVAL);
 	zassert_equal(meshtastic_sched_set("dedup.ttl", "70000"), -EINVAL);
+	zassert_equal(meshtastic_sched_set("reliable.retries", "11"), -EINVAL);
+	zassert_equal(meshtastic_sched_set("reliable.timeout", "10"), -EINVAL);
 
 	/* A rejected set must not mutate state. */
 	zassert_equal(meshtastic_sched_get()->tx_depth, depth_before);

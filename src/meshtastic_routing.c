@@ -10,6 +10,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
+#include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
 
 #include <zephyr/logging/log.h>
@@ -117,6 +118,11 @@ void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet)
 {
 	if (packet == NULL || !packet_is_to_us(packet) || packet->from == mt.node_id) {
 		return;
+	}
+
+	/* An incoming ROUTING packet may be an ACK/NAK for something we sent. */
+	if (packet->portnum == MESHTASTIC_PORT_ROUTING) {
+		meshtastic_reliable_on_routing(packet);
 	}
 
 	if (packet->want_ack && packet->to == mt.node_id) {
