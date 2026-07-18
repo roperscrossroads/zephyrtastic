@@ -1,0 +1,29 @@
+{
+  "upstream": "firmware @ ff951059c",
+  "regions": {
+    "xor_hash": {
+      "file": "src/mesh/Channels.cpp",
+      "line": 27,
+      "anchor": "uint8_t xorHash(",
+      "sha256": "77646cb87b60e197d00335dfcd828ea2b6d6be630edbc231b581d51aa49e9410"
+    },
+    "djb2_hash": {
+      "file": "src/mesh/RadioInterface.cpp",
+      "line": 908,
+      "anchor": "uint32_t hash(const char *str)",
+      "sha256": "a40dc5227198efd31211d550ba05b2c245a1b04ee8b01d4543d863460317453b"
+    },
+    "modem_preset_to_params": {
+      "file": "src/mesh/MeshRadio.h",
+      "line": 203,
+      "anchor": "static inline void modemPresetToParams(",
+      "sha256": "ae57bdd95cbc01a9ef181c135b4841ebb825d8face8da721c7a60401794919ec"
+    },
+    "init_nonce": {
+      "file": "src/mesh/CryptoEngine.cpp",
+      "line": 428,
+      "anchor": "void CryptoEngine::initNonce(",
+      "sha256": "80e7d0462008af8011fecdc66738ae8a862af7933f62b235de89d116d2ad572a"
+    }
+  }
+}
