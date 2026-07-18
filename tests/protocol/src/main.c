@@ -6,8 +6,12 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/ztest.h>
 
+#include <pb_decode.h>
+#include <pb_encode.h>
+
 #include <zephyr/meshtastic/meshtastic.h>
 
+#include "meshtastic/mesh.pb.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
@@ -854,6 +858,142 @@ ZTEST(protocol_stack, test_dedup_ttl_expiry_allows_resend)
 	zassert_equal(state.recv_count, 2U, "expected two deliveries across the TTL boundary");
 	meshtastic_sched_stats_get(&sst);
 	zassert_true(sst.dedup_expired >= 1U, "dedup TTL expiry should be counted");
+}
+
+/* Verifies the TraceRoute responder replies to a want_response RouteDiscovery
+ * addressed to us: on TRACEROUTE_APP, back to the requester, correlated by
+ * request_id, with our RX SNR appended to snr_towards (dB scaled by 4) and no
+ * self-insertion into route[]. */
+ZTEST(protocol_stack, test_traceroute_responder_replies_with_snr)
+{
+	meshtastic_RouteDiscovery rd = meshtastic_RouteDiscovery_init_zero;
+	uint8_t rd_buf[64];
+	pb_ostream_t os = pb_ostream_from_buffer(rd_buf, sizeof(rd_buf));
+	struct meshtastic_packet req = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.id = 0x7A01U,
+		.portnum = MESHTASTIC_PORT_TRACEROUTE,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_response = true,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_packet reply;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_RouteDiscovery got = meshtastic_RouteDiscovery_init_zero;
+	pb_istream_t is;
+	const int8_t rx_snr = 5;
+
+	/* Empty RouteDiscovery = a direct trace, no intermediate hops recorded yet. */
+	zassert_true(pb_encode(&os, meshtastic_RouteDiscovery_fields, &rd),
+		     "RouteDiscovery encode failed");
+	req.payload = rd_buf;
+	req.payload_len = os.bytes_written;
+
+	zassert_ok(meshtastic_build_wire_packet(&req, wire, &wire_len));
+	inject_rx_frame(wire, wire_len, -40, rx_snr);
+	k_sleep(K_MSEC(100));
+
+	assert_mock_send_count(1U);
+	decode_last_tx(&reply, payload, sizeof(payload));
+
+	zassert_equal(reply.portnum, MESHTASTIC_PORT_TRACEROUTE, "reply not on TRACEROUTE port");
+	zassert_equal(reply.to, PEER_NODE_ID, "reply must return to the requester");
+	zassert_equal(reply.from, TEST_NODE_ID, "reply must originate from us");
+	zassert_equal(reply.request_id, req.id, "reply must correlate via request_id");
+	zassert_false(reply.want_response, "reply must not itself request a response");
+
+	is = pb_istream_from_buffer(payload, reply.payload_len);
+	zassert_true(pb_decode(&is, meshtastic_RouteDiscovery_fields, &got),
+		     "reply payload must be a RouteDiscovery");
+	zassert_equal(got.route_count, 0, "destination must not add itself to route[]");
+	zassert_equal(got.snr_towards_count, 1, "destination appends exactly one snr_towards");
+	zassert_equal(got.snr_towards[0], (int)rx_snr * 4, "snr_towards must be RX snr scaled x4");
+}
+
+/* Verifies a TRACEROUTE request addressed to us but WITHOUT want_response draws
+ * no reply (the request is consumed locally, nothing is transmitted). */
+ZTEST(protocol_stack, test_traceroute_no_reply_without_want_response)
+{
+	meshtastic_RouteDiscovery rd = meshtastic_RouteDiscovery_init_zero;
+	uint8_t rd_buf[64];
+	pb_ostream_t os = pb_ostream_from_buffer(rd_buf, sizeof(rd_buf));
+	struct meshtastic_packet req = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.id = 0x7A02U,
+		.portnum = MESHTASTIC_PORT_TRACEROUTE,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_response = false,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	zassert_true(pb_encode(&os, meshtastic_RouteDiscovery_fields, &rd), "encode failed");
+	req.payload = rd_buf;
+	req.payload_len = os.bytes_written;
+
+	zassert_ok(meshtastic_build_wire_packet(&req, wire, &wire_len));
+	inject_rx_frame(wire, wire_len, -40, 5);
+	k_sleep(K_MSEC(100));
+
+	assert_mock_send_count(0U);
+}
+
+/* Verifies the responder APPENDS to an already-accumulated request (as it would
+ * arrive relayed through other nodes) rather than overwriting: a pre-existing
+ * route[] / snr_towards[] entry is preserved and our RX SNR is added after it. */
+ZTEST(protocol_stack, test_traceroute_appends_to_accumulated_route)
+{
+	meshtastic_RouteDiscovery rd = meshtastic_RouteDiscovery_init_zero;
+	uint8_t rd_buf[64];
+	pb_ostream_t os = pb_ostream_from_buffer(rd_buf, sizeof(rd_buf));
+	struct meshtastic_packet req = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.id = 0x7A03U,
+		.portnum = MESHTASTIC_PORT_TRACEROUTE,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_response = true,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_packet reply;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_RouteDiscovery got = meshtastic_RouteDiscovery_init_zero;
+	pb_istream_t is;
+	const int8_t rx_snr = 5;
+
+	/* One prior hop already recorded (node 0xAAAA1111 relayed at 8 dB = 32 q4). */
+	rd.route[0] = 0xAAAA1111U;
+	rd.route_count = 1;
+	rd.snr_towards[0] = 8 * 4;
+	rd.snr_towards_count = 1;
+	zassert_true(pb_encode(&os, meshtastic_RouteDiscovery_fields, &rd), "encode failed");
+	req.payload = rd_buf;
+	req.payload_len = os.bytes_written;
+
+	zassert_ok(meshtastic_build_wire_packet(&req, wire, &wire_len));
+	inject_rx_frame(wire, wire_len, -40, rx_snr);
+	k_sleep(K_MSEC(100));
+
+	assert_mock_send_count(1U);
+	decode_last_tx(&reply, payload, sizeof(payload));
+
+	is = pb_istream_from_buffer(payload, reply.payload_len);
+	zassert_true(pb_decode(&is, meshtastic_RouteDiscovery_fields, &got), "decode failed");
+	zassert_equal(got.route_count, 1, "existing route must be preserved (we don't add ourselves)");
+	zassert_equal(got.route[0], 0xAAAA1111U, "prior hop id must survive");
+	zassert_equal(got.snr_towards_count, 2, "our snr appended after the prior hop's");
+	zassert_equal(got.snr_towards[0], 8 * 4, "prior snr preserved");
+	zassert_equal(got.snr_towards[1], (int)rx_snr * 4, "our snr appended last");
 }
 
 /* Verifies duplicate foreign packets do not trigger additional relay transmissions. */

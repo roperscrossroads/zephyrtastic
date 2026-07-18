@@ -50,11 +50,9 @@ static int traceroute_alloc_reply(const struct meshtastic_packet *req,
 		return -EINVAL;
 	}
 
-	/* Ignore a multi-hop broadcast request (one that has been relayed), matching
-	 * the reference firmware — only direct/unicast traces get a reply. */
-	if (req->to == MESHTASTIC_NODE_BROADCAST && req->hop_limit < req->hop_start) {
-		return -ENOENT;
-	}
+	/* alloc_reply is only dispatched for want_response packets addressed to this
+	 * node (see meshtastic_dispatch_modules), so req->to is always our node id
+	 * here — a broadcast/relayed trace never reaches this responder. */
 
 	/* Decode the accumulated request (route[] = intermediate hops toward us). */
 	istream = pb_istream_from_buffer(req->payload, req->payload_len);

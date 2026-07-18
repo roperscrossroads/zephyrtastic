@@ -298,7 +298,9 @@ struct meshtastic_config {
  * @param payload     Decrypted, decoded payload bytes.
  * @param payload_len Number of bytes in @p payload.
  * @param rssi        RSSI in dBm.
- * @param snr         SNR in dB (0.25 dB units as returned by the driver).
+ * @param snr         SNR in whole dB, as returned by the Zephyr LoRa driver
+ *                    (the Semtech driver already scales the chip's 0.25 dB
+ *                    steps down to integer dB).
  */
 typedef void (*meshtastic_recv_cb_t)(uint32_t from, uint32_t to, uint32_t portnum,
 				     const uint8_t *payload, size_t payload_len, int16_t rssi,
