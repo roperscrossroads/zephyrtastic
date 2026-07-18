@@ -93,6 +93,8 @@ enum meshtastic_portnum {
 	MESHTASTIC_PORT_NODEINFO = 4,
 	/** Internal mesh routing. */
 	MESHTASTIC_PORT_ROUTING = 5,
+	/** AdminMessage config read/write (ADMIN_APP). */
+	MESHTASTIC_PORT_ADMIN = 6,
 	/** Node status string. */
 	MESHTASTIC_PORT_NODE_STATUS = 36,
 	/** Sensor telemetry. */

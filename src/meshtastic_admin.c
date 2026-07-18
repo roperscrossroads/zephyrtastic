@@ -5,11 +5,14 @@
  * module config, channel and owner operations into the config store, and
  * synthesizes the ROUTING ACK / AdminMessage responses the app waits on.
  *
- * Scope: LOCAL transport only (from == this node), which the reference firmware
- * never gates behind a session passkey — so responses carry the live key (from
- * the session engine, meshtastic_admin_session.[ch], ready for the remote/mesh
- * path) but the local path does not validate it. A managed node (is_managed)
- * refuses local admin outright: only an authorized remote admin may change it.
+ * Two transports share one dispatcher (admin_dispatch):
+ *  - LOCAL (from == self), the directly-connected app: trusted, no passkey
+ *    (the reference never gates local admin), replies fan out via the PhoneAPI.
+ *    Refused outright when the node is is_managed.
+ *  - REMOTE (from != self) over the mesh: the sender is authorized (PKC key in
+ *    SecurityConfig.admin_key, or the legacy admin channel) and mutating ops
+ *    must carry a valid session passkey; replies (and ACK/error) are sent back
+ *    over the mesh, PKC-encrypted to the admin when we hold its key.
  */
 
 #include "meshtastic_admin.h"
@@ -26,9 +29,11 @@
 #include <zephyr/sys/poweroff.h>
 #endif
 
+#include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
 
 #include "meshtastic_admin_session.h"
+#include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
 #if defined(CONFIG_MESHTASTIC_POSITION)
 #include "meshtastic_position.h"
@@ -37,6 +42,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
+#include "meshtastic_router.h"
 #include "meshtastic_settings.h"
 
 #include "meshtastic/admin.pb.h"
@@ -69,6 +75,19 @@ BUILD_ASSERT(sizeof(meshtastic_AdminMessage) < 1024,
 K_MUTEX_DEFINE(admin_lock);
 static meshtastic_AdminMessage admin_req;
 static meshtastic_AdminMessage admin_resp;
+
+/* Per-dispatch reply context, valid only while admin_lock is held. Set once by
+ * admin_dispatch() so the emit helpers know where and how to reply — the local
+ * path fans out via the PhoneAPI; the remote path transmits back over the mesh
+ * to the requester. Serialized by admin_lock (single dispatch at a time). */
+static struct admin_ctx {
+	uint32_t from;			   /* requester node id (reply destination) */
+	uint32_t id;			   /* request packet id (reply request_id) */
+	bool want_ack;			   /* requester asked for a ROUTING ACK */
+	uint8_t channel_index;		   /* channel the request arrived on */
+	bool remote;			   /* true: reply over the mesh, not PhoneAPI */
+	const struct meshtastic_packet *rx; /* remote only: the received packet */
+} admin_cur;
 
 /* begin_edit_settings ... commit_edit_settings transaction state (single local
  * session; the app opens/closes serially). */
@@ -169,9 +188,13 @@ static bool admin_is_managed(void)
 	       cfg.payload_variant.security.is_managed;
 }
 
-/* Emit an ADMIN_APP FromRadio.packet response carrying resp, correlated to the
- * request via request_id. resp is the module scratch (caller holds admin_lock). */
-static void admin_emit_reply(const meshtastic_MeshPacket *req, meshtastic_AdminMessage *resp)
+/* Emit an ADMIN_APP response carrying resp, correlated to the request via
+ * request_id + the live session passkey. resp is the module scratch (caller
+ * holds admin_lock). Routes by admin_cur.remote: local fans out via the
+ * PhoneAPI; remote transmits back to the requester over the mesh (a unicast DM,
+ * so meshtastic_build_wire_packet PKC-encrypts it when we hold the admin's key,
+ * fire-and-forget with K_NO_WAIT so the RX thread never blocks). */
+static void admin_emit_reply(meshtastic_AdminMessage *resp)
 {
 	uint8_t buf[MESHTASTIC_MAX_PAYLOAD_LEN];
 	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -187,23 +210,35 @@ static void admin_emit_reply(const meshtastic_MeshPacket *req, meshtastic_AdminM
 
 	pkt.portnum = meshtastic_PortNum_ADMIN_APP;
 	pkt.from = meshtastic_get_node_id();
-	pkt.to = req->from;
+	pkt.to = admin_cur.from;
 	pkt.id = meshtastic_allocate_packet_id();
-	pkt.request_id = req->id;
-	pkt.channel_index = 0U;
+	pkt.request_id = admin_cur.id;
 	pkt.payload = buf;
 	pkt.payload_len = stream.bytes_written;
 
-	meshtastic_phoneapi_on_packet(&pkt);
+	if (admin_cur.remote) {
+		pkt.channel_index = admin_cur.channel_index;
+		(void)meshtastic_send_packet(&pkt, K_NO_WAIT);
+	} else {
+		pkt.channel_index = 0U;
+		meshtastic_phoneapi_on_packet(&pkt);
+	}
 }
 
-/* Emit a ROUTING_APP ACK the app matches to its want_ack request_id. */
-static void admin_ack_write(const meshtastic_MeshPacket *req, meshtastic_Routing_Error err)
+/* Emit a ROUTING_APP ACK/NAK the client matches to its want_ack request_id.
+ * Routes like admin_emit_reply: local via the PhoneAPI, remote back over the
+ * mesh via the router (K_NO_WAIT, primary channel — matching NAK behaviour). */
+static void admin_ack_write(meshtastic_Routing_Error err)
 {
 	meshtastic_Routing routing = meshtastic_Routing_init_zero;
 	uint8_t buf[16];
 	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
 	struct meshtastic_packet pkt = {0};
+
+	if (admin_cur.remote) {
+		meshtastic_routing_send_error(admin_cur.rx, err);
+		return;
+	}
 
 	routing.which_variant = meshtastic_Routing_error_reason_tag;
 	routing.error_reason = err;
@@ -215,9 +250,9 @@ static void admin_ack_write(const meshtastic_MeshPacket *req, meshtastic_Routing
 
 	pkt.portnum = meshtastic_PortNum_ROUTING_APP;
 	pkt.from = meshtastic_get_node_id();
-	pkt.to = req->from;
+	pkt.to = admin_cur.from;
 	pkt.id = meshtastic_allocate_packet_id();
-	pkt.request_id = req->id;
+	pkt.request_id = admin_cur.id;
 	pkt.channel_index = 0U;
 	pkt.payload = buf;
 	pkt.payload_len = stream.bytes_written;
@@ -232,17 +267,17 @@ static void admin_ack_write(const meshtastic_MeshPacket *req, meshtastic_Routing
 /* Getters return true iff a response was emitted; the dispatcher uses this to
  * skip the redundant ROUTING ACK on success (firmware sends only the response),
  * while still ACKing a failed getter so the app's request doesn't time out. */
-static bool handle_get_device_metadata(const meshtastic_MeshPacket *req)
+static bool handle_get_device_metadata(void)
 {
 	admin_resp = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
 	admin_resp.which_payload_variant =
 		meshtastic_AdminMessage_get_device_metadata_response_tag;
 	meshtastic_fill_device_metadata(&admin_resp.payload_variant.get_device_metadata_response);
-	admin_emit_reply(req, &admin_resp);
+	admin_emit_reply(&admin_resp);
 	return true;
 }
 
-static bool handle_get_config(const meshtastic_MeshPacket *req, uint32_t config_type)
+static bool handle_get_config(uint32_t config_type)
 {
 	/* admin ConfigType N maps to Config oneof tag N+1 (verified). */
 	pb_size_t tag = (pb_size_t)(config_type + 1U);
@@ -254,11 +289,11 @@ static bool handle_get_config(const meshtastic_MeshPacket *req, uint32_t config_
 		LOG_WRN("admin: get_config unknown type %u", (unsigned int)config_type);
 		return false;
 	}
-	admin_emit_reply(req, &admin_resp);
+	admin_emit_reply(&admin_resp);
 	return true;
 }
 
-static bool handle_get_module_config(const meshtastic_MeshPacket *req, uint32_t module_type)
+static bool handle_get_module_config(uint32_t module_type)
 {
 	pb_size_t tag = (pb_size_t)(module_type + 1U);
 
@@ -270,11 +305,11 @@ static bool handle_get_module_config(const meshtastic_MeshPacket *req, uint32_t 
 		LOG_WRN("admin: get_module unknown type %u", (unsigned int)module_type);
 		return false;
 	}
-	admin_emit_reply(req, &admin_resp);
+	admin_emit_reply(&admin_resp);
 	return true;
 }
 
-static bool handle_get_channel(const meshtastic_MeshPacket *req, uint32_t one_based)
+static bool handle_get_channel(uint32_t one_based)
 {
 	uint8_t index;
 
@@ -293,16 +328,16 @@ static bool handle_get_channel(const meshtastic_MeshPacket *req, uint32_t one_ba
 		return false;
 	}
 	admin_resp.payload_variant.get_channel_response.index = (int8_t)index;
-	admin_emit_reply(req, &admin_resp);
+	admin_emit_reply(&admin_resp);
 	return true;
 }
 
-static bool handle_get_owner(const meshtastic_MeshPacket *req)
+static bool handle_get_owner(void)
 {
 	admin_resp = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
 	admin_resp.which_payload_variant = meshtastic_AdminMessage_get_owner_response_tag;
 	meshtastic_fill_user(&admin_resp.payload_variant.get_owner_response);
-	admin_emit_reply(req, &admin_resp);
+	admin_emit_reply(&admin_resp);
 	return true;
 }
 
@@ -346,14 +381,14 @@ static void admin_fill_connection_status(meshtastic_DeviceConnectionStatus *st)
 #endif
 }
 
-static bool handle_get_device_connection_status(const meshtastic_MeshPacket *req)
+static bool handle_get_device_connection_status(void)
 {
 	admin_resp = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
 	admin_resp.which_payload_variant =
 		meshtastic_AdminMessage_get_device_connection_status_response_tag;
 	admin_fill_connection_status(
 		&admin_resp.payload_variant.get_device_connection_status_response);
-	admin_emit_reply(req, &admin_resp);
+	admin_emit_reply(&admin_resp);
 	return true;
 }
 
@@ -372,66 +407,177 @@ static bool owner_name_all_whitespace(const char *name)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Remote authorization (mesh path)                                           */
+/* ------------------------------------------------------------------------- */
+
+/* X25519 public-key length; SecurityConfig.admin_key entries and NodeDB peer
+ * keys are both this size. */
+#define ADMIN_PUBKEY_LEN 32U
+
+/* Legacy insecure admin channel — a plaintext admin packet is accepted only if
+ * it arrived on a channel literally named "admin". Mirrors Channels::adminChannel. */
+#define ADMIN_LEGACY_CHANNEL_NAME "admin"
+
+/* True if the sender's stored public key matches a configured admin key
+ * (SecurityConfig.admin_key[0..2]) — the modern, secure remote-admin gate. */
+static bool admin_key_matches_sender(uint32_t from)
+{
+	struct meshtastic_nodedb_node node;
+	meshtastic_Config cfg;
+
+	if (meshtastic_nodedb_get(from, &node) != 0 || node.public_key_len != ADMIN_PUBKEY_LEN) {
+		return false;
+	}
+	if (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg) != 0 ||
+	    cfg.which_payload_variant != meshtastic_Config_security_tag) {
+		return false;
+	}
+	for (pb_size_t i = 0; i < cfg.payload_variant.security.admin_key_count; i++) {
+		const meshtastic_Config_SecurityConfig_admin_key_t *k =
+			&cfg.payload_variant.security.admin_key[i];
+
+		if (k->size == ADMIN_PUBKEY_LEN &&
+		    memcmp(k->bytes, node.public_key, ADMIN_PUBKEY_LEN) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* True if a plaintext admin packet is allowed via the legacy admin channel:
+ * admin_channel_enabled AND the arrival channel is named "admin". */
+static bool admin_channel_authorized(uint8_t channel_index)
+{
+	meshtastic_Config cfg;
+	const char *name;
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg) != 0 ||
+	    cfg.which_payload_variant != meshtastic_Config_security_tag ||
+	    !cfg.payload_variant.security.admin_channel_enabled) {
+		return false;
+	}
+	name = meshtastic_channels_get_name(channel_index);
+	return name != NULL && strcmp(name, ADMIN_LEGACY_CHANNEL_NAME) == 0;
+}
+
+/* Decide whether a remote admin packet is authorized. On refusal, sets *err to
+ * the ROUTING error to return. Mirrors AdminModule: PKC admin_key first, then
+ * the legacy admin channel, else NOT_AUTHORIZED. */
+static bool admin_remote_authorized(const struct meshtastic_packet *pkt,
+				    meshtastic_Routing_Error *err)
+{
+	if (pkt->pki_encrypted) {
+		if (admin_key_matches_sender(pkt->from)) {
+			return true;
+		}
+		*err = meshtastic_Routing_Error_ADMIN_PUBLIC_KEY_UNAUTHORIZED;
+		return false;
+	}
+	if (admin_channel_authorized(pkt->channel_index)) {
+		return true;
+	}
+	*err = meshtastic_Routing_Error_NOT_AUTHORIZED;
+	return false;
+}
+
+/* Mutating admin ops from a remote node require a valid session passkey;
+ * get_*_request reads are exempt (their response issues a fresh key). Mirrors
+ * AdminModule messageIsRequest. Responses fall through to "needs" but are
+ * no-ops in the dispatcher default arm. */
+static bool admin_variant_needs_passkey(pb_size_t variant)
+{
+	switch (variant) {
+	case meshtastic_AdminMessage_get_config_request_tag:
+	case meshtastic_AdminMessage_get_module_config_request_tag:
+	case meshtastic_AdminMessage_get_channel_request_tag:
+	case meshtastic_AdminMessage_get_owner_request_tag:
+	case meshtastic_AdminMessage_get_device_metadata_request_tag:
+	case meshtastic_AdminMessage_get_device_connection_status_request_tag:
+	case meshtastic_AdminMessage_get_ringtone_request_tag:
+	case meshtastic_AdminMessage_get_canned_message_module_messages_request_tag:
+	case meshtastic_AdminMessage_get_ui_config_request_tag:
+	case meshtastic_AdminMessage_get_node_remote_hardware_pins_request_tag:
+		return false;
+	default:
+		return true;
+	}
+}
+
+/* ------------------------------------------------------------------------- */
 /* Dispatcher                                                                 */
 /* ------------------------------------------------------------------------- */
 
-bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
+/* Shared decode + gate + dispatch + reply. @p ctx (copied into admin_cur under
+ * the lock) tells the emit helpers where to reply. Local and remote both flow
+ * through here; the differences are the is_managed gate (local) and the passkey
+ * gate (remote). */
+static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t payload_len)
 {
 	pb_istream_t stream;
 	meshtastic_Routing_Error ack_err = meshtastic_Routing_Error_NONE;
 	bool response_sent = false;
 	int ret;
 
-	if (pkt == NULL) {
-		return false;
-	}
-
 	k_mutex_lock(&admin_lock, K_FOREVER);
+	admin_cur = ctx;
 
 	admin_req = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
-	stream = pb_istream_from_buffer(pkt->decoded.payload.bytes, pkt->decoded.payload.size);
+	stream = pb_istream_from_buffer(payload, payload_len);
 	if (!pb_decode(&stream, meshtastic_AdminMessage_fields, &admin_req)) {
 		LOG_WRN("admin: AdminMessage decode failed: %s", PB_GET_ERROR(&stream));
 		k_mutex_unlock(&admin_lock);
-		return true; /* consumed — never forward admin onto the mesh */
+		return;
 	}
 
-	LOG_DBG("admin: variant %u from 0x%08x id=0x%08x",
-		(unsigned int)admin_req.which_payload_variant, pkt->from, pkt->id);
+	LOG_DBG("admin: variant %u from 0x%08x id=0x%08x remote=%d",
+		(unsigned int)admin_req.which_payload_variant, admin_cur.from, admin_cur.id,
+		(int)admin_cur.remote);
 
 	/* Managed node: the directly-connected app may not administer it — only an
-	 * authorized remote admin can (session passkey / PKC admin_key, handled on
-	 * the mesh path). Consume without applying; the app already knows the node
-	 * is managed from SecurityConfig and greys its settings out. Config still
-	 * reaches the app through the normal want_config stream, not admin reads. */
-	if (admin_is_managed()) {
+	 * authorized remote admin can. Consume without applying; the app already
+	 * knows the node is managed from SecurityConfig and greys its settings out.
+	 * Config still reaches the app through the normal want_config stream. */
+	if (!admin_cur.remote && admin_is_managed()) {
 		LOG_INF("admin: ignoring local admin variant %u — node is_managed",
 			(unsigned int)admin_req.which_payload_variant);
 		k_mutex_unlock(&admin_lock);
-		return true;
+		return;
+	}
+
+	/* Remote mutating ops must carry a live session passkey (replay protection);
+	 * the sender was already authorized (PKC/admin channel) by handle_remote. */
+	if (admin_cur.remote &&
+	    admin_variant_needs_passkey(admin_req.which_payload_variant) &&
+	    !meshtastic_admin_session_valid(admin_req.session_passkey.bytes,
+					    admin_req.session_passkey.size)) {
+		LOG_WRN("admin: remote variant %u rejected — bad/absent session passkey",
+			(unsigned int)admin_req.which_payload_variant);
+		admin_ack_write(meshtastic_Routing_Error_ADMIN_BAD_SESSION_KEY);
+		k_mutex_unlock(&admin_lock);
+		return;
 	}
 
 	switch (admin_req.which_payload_variant) {
 	/* Getters — a response already carries the passkey, so the redundant
 	 * ROUTING ACK is suppressed below when response_sent (firmware behavior). */
 	case meshtastic_AdminMessage_get_device_metadata_request_tag:
-		response_sent = handle_get_device_metadata(pkt);
+		response_sent = handle_get_device_metadata();
 		break;
 	case meshtastic_AdminMessage_get_config_request_tag:
-		response_sent = handle_get_config(pkt, admin_req.payload_variant.get_config_request);
+		response_sent = handle_get_config(admin_req.payload_variant.get_config_request);
 		break;
 	case meshtastic_AdminMessage_get_module_config_request_tag:
 		response_sent = handle_get_module_config(
-			pkt, admin_req.payload_variant.get_module_config_request);
+			admin_req.payload_variant.get_module_config_request);
 		break;
 	case meshtastic_AdminMessage_get_channel_request_tag:
-		response_sent = handle_get_channel(pkt, admin_req.payload_variant.get_channel_request);
+		response_sent = handle_get_channel(admin_req.payload_variant.get_channel_request);
 		break;
 	case meshtastic_AdminMessage_get_owner_request_tag:
-		response_sent = handle_get_owner(pkt);
+		response_sent = handle_get_owner();
 		break;
 	case meshtastic_AdminMessage_get_device_connection_status_request_tag:
-		response_sent = handle_get_device_connection_status(pkt);
+		response_sent = handle_get_device_connection_status();
 		break;
 
 	/* Setters — apply + persist (persistence deferred if a txn is open). */
@@ -659,12 +805,12 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
 		break;
 	}
 
-	/* The app's 30s write timeout waits on a ROUTING ACK. A getter already
+	/* The client's write timeout waits on a ROUTING ACK. A getter already
 	 * emitted an AdminMessage response (carrying the passkey), so suppress the
 	 * redundant ACK there — matching firmware, which sends only the response —
 	 * but still ACK a failed getter and every setter. */
-	if (pkt->want_ack && !response_sent) {
-		admin_ack_write(pkt, ack_err);
+	if (admin_cur.want_ack && !response_sent) {
+		admin_ack_write(ack_err);
 	}
 
 	/* Fire a deferred reboot once the write that needs it is not inside an open
@@ -675,7 +821,52 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
 	}
 
 	k_mutex_unlock(&admin_lock);
-	return true;
+}
+
+bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
+{
+	if (pkt == NULL) {
+		return false;
+	}
+
+	admin_dispatch((struct admin_ctx){
+			       .from = pkt->from,
+			       .id = pkt->id,
+			       .want_ack = pkt->want_ack,
+			       .channel_index = 0U,
+			       .remote = false,
+			       .rx = NULL,
+		       },
+		       pkt->decoded.payload.bytes, pkt->decoded.payload.size);
+	return true; /* consumed — never forward admin onto the mesh */
+}
+
+void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt)
+{
+	meshtastic_Routing_Error auth_err = meshtastic_Routing_Error_NOT_AUTHORIZED;
+
+	if (pkt == NULL || (pkt->payload == NULL && pkt->payload_len != 0U)) {
+		return;
+	}
+
+	/* Packet-level authorization before touching the AdminMessage contents. On
+	 * refusal, NAK the requester with the specific reason and drop it. */
+	if (!admin_remote_authorized(pkt, &auth_err)) {
+		LOG_WRN("admin: remote admin from 0x%08x unauthorized (err=%d)", pkt->from,
+			(int)auth_err);
+		meshtastic_routing_send_error(pkt, auth_err);
+		return;
+	}
+
+	admin_dispatch((struct admin_ctx){
+			       .from = pkt->from,
+			       .id = pkt->id,
+			       .want_ack = pkt->want_ack,
+			       .channel_index = pkt->channel_index,
+			       .remote = true,
+			       .rx = pkt,
+		       },
+		       pkt->payload, pkt->payload_len);
 }
 
 void meshtastic_admin_reset(void)

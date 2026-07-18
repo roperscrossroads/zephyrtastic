@@ -355,15 +355,6 @@ static void assert_rx_payload(const void *expected, size_t expected_len)
 	}
 }
 
-static void assert_event_payload(const void *expected, size_t expected_len)
-{
-	zassert_equal(state.last_event_payload_len, expected_len, "unexpected event payload len");
-	if (expected_len > 0U) {
-		zassert_mem_equal(state.last_event_payload, expected, expected_len,
-				  "unexpected event payload");
-	}
-}
-
 static void assert_received_payload(const void *expected, size_t expected_len)
 {
 	zassert_equal(state.last_received_payload_len, expected_len,
@@ -1916,9 +1907,11 @@ ZTEST(admin_session, test_key_stable_then_reset_invalidates)
 
 ZTEST_SUITE(admin_session, NULL, NULL, NULL, NULL, NULL);
 
-/* Encode an AdminMessage that sets the device role, into buf; returns length. */
-static size_t encode_admin_set_role(meshtastic_Config_DeviceConfig_Role role, uint8_t *buf,
-				    size_t cap)
+/* Encode an AdminMessage set_config(device.role), optionally carrying a session
+ * passkey (pass NULL/0 to omit it), into buf; returns length. */
+static size_t encode_admin_set_role_key(meshtastic_Config_DeviceConfig_Role role,
+					const uint8_t *passkey, size_t passkey_len, uint8_t *buf,
+					size_t cap)
 {
 	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
 	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
@@ -1926,9 +1919,19 @@ static size_t encode_admin_set_role(meshtastic_Config_DeviceConfig_Role role, ui
 	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
 	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_device_tag;
 	am.payload_variant.set_config.payload_variant.device.role = role;
+	if (passkey != NULL && passkey_len > 0U) {
+		am.session_passkey.size = (pb_size_t)passkey_len;
+		memcpy(am.session_passkey.bytes, passkey, passkey_len);
+	}
 	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am),
 		     "admin set_config encode failed");
 	return os.bytes_written;
+}
+
+static size_t encode_admin_set_role(meshtastic_Config_DeviceConfig_Role role, uint8_t *buf,
+				    size_t cap)
+{
+	return encode_admin_set_role_key(role, NULL, 0U, buf, cap);
 }
 
 static void admin_set_is_managed(bool managed)
@@ -1950,6 +1953,19 @@ static meshtastic_Config_DeviceConfig_Role admin_current_role(void)
 	return dev.payload_variant.device.role;
 }
 
+/* Force the persisted device role. protocol_before() resets only the runtime
+ * role (meshtastic_set_device_role), not the config store these admin tests
+ * read/write — so each self-baselines to CLIENT and restores it, staying
+ * order-independent and not leaking a role into other tests. */
+static void admin_force_device_role(meshtastic_Config_DeviceConfig_Role role)
+{
+	meshtastic_Config dev = meshtastic_Config_init_zero;
+
+	dev.which_payload_variant = meshtastic_Config_device_tag;
+	dev.payload_variant.device.role = role;
+	zassert_ok(meshtastic_config_store_set_config(&dev), "force device role failed");
+}
+
 /* A managed node consumes but does not apply local admin; an unmanaged node
  * applies it. Runs in protocol_stack so meshtastic_init + the role reset in
  * protocol_before() apply. */
@@ -1967,9 +1983,7 @@ ZTEST(protocol_stack, test_managed_node_refuses_local_admin)
 	pkt.decoded.payload.size = (pb_size_t)len;
 	memcpy(pkt.decoded.payload.bytes, buf, len);
 
-	/* Baseline: protocol_before() reset the role to CLIENT. */
-	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
-		      "precondition: role should start CLIENT");
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 
 	/* Managed: the set is consumed but NOT applied. */
 	admin_set_is_managed(true);
@@ -1983,7 +1997,145 @@ ZTEST(protocol_stack, test_managed_node_refuses_local_admin)
 	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
 		      "unmanaged node must apply local admin");
 
-	/* Role is reset by the next protocol_before(); leave is_managed clear. */
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	admin_set_is_managed(false);
+}
+
+/* Build a decoded internal packet carrying an AdminMessage received "over the
+ * mesh" from PEER_NODE_ID to us, on the given channel. want_ack is a parameter
+ * because the full RX path (meshtastic_handle_inbound_packet) also sends a
+ * transport-level ROUTING ACK for want_ack unicasts — desirable in production
+ * but a blocking (K_FOREVER) send that would deadlock the mock gate in tests. */
+static void make_remote_admin_packet(struct meshtastic_packet *pkt, const uint8_t *payload,
+				     size_t len, uint8_t channel_index, bool want_ack)
+{
+	*pkt = (struct meshtastic_packet){
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.portnum = MESHTASTIC_PORT_ADMIN,
+		.channel_index = channel_index,
+		.payload = payload,
+		.payload_len = len,
+		.want_ack = want_ack,
+	};
+}
+
+/* Let the outbound worker transmit a fire-and-forget admin reply (NAK/ACK sent
+ * K_NO_WAIT, so there is no TX_DONE event to wait on) — same 50 ms settle the
+ * suite's other async-TX tests use, so the reply is counted in this test rather
+ * than leaking into the next test's send_count. */
+#define ADMIN_REPLY_SETTLE K_MSEC(50)
+
+/* Test-only admin channel: a secondary slot named "admin" plus the legacy
+ * admin_channel_enabled flag, so a plaintext (non-PKC) remote admin packet on
+ * that channel authorizes — the only remote-auth path testable without PKI. */
+#define ADMIN_TEST_CH_INDEX 1
+
+static void admin_channel_set(bool enabled)
+{
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
+	meshtastic_Config sec = meshtastic_Config_init_zero;
+
+	ch.role = enabled ? meshtastic_Channel_Role_SECONDARY : meshtastic_Channel_Role_DISABLED;
+	ch.has_settings = true;
+	if (enabled) {
+		strncpy(ch.settings.name, "admin", sizeof(ch.settings.name) - 1U);
+	}
+	zassert_ok(meshtastic_config_store_set_channel(ADMIN_TEST_CH_INDEX, &ch),
+		   "admin test channel set failed");
+
+	sec.which_payload_variant = meshtastic_Config_security_tag;
+	sec.payload_variant.security.admin_channel_enabled = enabled;
+	zassert_ok(meshtastic_config_store_set_config(&sec), "admin_channel_enabled set failed");
+}
+
+/* Remote admin from an unauthorized sender (not PKC, not on the admin channel)
+ * is refused: config is not changed. The core security property. */
+ZTEST(protocol_stack, test_remote_admin_unauthorized_refused)
+{
+	uint8_t buf[256];
+	struct meshtastic_packet pkt;
+	size_t len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_ROUTER, buf,
+					   sizeof(buf));
+
+	admin_set_is_managed(false);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	make_remote_admin_packet(&pkt, buf, len, meshtastic_channels_primary_index(), true);
+
+	reset_mock_lora();
+	meshtastic_admin_handle_remote(&pkt);
+	k_sleep(ADMIN_REPLY_SETTLE);
+	assert_mock_send_count(1U); /* the NAK back to the sender, drained here */
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "unauthorized remote admin must not apply");
+}
+
+/* The router routes an ADMIN_APP unicast-to-us into the remote-admin handler
+ * (consumed), not to the phone as an ordinary RX packet. Unauthorized here, so
+ * it is also not applied. */
+ZTEST(protocol_stack, test_remote_admin_routed_not_delivered)
+{
+	uint8_t buf[256];
+	struct meshtastic_packet pkt;
+	size_t len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_ROUTER, buf,
+					   sizeof(buf));
+
+	admin_set_is_managed(false);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	/* want_ack=false: the full RX path would also send a blocking transport ACK
+	 * that deadlocks the mock gate; the admin NAK alone proves routing. */
+	make_remote_admin_packet(&pkt, buf, len, meshtastic_channels_primary_index(), false);
+
+	reset_mock_lora();
+	meshtastic_handle_inbound_packet(&pkt, NULL, 0U, true);
+	k_sleep(ADMIN_REPLY_SETTLE);
+
+	zassert_equal(state.recv_count, 0U,
+		      "remote admin must be consumed by handle_remote, not delivered to the phone");
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "unauthorized remote admin must not apply");
+}
+
+/* On the (authorized) legacy admin channel, a remote mutating op still needs a
+ * valid session passkey: rejected without one, applied with a live one. */
+ZTEST(protocol_stack, test_remote_admin_channel_requires_passkey)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	struct meshtastic_packet pkt;
+	size_t len;
+
+	admin_set_is_managed(false);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	admin_channel_set(true);
+
+	/* Authorized by channel, but no passkey -> rejected, not applied. */
+	len = encode_admin_set_role_key(meshtastic_Config_DeviceConfig_Role_ROUTER, NULL, 0U, buf,
+					sizeof(buf));
+	make_remote_admin_packet(&pkt, buf, len, ADMIN_TEST_CH_INDEX, true);
+	reset_mock_lora();
+	meshtastic_admin_handle_remote(&pkt);
+	k_sleep(ADMIN_REPLY_SETTLE);
+	assert_mock_send_count(1U); /* BAD_SESSION_KEY NAK */
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "remote setter without a session passkey must be rejected");
+
+	/* Same op with a live passkey -> applied. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role_key(meshtastic_Config_DeviceConfig_Role_ROUTER, key, sizeof(key),
+					buf, sizeof(buf));
+	make_remote_admin_packet(&pkt, buf, len, ADMIN_TEST_CH_INDEX, true);
+	reset_mock_lora();
+	meshtastic_admin_handle_remote(&pkt);
+	k_sleep(ADMIN_REPLY_SETTLE);
+	assert_mock_send_count(1U); /* success ROUTING ACK */
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "remote setter with a valid session passkey must apply");
+
+	/* Teardown: disable the admin channel and restore the baseline role. */
+	admin_channel_set(false);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 	admin_set_is_managed(false);
 }
 

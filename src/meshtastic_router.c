@@ -14,6 +14,9 @@
 
 #include <zephyr/meshtastic/nodedb.h>
 
+#if defined(CONFIG_MESHTASTIC_ADMIN)
+#include "meshtastic_admin.h"
+#endif
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
 #include "meshtastic_modules.h"
@@ -476,7 +479,18 @@ void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, co
 		    packet->portnum != MESHTASTIC_PORT_TELEMETRY) {
 			LOG_DBG("CORE_PORTNUMS_ONLY: drop port %u", (unsigned int)packet->portnum);
 		} else if (packet->to == mt.node_id || packet->to == MESHTASTIC_NODE_BROADCAST) {
-			deliver_packet(packet);
+#if defined(CONFIG_MESHTASTIC_ADMIN)
+			/* Remote admin: an ADMIN_APP unicast to us from another node is
+			 * authorized + applied on the mesh (PKC admin_key / passkey), not
+			 * delivered to the phone as an ordinary RX packet. */
+			if (packet->portnum == MESHTASTIC_PORT_ADMIN && packet->to == mt.node_id &&
+			    packet->from != mt.node_id) {
+				meshtastic_admin_handle_remote(packet);
+			} else
+#endif
+			{
+				deliver_packet(packet);
+			}
 		}
 
 #if defined(CONFIG_MESHTASTIC_MQTT)
