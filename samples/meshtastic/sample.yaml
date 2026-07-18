@@ -9,6 +9,7 @@ common:
   integration_platforms:
     - twatch_s3/esp32s3/procpu
     - heltec_wifi_lora32_v3/esp32s3/procpu
+    - heltec_wifi_lora32_v4/esp32s3/procpu
     - arduino_giga_r1/stm32h747xx/m7
 tests:
   sample.meshtastic:
@@ -18,6 +19,8 @@ tests:
     platform_allow:
       - twatch_s3/esp32s3/procpu
       - heltec_wifi_lora32_v3/esp32s3/procpu
+      - heltec_wifi_lora32_v4/esp32s3/procpu
+      - heltec_wifi_lora32_v4_r8/esp32s3/procpu
       - arduino_giga_r1/stm32h747xx/m7
     extra_args:
       - platform:arduino_giga_r1/stm32h747xx/m7:SHIELD=semtech_sx1262mb2das

@@ -2,6 +2,11 @@ name: meshtastic-zephyr
 build:
   cmake: .
   kconfig: Kconfig
+  settings:
+    # Expose this repo's local boards/ dir as a BOARD_ROOT so out-of-tree
+    # board ports (e.g. heltec_wifi_lora32_v4) are discovered automatically,
+    # without needing -DBOARD_ROOT= on every build.
+    board_root: .
 samples:
   - samples
 tests:

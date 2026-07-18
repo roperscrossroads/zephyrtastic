@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_HELTEC_WIFI_LORA32_V4_ESP32S3_PROCPU
+
+# The V4 drives Vext (OLED power domain) via a GPIO power-domain, same model
+# as V3. Enable the GPIO power-domain machinery so the OLED node's
+# power-domains phandle actually gates GPIO36 (4.2/4.3).
+config POWER_DOMAIN
+	default y
+
+config POWER_DOMAIN_GPIO
+	default y
+
+if LVGL
+
+config LV_Z_VDB_SIZE
+	default 64
+
+config LV_DPI_DEF
+	default 116
+
+config LV_Z_COLOR_MONO_HW_INVERSION
+	default y
+
+choice LV_COLOR_DEPTH
+	default LV_COLOR_DEPTH_1
+endchoice
+
+endif # LVGL
+
+endif # BOARD_HELTEC_WIFI_LORA32_V4_ESP32S3_PROCPU

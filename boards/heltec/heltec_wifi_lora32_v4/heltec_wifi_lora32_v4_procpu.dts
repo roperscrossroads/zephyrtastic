@@ -1,0 +1,58 @@
+/*
+ * Heltec WiFi LoRa 32 (V4) — PROCPU, revisions 4.2 and 4.3.
+ * ESP32-S3 WROOM, 16MB flash + 2MB QSPI PSRAM.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/dts-v1/;
+
+#include <espressif/esp32s3/esp32s3_wroom_n16r2.dtsi>
+#include "heltec_wifi_lora32_v4-pinctrl.dtsi"
+#include <zephyr/dt-bindings/pwm/pwm.h>
+#include <espressif/partitions_0x0_amp_16M.dtsi>
+#include "heltec_wifi_lora32_v4-common.dtsi"
+
+/ {
+	model = "Heltec WiFi LoRa 32 V4 PROCPU";
+	compatible = "espressif,esp32s3";
+
+	/*
+	 * Vext (GPIO36, active-low) powers the OLED. The reference firmware drives
+	 * it low at boot; here it is the OLED node's power-domain. On r8 this pin
+	 * moves to GPIO40 — that board's .dts overrides enable-gpios.
+	 */
+	vext_ctrl: vext_ctrl {
+		compatible = "power-domain-gpio";
+		enable-gpios = <&gpio1 4 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;	/* GPIO36 */
+		#power-domain-cells = <0>;
+		label = "Vext Control";
+	};
+};
+
+/*
+ * L76K GNSS control lines (4.2/4.3 pin-out). Held at their run state with
+ * gpio-hogs so the module powers up without firmware intervention:
+ *   EN      GPIO34 (gpio1.2) active-low  -> assert (enable)
+ *   STANDBY GPIO40 (gpio1.8) high = wake -> drive high (force wake)
+ *   RESET   GPIO42 (gpio1.10) active-low -> deassert (release from reset)
+ * VERIFY(hardware): confirm polarities against the L76K datasheet before trusting.
+ */
+&gpio1 {
+	gps_en_hog {
+		gpio-hog;
+		gpios = <2 GPIO_ACTIVE_LOW>;	/* GPIO34, GPS_EN_ACTIVE=LOW */
+		output-high;
+	};
+
+	gps_standby_hog {
+		gpio-hog;
+		gpios = <8 GPIO_ACTIVE_HIGH>;	/* GPIO40, high = force wake */
+		output-high;
+	};
+
+	gps_reset_hog {
+		gpio-hog;
+		gpios = <10 GPIO_ACTIVE_LOW>;	/* GPIO42, active-low reset */
+		output-low;
+	};
+};

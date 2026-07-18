@@ -1,0 +1,12 @@
+board:
+  name: heltec_wifi_lora32_v4
+  full_name: WiFi LoRa 32 (V4)
+  vendor: heltec
+  # ONE image covers both V4 PCB revisions. They differ only in the RF
+  # front-end module (4.2 -> GC1109, 4.3 -> KCT8103L) and its mode-select GPIO;
+  # heltec_wifi_lora32_v4_fem.c detects the fitted FEM at boot (reads the CSD
+  # line) and configures it, so no board revisions are needed. The
+  # 8MB-octal-PSRAM "V4 R8" is a different memory part (quad vs octal PSRAM at
+  # the SoC-dtsi level) and lives in its own board dir (heltec_wifi_lora32_v4_r8).
+  socs:
+  - name: esp32s3

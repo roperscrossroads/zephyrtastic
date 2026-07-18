@@ -1,0 +1,74 @@
+/*
+ * Heltec WiFi LoRa 32 (V4 R8) — PROCPU.
+ * ESP32-S3 WROOM, 16MB flash + 8MB OCTAL PSRAM, KCT8103L FEM.
+ *
+ * Reuses the plain-V4 pinctrl and common hardware dtsi, then applies the R8
+ * deltas (from firmware variants/esp32s3/heltec_v4_r8/variant.h):
+ *   - Vext moves GPIO36 -> GPIO40
+ *   - no ADC_CTRL (battery divider is ungated)
+ *   - KCT8103L FEM (CTX RX-mode select on GPIO5, same as V4 4.3)
+ *   - GPS enable moves to GPIO42; standby line dropped
+ * All R8-specific pins are VERIFY(hardware) — this target is a scaffold to
+ * iterate on once the board is in hand; octal-PSRAM bring-up in particular is
+ * unconfirmed.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/dts-v1/;
+
+#include <espressif/esp32s3/esp32s3_wroom_n16r8.dtsi>
+#include "../heltec_wifi_lora32_v4/heltec_wifi_lora32_v4-pinctrl.dtsi"
+#include <zephyr/dt-bindings/pwm/pwm.h>
+#include <espressif/partitions_0x0_amp_16M.dtsi>
+#include "../heltec_wifi_lora32_v4/heltec_wifi_lora32_v4-common.dtsi"
+
+/ {
+	model = "Heltec WiFi LoRa 32 V4 R8 PROCPU";
+	compatible = "espressif,esp32s3";
+
+	/* Vext on GPIO40 (active-low) instead of the plain-V4 GPIO36. */
+	vext_ctrl: vext_ctrl {
+		compatible = "power-domain-gpio";
+		enable-gpios = <&gpio1 8 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;	/* GPIO40 */
+		#power-domain-cells = <0>;
+		label = "Vext Control";
+	};
+};
+
+/*
+ * R8 has no ADC_CTRL gate: drop the power-domain node the common dtsi defines
+ * and un-gate the battery divider so it reads directly.
+ */
+/delete-node/ &adc_ctrl;
+
+&vbatt {
+	/delete-property/ power-domains;
+};
+
+/*
+ * White LED moves GPIO35 -> GPIO46 on R8 (per the Heltec V4-R8 pin map). On the
+ * plain V4, GPIO46 is the GC1109 FEM CPS mode pin; R8 fits the KCT8103L (mode on
+ * GPIO5), so GPIO46 is free for the LED here. The common.dtsi led0 defaults to
+ * GPIO35 — override it. VERIFY(hardware): confirm the LED is on GPIO46 on R8.
+ * NOTE: the PWM LED (pwm_led_white via ledc0) still maps to the common GPIO35
+ * pinctrl — only the plain gpio-led is moved here; add an R8 ledc0 pinctrl
+ * override if PWM LED control on R8 is needed.
+ */
+&led0 {
+	gpios = <&gpio1 14 GPIO_ACTIVE_HIGH>;	/* GPIO46 */
+};
+
+/*
+ * The FEM (KCT8103L on R8) is powered/detected/configured by the shared board C
+ * init (../heltec_wifi_lora32_v4/heltec_wifi_lora32_v4_fem.c, compiled via this
+ * board's CMakeLists) — no static FEM hogs here. Detection will report KCT8103L.
+ */
+
+/* L76K GPS enable on GPIO42 (VERIFY polarity + reset/standby wiring on R8). */
+&gpio1 {
+	gps_en_hog {
+		gpio-hog;
+		gpios = <10 GPIO_ACTIVE_LOW>;	/* GPIO42 */
+		output-high;
+	};
+};

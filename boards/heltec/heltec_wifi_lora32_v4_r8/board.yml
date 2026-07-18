@@ -1,0 +1,11 @@
+board:
+  name: heltec_wifi_lora32_v4_r8
+  full_name: WiFi LoRa 32 (V4 R8)
+  vendor: heltec
+  # V4 "R8": ESP32-S3 WROOM with 16MB flash + 8MB OCTAL PSRAM (vs the 2MB QSPI
+  # PSRAM on the plain V4). Because the PSRAM part differs at the SoC-dtsi level
+  # (octal vs quad), this is a separate board rather than a revision of
+  # heltec_wifi_lora32_v4. FEM is the KCT8103L (same as V4 4.3). Several control
+  # pins move vs the plain V4 (Vext GPIO40, GPS enable) — all marked VERIFY.
+  socs:
+  - name: esp32s3

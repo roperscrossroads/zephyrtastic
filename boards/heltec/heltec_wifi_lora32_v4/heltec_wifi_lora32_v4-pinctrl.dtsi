@@ -1,0 +1,66 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Pin control for the Heltec WiFi LoRa 32 (V4). Radio SPI, OLED I2C, console
+ * UART and the white PWM LED are pinned exactly as on the V3 (the V4 kept the
+ * same map). The one addition is uart1 for the on-board L76K GNSS:
+ *   GPS_TX -> GPIO38 (data toward the CPU  => ESP RX)
+ *   GPS_RX -> GPIO39 (data toward the GPS  => ESP TX)
+ * (firmware variants/esp32s3/heltec_v4/variant.h). VERIFY(hardware) on the r8
+ * revision — its GPS enable/standby pins move, though TX/RX appear unchanged.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/esp32s3-pinctrl.h>
+
+&pinctrl {
+	uart0_default: uart0_default {
+		group1 {
+			pinmux = <UART0_TX_GPIO43>;
+			output-high;
+		};
+
+		group2 {
+			pinmux = <UART0_RX_GPIO44>;
+			bias-pull-up;
+		};
+	};
+
+	uart1_default: uart1_default {
+		group1 {
+			pinmux = <UART1_TX_GPIO39>;
+			output-high;
+		};
+
+		group2 {
+			pinmux = <UART1_RX_GPIO38>;
+			bias-pull-up;
+		};
+	};
+
+	i2c0_default: i2c0_default {
+		group1 {
+			pinmux = <I2C0_SDA_GPIO17>,
+				 <I2C0_SCL_GPIO18>;
+			drive-open-drain;
+		};
+	};
+
+	spim2_default: spim2_default {
+		group1 {
+			pinmux = <SPIM2_MISO_GPIO11>,
+				 <SPIM2_SCLK_GPIO9>;
+		};
+
+		group2 {
+			pinmux = <SPIM2_MOSI_GPIO10>;
+			output-low;
+		};
+	};
+
+	ledc0_default: ledc0_default {
+		group1 {
+			pinmux = <LEDC_CH0_GPIO35>;
+			output-enable;
+		};
+	};
+};

@@ -1,0 +1,275 @@
+/*
+ * Heltec WiFi LoRa 32 (V4) — hardware common to all V4 revisions.
+ *
+ * Pin source: the Meshtastic reference firmware
+ * (firmware/variants/esp32s3/heltec_v4/variant.h). Anything that differs
+ * between the 4.2 (GC1109 FEM) / 4.3 (KCT8103L FEM) / r8 (octal-PSRAM) boards
+ * is NOT here — it lives in the per-board .dts or the per-revision overlay.
+ *
+ * Relative to the V3 the SoC and the RF path changed; the digital wiring did
+ * not. The radio SPI pins (CS8/RESET12/BUSY13/DIO1-14/SCK9/MISO11/MOSI10), the
+ * OLED I2C (SDA17/SCL18, RESET21), the white LED (GPIO35), the button (GPIO0)
+ * and the VBAT divider are all identical to the upstream V3 board.
+ *
+ * NEW on V4, and the reason this is more than a config tweak:
+ *
+ *   RF front-end module (FEM).  The SX1262 no longer drives the antenna
+ *   directly; it feeds an integrated PA+LNA FEM (GC1109 on 4.2, KCT8103L on
+ *   4.3/r8).  The FEM needs three controls the bare-radio V3 never had:
+ *     - VFEM power   (GPIO7, "LORA_PA_POWER")  -> LDO enable, must be ON first
+ *     - CSD enable   (GPIO2)                   -> HIGH = FEM on, LOW = shutdown
+ *     - mode select  (GPIO46 or GPIO5)         -> per-revision, see overlays
+ *   The SX1262's own DIO2 drives the FEM's TX/RX path-select pin automatically
+ *   (dio2-tx-enable, same mechanism as V3). Zephyr has no generic LoRa-FEM
+ *   framework, so for bring-up we simply power + enable the FEM at boot with
+ *   gpio-hogs (below) and let DIO2 do the TX/RX switching. Dynamic PA-mode
+ *   switching (driver tx-enable-gpios) is a later refinement.
+ *
+ * VERIFY(hardware): on the bench confirm (a) the OLED powers up (Vext polarity),
+ * (b) the FEM hogs run before the SX1262 keys up, and (c) TX actually engages
+ * the PA (measure output power) rather than the ~1 dB bypass path.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/lora/sx126x.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+	aliases {
+		led0 = &led0;
+		pwm-0 = &ledc0;
+		pwm-led0 = &pwm_led_white;
+		uart-0 = &uart0;
+		uart-1 = &uart1;
+		i2c-0 = &i2c0;
+		lora0 = &lora0;
+		sw0 = &button0;
+		watchdog0 = &wdt0;
+		die-temp0 = &coretemp;
+		gnss = &gnss;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led0: led {
+			gpios = <&gpio1 3 GPIO_ACTIVE_HIGH>;	/* GPIO35 */
+			label = "White LED";
+		};
+	};
+
+	pwmleds {
+		compatible = "pwm-leds";
+
+		pwm_led_white: pwm_led_gpio35 {
+			label = "White PWM LED";
+			pwms = <&ledc0 0 PWM_MSEC(10) PWM_POLARITY_NORMAL>;
+		};
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+
+		button0: button_0 {
+			gpios = <&gpio0 0 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "USER Key";
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+
+	/*
+	 * Battery sense: plain resistor divider on GPIO1 (ADC1 ch0), same as V3.
+	 * The V4 has NO fuel-gauge IC. VBAT sense is gated by ADC_CTRL (GPIO37);
+	 * see adc_ctrl below.
+	 */
+	vbatt: vbatt {
+		compatible = "voltage-divider";
+		io-channels = <&adc1 0>;
+		output-ohms = <100000>;
+		full-ohms = <(100000 + 390000)>;
+		power-domains = <&adc_ctrl>;
+	};
+
+	/*
+	 * ADC_CTRL (GPIO37) gates the battery divider on 4.2/4.3. Absent on r8
+	 * (that board omits ADC_CTRL) — the r8 .dts deletes this node.
+	 */
+	adc_ctrl: adc_ctrl {
+		compatible = "power-domain-gpio";
+		enable-gpios = <&gpio1 5 GPIO_ACTIVE_HIGH>;	/* GPIO37, ADC_CTRL_ENABLED=HIGH */
+		#power-domain-cells = <0>;
+		label = "ADC Control";
+	};
+
+	/*
+	 * Console/shell on the ESP32-S3 built-in USB-Serial-JTAG (&usb_serial),
+	 * NOT uart0. The V4 REMOVED the CP2102 bridge the V3 used — the USB-C port
+	 * is wired to the SoC's native USB (D+/D- on GPIO19/20), so uart0
+	 * (GPIO43/44) is no longer reachable over the cable. usb_serial enumerates
+	 * as a CDC-ACM device (/dev/ttyACM0) and carries both the boot log and the
+	 * shell. The SERIAL_ESP32_USB driver auto-enables from the node below.
+	 * uart0 stays enabled for the header pins / netserial PhoneAPI.
+	 */
+	chosen {
+		zephyr,sram = &sram1;
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,bt-hci = &esp32_bt_hci;
+		zephyr,display = &ssd1306_128x64;
+	};
+};
+
+/* Native USB console/shell — the V4 has no CP2102 (see chosen above). */
+&usb_serial {
+	status = "okay";
+};
+
+&adc1 {
+	status = "okay";
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+/*
+ * On-board L76K GNSS (NMEA over UART). The generic NMEA driver handles the
+ * data stream; the L76K's EN / STANDBY / RESET control lines are board GPIOs
+ * driven per-revision (see the per-board .dts) — their pins differ on r8.
+ * VERIFY(hardware): baud (L76K defaults to 9600) and that EN is asserted.
+ */
+&uart1 {
+	status = "okay";
+	current-speed = <9600>;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-names = "default";
+
+	gnss: gnss {
+		compatible = "gnss-nmea-generic";
+		status = "okay";
+	};
+};
+
+/*
+ * The RF front-end module (FEM) control pins — VFEM power (GPIO7), CSD
+ * chip-enable (GPIO2), and the per-FEM mode pin (GC1109 CPS = GPIO46 /
+ * KCT8103L CTX = GPIO5) — are NOT hogged here. They are owned by the board C
+ * init (heltec_wifi_lora32_v4_fem.c), which powers the rail, RUNTIME-DETECTS
+ * which FEM is fitted by reading CSD, logs it, and configures the right pins.
+ * That is why this is a single image with no board revisions. DIO2 still drives
+ * the FEM TX/RX path-select pin automatically (dio2-tx-enable on lora0).
+ */
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&ledc0 {
+	pinctrl-0 = <&ledc0_default>;
+	pinctrl-names = "default";
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel0@0 {
+		reg = <0x0>;
+		timer = <0>;
+	};
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
+
+	/* SSD1315 OLED — driver-compatible with the SSD1306, same as V3. */
+	ssd1306_128x64: display-controller@3c {
+		compatible = "solomon,ssd1306";
+		reg = <0x3c>;
+		width = <128>;
+		height = <64>;
+		segment-offset = <0>;
+		page-offset = <0>;
+		display-offset = <0>;
+		multiplex-ratio = <63>;
+		segment-remap;
+		com-invdir;
+		inversion-on;
+		prechargep = <0x22>;
+		reset-gpios = <&gpio0 21 GPIO_ACTIVE_LOW>;
+		power-domains = <&vext_ctrl>;
+	};
+};
+
+&spi2 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	pinctrl-0 = <&spim2_default>;
+	pinctrl-names = "default";
+
+	cs-gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
+
+	/*
+	 * SX1262 — identical digital wiring to the V3. DIO2 drives the FEM's
+	 * TX/RX path-select pin (dio2-tx-enable); DIO3 supplies the 1.8 V TCXO.
+	 * rx-boosted matches the reference firmware default (+3 dB RX sensitivity).
+	 */
+	lora0: modem@0 {
+		compatible = "semtech,sx1262";
+		reg = <0>;
+		reset-gpios = <&gpio0 12 (GPIO_OPEN_DRAIN | GPIO_ACTIVE_LOW)>;
+		busy-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
+		dio1-gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
+		dio2-tx-enable;
+		dio3-tcxo-voltage = <SX126X_DIO3_TCXO_1V8>;
+		tcxo-power-startup-delay-ms = <5>;
+		spi-max-frequency = <4000000>;
+		rx-boosted;
+	};
+};
+
+&timer0 {
+	status = "okay";
+};
+
+&timer1 {
+	status = "okay";
+};
+
+&timer2 {
+	status = "okay";
+};
+
+&timer3 {
+	status = "okay";
+};
+
+&wdt0 {
+	status = "okay";
+};
+
+&trng0 {
+	status = "okay";
+};
+
+&coretemp {
+	status = "okay";
+};
+
+&esp32_bt_hci {
+	status = "okay";
+};
+
+&wifi {
+	status = "okay";
+};
