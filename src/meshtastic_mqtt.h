@@ -12,6 +12,9 @@ extern "C" {
 #endif
 
 int meshtastic_mqtt_init(void);
+
+/** True while the MQTT client has a live broker connection. */
+bool meshtastic_mqtt_is_connected(void);
 void meshtastic_mqtt_on_tx(const struct meshtastic_packet *packet, const uint8_t *wire,
 			   size_t wire_len);
 void meshtastic_mqtt_on_rx(const struct meshtastic_packet *packet, const uint8_t *wire,

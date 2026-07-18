@@ -38,6 +38,20 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
+#if defined(CONFIG_WIFI)
+#include <zephyr/net/net_if.h>
+#include <zephyr/net/wifi.h>
+#include <zephyr/net/wifi_mgmt.h>
+#endif
+
+/* Cross-module connection-state accessors (get_device_connection_status). */
+#if defined(CONFIG_MESHTASTIC_MQTT)
+bool meshtastic_mqtt_is_connected(void);
+#endif
+#if defined(CONFIG_MESHTASTIC_BLE)
+bool meshtastic_ble_is_connected(void);
+#endif
+
 BUILD_ASSERT(sizeof(meshtastic_AdminMessage) < 1024,
 	     "meshtastic_AdminMessage larger than expected — check admin.options bounds");
 
@@ -242,6 +256,57 @@ static bool handle_get_owner(const meshtastic_MeshPacket *req)
 	return true;
 }
 
+/* Fill the app-facing device connection status from whatever transports this
+ * build actually has. Only WiFi/BT are meaningfully live on this port; each arm
+ * is compiled out when its transport isn't. */
+static void admin_fill_connection_status(meshtastic_DeviceConnectionStatus *st)
+{
+#if defined(CONFIG_WIFI)
+	struct net_if *iface = net_if_get_default();
+	struct wifi_iface_status wstat = {0};
+	struct net_in_addr *ip;
+
+	st->has_wifi = true;
+	if (iface != NULL) {
+		if (net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &wstat, sizeof(wstat)) == 0 &&
+		    wstat.state >= WIFI_STATE_ASSOCIATED) {
+			size_t n = MIN((size_t)wstat.ssid_len, sizeof(st->wifi.ssid) - 1U);
+
+			memcpy(st->wifi.ssid, wstat.ssid, n);
+			st->wifi.ssid[n] = '\0';
+			st->wifi.rssi = wstat.rssi;
+		}
+		/* Report connected + IP off the actual assigned address, not just link
+		 * state — an associated-but-no-DHCP iface isn't usable yet. */
+		ip = net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED);
+		if (ip != NULL) {
+			st->wifi.has_status = true;
+			st->wifi.status.is_connected = true;
+			st->wifi.status.ip_address = ip->s_addr;
+#if defined(CONFIG_MESHTASTIC_MQTT)
+			st->wifi.status.is_mqtt_connected = meshtastic_mqtt_is_connected();
+#endif
+		}
+	}
+#endif /* CONFIG_WIFI */
+
+#if defined(CONFIG_MESHTASTIC_BLE)
+	st->has_bluetooth = true;
+	st->bluetooth.is_connected = meshtastic_ble_is_connected();
+#endif
+}
+
+static bool handle_get_device_connection_status(const meshtastic_MeshPacket *req)
+{
+	admin_resp = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	admin_resp.which_payload_variant =
+		meshtastic_AdminMessage_get_device_connection_status_response_tag;
+	admin_fill_connection_status(
+		&admin_resp.payload_variant.get_device_connection_status_response);
+	admin_emit_reply(req, &admin_resp);
+	return true;
+}
+
 /* True if name is non-empty but contains only whitespace (rejected for owner). */
 static bool owner_name_all_whitespace(const char *name)
 {
@@ -302,6 +367,9 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
 		break;
 	case meshtastic_AdminMessage_get_owner_request_tag:
 		response_sent = handle_get_owner(pkt);
+		break;
+	case meshtastic_AdminMessage_get_device_connection_status_request_tag:
+		response_sent = handle_get_device_connection_status(pkt);
 		break;
 
 	/* Setters — apply + persist (persistence deferred if a txn is open). */

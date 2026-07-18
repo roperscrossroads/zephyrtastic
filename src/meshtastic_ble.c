@@ -511,6 +511,11 @@ static int start_advertising(void)
 	return bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
 }
 
+bool meshtastic_ble_is_connected(void)
+{
+	return ble.conn != NULL;
+}
+
 int meshtastic_ble_init(void)
 {
 	int ret;

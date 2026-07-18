@@ -1152,6 +1152,11 @@ void meshtastic_mqtt_on_rx(const struct meshtastic_packet *packet, const uint8_t
 #endif
 }
 
+bool meshtastic_mqtt_is_connected(void)
+{
+	return mqtt_ctx.connected;
+}
+
 int meshtastic_mqtt_init(void)
 {
 	int ret;
