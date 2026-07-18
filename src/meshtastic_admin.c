@@ -5,9 +5,11 @@
  * module config, channel and owner operations into the config store, and
  * synthesizes the ROUTING ACK / AdminMessage responses the app waits on.
  *
- * Scope: LOCAL transport only (from == this node). The session passkey is
- * returned in responses but not validated, mirroring the reference firmware's
- * behavior for directly-connected (from==0) clients.
+ * Scope: LOCAL transport only (from == this node), which the reference firmware
+ * never gates behind a session passkey — so responses carry the live key (from
+ * the session engine, meshtastic_admin_session.[ch], ready for the remote/mesh
+ * path) but the local path does not validate it. A managed node (is_managed)
+ * refuses local admin outright: only an authorized remote admin may change it.
  */
 
 #include "meshtastic_admin.h"
@@ -26,6 +28,7 @@
 
 #include <zephyr/meshtastic/nodedb.h>
 
+#include "meshtastic_admin_session.h"
 #include "meshtastic_clock.h"
 #if defined(CONFIG_MESHTASTIC_POSITION)
 #include "meshtastic_position.h"
@@ -143,15 +146,27 @@ static void admin_schedule_reboot(void)
 
 static void fill_session_passkey(meshtastic_AdminMessage *resp)
 {
-	uint32_t nid = meshtastic_get_node_id();
+	/* Issue the live session key (rotated/generated as needed). A remote
+	 * client must echo it back with any mutating op; the local from==self
+	 * path never validates it. See meshtastic_admin_session.[ch]. */
+	BUILD_ASSERT(sizeof(resp->session_passkey.bytes) >= MESHTASTIC_ADMIN_SESSION_KEY_LEN,
+		     "AdminMessage.session_passkey too small for the session key");
+	resp->session_passkey.size = MESHTASTIC_ADMIN_SESSION_KEY_LEN;
+	meshtastic_admin_session_current(resp->session_passkey.bytes);
+}
 
-	/* Local MVP: the app only requires a non-empty 8-byte key (never
-	 * validated for from==self). Derive a stable value from the node id. */
-	resp->session_passkey.size = 8U;
-	for (int i = 0; i < 8; i++) {
-		resp->session_passkey.bytes[i] =
-			(uint8_t)((nid >> ((i % 4) * 8)) & 0xFFU) ^ (uint8_t)(0xA5U + i);
+/* True when this node is administratively managed — config may be changed only
+ * by an authorized remote admin, so local (directly-connected app) admin is
+ * refused. Mirrors AdminModule's `mp.from == 0 && is_managed` guard. */
+static bool admin_is_managed(void)
+{
+	meshtastic_Config cfg;
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg) != 0) {
+		return false;
 	}
+	return cfg.which_payload_variant == meshtastic_Config_security_tag &&
+	       cfg.payload_variant.security.is_managed;
 }
 
 /* Emit an ADMIN_APP FromRadio.packet response carrying resp, correlated to the
@@ -383,6 +398,18 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
 
 	LOG_DBG("admin: variant %u from 0x%08x id=0x%08x",
 		(unsigned int)admin_req.which_payload_variant, pkt->from, pkt->id);
+
+	/* Managed node: the directly-connected app may not administer it — only an
+	 * authorized remote admin can (session passkey / PKC admin_key, handled on
+	 * the mesh path). Consume without applying; the app already knows the node
+	 * is managed from SecurityConfig and greys its settings out. Config still
+	 * reaches the app through the normal want_config stream, not admin reads. */
+	if (admin_is_managed()) {
+		LOG_INF("admin: ignoring local admin variant %u — node is_managed",
+			(unsigned int)admin_req.which_payload_variant);
+		k_mutex_unlock(&admin_lock);
+		return true;
+	}
 
 	switch (admin_req.which_payload_variant) {
 	/* Getters — a response already carries the passkey, so the redundant

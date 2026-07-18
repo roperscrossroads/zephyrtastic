@@ -43,7 +43,10 @@ config MESHTASTIC_ADMIN
 	  settings via AdminMessage (portnum ADMIN_APP), not just read them.
 	  Handles get_/set_ config, module config, channels and owner,
 	  begin/commit edit transactions, and reboot. Local (from == this node)
-	  admin only — no session-passkey validation, PKC, or remote/mesh admin.
+	  admin only for now; a managed node (SecurityConfig.is_managed) refuses
+	  local admin. The rotating session-passkey engine is present (issued in
+	  responses, validated on the remote path); PKC admin_key auth and
+	  remote/mesh admin delivery are still pending.
 	  Persistence of writes across reboot additionally requires
 	  MESHTASTIC_SETTINGS; without it writes apply live but are RAM-only.
 

@@ -59,7 +59,10 @@ if(CONFIG_MESHTASTIC)
     meshtastic_phoneapi_config.c
     meshtastic_region_presets.c
   )
-  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN meshtastic_admin.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN
+    meshtastic_admin.c
+    meshtastic_admin_session.c
+  )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE meshtastic_ble.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SERIAL meshtastic_serial.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_TCP meshtastic_tcp.c)

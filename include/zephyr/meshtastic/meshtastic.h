@@ -175,6 +175,12 @@ struct meshtastic_packet {
 	bool want_ack;
 	/** Packet was marked as having passed via MQTT. */
 	bool via_mqtt;
+	/**
+	 * Decoded via PKC (public-key crypto / a DM to us), not a PSK channel.
+	 * The sender's public key is in the NodeDB under @p from — used by the
+	 * remote-admin path to authorize against SecurityConfig.admin_key.
+	 */
+	bool pki_encrypted;
 	/** Application payload asks peers to respond in kind. */
 	bool want_response;
 	/** Receive RSSI in dBm, when known. */

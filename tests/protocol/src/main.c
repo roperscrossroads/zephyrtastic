@@ -12,8 +12,12 @@
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
 
+#include "meshtastic/admin.pb.h"
 #include "meshtastic/mesh.pb.h"
+#include "meshtastic_admin.h"
+#include "meshtastic_admin_session.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
@@ -1846,3 +1850,141 @@ ZTEST(protocol_stack, test_egress_overflow_drop_lowest)
 		      "expected two dropped BG frames (one rejected, one evicted)");
 	egress_end();
 }
+
+/* ------------------------------------------------------------------------- */
+/* Admin auth foundation — session-passkey engine + is_managed local gate.    */
+/* ------------------------------------------------------------------------- */
+
+#if defined(CONFIG_MESHTASTIC_ADMIN)
+
+/* The session-key engine is standalone (no meshtastic_init needed): its own
+ * static state, seeded from sys_rand_get + k_uptime. Real-time rotation (150 s)
+ * and expiry (300 s) aren't exercised here — that would need a fake clock; these
+ * cover issuance, stability, match/mismatch, and reset. */
+ZTEST(admin_session, test_issued_key_validates)
+{
+	uint8_t k[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(k);
+	zassert_true(meshtastic_admin_session_valid(k, sizeof(k)),
+		     "a freshly issued session key must validate");
+}
+
+ZTEST(admin_session, test_bad_key_rejected)
+{
+	uint8_t k[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	uint8_t bad[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(k);
+
+	memcpy(bad, k, sizeof(bad));
+	bad[0] ^= 0xFFU;
+	zassert_false(meshtastic_admin_session_valid(bad, sizeof(bad)),
+		      "a mismatched key must be rejected");
+	zassert_false(meshtastic_admin_session_valid(k, sizeof(k) - 1U),
+		      "a wrong-length key must be rejected");
+	zassert_false(meshtastic_admin_session_valid(k, 0U), "an empty key must be rejected");
+	zassert_false(meshtastic_admin_session_valid(NULL, sizeof(k)),
+		      "a NULL key must be rejected");
+}
+
+ZTEST(admin_session, test_key_stable_then_reset_invalidates)
+{
+	uint8_t first[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	uint8_t again[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	uint8_t second[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(first);
+	meshtastic_admin_session_current(again);
+	/* Within the rotation window, the same key is returned. */
+	zassert_mem_equal(first, again, sizeof(first),
+			  "session key must be stable within the rotation window");
+
+	meshtastic_admin_session_reset();
+	zassert_false(meshtastic_admin_session_valid(first, sizeof(first)),
+		      "after reset the previous key must not validate");
+
+	meshtastic_admin_session_current(second);
+	/* A reissued key should differ (8 random bytes; collision ~2^-64). Guards
+	 * against a stuck generator. */
+	zassert_true(memcmp(first, second, sizeof(first)) != 0,
+		     "reissued key should differ from the reset one");
+}
+
+ZTEST_SUITE(admin_session, NULL, NULL, NULL, NULL, NULL);
+
+/* Encode an AdminMessage that sets the device role, into buf; returns length. */
+static size_t encode_admin_set_role(meshtastic_Config_DeviceConfig_Role role, uint8_t *buf,
+				    size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
+	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_device_tag;
+	am.payload_variant.set_config.payload_variant.device.role = role;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am),
+		     "admin set_config encode failed");
+	return os.bytes_written;
+}
+
+static void admin_set_is_managed(bool managed)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+
+	cfg.which_payload_variant = meshtastic_Config_security_tag;
+	cfg.payload_variant.security.is_managed = managed;
+	zassert_ok(meshtastic_config_store_set_config(&cfg),
+		   "failed to write SecurityConfig.is_managed");
+}
+
+static meshtastic_Config_DeviceConfig_Role admin_current_role(void)
+{
+	meshtastic_Config dev;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag, &dev),
+		   "device config read failed");
+	return dev.payload_variant.device.role;
+}
+
+/* A managed node consumes but does not apply local admin; an unmanaged node
+ * applies it. Runs in protocol_stack so meshtastic_init + the role reset in
+ * protocol_before() apply. */
+ZTEST(protocol_stack, test_managed_node_refuses_local_admin)
+{
+	uint8_t buf[256];
+	meshtastic_MeshPacket pkt = meshtastic_MeshPacket_init_zero;
+	size_t len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_ROUTER, buf,
+					   sizeof(buf));
+
+	pkt.from = TEST_NODE_ID;
+	pkt.to = TEST_NODE_ID;
+	pkt.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	pkt.decoded.portnum = meshtastic_PortNum_ADMIN_APP;
+	pkt.decoded.payload.size = (pb_size_t)len;
+	memcpy(pkt.decoded.payload.bytes, buf, len);
+
+	/* Baseline: protocol_before() reset the role to CLIENT. */
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "precondition: role should start CLIENT");
+
+	/* Managed: the set is consumed but NOT applied. */
+	admin_set_is_managed(true);
+	zassert_true(meshtastic_admin_handle_local(&pkt), "admin packet should be consumed");
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "managed node must not apply local admin");
+
+	/* Unmanaged: the same set now takes effect. */
+	admin_set_is_managed(false);
+	zassert_true(meshtastic_admin_handle_local(&pkt), "admin packet should be consumed");
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "unmanaged node must apply local admin");
+
+	/* Role is reset by the next protocol_before(); leave is_managed clear. */
+	admin_set_is_managed(false);
+}
+
+#endif /* CONFIG_MESHTASTIC_ADMIN */
