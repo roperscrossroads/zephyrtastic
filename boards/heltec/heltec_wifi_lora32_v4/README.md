@@ -126,22 +126,26 @@ KCT8103L, LOW ⇒ GC1109** — then enable the FEM (CSD high) and set that
 front-end's mode pin. DIO2 does the TX/RX path switching. It logs what it found
 (see [Log messages](#log-messages)). One image, no revisions.
 
+The mode pin is driven **dynamically with the transceiver** — HIGH just before
+TX, LOW on return to RX — via the radio layer's FEM hook
+(`meshtastic_radio_fem_set_tx()`, `<zephyr/meshtastic/fem.h>`, called from
+`meshtastic_radio_send_wire_now()`). The board's detection stores whichever mode
+pin is fitted and the hook drives it. This mirrors the reference firmware's
+`setTx/RxModeEnable`.
+
 **Status of RF correctness:**
 
-- **GC1109 (4.2) — fully correct.** CPS (GPIO46) held HIGH: full PA on TX,
-  "don't care" on RX.
-- **KCT8103L (4.3 / R8) — TX correct, RX-LNA not yet.** CTX (GPIO5) is held
-  HIGH, which gives correct **full-PA TX** and a working (bypass) RX — but the
-  ~1.9 dB-NF **LNA is inactive**, because engaging it needs CTX driven LOW *only
-  during RX*. The stock Zephyr `semtech,sx126x` driver's `tx-enable-gpios` can't
-  provide that: it is inhibited whenever `dio2-tx-enable` is set (and we need
-  DIO2 for the path pin), so it can't toggle a *second* FEM pin.
+- **GC1109 (4.2) — correct.** CPS (GPIO46) HIGH on TX (full PA), LOW on RX
+  ("don't care").
+- **KCT8103L (4.3 / R8) — correct, including the LNA.** CTX (GPIO5) HIGH on TX
+  (full PA), LOW on RX — which engages the ~1.9 dB-NF **RX LNA**. It sits in the
+  RX (LNA) state by default and only rises during a transmit.
 
-> **Remaining follow-up (extra RX sensitivity on KCT8103L):** a small FEM hook
-> that drives CTX LOW on RX / HIGH on TX, called from the radio layer's TX/RX
-> transition (`meshtastic_radio.c`, `mt_radio_do_tx`), mirroring the reference
-> firmware's `setTx/RxModeEnable`. Not needed for a functional node; it only
-> recovers RX-LNA gain on the KCT8103L variant.
+> Why the hook rather than devicetree: the stock `semtech,sx126x` driver's
+> `tx-enable-gpios` is inhibited whenever `dio2-tx-enable` is set — and we need
+> DIO2 for the path pin — so a *second* FEM pin can't be driven from DT. The
+> radio-layer hook is the clean equivalent (weak no-op by default; the board
+> provides the strong override).
 
 ---
 
@@ -153,12 +157,12 @@ caveat above:
 
 ```
 <inf> heltec_v4_fem: Detected KCT8103L LoRa FEM (V4 rev 4.3 / R8)
-<inf> heltec_v4_fem: LoRa FEM: full-PA TX enabled; RX in bypass (LNA inactive) — static CTX; dynamic RX-LNA is a future improvement
+<inf> heltec_v4_fem: LoRa FEM ready: mode pin follows TX/RX (RX-LNA active on KCT8103L)
 ```
 or
 ```
 <inf> heltec_v4_fem: Detected GC1109 LoRa FEM (V4 rev 4.2)
-<inf> heltec_v4_fem: LoRa FEM: full-PA TX path enabled
+<inf> heltec_v4_fem: LoRa FEM ready: mode pin follows TX/RX (RX-LNA active on KCT8103L)
 ```
 An `<err> … FEM detect read failed` means the CSD read errored — RF will be
 unreliable; check the board.
@@ -222,9 +226,11 @@ Source: `firmware/variants/esp32s3/heltec_v4/variant.h`. ESP32-S3 GPIO→bank:
       KCT8103L), and PSRAM/model (110 vs 132).
 - [ ] OLED powers up (Vext polarity correct).
 - [ ] FEM init runs before the SX1262 keys up (SYS_INIT POST_KERNEL/80 < LoRa 90).
-- [ ] **GC1109 (4.2):** measure TX output — PA engaged, not ~1 dB bypass.
-- [ ] **KCT8103L (4.3 / R8):** TX PA works (static CTX HIGH); RX runs in bypass
-      (LNA off) until the dynamic-CTX follow-up — measure RX sensitivity.
+- [ ] **GC1109 (4.2):** measure TX output — PA engaged on TX, not ~1 dB bypass.
+- [ ] **KCT8103L (4.3 / R8):** confirm the mode pin (GPIO5) toggles with TX/RX
+      (LOW at idle/RX = LNA, HIGH during TX = PA); measure TX power + RX
+      sensitivity.
+- [ ] Confirm the FEM mode pin returns LOW after each TX (RX-LNA restored).
 - [ ] L76K GPS: 9600 baud + EN/STANDBY/RESET polarities; R8 GPS pins.
 - [ ] R8 octal-PSRAM bring-up (SPIRAM not yet enabled in the defconfig).
 - [ ] `CONFIG_MESHTASTIC_TX_POWER`: 20 dBm at the chip is high-20s dBm at the
@@ -248,6 +254,9 @@ boards/heltec/heltec_wifi_lora32_v4_r8/   # octal-PSRAM sibling (scaffold)
   ... reuses ../heltec_wifi_lora32_v4/*-common.dtsi + *-pinctrl.dtsi
 
 samples/meshtastic/boards/heltec_wifi_lora32_v4_esp32s3_procpu.conf  # node tuning
+
+include/zephyr/meshtastic/fem.h   # shared FEM hook contract (weak set_tx)
+src/meshtastic_radio.c            # weak no-op default + calls the hook around TX
 ```
 
 Pin source of truth: `firmware/variants/esp32s3/heltec_v4{,_r8}/variant.h`.

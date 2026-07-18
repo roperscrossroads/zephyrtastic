@@ -18,16 +18,17 @@
  *   4.3/r8).  The FEM needs three controls the bare-radio V3 never had:
  *     - VFEM power   (GPIO7, "LORA_PA_POWER")  -> LDO enable, must be ON first
  *     - CSD enable   (GPIO2)                   -> HIGH = FEM on, LOW = shutdown
- *     - mode select  (GPIO46 or GPIO5)         -> per-revision, see overlays
+ *     - mode select  (GPIO46 or GPIO5)         -> HIGH on TX, LOW on RX
  *   The SX1262's own DIO2 drives the FEM's TX/RX path-select pin automatically
- *   (dio2-tx-enable, same mechanism as V3). Zephyr has no generic LoRa-FEM
- *   framework, so for bring-up we simply power + enable the FEM at boot with
- *   gpio-hogs (below) and let DIO2 do the TX/RX switching. Dynamic PA-mode
- *   switching (driver tx-enable-gpios) is a later refinement.
+ *   (dio2-tx-enable, same mechanism as V3). These other three pins are owned by
+ *   the board C init (heltec_wifi_lora32_v4_fem.c): it powers the rail, detects
+ *   which FEM is fitted (reads CSD), and drives the mode pin with the radio via
+ *   the FEM hook (<zephyr/meshtastic/fem.h>) — HIGH on TX, LOW on RX (the RX-LOW
+ *   enables the KCT8103L LNA). One image for both revisions; no gpio-hogs here.
  *
  * VERIFY(hardware): on the bench confirm (a) the OLED powers up (Vext polarity),
- * (b) the FEM hogs run before the SX1262 keys up, and (c) TX actually engages
- * the PA (measure output power) rather than the ~1 dB bypass path.
+ * (b) the boot log names the detected FEM, and (c) TX actually engages the PA
+ * (measure output power) rather than the ~1 dB bypass path.
  */
 
 #include <zephyr/dt-bindings/gpio/gpio.h>
