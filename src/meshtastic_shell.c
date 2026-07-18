@@ -19,6 +19,7 @@
 
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
+#include "meshtastic_sched.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -1155,9 +1156,148 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodeinfo_cmds,
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_NODEINFO */
 
+static int cmd_sched_show(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_sched_config c;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_sched_snapshot(&c);
+
+	shell_print(sh, "TX egress:");
+	shell_print(sh, "  tx.order     %-9s [fifo|priority]",
+		    meshtastic_sched_order_name(c.tx_order));
+	shell_print(sh, "  tx.overflow  %-9s [drop-newest|drop-lowest]",
+		    meshtastic_sched_overflow_name(c.tx_overflow));
+	shell_print(sh, "  tx.depth     %u / %u max", c.tx_depth,
+		    CONFIG_MESHTASTIC_OUTBOUND_QUEUE_MAX);
+	shell_print(sh, "Phone queue:");
+	shell_print(sh, "  phone.evict  %-9s [drop-oldest|protect]",
+		    meshtastic_sched_phone_evict_name(c.phone_evict));
+	shell_print(sh, "Airtime / dedup:");
+	if (c.airtime_max_util != 0U) {
+		shell_print(sh, "  airtime.max  %u%%        [0=off, else max chan-util for BG TX]",
+			    c.airtime_max_util);
+	} else {
+		shell_print(sh, "  airtime.max  off       [0=off, else max chan-util for BG TX]");
+	}
+	if (c.dedup_ttl_sec != 0U) {
+		shell_print(sh, "  dedup.ttl    %us       [0=never expire] (cache %u entries)",
+			    c.dedup_ttl_sec, CONFIG_MESHTASTIC_DUP_CACHE_SIZE);
+	} else {
+		shell_print(sh, "  dedup.ttl    off       [0=never expire] (cache %u entries)",
+			    CONFIG_MESHTASTIC_DUP_CACHE_SIZE);
+	}
+
+	shell_fprintf(sh, SHELL_NORMAL, "presets:");
+	for (int i = 0; meshtastic_sched_preset_name(i) != NULL; i++) {
+		shell_fprintf(sh, SHELL_NORMAL, " %s", meshtastic_sched_preset_name(i));
+	}
+	shell_print(sh, "");
+	return 0;
+}
+
+static int cmd_sched_policy(const struct shell *sh, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc < 2U) {
+		shell_error(sh, "usage: meshtastic sched policy <name>");
+		return -EINVAL;
+	}
+
+	ret = meshtastic_sched_apply_preset(argv[1]);
+	if (ret == -ENOENT) {
+		shell_error(sh, "unknown policy '%s'", argv[1]);
+		return ret;
+	}
+
+	shell_print(sh, "policy '%s' applied (stats reset)", argv[1]);
+	return 0;
+}
+
+static int cmd_sched_set(const struct shell *sh, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc < 3U) {
+		shell_error(sh, "usage: meshtastic sched set <key> <value>");
+		shell_print(sh, "keys: tx.order tx.overflow tx.depth phone.evict "
+				"airtime.max dedup.ttl");
+		return -EINVAL;
+	}
+
+	ret = meshtastic_sched_set(argv[1], argv[2]);
+	if (ret == -ENOENT) {
+		shell_error(sh, "unknown key '%s'", argv[1]);
+	} else if (ret == -EINVAL) {
+		shell_error(sh, "bad value '%s' for %s", argv[2], argv[1]);
+	} else {
+		shell_print(sh, "%s = %s (stats reset)", argv[1], argv[2]);
+	}
+	return ret;
+}
+
+static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_sched_stats st;
+	struct meshtastic_status status;
+
+	if (argc >= 2U && strcmp(argv[1], "reset") == 0) {
+		meshtastic_sched_stats_reset();
+		shell_print(sh, "sched stats reset");
+		return 0;
+	}
+
+	meshtastic_sched_stats_get(&st);
+	(void)meshtastic_get_status(&status);
+
+	shell_print(sh, "RX   pkts %u  drop(queue) %u  dup %u  decode-fail %u", status.rx_packets,
+		    status.rx_dropped, status.duplicate_packets, status.decode_failures);
+	shell_print(sh, "TX   pkts %u  failed %u  relayed %u", status.tx_packets,
+		    status.tx_failures, status.relayed_packets);
+	shell_print(sh, "TX egress by tier (enqueued / dropped):");
+	for (uint8_t t = 0; t < MT_SCHED_TIER_COUNT; t++) {
+		shell_print(sh, "  %-6s %u / %u", meshtastic_sched_tier_name(t), st.tx_enq[t],
+			    st.tx_drop[t]);
+	}
+	shell_print(sh, "outbound hi-water: %u / %u", st.ob_hiwater,
+		    CONFIG_MESHTASTIC_OUTBOUND_QUEUE_MAX);
+	shell_print(sh, "phone FromRadio drops: %u (%u protected)", st.phone_drop,
+		    st.phone_drop_protected);
+	shell_print(sh, "airtime-gated BG broadcasts: %u", st.tx_airtime_drop);
+	shell_print(sh, "dedup TTL expiries: %u", st.dedup_expired);
+	return 0;
+}
+
+static int cmd_sched_defaults(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_sched_defaults();
+	shell_print(sh, "sched reverted to compiled defaults");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	meshtastic_sched_cmds,
+	SHELL_CMD(show, NULL, SHELL_HELP("Show scheduler policy and knobs.", NULL), cmd_sched_show),
+	SHELL_CMD(policy, NULL, SHELL_HELP("Apply a named policy preset.", "<name>"),
+		  cmd_sched_policy),
+	SHELL_CMD(set, NULL, SHELL_HELP("Set one knob.", "<key> <value>"), cmd_sched_set),
+	SHELL_CMD(stats, NULL, SHELL_HELP("Show or reset live counters.", "[reset]"),
+		  cmd_sched_stats),
+	SHELL_CMD(defaults, NULL, SHELL_HELP("Revert to compiled defaults.", NULL),
+		  cmd_sched_defaults),
+	SHELL_SUBCMD_SET_END);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
+	SHELL_CMD(sched, &meshtastic_sched_cmds,
+		  SHELL_HELP("Scheduler / QoS policy commands.", NULL), cmd_sched_show),
 	SHELL_CMD(channel, &meshtastic_channel_cmds, SHELL_HELP("Channel table commands.", NULL),
 		  NULL),
 	SHELL_CMD(device, &meshtastic_device_cmds,

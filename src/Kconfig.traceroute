@@ -1,0 +1,15 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_TRACEROUTE
+	bool "Meshtastic TraceRoute responder"
+	default y
+	help
+	  Register a port handler for incoming TRACEROUTE_APP (port 70)
+	  requests: reply with a RouteDiscovery so the app or the reference
+	  client `meshtastic --traceroute` can map the path to this node. The
+	  reply appends this node's receive SNR to the towards-route, mirroring
+	  the reference firmware's destination behavior.
+
+	  Responder only: this flood-router port does not insert itself into the
+	  route of traces passing through it, and has no local trace initiator.

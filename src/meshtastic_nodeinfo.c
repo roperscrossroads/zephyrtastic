@@ -258,7 +258,7 @@ MESHTASTIC_MODULE_DEFINE(nodeinfo, MESHTASTIC_PORT_NODEINFO, MESHTASTIC_MODULE_A
 			 meshtastic_module_nodeinfo_alloc_reply);
 
 #if defined(CONFIG_MESHTASTIC_NODEINFO_AUTO_SEND)
-static K_THREAD_STACK_DEFINE(nodeinfo_stack, 2048);
+static K_THREAD_STACK_DEFINE(nodeinfo_stack, 4096);
 static struct k_thread nodeinfo_thread;
 
 static void nodeinfo_thread_fn(void *p1, void *p2, void *p3)

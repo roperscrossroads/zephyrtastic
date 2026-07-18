@@ -78,8 +78,10 @@ Legend: ✅ Full · 🟡 Partial · ❌ Not yet
      - ✅
      - StreamAPI framing over a chosen UART (test on Android, macOS, and web client)
    * - Settings edit over phoneAPI
-     - ❌
-     - Read/handshake only — use the shell to configure
+     - 🟡
+     - Local admin write implemented (config / module / channel / owner, edit
+       transactions, reboot, favorite / ignore / remove-node, fixed position) —
+       pending hardware test; no session-passkey validation or remote admin yet
    * - **Messaging & telemetry**
      -
      -
@@ -88,7 +90,9 @@ Legend: ✅ Full · 🟡 Partial · ❌ Not yet
      - Send / receive UTF-8 plaintext
    * - Position / GNSS
      - ✅
-     - Integration with Zephyr GNSS subsystem, periodic position broadcast
+     - Integration with Zephyr GNSS subsystem, periodic position broadcast; the
+       Position module also runs GNSS-less to advertise an admin-set fixed
+       position
    * - NodeInfo
      - ✅
      - Periodic identity broadcast + node discovery
@@ -105,6 +109,10 @@ Legend: ✅ Full · 🟡 Partial · ❌ Not yet
    * - MQTT
      - 🟡
      - Gateway uplink/downlink bridge ; no per-channel configuration for now
+   * - TraceRoute
+     - 🟡
+     - Responds to path-mapping requests (RouteDiscovery); no relay-path
+       accumulation or local trace initiator
    * - **Configuration**
      -
      -
@@ -153,6 +161,19 @@ the Zephyr . Commands marked *(optional)* are only present when their correspond
      - Send environment telemetry *(optional)*
    * - ``meshtastic nodeinfo send [dest|broadcast]``
      - Send node information *(optional)*
+   * - ``meshtastic sched [show]``
+     - Show the scheduler / QoS policy and knobs
+   * - ``meshtastic sched policy <name>``
+     - Apply a policy preset (``default``, ``legacy``)
+   * - ``meshtastic sched set <key> <value>``
+     - Tune one knob live: ``tx.order``, ``tx.overflow``, ``tx.depth``, ``phone.evict``, ``airtime.max`` (% channel util that gates background self-broadcasts, 0=off), ``dedup.ttl`` (seconds a duplicate is remembered, 0=never)
+   * - ``meshtastic sched stats [reset]``
+     - Show live TX/RX counters, per-tier egress, phone-queue drops, airtime-gated broadcasts and dedup TTL expiries; ``reset`` to zero them
+
+The scheduler policy is a runtime-tunable QoS surface (RAM-only — a reboot
+restores compiled defaults). Changing a knob or applying a preset resets the
+live stats, so each policy is measured from a clean slate. See
+``docs/ARCH-REVIEW.md``.
 
 Setup
 *****

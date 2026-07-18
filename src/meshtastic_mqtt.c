@@ -24,11 +24,18 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#if defined(CONFIG_MESHTASTIC_MQTT_TLS)
+#include <zephyr/net/tls_credentials.h>
+#if !defined(CONFIG_MESHTASTIC_MQTT_TLS_NO_VERIFY)
+#include "meshtastic_mqtt_ca_cert.h"
+#endif
+#endif
+
 #include <pb_decode.h>
 #include <pb_encode.h>
 
 #include "meshtastic_channels.h"
-#include "meshtastic_gnss.h"
+#include "meshtastic_position.h"
 #include "meshtastic_mqtt.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_router.h"
@@ -127,6 +134,10 @@ static void mqtt_prepare_fds(void)
 {
 	if (mqtt_ctx.client.transport.type == MQTT_TRANSPORT_NON_SECURE) {
 		mqtt_fds[0].fd = mqtt_ctx.client.transport.tcp.sock;
+#if defined(CONFIG_MESHTASTIC_MQTT_TLS)
+	} else if (mqtt_ctx.client.transport.type == MQTT_TRANSPORT_SECURE) {
+		mqtt_fds[0].fd = mqtt_ctx.client.transport.tls.sock;
+#endif
 	} else {
 		mqtt_fds[0].fd = -1;
 	}
@@ -511,14 +522,14 @@ static void mqtt_perhaps_report_to_map(void)
 		return;
 	}
 
-#if defined(CONFIG_MESHTASTIC_GNSS)
+#if defined(CONFIG_MESHTASTIC_POSITION)
 	int ret;
 
-	ret = meshtastic_gnss_get_last_position(&position);
+	ret = meshtastic_position_get_current(&position);
 	if (ret < 0) {
 		if (mqtt_ctx.last_map_no_position_ms == 0 ||
 		    (now - mqtt_ctx.last_map_no_position_ms) >= MQTT_MAP_WARN_MS) {
-			LOG_WRN("MapReport enabled but no GNSS position (%d)", ret);
+			LOG_WRN("MapReport enabled but no position available (%d)", ret);
 			mqtt_ctx.last_map_no_position_ms = now;
 		}
 		return;
@@ -526,7 +537,7 @@ static void mqtt_perhaps_report_to_map(void)
 #else
 	if (mqtt_ctx.last_map_no_position_ms == 0 ||
 	    (now - mqtt_ctx.last_map_no_position_ms) >= MQTT_MAP_WARN_MS) {
-		LOG_WRN("MapReport enabled but GNSS support is not compiled in");
+		LOG_WRN("MapReport enabled but position support is not compiled in");
 		mqtt_ctx.last_map_no_position_ms = now;
 	}
 	return;
@@ -869,6 +880,60 @@ static int mqtt_resolve_broker(void)
 	return 0;
 }
 
+#if defined(CONFIG_MESHTASTIC_MQTT_TLS)
+#if defined(CONFIG_MESHTASTIC_MQTT_TLS_NO_VERIFY)
+/* Encrypted-but-unauthenticated transport: no CA trust anchor is loaded and the
+ * broker certificate is NOT validated. The channel is still TLS-encrypted, but a
+ * MITM cannot be detected. This mode exists because the on-device mbedTLS build
+ * cannot parse the RSA-signed Let's Encrypt chain the broker currently serves;
+ * flip it off (proper verify via the CA cert below) once the broker serves an
+ * all-ECDSA chain anchored at ISRG Root X2. SNI is still sent so the broker
+ * selects the right vhost/cert. */
+static void mqtt_tls_configure(void)
+{
+	struct mqtt_sec_config *tls = &mqtt_ctx.client.transport.tls.config;
+
+	mqtt_ctx.client.transport.type = MQTT_TRANSPORT_SECURE;
+	tls->peer_verify = TLS_PEER_VERIFY_NONE;
+	tls->cipher_list = NULL;
+	tls->sec_tag_list = NULL;
+	tls->sec_tag_count = 0;
+	tls->hostname = CONFIG_MESHTASTIC_MQTT_TLS_HOSTNAME;
+}
+#else /* proper verification against the embedded CA */
+static const sec_tag_t mqtt_sec_tags[] = {
+	CONFIG_MESHTASTIC_MQTT_TLS_SEC_TAG,
+};
+
+/* Register the CA trust anchor once, then point the MQTT transport at it.
+ * hostname drives both SNI and certificate CN/SAN verification, so it stays the
+ * broker's DNS name even when BROKER_HOST is a raw IP (DNS-bypass). */
+static void mqtt_tls_configure(void)
+{
+	static bool ca_registered;
+	struct mqtt_sec_config *tls = &mqtt_ctx.client.transport.tls.config;
+
+	if (!ca_registered) {
+		int rc = tls_credential_add(CONFIG_MESHTASTIC_MQTT_TLS_SEC_TAG,
+					    TLS_CREDENTIAL_CA_CERTIFICATE,
+					    mqtt_ca_cert, sizeof(mqtt_ca_cert));
+		if (rc != 0 && rc != -EEXIST) {
+			LOG_ERR("Failed to register MQTT CA cert (%d)", rc);
+		} else {
+			ca_registered = true;
+		}
+	}
+
+	mqtt_ctx.client.transport.type = MQTT_TRANSPORT_SECURE;
+	tls->peer_verify = TLS_PEER_VERIFY_REQUIRED;
+	tls->cipher_list = NULL;
+	tls->sec_tag_list = mqtt_sec_tags;
+	tls->sec_tag_count = ARRAY_SIZE(mqtt_sec_tags);
+	tls->hostname = CONFIG_MESHTASTIC_MQTT_TLS_HOSTNAME;
+}
+#endif /* CONFIG_MESHTASTIC_MQTT_TLS_NO_VERIFY */
+#endif /* CONFIG_MESHTASTIC_MQTT_TLS */
+
 static void mqtt_client_configure(void)
 {
 	mqtt_client_init(&mqtt_ctx.client);
@@ -888,7 +953,11 @@ static void mqtt_client_configure(void)
 	mqtt_ctx.client.rx_buf_size = sizeof(mqtt_ctx.rx_buf);
 	mqtt_ctx.client.tx_buf = mqtt_ctx.tx_buf;
 	mqtt_ctx.client.tx_buf_size = sizeof(mqtt_ctx.tx_buf);
+#if defined(CONFIG_MESHTASTIC_MQTT_TLS)
+	mqtt_tls_configure();
+#else
 	mqtt_ctx.client.transport.type = MQTT_TRANSPORT_NON_SECURE;
+#endif
 }
 
 static int mqtt_subscribe_downlink(void)

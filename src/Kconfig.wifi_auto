@@ -1,0 +1,23 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_WIFI_AUTOCONNECT
+	bool "Auto-connect WiFi from stored credentials at boot"
+	depends on WIFI && WIFI_CREDENTIALS && WIFI_CREDENTIALS_CONNECT_STORED
+	help
+	  At boot, issue NET_REQUEST_WIFI_CONNECT_STORED so the station connects
+	  using credentials persisted in NVS (provision once via `wifi cred add`).
+	  Removes the need to type `wifi connect` on the shell -- required when the
+	  console UART is repurposed (e.g. serial PhoneAPI) and only telnet remains.
+
+if MESHTASTIC_WIFI_AUTOCONNECT
+
+config MESHTASTIC_WIFI_AUTOCONNECT_DELAY_SEC
+	int "Delay before first auto-connect attempt (seconds)"
+	default 3
+
+config MESHTASTIC_WIFI_AUTOCONNECT_RETRIES
+	int "Auto-connect attempts before giving up"
+	default 5
+
+endif # MESHTASTIC_WIFI_AUTOCONNECT

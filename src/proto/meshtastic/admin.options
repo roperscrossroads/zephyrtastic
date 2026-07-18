@@ -1,0 +1,35 @@
+# nanopb options for admin.proto — bound every variable-length field so nanopb
+# generates static structs (no pb_callback_t). Config/ModuleConfig/Channel/User/
+# DeviceMetadata/DeviceUIConfig/Position are already bounded by their own
+# vendored .options; only fields DEFINED here need bounding.
+
+# Session key: firmware uses an 8-byte passkey (uint8_t[8]).
+*AdminMessage.session_passkey max_size:8
+
+# String oneof arms (canned-message text, ringtone, file path).
+*AdminMessage.get_canned_message_module_messages_response max_size:201
+*AdminMessage.set_canned_message_module_messages max_size:201
+*AdminMessage.get_ringtone_response max_size:231
+*AdminMessage.set_ringtone_message max_size:231
+*AdminMessage.delete_file_request max_size:201
+
+# Amateur-radio parameters (bounds match upstream admin.options).
+*HamParameters.call_sign max_size:8
+*HamParameters.short_name max_size:5
+*HamParameters.long_name max_size:15
+
+# OTA firmware hash.
+*OTAEvent.ota_hash max_size:32
+
+# Remote input event scalars (int widths match upstream admin.options).
+*InputEvent.event_code int_size:8
+*InputEvent.kb_char int_size:8
+*InputEvent.touch_x int_size:16
+*InputEvent.touch_y int_size:16
+
+# Lockdown passphrase (1-32 bytes).
+*LockdownAuth.passphrase max_size:32
+
+# Remote-hardware pins response (bound the repeated count so the element does
+# not become a callback array; count matches upstream admin.options).
+*NodeRemoteHardwarePinsResponse.node_remote_hardware_pins max_count:16

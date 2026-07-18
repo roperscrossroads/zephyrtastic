@@ -4,8 +4,11 @@
 menuconfig MESHTASTIC_GNSS
 	bool "Meshtastic GNSS position service"
 	depends on GNSS
+	select MESHTASTIC_POSITION
 	help
-	  Subscribe to Zephyr GNSS data and send Meshtastic Position payloads.
+	  Subscribe to Zephyr GNSS data and feed Meshtastic Position payloads to
+	  the position module (MESHTASTIC_POSITION), which owns the portnum
+	  handling, replies, and transmission.
 
 if MESHTASTIC_GNSS
 
@@ -31,14 +34,6 @@ config MESHTASTIC_GNSS_RETRY_INTERVAL_SEC
 	  After a failed automatic position transmission, wait at least this
 	  long before trying again. Prevents hammering the radio when the GNSS
 	  driver publishes fixes frequently.
-
-config MESHTASTIC_GNSS_REPLY_SUPPRESS_SEC
-	int "Minimum seconds between Position want_response replies"
-	default 180
-	range 0 86400
-	help
-	  Rate-limit responses to incoming Position requests with want_response
-	  set, matching stock PositionModule behavior.
 
 if MESHTASTIC_GNSS_AUTO_SEND
 

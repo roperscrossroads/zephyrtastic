@@ -53,3 +53,14 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Zephyr/west build output
+build*/
+
+# Local editor / tooling settings
+.claude/settings.local.json
+
+# Local, uncommitted config overrides — site-specific network config,
+# broker/collector addresses and secrets live here, never in git history.
+prj-local.conf
+*-local.conf

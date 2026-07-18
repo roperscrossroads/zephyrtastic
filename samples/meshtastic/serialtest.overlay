@@ -1,0 +1,6 @@
+/* CLI reference-client test: give uart0 (CP210x/ttyUSB0) to the meshtastic StreamAPI. */
+/ {
+	chosen {
+		zephyr,meshtastic-uart = &uart0;
+	};
+};

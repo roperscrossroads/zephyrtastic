@@ -97,6 +97,8 @@ enum meshtastic_portnum {
 	MESHTASTIC_PORT_NODE_STATUS = 36,
 	/** Sensor telemetry. */
 	MESHTASTIC_PORT_TELEMETRY = 67,
+	/** Traceroute (RouteDiscovery) path mapping. */
+	MESHTASTIC_PORT_TRACEROUTE = 70,
 	/** Private / application-defined. */
 	MESHTASTIC_PORT_PRIVATE = 256,
 };

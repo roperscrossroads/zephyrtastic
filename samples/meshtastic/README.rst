@@ -18,6 +18,7 @@ The sample has been tested with the following boards:
 
 - Arduino GIGA R1 with a Semtech SX1262 shield
 - LilyGO T-Watch Ultra with a Semtech SX1262 shield
+- Heltec WiFi LoRa 32 (V3) (ESP32-S3, on-board Semtech SX1262)
 
 Building and Running
 ********************

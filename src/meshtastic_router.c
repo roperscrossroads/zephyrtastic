@@ -21,6 +21,7 @@
 #include "meshtastic_mqtt.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_router.h"
+#include "meshtastic_sched.h"
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 #include "meshtastic_airtime.h"
@@ -31,11 +32,28 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 static bool dup_check(uint32_t src, uint32_t id)
 {
+	/* Single scalar, captured once for the whole scan — a direct atomic read is
+	 * sufficient (see the concurrency note in meshtastic_sched.h). */
+	uint32_t ttl_ms = (uint32_t)meshtastic_sched_get()->dedup_ttl_sec * 1000U;
+	uint32_t now = k_uptime_get_32();
+	bool saw_expired = false;
+
+	/* Scan the whole cache: a fresh match wins over any stale copy of the
+	 * same (src,id), so an expired entry can never mask a real duplicate. */
 	for (int i = 0; i < CONFIG_MESHTASTIC_DUP_CACHE_SIZE; i++) {
-		if (mt.dup_cache[i].src == src && mt.dup_cache[i].id == id) {
-			mt.status.duplicate_packets++;
-			return true;
+		if (mt.dup_cache[i].src != src || mt.dup_cache[i].id != id) {
+			continue;
 		}
+		if (ttl_ms != 0U && (now - mt.dup_cache[i].ms) > ttl_ms) {
+			saw_expired = true;
+			continue;
+		}
+		mt.status.duplicate_packets++;
+		return true;
+	}
+
+	if (saw_expired) {
+		meshtastic_sched_stat_dedup_expired();
 	}
 
 	return false;
@@ -45,6 +63,7 @@ static void dup_add(uint32_t src, uint32_t id)
 {
 	mt.dup_cache[mt.dup_head].src = src;
 	mt.dup_cache[mt.dup_head].id = id;
+	mt.dup_cache[mt.dup_head].ms = k_uptime_get_32();
 	mt.dup_head = (uint8_t)((mt.dup_head + 1U) % CONFIG_MESHTASTIC_DUP_CACHE_SIZE);
 }
 

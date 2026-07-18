@@ -21,7 +21,10 @@
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-/* NodeInfoLite.bitfield bit indices (Meshtastic upstream layout). */
+/* NodeInfoLite.bitfield bit indices (Meshtastic upstream layout). The DB is
+ * in-RAM only (never serialized), so these are internal to this firmware. */
+#define NODEINFO_BITFIELD_IS_FAVORITE_BIT         0
+#define NODEINFO_BITFIELD_IS_IGNORED_BIT          1
 #define NODEINFO_BITFIELD_VIA_MQTT_BIT            2
 #define NODEINFO_BITFIELD_HAS_USER_BIT            5
 #define NODEINFO_BITFIELD_IS_LICENSED_BIT         6
@@ -116,7 +119,9 @@ static size_t oldest_evictable_index_locked(void)
 	size_t oldest_index = SIZE_MAX;
 
 	for (size_t i = 0U; i < nodedb_entry_count; i++) {
-		if (!nodedb_entries[i].used || nodedb_entries[i].node.num == local) {
+		if (!nodedb_entries[i].used || nodedb_entries[i].node.num == local ||
+		    IS_BIT_SET(nodedb_entries[i].node.bitfield,
+			       NODEINFO_BITFIELD_IS_FAVORITE_BIT)) {
 			continue;
 		}
 
@@ -427,6 +432,8 @@ static void fill_snapshot(const struct nodedb_entry *entry, struct meshtastic_no
 	out->via_mqtt = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_VIA_MQTT_BIT);
 	out->has_hops_away = node->has_hops_away;
 	out->hops_away = node->hops_away;
+	out->is_favorite = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_FAVORITE_BIT);
+	out->is_ignored = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_IGNORED_BIT);
 
 	out->has_user = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_HAS_USER_BIT);
 	copy_string(out->long_name, sizeof(out->long_name), node->long_name);
@@ -518,6 +525,64 @@ int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *
 	k_mutex_unlock(&nodedb_lock);
 
 	return 0;
+}
+
+static int nodedb_set_bit(uint32_t node_num, int bit, bool value)
+{
+	struct nodedb_entry *entry;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = find_entry_locked(node_num);
+	if (entry == NULL) {
+		k_mutex_unlock(&nodedb_lock);
+		return -ENOENT;
+	}
+
+	WRITE_BIT(entry->node.bitfield, bit, value);
+	k_mutex_unlock(&nodedb_lock);
+
+	return 0;
+}
+
+int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite)
+{
+	return nodedb_set_bit(node_num, NODEINFO_BITFIELD_IS_FAVORITE_BIT, favorite);
+}
+
+int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored)
+{
+	return nodedb_set_bit(node_num, NODEINFO_BITFIELD_IS_IGNORED_BIT, ignored);
+}
+
+int meshtastic_nodedb_remove(uint32_t node_num)
+{
+	/* The local node is always present and must never be evicted or removed. */
+	if (node_num == meshtastic_get_node_id()) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	for (size_t i = 0U; i < nodedb_entry_count; i++) {
+		if (!nodedb_entries[i].used || nodedb_entries[i].node.num != node_num) {
+			continue;
+		}
+
+		/* Preserve the "entries [0, count) are all used" invariant by
+		 * swapping the last entry into the hole, then shrinking. */
+		size_t last = nodedb_entry_count - 1U;
+
+		if (i != last) {
+			nodedb_entries[i] = nodedb_entries[last];
+		}
+		nodedb_entries[last] = (struct nodedb_entry){0};
+		nodedb_entry_count--;
+		k_mutex_unlock(&nodedb_lock);
+		LOG_DBG("NodeDB removed 0x%08x", node_num);
+		return 0;
+	}
+	k_mutex_unlock(&nodedb_lock);
+
+	return -ENOENT;
 }
 
 int meshtastic_nodedb_init(void)

@@ -12,7 +12,6 @@ extern "C" {
 #endif
 
 int meshtastic_gnss_init(void);
-int meshtastic_gnss_get_last_position(meshtastic_Position *position);
 
 #ifdef __cplusplus
 }

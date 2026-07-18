@@ -10,8 +10,10 @@
 
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
+#include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_router.h"
+#include "meshtastic_sched.h"
 
 #define TEST_NODE_ID  0x12345678U
 #define PEER_NODE_ID  0x87654321U
@@ -27,6 +29,15 @@ struct mock_lora_state {
 	uint32_t config_count;
 	uint8_t last_tx[MESHTASTIC_PKT_MAX];
 	uint32_t last_tx_len;
+
+	/* Gate for scheduler-egress ordering tests: when enabled, the worker
+	 * thread parks inside send() until the test releases it one frame at a
+	 * time, and every transmitted frame's wire id is logged in order. */
+	bool gate_enabled;
+	struct k_sem gate;    /* worker waits here in send() while gated */
+	struct k_sem entered; /* given as the worker enters a gated send() */
+	uint32_t tx_ids[16];  /* wire ids in transmit order */
+	uint8_t tx_ids_count;
 };
 
 static struct mock_lora_state mock_lora;
@@ -36,6 +47,8 @@ static int mock_lora_init(const struct device *dev)
 	ARG_UNUSED(dev);
 
 	k_mutex_init(&mock_lora.lock);
+	k_sem_init(&mock_lora.gate, 0, ARRAY_SIZE(mock_lora.tx_ids));
+	k_sem_init(&mock_lora.entered, 0, ARRAY_SIZE(mock_lora.tx_ids));
 	mock_lora.send_result = 0;
 
 	return 0;
@@ -66,13 +79,30 @@ static int mock_lora_send(const struct device *dev, uint8_t *data, uint32_t data
 
 	ARG_UNUSED(dev);
 
+	bool gated;
+
 	k_mutex_lock(&mock_lora.lock, K_FOREVER);
 	zassert_true(data_len <= sizeof(mock_lora.last_tx), "unexpected tx len %u", data_len);
 	memcpy(mock_lora.last_tx, data, data_len);
 	mock_lora.last_tx_len = data_len;
 	mock_lora.send_count++;
+	if (mock_lora.tx_ids_count < ARRAY_SIZE(mock_lora.tx_ids) &&
+	    data_len >= MESHTASTIC_HDR_LEN) {
+		const struct meshtastic_wire_header *hdr =
+			(const struct meshtastic_wire_header *)data;
+
+		mock_lora.tx_ids[mock_lora.tx_ids_count++] = sys_le32_to_cpu(hdr->id);
+	}
 	ret = mock_lora.send_result;
+	gated = mock_lora.gate_enabled;
 	k_mutex_unlock(&mock_lora.lock);
+
+	/* Park the worker so the test can stack up frames and release them one at
+	 * a time — never hold mock_lora.lock while blocked. */
+	if (gated) {
+		k_sem_give(&mock_lora.entered);
+		(void)k_sem_take(&mock_lora.gate, K_FOREVER);
+	}
 
 	return ret;
 }
@@ -175,7 +205,11 @@ static void reset_mock_lora(void)
 	mock_lora.config_count = 0U;
 	mock_lora.last_tx_len = 0U;
 	memset(mock_lora.last_tx, 0, sizeof(mock_lora.last_tx));
+	mock_lora.gate_enabled = false;
+	mock_lora.tx_ids_count = 0U;
 	k_mutex_unlock(&mock_lora.lock);
+	k_sem_reset(&mock_lora.gate);
+	k_sem_reset(&mock_lora.entered);
 }
 
 static void on_recv(uint32_t from, uint32_t to, uint32_t portnum, const uint8_t *payload,
@@ -258,6 +292,7 @@ static void protocol_before(void *fixture)
 	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_ALL);
 	memset(mt.dup_cache, 0, sizeof(mt.dup_cache));
 	mt.dup_head = 0U;
+	meshtastic_sched_defaults();
 	reset_mock_lora();
 	reset_callbacks_state();
 }
@@ -790,6 +825,37 @@ ZTEST(protocol_stack, test_duplicate_packets_are_suppressed)
 	zassert_equal(state.recv_count, 1U, "expected single delivery");
 }
 
+/* Verifies a packet re-sent after the dedup TTL has elapsed is treated as fresh
+ * (delivered again) instead of being suppressed forever, and that the expiry is
+ * counted. Uses a 1-second TTL so the test doesn't stall. */
+ZTEST(protocol_stack, test_dedup_ttl_expiry_allows_resend)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_sched_stats sst;
+
+	zassert_ok(meshtastic_sched_set("dedup.ttl", "1"));
+
+	build_peer_wire_packet(TEST_NODE_ID, 0x2071U, 3U, "ttl", wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -30, 5);
+	zassert_ok(k_sem_take(&state.rx_sem, K_SECONDS(1)), "first delivery timed out");
+
+	/* Immediate resend is still within the TTL window -> suppressed. */
+	inject_rx_frame(wire, wire_len, -30, 5);
+	zassert_equal(-EAGAIN, k_sem_take(&state.rx_sem, K_MSEC(100)),
+		      "resend within TTL should be suppressed");
+
+	/* Age the entry out, then resend -> treated as fresh -> delivered again. */
+	k_sleep(K_MSEC(1200));
+	inject_rx_frame(wire, wire_len, -30, 5);
+	zassert_ok(k_sem_take(&state.rx_sem, K_SECONDS(1)),
+		   "resend after TTL expiry should be delivered again");
+
+	zassert_equal(state.recv_count, 2U, "expected two deliveries across the TTL boundary");
+	meshtastic_sched_stats_get(&sst);
+	zassert_true(sst.dedup_expired >= 1U, "dedup TTL expiry should be counted");
+}
+
 /* Verifies duplicate foreign packets do not trigger additional relay transmissions. */
 ZTEST(protocol_stack, test_duplicate_foreign_packets_do_not_relay_again)
 {
@@ -978,4 +1044,170 @@ ZTEST(protocol_stack, test_duplicate_downlink_returns_ealready)
 	assert_mock_send_count(0U);
 	zassert_equal(state.recv_count, 0U, "duplicate downlink should not be delivered");
 	zassert_equal(state.event_count, 0U, "duplicate downlink should not emit events");
+}
+
+/* ------------------------------------------------------------------------- */
+/* Scheduler egress: priority ordering + overflow drop, verified end-to-end   */
+/* through the outbound worker by gating the mock radio's send().             */
+/* ------------------------------------------------------------------------- */
+
+#define EGRESS_HOP 3U
+
+static void egress_gate_enable(bool on)
+{
+	k_mutex_lock(&mock_lora.lock, K_FOREVER);
+	mock_lora.gate_enabled = on;
+	k_mutex_unlock(&mock_lora.lock);
+}
+
+/* Start a gated egress test from a known-clean state: free any worker a prior
+ * test left parked on the gate (k_sem_reset does NOT wake a blocked taker),
+ * drain the queue to idle, zero the tx log, then re-enable the gate. */
+static void egress_begin(void)
+{
+	egress_gate_enable(false);
+	for (int i = 0; i < (int)ARRAY_SIZE(mock_lora.tx_ids); i++) {
+		k_sem_give(&mock_lora.gate); /* release a parked worker, if any */
+	}
+	k_msleep(50); /* let the worker finish and drain to the ob_avail wait */
+
+	k_mutex_lock(&mock_lora.lock, K_FOREVER);
+	mock_lora.tx_ids_count = 0U;
+	mock_lora.send_count = 0U;
+	k_mutex_unlock(&mock_lora.lock);
+	k_sem_reset(&mock_lora.gate);
+	k_sem_reset(&mock_lora.entered);
+
+	egress_gate_enable(true);
+}
+
+/* Settle the worker after a gated test: disable the gate, release it, and let
+ * the in-flight send_wire_now() finish — which re-arms the mock RX callback the
+ * next test relies on. */
+static void egress_end(void)
+{
+	egress_gate_enable(false);
+	for (int i = 0; i < (int)ARRAY_SIZE(mock_lora.tx_ids); i++) {
+		k_sem_give(&mock_lora.gate);
+	}
+	k_msleep(50);
+	zassert_not_null(mock_lora.rx_cb, "egress test left the RX callback un-armed");
+}
+
+/* Enqueue a raw wire frame at an explicit tier (bypasses portnum->tier mapping
+ * so the queue mechanism is tested directly). Returns the enqueue result. */
+static int egress_send(uint32_t id, uint8_t tier)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len = 0U;
+	static const uint8_t body[] = {0xDEU, 0xADU};
+
+	build_wire_packet(TEST_NODE_ID, MESHTASTIC_NODE_BROADCAST, id, EGRESS_HOP,
+			  MESHTASTIC_PORT_TEXT_MESSAGE, body, sizeof(body), wire, &wire_len);
+	return meshtastic_radio_send_wire_prio(wire, wire_len, tier);
+}
+
+/* Wait until the gated worker has parked inside send() (i.e. it dequeued and is
+ * about to transmit the next frame). */
+static void egress_wait_parked(void)
+{
+	zassert_ok(k_sem_take(&mock_lora.entered, K_SECONDS(2)),
+		   "timed out waiting for the outbound worker to park in send()");
+}
+
+static void egress_release_one(void)
+{
+	k_sem_give(&mock_lora.gate);
+}
+
+static void egress_assert_order(const uint32_t *expected, size_t count)
+{
+	k_mutex_lock(&mock_lora.lock, K_FOREVER);
+	zassert_equal(mock_lora.tx_ids_count, count, "expected %zu transmits, got %u", count,
+		      mock_lora.tx_ids_count);
+	for (size_t i = 0; i < count; i++) {
+		zassert_equal(mock_lora.tx_ids[i], expected[i],
+			      "tx #%zu: expected id 0x%08x, got 0x%08x", i, expected[i],
+			      mock_lora.tx_ids[i]);
+	}
+	k_mutex_unlock(&mock_lora.lock);
+}
+
+/* Frames queued together drain highest-tier-first, FIFO within a tier. */
+ZTEST(protocol_stack, test_egress_priority_ordering)
+{
+	/* Expected drain order after the primer: ACK, HIGH, the two NORMAL frames
+	 * in arrival order, then the two BG frames in arrival order. */
+	static const uint32_t expected[] = {
+		0x1000U, 0x1003U, 0x1004U, 0x1002U, 0x1006U, 0x1001U, 0x1005U,
+	};
+
+	meshtastic_sched_defaults(); /* priority order, drop-lowest */
+	meshtastic_sched_stats_reset();
+	egress_begin();
+
+	/* Primer occupies the worker so the rest queue up together. */
+	zassert_ok(egress_send(0x1000U, MT_SCHED_TIER_NORMAL));
+	egress_wait_parked();
+
+	zassert_ok(egress_send(0x1001U, MT_SCHED_TIER_BG));
+	zassert_ok(egress_send(0x1002U, MT_SCHED_TIER_NORMAL));
+	zassert_ok(egress_send(0x1003U, MT_SCHED_TIER_ACK));
+	zassert_ok(egress_send(0x1004U, MT_SCHED_TIER_HIGH));
+	zassert_ok(egress_send(0x1005U, MT_SCHED_TIER_BG));
+	zassert_ok(egress_send(0x1006U, MT_SCHED_TIER_NORMAL));
+
+	for (int i = 0; i < 6; i++) {
+		egress_release_one();
+		egress_wait_parked();
+	}
+	egress_release_one(); /* let the last frame's send() return */
+
+	egress_gate_enable(false);
+	egress_assert_order(expected, ARRAY_SIZE(expected));
+	egress_end();
+}
+
+/* When the queue is full, a fire-and-forget frame evicts a strictly-lower-tier
+ * frame if it can, else is itself dropped — never a higher-tier frame. */
+ZTEST(protocol_stack, test_egress_overflow_drop_lowest)
+{
+	static const uint32_t expected[] = {0x2000U, 0x2005U, 0x2001U, 0x2002U};
+	struct meshtastic_sched_stats st;
+
+	meshtastic_sched_defaults(); /* priority order, drop-lowest */
+	zassert_ok(meshtastic_sched_set("tx.depth", "3"));
+	meshtastic_sched_stats_reset();
+	egress_begin();
+
+	zassert_ok(egress_send(0x2000U, MT_SCHED_TIER_NORMAL)); /* primer */
+	egress_wait_parked();
+
+	/* Fill the depth-3 queue with background frames. */
+	zassert_ok(egress_send(0x2001U, MT_SCHED_TIER_BG));
+	zassert_ok(egress_send(0x2002U, MT_SCHED_TIER_BG));
+	zassert_ok(egress_send(0x2003U, MT_SCHED_TIER_BG));
+
+	/* A 4th BG frame has nothing lower-ranked to evict -> dropped. */
+	zassert_equal(egress_send(0x2004U, MT_SCHED_TIER_BG), -ENOMSG,
+		      "same-tier overflow frame should be rejected");
+
+	/* An ACK frame evicts the newest BG frame (0x2003) and takes its slot. */
+	zassert_ok(egress_send(0x2005U, MT_SCHED_TIER_ACK));
+
+	for (int i = 0; i < 3; i++) {
+		egress_release_one();
+		egress_wait_parked();
+	}
+	egress_release_one();
+
+	egress_gate_enable(false);
+
+	/* 0x2003 evicted and 0x2004 rejected never transmit; ACK drains first. */
+	egress_assert_order(expected, ARRAY_SIZE(expected));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.tx_drop[MT_SCHED_TIER_BG], 2,
+		      "expected two dropped BG frames (one rejected, one evicted)");
+	egress_end();
 }

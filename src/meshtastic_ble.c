@@ -112,16 +112,21 @@ static void ble_data_ready(struct meshtastic_phoneapi *api)
 	schedule_fromradio_prepare();
 }
 
-static void fromradio_work_handler(struct k_work *work)
+/*
+ * Synchronously stage the next FromRadio frame for delivery, if one is
+ * available. Returns true if a frame is now ready. Called both from the read
+ * handler (so a phone draining FromRadio in a tight loop gets back-to-back
+ * frames, like stock Meshtastic firmware) and from the work queue (initial
+ * kick / re-notify).
+ */
+static bool stage_fromradio(void)
 {
-	ARG_UNUSED(work);
-
 	if (fromradio_ready) {
-		return;
+		return true;
 	}
 
 	if (!meshtastic_phoneapi_current_frame(&ble.api, &fromradio_staged)) {
-		return;
+		return false;
 	}
 
 	k_mutex_lock(&ble.api.lock, K_FOREVER);
@@ -131,7 +136,16 @@ static void fromradio_work_handler(struct k_work *work)
 	fromradio_ready = true;
 	LOG_DBG("BLE FromRadio staged len=%u from_num=%u", fromradio_staged.len,
 		meshtastic_phoneapi_from_num(&ble.api));
-	notify_fromnum();
+	return true;
+}
+
+static void fromradio_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (stage_fromradio()) {
+		notify_fromnum();
+	}
 }
 
 static void ble_disconnect(struct meshtastic_phoneapi *api)
@@ -188,6 +202,15 @@ static ssize_t read_fromradio(struct bt_conn *conn, const struct bt_gatt_attr *a
 	ARG_UNUSED(attr);
 
 	if (offset == 0U) {
+		/*
+		 * Stage synchronously here so a phone draining FromRadio in a tight
+		 * loop gets the next frame immediately, instead of racing the work
+		 * queue and getting a premature empty read — which the app treats as
+		 * "config paused" and stalls on (the "loading module config" hang).
+		 */
+		if (!fromradio_ready) {
+			(void)stage_fromradio();
+		}
 		if (fromradio_ready) {
 			memcpy(fromradio_buf, fromradio_staged.data, fromradio_staged.len);
 			fromradio_len = fromradio_staged.len;
@@ -200,7 +223,14 @@ static ssize_t read_fromradio(struct bt_conn *conn, const struct bt_gatt_attr *a
 	if (ret >= 0 && fromradio_len > 0U && offset + ret >= fromradio_len) {
 		meshtastic_phoneapi_release_current_frame(&ble.api);
 		fromradio_ready = false;
-		schedule_fromradio_prepare();
+		/*
+		 * Proactively stage the next frame and notify, so the phone keeps
+		 * draining even if it waits on a FromNum notification between reads.
+		 * A dropped notify is now self-healing: the next read re-stages.
+		 */
+		if (stage_fromradio()) {
+			notify_fromnum();
+		}
 	}
 
 	return ret;

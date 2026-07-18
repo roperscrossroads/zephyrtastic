@@ -105,6 +105,9 @@ struct meshtastic_nodedb_node {
 	bool has_hops_away;
 	uint8_t hops_away;
 
+	bool is_favorite;
+	bool is_ignored;
+
 	bool has_user;
 	char long_name[MESHTASTIC_NODEDB_LONG_NAME_LEN];
 	char short_name[MESHTASTIC_NODEDB_SHORT_NAME_LEN];
@@ -155,6 +158,39 @@ int meshtastic_nodedb_get(uint32_t node_num, struct meshtastic_nodedb_node *out)
  * @retval -ENOTSUP NodeDB support is not enabled.
  */
 int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *out);
+
+/**
+ * @brief Mark a node favorited / un-favorited in the in-RAM NodeDB.
+ *
+ * Favorited nodes are protected from cache eviction. Best-effort: acting on a
+ * node not present in the NodeDB is a no-op.
+ *
+ * @retval 0 Flag updated.
+ * @retval -ENOENT The node is not present.
+ * @retval -ENOTSUP NodeDB support is not enabled.
+ */
+int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite);
+
+/**
+ * @brief Mark a node ignored / un-ignored in the in-RAM NodeDB.
+ *
+ * @retval 0 Flag updated.
+ * @retval -ENOENT The node is not present.
+ * @retval -ENOTSUP NodeDB support is not enabled.
+ */
+int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored);
+
+/**
+ * @brief Remove a node from the in-RAM NodeDB.
+ *
+ * The local node cannot be removed.
+ *
+ * @retval 0 Entry removed.
+ * @retval -EINVAL @p node_num is the local node.
+ * @retval -ENOENT The node is not present.
+ * @retval -ENOTSUP NodeDB support is not enabled.
+ */
+int meshtastic_nodedb_remove(uint32_t node_num);
 
 #ifdef __cplusplus
 }

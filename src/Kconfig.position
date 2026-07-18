@@ -1,0 +1,33 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_POSITION
+	bool "Meshtastic position service"
+	default y
+	help
+	  Position portnum module: caches the node's position (from a GNSS
+	  source and/or an admin-set fixed position), answers incoming Position
+	  requests, and broadcasts. Required by MESHTASTIC_GNSS, which is just
+	  one optional source feeding it; can also run stand-alone on a GNSS-less
+	  node to advertise a fixed position (admin set_fixed_position).
+
+if MESHTASTIC_POSITION
+
+config MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC
+	int "Fixed-position broadcast interval in seconds"
+	default 900
+	range 5 86400
+	help
+	  Interval between periodic re-broadcasts of an admin-set fixed position.
+	  A GNSS-less node has no fix callback to drive sends, so a static fixed
+	  position is re-announced on this timer.
+
+config MESHTASTIC_POSITION_REPLY_SUPPRESS_SEC
+	int "Minimum seconds between Position want_response replies"
+	default 180
+	range 0 86400
+	help
+	  Rate-limit responses to incoming Position requests with want_response
+	  set, matching stock PositionModule behavior.
+
+endif # MESHTASTIC_POSITION

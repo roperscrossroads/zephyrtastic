@@ -39,14 +39,25 @@ config MESHTASTIC_RX_REARM_RETRY_MS
 	  is left deaf.  The processing thread retries the re-arm at this
 	  interval until it succeeds.
 
-config MESHTASTIC_OUTBOUND_QUEUE_DEPTH
-	int "Outbound LoRa transmit queue depth (frames)"
-	default 8
-	range 2 32
+config MESHTASTIC_OUTBOUND_QUEUE_MAX
+	int "Outbound LoRa transmit queue capacity (frames)"
+	default 16
+	range 2 64
 	help
-	  Number of wire frames waiting for the outbound transmit worker.
-	  All LoRa TX (application packets, relay, periodic telemetry) is
-	  serialized through this queue.
+	  Physical capacity of the outbound priority queue. The scheduler
+	  (meshtastic sched) enforces a runtime soft depth <= this ceiling, so
+	  the depth can be tuned live without a rebuild up to this maximum. Each
+	  slot holds a full wire frame, so raising this costs RAM.
+
+config MESHTASTIC_OUTBOUND_QUEUE_DEPTH
+	int "Default outbound transmit soft depth (frames)"
+	default 8
+	range 2 64
+	help
+	  Default runtime soft depth of the outbound queue (the scheduler's
+	  starting tx.depth). Must be <= MESHTASTIC_OUTBOUND_QUEUE_MAX. All LoRa
+	  TX (application packets, relay, periodic telemetry) is serialized
+	  through this queue.
 
 config MESHTASTIC_OUTBOUND_STACK_SIZE
 	int "Outbound transmit worker stack size (bytes)"
@@ -81,12 +92,14 @@ config MESHTASTIC_TX_POWER
 
 config MESHTASTIC_DUP_CACHE_SIZE
 	int "Duplicate-packet cache size (entries)"
-	default 16
+	default 32
 	range 4 64
 	help
 	  Number of (src, packet_id) pairs retained for duplicate suppression.
-	  Each entry consumes 8 bytes of RAM.  Increase if duplicate packets
-	  are observed in dense mesh deployments.
+	  Each entry consumes 12 bytes of RAM.  Increase if duplicate packets
+	  are observed in dense mesh deployments.  The retention window is bounded
+	  by both this size and the runtime "dedup.ttl" scheduler knob (an entry
+	  older than the TTL no longer suppresses a re-sent packet).
 
 config MESHTASTIC_NODE_LONG_NAME
 	string "Default node long name"

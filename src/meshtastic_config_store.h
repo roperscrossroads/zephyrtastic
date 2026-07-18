@@ -10,6 +10,7 @@
 
 #include "meshtastic/channel.pb.h"
 #include "meshtastic/config.pb.h"
+#include "meshtastic/mesh.pb.h"
 #include "meshtastic/module_config.pb.h"
 
 #include <zephyr/meshtastic/meshtastic.h>
@@ -32,6 +33,10 @@ int meshtastic_config_store_set_channel(uint8_t index, const meshtastic_Channel 
 int meshtastic_config_store_get_config(pb_size_t tag, meshtastic_Config *config);
 int meshtastic_config_store_set_config(const meshtastic_Config *config);
 
+/** Set the position config's fixed_position flag (admin set/remove fixed
+ * position). Persists via the coalesced save. */
+int meshtastic_config_store_set_position_fixed(bool fixed);
+
 int meshtastic_config_store_get_module(pb_size_t tag, meshtastic_ModuleConfig *module);
 int meshtastic_config_store_set_module(const meshtastic_ModuleConfig *module);
 
@@ -40,6 +45,19 @@ int meshtastic_config_store_get_device_ui(meshtastic_DeviceUIConfig *device_ui);
 int meshtastic_config_store_set_device_role(meshtastic_Config_DeviceConfig_Role role);
 int meshtastic_config_store_set_rebroadcast_mode(
 	meshtastic_Config_DeviceConfig_RebroadcastMode mode);
+
+/** Set the node owner (long/short name, licensed/unmessagable flags). Persists. */
+int meshtastic_config_store_set_owner(const meshtastic_User *user);
+
+/** Read the stored owner flags (either pointer may be NULL). */
+void meshtastic_config_store_get_owner_flags(bool *is_licensed, bool *is_unmessagable);
+
+/**
+ * Suppress the coalesced settings save inside setters (used to defer flash
+ * writes during an admin begin/commit edit transaction). Re-enable then call
+ * meshtastic_settings_flush() to persist a batch atomically.
+ */
+void meshtastic_config_store_set_save_suppressed(bool suppressed);
 
 int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_len);
 int meshtastic_config_store_setting_set(const char *key, const void *buf, size_t len);

@@ -1,0 +1,69 @@
+/*
+ * Heltec WiFi LoRa 32 (V3) — ESP32-S3 + on-board Semtech SX1262.
+ *
+ * The upstream Zephyr board .dts already declares a fully-wired `lora0`
+ * (sx1262) node whose pins match the Meshtastic reference firmware's
+ * variant.h exactly: CS=GPIO8, RESET=GPIO12, BUSY=GPIO13, DIO1/IRQ=GPIO14,
+ * SCK=GPIO9, MOSI=GPIO10, MISO=GPIO11; the SX1262's own DIO2 as the RF switch
+ * (dio2-tx-enable) and its DIO3 as the 1.8 V TCXO supply (dio3-tcxo-voltage).
+ * So no radio pins are set here — only board-appropriate tweaks:
+ *
+ *  1. rx-boosted — an SX1262 internal RX-gain *register* setting, NOT a pin.
+ *     The Zephyr sx126x driver writes SX126X_REG_RX_GAIN (0x08AC): 0x94
+ *     power-saving (its default) vs 0x96 boosted. The reference firmware
+ *     enables boosted by default (config.lora.sx126x_rx_boosted_gain = true,
+ *     NodeDB.cpp -> RadioLib setRxBoostedGainMode()): ~3 dB more RX
+ *     sensitivity for ~2 mA. Setting `rx-boosted` here matches stock.
+ *
+ *     This is independent of the board's Vext rail (GPIO36). The firmware's
+ *     variant.h comments Vext as powering "the oled display and the lora
+ *     antenna boost", but the standard V3 carries no external LNA/PA, and
+ *     upstream Zephyr ties Vext only to the OLED power-domain — so whether the
+ *     SX1262 depends on Vext on this board is UNCONFIRMED. See item 3.
+ *
+ *  2. die-temp0 — expose the ESP32-S3 on-die temperature sensor for
+ *     device-metrics telemetry.
+ *
+ *  3. Vext ON at boot — the reference firmware unconditionally drives Vext
+ *     (GPIO36, active-low) low at boot to power the OLED, and its variant.h
+ *     comments it as also feeding "the lora antenna boost" (unconfirmed; the
+ *     standard V3 has no external LNA/PA). Upstream Zephyr models Vext only as
+ *     the OLED's `vext_ctrl` power-domain, which is INERT here (CONFIG_POWER_
+ *     DOMAIN is not set) — so without this the port would leave GPIO36
+ *     undriven, unlike firmware. The gpio-hog below drives GPIO36 to its
+ *     active (physical-low) level at boot, matching firmware exactly.
+ *
+ * VERIFY(hardware): confirm on the bench that (a) the OLED still powers up
+ * (correct Vext polarity) and (b) the hog runs before the SX1262 needs power
+ * (GPIO-hog init priority 41). If CONFIG_POWER_DOMAIN is ever enabled, remove
+ * this hog — it would then contend with vext_ctrl for GPIO36.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	aliases {
+		die-temp0 = &coretemp;
+	};
+};
+
+&lora0 {
+	rx-boosted;
+};
+
+/*
+ * Drive Vext (GPIO36 = gpio1 pin 4) to its active level at boot, mirroring the
+ * reference firmware's digitalWrite(VEXT_ENABLE, LOW). Vext is active-low, so
+ * GPIO_ACTIVE_LOW + output-high => logical-active => physical-low => Vext ON.
+ */
+&gpio1 {
+	vext_enable_hog {
+		gpio-hog;
+		gpios = <4 GPIO_ACTIVE_LOW>;
+		output-high;
+	};
+};
+
+&coretemp {
+	status = "okay";
+};

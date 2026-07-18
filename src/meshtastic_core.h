@@ -32,6 +32,7 @@ extern "C" {
 struct meshtastic_dup_entry {
 	uint32_t src;
 	uint32_t id;
+	uint32_t ms; /* k_uptime_get_32() when recorded, for TTL expiry */
 };
 
 struct meshtastic_context {
@@ -78,6 +79,7 @@ const char *meshtastic_long_name(void);
 const char *meshtastic_short_name(void);
 meshtastic_HardwareModel meshtastic_hw_model(void);
 void meshtastic_fill_user(meshtastic_User *user);
+void meshtastic_fill_device_metadata(meshtastic_DeviceMetadata *md);
 uint32_t meshtastic_runtime_frequency(void);
 const char *meshtastic_runtime_channel_name(void);
 const uint8_t *meshtastic_runtime_psk(size_t *psk_len);

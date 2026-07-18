@@ -39,6 +39,48 @@ config MESHTASTIC_MQTT_PASSWORD
 	help
 	  Default large4cats matches the public mqtt.meshtastic.org broker.
 
+config MESHTASTIC_MQTT_TLS
+	bool "Connect to the MQTT broker over TLS"
+	depends on MQTT_LIB_TLS && NET_SOCKETS_SOCKOPT_TLS && TLS_CREDENTIALS
+	help
+	  Use a TLS-secured transport (typically port 8883). The CA trust anchor
+	  is registered from meshtastic_mqtt_ca_cert.h under the sec tag below,
+	  and the broker certificate is verified against MESHTASTIC_MQTT_TLS_HOSTNAME
+	  (which also drives SNI) — so BROKER_HOST may be a raw IP to bypass DNS.
+
+if MESHTASTIC_MQTT_TLS
+
+config MESHTASTIC_MQTT_TLS_HOSTNAME
+	string "TLS SNI / certificate verification hostname"
+	default "mqtt.meshtastic.org"
+	help
+	  Hostname used for SNI and CN/SAN certificate verification, independent of
+	  BROKER_HOST. Set to the broker's DNS name even when BROKER_HOST is an IP.
+
+config MESHTASTIC_MQTT_TLS_SEC_TAG
+	int "TLS credential security tag for the MQTT CA cert"
+	default 42
+	help
+	  Arbitrary, unique sec tag under which the CA certificate is registered.
+	  Unused when MESHTASTIC_MQTT_TLS_NO_VERIFY is set.
+
+config MESHTASTIC_MQTT_TLS_NO_VERIFY
+	bool "Skip broker certificate verification (encrypted but unauthenticated)"
+	default n
+	help
+	  Establish a TLS-encrypted transport WITHOUT validating the broker
+	  certificate: no CA trust anchor is loaded (meshtastic_mqtt_ca_cert.h is
+	  not compiled in) and peer_verify is NONE. The channel is still encrypted
+	  on the wire, but a man-in-the-middle cannot be detected.
+
+	  Use this only when the on-device mbedTLS build cannot parse the chain the
+	  broker serves (e.g. an RSA-signed Let's Encrypt chain against an
+	  ECDSA-only mbedTLS config). Prefer full verification (leave this off and
+	  embed the CA under the sec tag above) whenever the broker can serve a
+	  chain this build can validate.
+
+endif # MESHTASTIC_MQTT_TLS
+
 config MESHTASTIC_MQTT_ROOT
 	string "MQTT root topic prefix"
 	default "msh/EU_868"

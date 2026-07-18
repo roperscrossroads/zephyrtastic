@@ -3,6 +3,7 @@
  */
 
 #include <errno.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,7 +31,15 @@ struct store_owner_record {
 	uint8_t version;
 	char long_name[OWNER_LONG_NAME_LEN];
 	char short_name[OWNER_SHORT_NAME_LEN];
+	/* Appended after the initial release; loaded only if the stored blob is
+	 * large enough (see setting_set_owner), so older records still load. */
+	uint8_t is_licensed;
+	uint8_t is_unmessagable;
 } __packed;
+
+/* Size of an owner record written before the licensed/unmessagable flags were
+ * appended — used to accept older blobs without the trailing flags. */
+#define STORE_OWNER_RECORD_V1_LEN offsetof(struct store_owner_record, is_licensed)
 
 struct named_config {
 	const char *name;
@@ -67,6 +76,7 @@ static const struct named_config module_names[] = {
 	{"statusmessage", meshtastic_ModuleConfig_statusmessage_tag},
 	{"traffic_management", meshtastic_ModuleConfig_traffic_management_tag},
 	{"tak", meshtastic_ModuleConfig_tak_tag},
+	{"mesh_beacon", meshtastic_ModuleConfig_mesh_beacon_tag},
 };
 
 static struct {
@@ -74,6 +84,8 @@ static struct {
 	bool lock_ready;
 	char long_name[OWNER_LONG_NAME_LEN];
 	char short_name[OWNER_SHORT_NAME_LEN];
+	bool is_licensed;
+	bool is_unmessagable;
 	meshtastic_Channel channels[MESHTASTIC_MAX_CHANNELS];
 	meshtastic_Config configs[ARRAY_SIZE(config_names)];
 	meshtastic_ModuleConfig modules[ARRAY_SIZE(module_names)];
@@ -299,6 +311,13 @@ static bool config_is_valid(const meshtastic_Config *config)
 		       config->payload_variant.device.rebroadcast_mode <=
 			       meshtastic_Config_DeviceConfig_RebroadcastMode_CORE_PORTNUMS_ONLY;
 	case meshtastic_Config_lora_tag:
+		/* Reject the 2.4 GHz region: the port has no wide-LoRa-capable radio
+		 * abstraction, so LORA_24 cannot be honored (firmware gates this on
+		 * RadioLibInterface::wideLora(); AdminModule.cpp). */
+		if (config->payload_variant.lora.region ==
+		    meshtastic_Config_LoRaConfig_RegionCode_LORA_24) {
+			return false;
+		}
 		return config->payload_variant.lora.hop_limit <= 7U;
 	case meshtastic_Config_bluetooth_tag:
 		return config->payload_variant.bluetooth.mode <=
@@ -510,6 +529,33 @@ int meshtastic_config_store_get_channel(uint8_t index, meshtastic_Channel *chann
 	return 0;
 }
 
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+static bool save_suppressed;
+#endif
+
+void meshtastic_config_store_set_save_suppressed(bool suppressed)
+{
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	save_suppressed = suppressed;
+#else
+	(void)suppressed;
+#endif
+}
+
+/*
+ * Route setter persistence through here so an open admin edit transaction can
+ * defer the coalesced flash write until commit
+ * (see meshtastic_config_store_set_save_suppressed()).
+ */
+static void store_schedule_save(void)
+{
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	if (!save_suppressed) {
+		meshtastic_settings_schedule_save();
+	}
+#endif
+}
+
 int meshtastic_config_store_set_channel(uint8_t index, const meshtastic_Channel *channel)
 {
 	int ret;
@@ -528,9 +574,7 @@ int meshtastic_config_store_set_channel(uint8_t index, const meshtastic_Channel 
 		return ret;
 	}
 
-#if defined(CONFIG_MESHTASTIC_SETTINGS)
-	meshtastic_settings_schedule_save();
-#endif
+	store_schedule_save();
 	return 0;
 }
 
@@ -569,9 +613,23 @@ int meshtastic_config_store_set_config(const meshtastic_Config *config)
 		return ret;
 	}
 
-#if defined(CONFIG_MESHTASTIC_SETTINGS)
-	meshtastic_settings_schedule_save();
-#endif
+	store_schedule_save();
+	return 0;
+}
+
+int meshtastic_config_store_set_position_fixed(bool fixed)
+{
+	int idx = index_for_config_tag(meshtastic_Config_position_tag);
+
+	if (idx < 0) {
+		return -EINVAL;
+	}
+
+	store_lock();
+	store.configs[idx].payload_variant.position.fixed_position = fixed;
+	store_unlock();
+
+	store_schedule_save();
 	return 0;
 }
 
@@ -604,9 +662,7 @@ int meshtastic_config_store_set_module(const meshtastic_ModuleConfig *module)
 	store.modules[idx] = *module;
 	store_unlock();
 
-#if defined(CONFIG_MESHTASTIC_SETTINGS)
-	meshtastic_settings_schedule_save();
-#endif
+	store_schedule_save();
 	return 0;
 }
 
@@ -641,9 +697,7 @@ int meshtastic_config_store_set_device_role(meshtastic_Config_DeviceConfig_Role 
 	store_unlock();
 
 	meshtastic_set_device_role(role);
-#if defined(CONFIG_MESHTASTIC_SETTINGS)
-	meshtastic_settings_schedule_save();
-#endif
+	store_schedule_save();
 	return 0;
 }
 
@@ -661,10 +715,38 @@ int meshtastic_config_store_set_rebroadcast_mode(
 	store_unlock();
 
 	meshtastic_set_rebroadcast_mode(mode);
-#if defined(CONFIG_MESHTASTIC_SETTINGS)
-	meshtastic_settings_schedule_save();
-#endif
+	store_schedule_save();
 	return 0;
+}
+
+int meshtastic_config_store_set_owner(const meshtastic_User *user)
+{
+	if (user == NULL) {
+		return -EINVAL;
+	}
+
+	store_lock();
+	copy_string(store.long_name, sizeof(store.long_name), user->long_name);
+	copy_string(store.short_name, sizeof(store.short_name), user->short_name);
+	store.is_licensed = user->is_licensed;
+	store.is_unmessagable = user->has_is_unmessagable && user->is_unmessagable;
+	store_unlock();
+
+	/* mt.long_name / mt.short_name already point at store.* (apply_core). */
+	store_schedule_save();
+	return 0;
+}
+
+void meshtastic_config_store_get_owner_flags(bool *is_licensed, bool *is_unmessagable)
+{
+	store_lock();
+	if (is_licensed != NULL) {
+		*is_licensed = store.is_licensed;
+	}
+	if (is_unmessagable != NULL) {
+		*is_unmessagable = store.is_unmessagable;
+	}
+	store_unlock();
 }
 
 static int setting_get_owner(void *buf, size_t buf_len)
@@ -678,6 +760,8 @@ static int setting_get_owner(void *buf, size_t buf_len)
 	store_lock();
 	copy_string(owner.long_name, sizeof(owner.long_name), store.long_name);
 	copy_string(owner.short_name, sizeof(owner.short_name), store.short_name);
+	owner.is_licensed = store.is_licensed ? 1U : 0U;
+	owner.is_unmessagable = store.is_unmessagable ? 1U : 0U;
 	store_unlock();
 
 	memcpy(buf, &owner, sizeof(owner));
@@ -688,7 +772,9 @@ static int setting_set_owner(const void *buf, size_t len)
 {
 	const struct store_owner_record *owner = buf;
 
-	if (len != sizeof(*owner) || owner->version != STORE_RECORD_VERSION) {
+	/* Accept the pre-flags record (names only) as well as the current one, so
+	 * an upgrade keeps the stored owner instead of resetting it. */
+	if (len < STORE_OWNER_RECORD_V1_LEN || owner->version != STORE_RECORD_VERSION) {
 		return -EINVAL;
 	}
 
@@ -697,6 +783,13 @@ static int setting_set_owner(const void *buf, size_t len)
 			  sizeof(owner->long_name));
 	copy_fixed_string(store.short_name, sizeof(store.short_name), owner->short_name,
 			  sizeof(owner->short_name));
+	if (len >= sizeof(*owner)) {
+		store.is_licensed = (owner->is_licensed != 0U);
+		store.is_unmessagable = (owner->is_unmessagable != 0U);
+	} else {
+		store.is_licensed = false;
+		store.is_unmessagable = false;
+	}
 	store_unlock();
 
 	return 0;

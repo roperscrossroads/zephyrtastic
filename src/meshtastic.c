@@ -28,16 +28,23 @@
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
+#include "meshtastic_sched.h"
 
 #include "meshtastic_settings.h"
 #include "meshtastic_gnss.h"
 #include "meshtastic_mqtt.h"
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+#include "meshtastic_airtime.h"
+#endif
 
 #if defined(CONFIG_MESHTASTIC_BLE)
 int meshtastic_ble_init(void);
 #endif
 #if defined(CONFIG_MESHTASTIC_SERIAL)
 int meshtastic_serial_init(void);
+#endif
+#if defined(CONFIG_MESHTASTIC_TCP)
+int meshtastic_tcp_init(void);
 #endif
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
 int meshtastic_metrics_init(void);
@@ -189,6 +196,57 @@ void meshtastic_fill_user(meshtastic_User *user)
 
 	user->hw_model = meshtastic_hw_model();
 	user->role = meshtastic_device_role();
+
+	meshtastic_config_store_get_owner_flags(&user->is_licensed, &user->is_unmessagable);
+	user->has_is_unmessagable = true;
+}
+
+void meshtastic_fill_device_metadata(meshtastic_DeviceMetadata *md)
+{
+	*md = (meshtastic_DeviceMetadata)meshtastic_DeviceMetadata_init_zero;
+	/* Parses as 2.7.4 — keeps the app above its minimum-version gate. */
+	strncpy(md->firmware_version, "2.7.4.zephyr", sizeof(md->firmware_version) - 1U);
+	md->hasBluetooth = IS_ENABLED(CONFIG_MESHTASTIC_BLE);
+	md->hasWifi = IS_ENABLED(CONFIG_WIFI);
+	md->hasEthernet = IS_ENABLED(CONFIG_NET_L2_ETHERNET);
+	md->canShutdown = false;       /* no PM/poweroff path in the port */
+	md->hasRemoteHardware = false; /* no RemoteHardware module */
+	md->hasPKC = false;            /* no ECDH/PKC key agreement yet */
+	md->role = meshtastic_device_role();
+	md->hw_model = meshtastic_hw_model();
+
+	/*
+	 * Tell the app which module config editors to hide. Unlike the reference
+	 * firmware (which only excludes its platform-absent set), we report this
+	 * port's TRUE module availability: modules with no handler here are marked
+	 * excluded so the app doesn't offer no-op config screens for them. Gate the
+	 * ones the port can build; exclude the rest unconditionally.
+	 */
+	md->excluded_modules =
+		(IS_ENABLED(CONFIG_MESHTASTIC_MQTT) ? 0U
+						    : meshtastic_ExcludedModules_MQTT_CONFIG) |
+		((IS_ENABLED(CONFIG_MESHTASTIC_DEVICE_METRICS) ||
+		  IS_ENABLED(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS))
+			 ? 0U
+			 : meshtastic_ExcludedModules_TELEMETRY_CONFIG) |
+		(IS_ENABLED(CONFIG_MESHTASTIC_BLE) ? 0U
+						   : meshtastic_ExcludedModules_BLUETOOTH_CONFIG) |
+		((IS_ENABLED(CONFIG_WIFI) || IS_ENABLED(CONFIG_NET_L2_ETHERNET))
+			 ? 0U
+			 : meshtastic_ExcludedModules_NETWORK_CONFIG) |
+		/* No handler in the port — always excluded. Note MESHTASTIC_SERIAL is
+		 * the PhoneAPI transport, not the on-mesh Serial module. */
+		meshtastic_ExcludedModules_SERIAL_CONFIG |
+		meshtastic_ExcludedModules_EXTNOTIF_CONFIG |
+		meshtastic_ExcludedModules_STOREFORWARD_CONFIG |
+		meshtastic_ExcludedModules_RANGETEST_CONFIG |
+		meshtastic_ExcludedModules_CANNEDMSG_CONFIG |
+		meshtastic_ExcludedModules_AUDIO_CONFIG |
+		meshtastic_ExcludedModules_REMOTEHARDWARE_CONFIG |
+		meshtastic_ExcludedModules_NEIGHBORINFO_CONFIG |
+		meshtastic_ExcludedModules_AMBIENTLIGHTING_CONFIG |
+		meshtastic_ExcludedModules_DETECTIONSENSOR_CONFIG |
+		meshtastic_ExcludedModules_PAXCOUNTER_CONFIG;
 }
 
 void meshtastic_set_ble_connected(bool connected)
@@ -376,6 +434,13 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	}
 #endif
 
+#if defined(CONFIG_MESHTASTIC_TCP)
+	ret = meshtastic_tcp_init();
+	if (ret < 0) {
+		return ret;
+	}
+#endif
+
 #if defined(CONFIG_MESHTASTIC_MQTT)
 	ret = meshtastic_mqtt_init();
 	if (ret < 0) {
@@ -463,10 +528,32 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 		return ret;
 	}
 
+	uint8_t tier = meshtastic_sched_tier_for(local.portnum);
+
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+	/* Airtime gate: throttle only the node's own periodic background beacons
+	 * (broadcast, fire-and-forget). Requested replies (unicast and/or a caller
+	 * that waits) and every higher tier are never gated. */
+	if (tier == MT_SCHED_TIER_BG && K_TIMEOUT_EQ(wait, K_NO_WAIT) &&
+	    local.to == MESHTASTIC_NODE_BROADCAST) {
+		/* Single scalar, captured once — a direct atomic read is sufficient
+		 * (see the concurrency note in meshtastic_sched.h). */
+		uint8_t max_util = meshtastic_sched_get()->airtime_max_util;
+
+		if (max_util != 0U &&
+		    meshtastic_airtime_channel_util_percent() >= (float)max_util) {
+			meshtastic_sched_stat_airtime_drop();
+			LOG_DBG("airtime gate: suppressed BG broadcast port=%u (chan util >= %u%%)",
+				(unsigned int)local.portnum, max_util);
+			return 0;
+		}
+	}
+#endif
+
 	if (K_TIMEOUT_EQ(wait, K_NO_WAIT)) {
-		ret = meshtastic_radio_send_wire(wire, pkt_len);
+		ret = meshtastic_radio_send_wire_prio(wire, pkt_len, tier);
 	} else {
-		ret = meshtastic_radio_send_wire_wait(wire, pkt_len, wait);
+		ret = meshtastic_radio_send_wire_wait_prio(wire, pkt_len, tier, wait);
 	}
 
 	return send_packet_complete(&local, wire, pkt_len, ret, K_TIMEOUT_EQ(wait, K_FOREVER));
@@ -567,7 +654,7 @@ uint8_t meshtastic_runtime_hop_limit(void)
 	return mt.hop_limit;
 }
 
-#if !defined(CONFIG_MESHTASTIC_GNSS)
+#if !defined(CONFIG_MESHTASTIC_POSITION)
 int meshtastic_send_position(uint32_t dest)
 {
 	ARG_UNUSED(dest);
@@ -614,6 +701,29 @@ int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *
 {
 	ARG_UNUSED(index);
 	ARG_UNUSED(out);
+
+	return -ENOTSUP;
+}
+
+int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite)
+{
+	ARG_UNUSED(node_num);
+	ARG_UNUSED(favorite);
+
+	return -ENOTSUP;
+}
+
+int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored)
+{
+	ARG_UNUSED(node_num);
+	ARG_UNUSED(ignored);
+
+	return -ENOTSUP;
+}
+
+int meshtastic_nodedb_remove(uint32_t node_num)
+{
+	ARG_UNUSED(node_num);
 
 	return -ENOTSUP;
 }

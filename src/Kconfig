@@ -26,7 +26,26 @@ menuconfig MESHTASTIC
 if MESHTASTIC
 
 config MESHTASTIC_PHONEAPI
-	bool
+	bool "Phone-app (client) API core"
+	help
+	  Client-facing FromRadio/ToRadio protocol core shared by the BLE, serial
+	  and TCP transports. Normally selected automatically by whichever
+	  transport is enabled; can also be turned on directly for a custom
+	  transport or for host-side tests.
+
+config MESHTASTIC_ADMIN
+	bool "Handle AdminMessage config-write from the connected app"
+	depends on MESHTASTIC_PHONEAPI
+	select REBOOT
+	default y
+	help
+	  Allow the directly-connected client app (BLE/serial/TCP) to WRITE
+	  settings via AdminMessage (portnum ADMIN_APP), not just read them.
+	  Handles get_/set_ config, module config, channels and owner,
+	  begin/commit edit transactions, and reboot. Local (from == this node)
+	  admin only — no session-passkey validation, PKC, or remote/mesh admin.
+	  Persistence of writes across reboot additionally requires
+	  MESHTASTIC_SETTINGS; without it writes apply live but are RAM-only.
 
 menuconfig MESHTASTIC_SETTINGS
 	bool "Persist Meshtastic configuration with Zephyr settings"
@@ -56,15 +75,19 @@ rsource "Kconfig.core"
 rsource "Kconfig.nodedb"
 rsource "Kconfig.nodeinfo"
 rsource "Kconfig.message"
+rsource "Kconfig.traceroute"
 rsource "Kconfig.ble"
 rsource "Kconfig.serial"
+rsource "Kconfig.tcp"
 rsource "Kconfig.shell"
+rsource "Kconfig.position"
 rsource "Kconfig.gnss"
 rsource "Kconfig.device_metrics"
 rsource "Kconfig.airtime"
 rsource "Kconfig.environment_metrics"
 rsource "Kconfig.telemetry"
 rsource "Kconfig.mqtt"
+rsource "Kconfig.wifi_auto"
 
 menu "LoRa transmit retry"
 

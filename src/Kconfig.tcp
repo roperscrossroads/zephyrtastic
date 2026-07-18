@@ -1,0 +1,52 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_TCP
+	bool "Meshtastic TCP PhoneAPI transport"
+	depends on NETWORKING && NET_TCP && NET_SOCKETS
+	select MESHTASTIC_PHONEAPI
+	select NET_TCP_KEEPALIVE
+	help
+	  Expose the Meshtastic PhoneAPI over TCP using stock StreamAPI framing
+	  (0x94 0xc3 <len16> <protobuf>), so the Android app or the reference
+	  client `meshtastic --host <ip>` can connect over IP. One client at a
+	  time. Unlike the serial transport this needs no dedicated UART, so it
+	  coexists with the console/shell and MQTT on the WiFi build.
+
+if MESHTASTIC_TCP
+
+config MESHTASTIC_TCP_PORT
+	int "TCP PhoneAPI listen port"
+	default 4403
+	range 1 65535
+	help
+	  Stock Meshtastic clients default to 4403.
+
+config MESHTASTIC_TCP_FROMRADIO_QUEUE_SIZE
+	int "TCP FromRadio queue depth"
+	default 8
+	range 8 64
+	help
+	  Number of encoded FromRadio frames retained for the TCP phone client.
+
+config MESHTASTIC_TCP_THREAD_STACK_SIZE
+	int "TCP PhoneAPI thread stack size"
+	default 4096
+
+config MESHTASTIC_TCP_THREAD_PRIORITY
+	int "TCP PhoneAPI thread priority"
+	default 8
+	help
+	  Priority for the TCP accept/serve worker. Keep below LoRa packet
+	  processing so broker I/O cannot delay local mesh sends.
+
+config MESHTASTIC_TCP_IDLE_TIMEOUT_SEC
+	int "Drop a client after this many seconds of silence (0 = never)"
+	default 300
+	help
+	  Backstop for a client that vanished with no clean close and no
+	  keepalive drop. A connected app resets this on any traffic/heartbeat;
+	  "newest wins" preemption and SO_KEEPALIVE (if NET_TCP_KEEPALIVE) are
+	  the primary mechanisms, so this can be generous.
+
+endif # MESHTASTIC_TCP

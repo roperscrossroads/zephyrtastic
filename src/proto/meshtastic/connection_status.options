@@ -1,0 +1,3 @@
+# nanopb options for connection_status.proto (admin.proto dependency).
+# Only the WiFi SSID string needs bounding.
+*WifiConnectionStatus.ssid max_size:33

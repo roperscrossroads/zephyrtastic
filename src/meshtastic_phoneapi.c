@@ -16,6 +16,13 @@
 
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
+#include "meshtastic_sched.h"
+#if IS_ENABLED(CONFIG_MESHTASTIC_ADMIN)
+#include "meshtastic_admin.h"
+#endif
+#if IS_ENABLED(CONFIG_MESHTASTIC_NODEINFO)
+#include <zephyr/meshtastic/nodeinfo.h>
+#endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -213,22 +220,104 @@ void meshtastic_phoneapi_current_frame_reset(struct meshtastic_phoneapi *api)
 	k_mutex_unlock(&api->lock);
 }
 
+/* A FromRadio frame is "droppable" if the app can recover the information from
+ * later traffic or the NodeDB: position/telemetry/nodeinfo mesh packets and
+ * ephemeral queueStatus. Everything else (text, routing, admin, encrypted DMs,
+ * my_info, rebooted) is protected from a burst evicting it before the phone
+ * reads it. */
+static bool fromradio_droppable(const meshtastic_FromRadio *from)
+{
+	if (from->which_payload_variant == meshtastic_FromRadio_queueStatus_tag) {
+		return true;
+	}
+	if (from->which_payload_variant == meshtastic_FromRadio_packet_tag &&
+	    from->packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
+		switch (from->packet.decoded.portnum) {
+		case meshtastic_PortNum_POSITION_APP:
+		case meshtastic_PortNum_TELEMETRY_APP:
+		case meshtastic_PortNum_NODEINFO_APP:
+			return true;
+		default:
+			return false;
+		}
+	}
+	return false;
+}
+
+/* Remove the frame at tail-offset @p k (0 = oldest), preserving order. Caller
+ * holds api->lock. */
+static void queue_evict_at(struct meshtastic_phoneapi *api, uint8_t k)
+{
+	for (uint8_t i = k; i + 1U < api->count; i++) {
+		uint8_t cur = (uint8_t)((api->tail + i) % api->queue_size);
+		uint8_t nxt = (uint8_t)((api->tail + i + 1U) % api->queue_size);
+
+		api->queue[cur] = api->queue[nxt];
+	}
+	api->head = (uint8_t)((api->head + api->queue_size - 1U) % api->queue_size);
+	api->count--;
+}
+
+/* Drop the oldest frame (tail). Caller holds api->lock. */
+static void queue_drop_oldest(struct meshtastic_phoneapi *api)
+{
+	meshtastic_sched_stat_phone_drop(api->queue[api->tail].protected);
+	api->tail = (uint8_t)((api->tail + 1U) % api->queue_size);
+	api->count--;
+}
+
 int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 					  const meshtastic_FromRadio *from)
 {
 	struct meshtastic_phoneapi_frame frame;
+	bool incoming_protected = !fromradio_droppable(from);
+	/* Capture the single eviction policy field once so it stays stable for the
+	 * whole decision below (a shell writer could otherwise flip it mid-way). */
+	enum meshtastic_sched_phone_evict evict = meshtastic_sched_get()->phone_evict;
 	int ret;
 
 	ret = meshtastic_phoneapi_encode_fromradio_frame(from, &frame);
 	if (ret < 0) {
 		return ret;
 	}
+	frame.protected = incoming_protected;
 
 	k_mutex_lock(&api->lock, K_FOREVER);
 	if (api->count == api->queue_size) {
-		api->tail = (uint8_t)((api->tail + 1U) % api->queue_size);
-		api->count--;
-		LOG_WRN("%s FromRadio queue full, dropping oldest frame", api->name);
+		if (evict == MT_SCHED_PHONE_PROTECT) {
+			int victim = -1;
+
+			for (uint8_t i = 0; i < api->count; i++) {
+				uint8_t idx = (uint8_t)((api->tail + i) % api->queue_size);
+
+				if (!api->queue[idx].protected) {
+					victim = i;
+					break;
+				}
+			}
+
+			if (victim >= 0) {
+				queue_evict_at(api, (uint8_t)victim);
+				meshtastic_sched_stat_phone_drop(false);
+				LOG_DBG("%s queue full, evicted a droppable frame", api->name);
+			} else if (!incoming_protected) {
+				/* All queued frames are protected and the newcomer is
+				 * droppable — drop the newcomer, not a protected frame. */
+				k_mutex_unlock(&api->lock);
+				meshtastic_sched_stat_phone_drop(false);
+				LOG_DBG("%s queue full (all protected), dropping incoming "
+					"background frame", api->name);
+				return 0;
+			} else {
+				/* Saturated with protected frames — last resort. */
+				queue_drop_oldest(api);
+				LOG_WRN("%s queue full of protected frames, dropping oldest",
+					api->name);
+			}
+		} else {
+			queue_drop_oldest(api);
+			LOG_WRN("%s FromRadio queue full, dropping oldest frame", api->name);
+		}
 	}
 
 	api->queue[api->head] = frame;
@@ -332,22 +421,46 @@ toradio_decoded:
 	switch (to.which_payload_variant) {
 	case meshtastic_ToRadio_packet_tag:
 		LOG_DBG("%s ToRadio packet id=%u", api->name, to.packet.id);
+#if IS_ENABLED(CONFIG_MESHTASTIC_ADMIN)
+		if (to.packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
+		    to.packet.decoded.portnum == meshtastic_PortNum_ADMIN_APP &&
+		    to.packet.to == meshtastic_get_node_id() &&
+		    meshtastic_admin_handle_local(&to.packet)) {
+			/* Consumed as local admin — do NOT transmit on the mesh. Still
+			 * emit a QueueStatus so the phone's StreamAPI stays in sync. */
+			meshtastic_phoneapi_enqueue_queue_status(api, 0, to.packet.id);
+			break;
+		}
+#endif
 		ret = meshtastic_send_mesh_pb(&to.packet);
 		meshtastic_phoneapi_enqueue_queue_status(api, ret, to.packet.id);
 		break;
 	case meshtastic_ToRadio_want_config_id_tag:
 		LOG_DBG("%s ToRadio want_config_id=%u", api->name, to.want_config_id);
+#if IS_ENABLED(CONFIG_MESHTASTIC_ADMIN)
+		meshtastic_admin_reset(); /* clear stale edit txn on (re)connect */
+#endif
 		meshtastic_phoneapi_enqueue_phone_config(api, to.want_config_id);
 		break;
 	case meshtastic_ToRadio_disconnect_tag:
 		LOG_DBG("%s ToRadio disconnect", api->name);
+#if IS_ENABLED(CONFIG_MESHTASTIC_ADMIN)
+		meshtastic_admin_reset();
+#endif
 		if (api->disconnect != NULL) {
 			api->disconnect(api);
 		}
 		break;
 	case meshtastic_ToRadio_heartbeat_tag:
-		LOG_DBG("%s ToRadio heartbeat", api->name);
+		LOG_DBG("%s ToRadio heartbeat nonce=%u", api->name, to.heartbeat.nonce);
 		meshtastic_phoneapi_enqueue_queue_status(api, 0, 0U);
+#if IS_ENABLED(CONFIG_MESHTASTIC_NODEINFO)
+		/* nonce==1 asks the node to re-announce its NodeInfo so peers can
+		 * re-learn it (e.g. after a reboot); mirrors firmware PhoneAPI.cpp. */
+		if (to.heartbeat.nonce == 1U) {
+			(void)meshtastic_send_node_info(MESHTASTIC_NODE_BROADCAST);
+		}
+#endif
 		break;
 	default:
 		LOG_WRN("%s unsupported ToRadio variant %u", api->name,

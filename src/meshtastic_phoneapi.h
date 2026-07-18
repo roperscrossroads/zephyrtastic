@@ -20,6 +20,7 @@ struct meshtastic_phoneapi;
 struct meshtastic_phoneapi_frame {
 	uint8_t data[MESHTASTIC_API_FRAME_MAX];
 	uint16_t len;
+	bool protected; /* survives selective eviction (see meshtastic sched phone.evict) */
 };
 
 typedef void (*meshtastic_phoneapi_data_ready_cb_t)(struct meshtastic_phoneapi *api);
@@ -32,9 +33,12 @@ enum meshtastic_phoneapi_config_state {
 	MESHTASTIC_PHONEAPI_CONFIG_DEVICE_UI,
 	MESHTASTIC_PHONEAPI_CONFIG_NODE_INFO,
 	MESHTASTIC_PHONEAPI_CONFIG_METADATA,
+	MESHTASTIC_PHONEAPI_CONFIG_REGION_PRESETS,
 	MESHTASTIC_PHONEAPI_CONFIG_CHANNELS,
 	MESHTASTIC_PHONEAPI_CONFIG_CONFIGS,
 	MESHTASTIC_PHONEAPI_CONFIG_MODULES,
+	MESHTASTIC_PHONEAPI_CONFIG_OTHER_NODEINFOS,
+	MESHTASTIC_PHONEAPI_CONFIG_FILEMANIFEST,
 	MESHTASTIC_PHONEAPI_CONFIG_QUEUE_STATUS,
 	MESHTASTIC_PHONEAPI_CONFIG_COMPLETE,
 };

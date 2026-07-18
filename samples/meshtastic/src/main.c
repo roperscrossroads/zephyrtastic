@@ -74,7 +74,7 @@ int main(void)
 		.frequency = 865100000U,
 		.tx_power = CONFIG_MESHTASTIC_TX_POWER,
 #else
-		.frequency = MESHTASTIC_FREQ_EU,
+		.frequency = MESHTASTIC_FREQ_US,
 		/* hop_limit and tx_power: 0 → use Kconfig defaults */
 #endif
 	};
@@ -101,19 +101,11 @@ int main(void)
 	 * mesh automatically by the subsystem; see CONFIG_MESHTASTIC_NODEINFO.
 	 */
 
-	/* Periodically broadcast a text message. */
-	while (true) {
-		// hello from CONFIG_BOARD_TARGET
-		ret = meshtastic_send_text(MESHTASTIC_NODE_BROADCAST,
-					   "Hello from " CONFIG_BOARD_TARGET "!");
-		if (ret < 0) {
-			LOG_ERR("meshtastic_send_text failed (%d)", ret);
-		} else {
-			LOG_INF("Broadcast sent");
-		}
-
-		k_sleep(K_SECONDS(300));
-	}
+	/* Automatic periodic text broadcast disabled: the node still
+	 * announces NodeInfo and relays mesh traffic; it just no longer spams
+	 * "Hello from ...". Park main so the app thread stays alive. */
+	(void)ret;
+	k_sleep(K_FOREVER);
 
 	return 0;
 }

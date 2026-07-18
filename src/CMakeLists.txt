@@ -24,6 +24,12 @@ if(CONFIG_MESHTASTIC)
   if(CONFIG_MESHTASTIC_MQTT)
     list(APPEND MESHTASTIC_NANOPB_PROTOS proto/meshtastic/mqtt.proto)
   endif()
+  if(CONFIG_MESHTASTIC_ADMIN)
+    list(APPEND MESHTASTIC_NANOPB_PROTOS
+      proto/meshtastic/connection_status.proto
+      proto/meshtastic/admin.proto
+    )
+  endif()
   zephyr_nanopb_sources(meshtastic ${MESHTASTIC_NANOPB_PROTOS})
 
   target_include_directories(meshtastic PRIVATE
@@ -36,11 +42,13 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources(
     meshtastic.c
     meshtastic_channels.c
+    meshtastic_clock.c
     meshtastic_config_store.c
     meshtastic_modules.c
     meshtastic_packet.c
     meshtastic_radio.c
     meshtastic_outbound.c
+    meshtastic_sched.c
     meshtastic_router.c
     meshtastic_routing.c
     meshtastic_settings_apply.c
@@ -50,10 +58,13 @@ if(CONFIG_MESHTASTIC)
     meshtastic_phoneapi.c
     meshtastic_phoneapi_config.c
   )
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN meshtastic_admin.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE meshtastic_ble.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SERIAL meshtastic_serial.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_TCP meshtastic_tcp.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SHELL meshtastic_shell.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_NODEDB meshtastic_nodedb.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_POSITION meshtastic_position.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_GNSS meshtastic_gnss.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_AIRTIME meshtastic_airtime.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_DEVICE_METRICS meshtastic_metrics.c)
@@ -61,6 +72,8 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_TELEMETRY_WANT_RESPONSE meshtastic_telemetry_common.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_NODEINFO meshtastic_nodeinfo.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_MESSAGE meshtastic_message.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_TRACEROUTE meshtastic_traceroute.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_MQTT meshtastic_mqtt.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_WIFI_AUTOCONNECT meshtastic_wifi_auto.c)
 
 endif()
