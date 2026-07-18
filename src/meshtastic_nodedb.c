@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
 #include <pb_decode.h>
@@ -17,6 +18,7 @@
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
 
+#include "meshtastic_clock.h"
 #include "meshtastic_modules.h"
 
 #include "meshtastic/deviceonly.pb.h"
@@ -196,11 +198,32 @@ static struct nodedb_entry *get_or_create_entry_locked(uint32_t node_num)
 
 struct warm_key {
 	uint32_t num;       /* 0 == empty slot */
-	uint32_t last_seen; /* uptime seconds; least-recently-seen evicted first */
+	uint32_t last_seen; /* recency for LRU; wall-clock epoch once seeded (see warm_now) */
 	uint8_t pub[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
 };
 
+/* Persisted record: last_seen (LE32) + public key. Restoring recency keeps warm
+ * LRU meaningful across reboots. Legacy records are key-only (32 B) — see set. */
+#define MTNODE_REC_LEN (sizeof(uint32_t) + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN)
+
 static struct warm_key warm_keys[CONFIG_MESHTASTIC_NODEDB_WARM_KEYS];
+
+/* Set when a warm eviction (or boot) may have orphaned an NVS record. The
+ * save-work handler then prunes any persisted mtnode/<id> whose node is no
+ * longer in the warm ring, so the durable store stays == the RAM ring
+ * (bounded; no unbounded NVS growth, no boot-load thrash). */
+static bool nodekeys_reconcile;
+
+/* Recency stamp for warm entries: wall-clock epoch when the SNTP/GNSS clock is
+ * seeded, else a small uptime-relative value. Epoch values (post-sync, and those
+ * restored from NVS) always outrank pre-sync uptime stamps, so a persisted key's
+ * true recency wins the LRU over a freshly-heard-but-unsynced boot window. */
+static uint32_t warm_now(void)
+{
+	uint32_t epoch = meshtastic_clock_now_epoch();
+
+	return (epoch != 0U) ? epoch : uptime_seconds();
+}
 
 static struct warm_key *warm_find_locked(uint32_t num)
 {
@@ -212,7 +235,41 @@ static struct warm_key *warm_find_locked(uint32_t num)
 	return NULL;
 }
 
-static void warm_upsert_locked(uint32_t num, const uint8_t *pub)
+/* Slot to (re)write for @num: its existing slot, else an empty slot, else a
+ * least-recently-seen entry to evict — but keys whose node is still active in
+ * the hot store (favorites are always hot-resident) are protected, so an active
+ * conversation never loses its PKC key to a burst of new nodes. Only if every
+ * entry is protected (warm smaller than the hot store) do we fall back to the
+ * global LRU, so a store always succeeds. */
+static struct warm_key *warm_slot_for_locked(uint32_t num)
+{
+	struct warm_key *slot = warm_find_locked(num);
+	struct warm_key *victim = NULL;   /* LRU among evictable (hot-absent) keys */
+	struct warm_key *fallback = NULL; /* global LRU, used only if all protected */
+
+	if (slot != NULL) {
+		return slot;
+	}
+
+	for (size_t i = 0U; i < ARRAY_SIZE(warm_keys); i++) {
+		if (warm_keys[i].num == 0U) {
+			return &warm_keys[i];
+		}
+		if (fallback == NULL || warm_keys[i].last_seen < fallback->last_seen) {
+			fallback = &warm_keys[i];
+		}
+		if (find_entry_locked(warm_keys[i].num) != NULL) {
+			continue; /* protected: node still active in the hot store */
+		}
+		if (victim == NULL || warm_keys[i].last_seen < victim->last_seen) {
+			victim = &warm_keys[i];
+		}
+	}
+
+	return (victim != NULL) ? victim : fallback;
+}
+
+static void warm_place_locked(uint32_t num, const uint8_t *pub, uint32_t last_seen)
 {
 	struct warm_key *slot;
 
@@ -220,24 +277,20 @@ static void warm_upsert_locked(uint32_t num, const uint8_t *pub)
 		return;
 	}
 
-	slot = warm_find_locked(num);
-	if (slot == NULL) {
-		/* Prefer an empty slot; otherwise evict the least-recently-seen. */
-		slot = &warm_keys[0];
-		for (size_t i = 0U; i < ARRAY_SIZE(warm_keys); i++) {
-			if (warm_keys[i].num == 0U) {
-				slot = &warm_keys[i];
-				break;
-			}
-			if (warm_keys[i].last_seen < slot->last_seen) {
-				slot = &warm_keys[i];
-			}
-		}
+	slot = warm_slot_for_locked(num);
+	if (slot->num != 0U && slot->num != num) {
+		/* Overwriting a different node evicts it; its NVS record is now an
+		 * orphan. Flag a reconcile so the next save prunes it. */
+		nodekeys_reconcile = true;
 	}
-
 	slot->num = num;
-	slot->last_seen = uptime_seconds();
+	slot->last_seen = last_seen;
 	memcpy(slot->pub, pub, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+}
+
+static void warm_upsert_locked(uint32_t num, const uint8_t *pub)
+{
+	warm_place_locked(num, pub, warm_now());
 }
 
 static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
@@ -251,15 +304,89 @@ static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUB
 	return true;
 }
 
+/* Max orphaned NVS records pruned per reconcile pass. A larger backlog (e.g. a
+ * device upgrading from the pre-bounded store) is drained across successive
+ * saves — see the overflow reschedule below. */
+#define WARM_RECONCILE_BATCH 32U
+
+struct warm_reconcile_ctx {
+	uint32_t orphans[WARM_RECONCILE_BATCH];
+	size_t count;
+	bool overflow;
+};
+
+/* Direct-load callback over the mtnode subtree: collect ids that are NOT in the
+ * warm ring (orphans to prune). Robust to the key arriving as "mtnode/<id>" or
+ * bare "<id>" — parse the last path component. */
+static int warm_reconcile_cb(const char *key, size_t len, settings_read_cb read_cb,
+			     void *cb_arg, void *param)
+{
+	struct warm_reconcile_ctx *ctx = param;
+	const char *id = strrchr(key, '/');
+	uint32_t num;
+	char *endptr;
+	bool orphan;
+
+	ARG_UNUSED(len);
+	ARG_UNUSED(read_cb);
+	ARG_UNUSED(cb_arg);
+
+	id = (id != NULL) ? id + 1 : key;
+	num = (uint32_t)strtoul(id, &endptr, 16);
+	if (*endptr != '\0' || num == 0U) {
+		return 0;
+	}
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	orphan = (warm_find_locked(num) == NULL);
+	k_mutex_unlock(&nodedb_lock);
+
+	if (!orphan) {
+		return 0;
+	}
+	if (ctx->count < ARRAY_SIZE(ctx->orphans)) {
+		ctx->orphans[ctx->count++] = num;
+	} else {
+		ctx->overflow = true;
+	}
+	return 0;
+}
+
+static void nodekeys_schedule_save(void);
+
 static void nodekeys_save_work_handler(struct k_work *work)
 {
 	int ret;
 
 	ARG_UNUSED(work);
 
+	if (nodekeys_reconcile) {
+		struct warm_reconcile_ctx ctx = {.count = 0U, .overflow = false};
+		char name[SETTINGS_MAX_NAME_LEN + 1];
+
+		nodekeys_reconcile = false;
+		(void)settings_load_subtree_direct(MTNODE_SUBTREE, warm_reconcile_cb, &ctx);
+
+		for (size_t i = 0U; i < ctx.count; i++) {
+			(void)snprintk(name, sizeof(name), MTNODE_SUBTREE "/%08x",
+				       ctx.orphans[i]);
+			(void)settings_delete(name);
+		}
+		if (ctx.count > 0U) {
+			LOG_DBG("NodeDB pruned %zu orphaned key(s) from NVS", ctx.count);
+		}
+		if (ctx.overflow) {
+			nodekeys_reconcile = true; /* more to prune next pass */
+		}
+	}
+
 	ret = settings_save_subtree(MTNODE_SUBTREE);
 	if (ret < 0) {
 		LOG_WRN("NodeDB key save failed (%d)", ret);
+	}
+
+	if (nodekeys_reconcile) {
+		nodekeys_schedule_save();
 	}
 }
 
@@ -273,12 +400,31 @@ static void nodekeys_schedule_save(void)
 
 static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
-	uint8_t buf[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
+	uint8_t buf[MTNODE_REC_LEN];
 	uint32_t node_num;
+	uint32_t last_seen;
+	const uint8_t *pub;
 	char *endptr;
 	ssize_t read;
 
-	if (len != sizeof(buf)) {
+	if (len == MTNODE_REC_LEN) {
+		/* Current format: last_seen (LE32) + public key. */
+		read = read_cb(cb_arg, buf, MTNODE_REC_LEN);
+		if (read != (ssize_t)MTNODE_REC_LEN) {
+			return 0;
+		}
+		last_seen = sys_get_le32(buf);
+		pub = buf + sizeof(uint32_t);
+	} else if (len == MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) {
+		/* Legacy key-only record (pre-recency): restore the key, but rank it
+		 * oldest (last_seen 0) so it's evicted first and re-stamped on save. */
+		read = read_cb(cb_arg, buf, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+		if (read != (ssize_t)MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) {
+			return 0;
+		}
+		last_seen = 0U;
+		pub = buf;
+	} else {
 		LOG_WRN("Ignoring persisted node key '%s' with unexpected size %zu", key, len);
 		return 0;
 	}
@@ -288,15 +434,10 @@ static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, v
 		return 0;
 	}
 
-	read = read_cb(cb_arg, buf, sizeof(buf));
-	if (read != (ssize_t)sizeof(buf)) {
-		return 0;
-	}
-
 	/* Restore into the warm tier, not the hot store: keeps the key reachable
 	 * for PKC without occupying a hot record slot (avoids restore thrash). */
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
-	warm_upsert_locked(node_num, buf);
+	warm_place_locked(node_num, pub, last_seen);
 	k_mutex_unlock(&nodedb_lock);
 
 	return 0;
@@ -314,8 +455,14 @@ static int nodekeys_export(int (*export_func)(const char *name, const void *val,
 			continue;
 		}
 
+		uint8_t rec[MTNODE_REC_LEN];
+
+		sys_put_le32(warm_keys[i].last_seen, rec);
+		memcpy(rec + sizeof(uint32_t), warm_keys[i].pub,
+		       MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+
 		(void)snprintk(name, sizeof(name), MTNODE_SUBTREE "/%08x", warm_keys[i].num);
-		ret = export_func(name, warm_keys[i].pub, sizeof(warm_keys[i].pub));
+		ret = export_func(name, rec, sizeof(rec));
 		if (ret < 0) {
 			break;
 		}
@@ -508,6 +655,57 @@ int meshtastic_nodedb_copy_pubkey(uint32_t node_num,
 	return ret;
 }
 
+size_t meshtastic_nodedb_warm_count(void)
+{
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	size_t n = 0U;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	for (size_t i = 0U; i < ARRAY_SIZE(warm_keys); i++) {
+		if (warm_keys[i].num != 0U) {
+			n++;
+		}
+	}
+	k_mutex_unlock(&nodedb_lock);
+	return n;
+#else
+	return 0U;
+#endif
+}
+
+int meshtastic_nodedb_warm_get(size_t index, uint32_t *num, uint32_t *last_seen)
+{
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	int ret = -ENOENT;
+	size_t seen = 0U;
+
+	if (num == NULL || last_seen == NULL) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	for (size_t i = 0U; i < ARRAY_SIZE(warm_keys); i++) {
+		if (warm_keys[i].num == 0U) {
+			continue;
+		}
+		if (seen == index) {
+			*num = warm_keys[i].num;
+			*last_seen = warm_keys[i].last_seen;
+			ret = 0;
+			break;
+		}
+		seen++;
+	}
+	k_mutex_unlock(&nodedb_lock);
+	return ret;
+#else
+	ARG_UNUSED(index);
+	ARG_UNUSED(num);
+	ARG_UNUSED(last_seen);
+	return -ENOTSUP;
+#endif
+}
+
 int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *out)
 {
 	if (out == NULL) {
@@ -607,6 +805,13 @@ int meshtastic_nodedb_init(void)
 	 * settings subsystem is up (settings_subsys_init ran earlier in
 	 * meshtastic_init). Runs outside the lock: nodekeys_set() takes it. */
 	(void)settings_load_subtree(MTNODE_SUBTREE);
+
+	/* Prune any NVS records that didn't fit the warm ring on restore (or that a
+	 * pre-bounded build left behind), so the durable store converges to the RAM
+	 * ring. Deferred to the save-work so the flash writes happen off the boot
+	 * path. */
+	nodekeys_reconcile = true;
+	nodekeys_schedule_save();
 #endif
 
 	return (entry == NULL) ? -ENOMEM : 0;

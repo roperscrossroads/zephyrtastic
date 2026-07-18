@@ -910,6 +910,36 @@ static int cmd_nodedb_list(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_nodedb_warm(const struct shell *sh, size_t argc, char **argv)
+{
+	size_t count;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	count = meshtastic_nodedb_warm_count();
+	shell_print(sh, "warm keys: %u", (unsigned int)count);
+
+	for (size_t i = 0U; i < count; i++) {
+		uint32_t num;
+		uint32_t last_seen;
+		const char *kind;
+
+		if (meshtastic_nodedb_warm_get(i, &num, &last_seen) < 0) {
+			break;
+		}
+
+		/* Distinguish a persisted wall-clock stamp (epoch, > ~2001) from a
+		 * pre-sync uptime stamp or a legacy-restored 0. */
+		kind = (last_seen > 1000000000U) ? "epoch"
+			: (last_seen == 0U) ? "none" : "uptime";
+		shell_print(sh, "0x%08x last_seen=%u (%s)", num,
+			    (unsigned int)last_seen, kind);
+	}
+
+	return 0;
+}
+
 static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 {
 	struct meshtastic_nodedb_node node;
@@ -965,6 +995,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodedb_cmds,
 			       SHELL_CMD(show, NULL,
 					 SHELL_HELP("Show one NodeDB entry.", "<node|0xnode>"),
 					 cmd_nodedb_show),
+			       SHELL_CMD(warm, NULL,
+					 SHELL_HELP("List warm key-tier entries (num + LRU recency).",
+						    NULL),
+					 cmd_nodedb_warm),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_NODEDB */
 

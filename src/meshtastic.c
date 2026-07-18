@@ -750,6 +750,20 @@ int meshtastic_nodedb_copy_pubkey(uint32_t node_num,
 	return -ENOTSUP;
 }
 
+size_t meshtastic_nodedb_warm_count(void)
+{
+	return 0U;
+}
+
+int meshtastic_nodedb_warm_get(size_t index, uint32_t *num, uint32_t *last_seen)
+{
+	ARG_UNUSED(index);
+	ARG_UNUSED(num);
+	ARG_UNUSED(last_seen);
+
+	return -ENOTSUP;
+}
+
 int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite)
 {
 	ARG_UNUSED(node_num);

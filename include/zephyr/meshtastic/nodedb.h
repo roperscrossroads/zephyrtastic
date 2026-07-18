@@ -89,6 +89,26 @@ int meshtastic_nodedb_copy_pubkey(uint32_t node_num,
 				  uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
 
 /**
+ * @brief Number of live entries in the warm key tier.
+ *
+ * Returns 0 when the warm tier is not compiled in (no key persistence).
+ */
+size_t meshtastic_nodedb_warm_count(void);
+
+/**
+ * @brief Read the @p index-th live warm-tier entry (introspection/tuning).
+ *
+ * Entries are indexed 0 .. meshtastic_nodedb_warm_count()-1 over the non-empty
+ * slots. @p last_seen is the LRU recency stamp (wall-clock epoch once seeded).
+ *
+ * @retval 0 Entry returned.
+ * @retval -EINVAL @p num or @p last_seen is NULL.
+ * @retval -ENOENT @p index is out of range.
+ * @retval -ENOTSUP The warm tier is not compiled in.
+ */
+int meshtastic_nodedb_warm_get(size_t index, uint32_t *num, uint32_t *last_seen);
+
+/**
  * @brief Mark a node favorited / un-favorited in the in-RAM NodeDB.
  *
  * Favorited nodes are protected from cache eviction. Best-effort: acting on a
