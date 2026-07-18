@@ -170,11 +170,15 @@ struct test_state {
 	struct k_sem tx_sem;
 	struct meshtastic_packet last_rx;
 	struct meshtastic_packet last_event_packet;
+	struct meshtastic_packet last_received_packet;
 	uint8_t last_rx_payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	uint8_t last_event_payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	uint8_t last_received_payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	size_t last_rx_payload_len;
 	size_t last_event_payload_len;
+	size_t last_received_payload_len;
 	struct meshtastic_event last_event;
+	struct meshtastic_event last_received;
 	uint32_t recv_count;
 	uint32_t event_count;
 };
@@ -185,11 +189,15 @@ static void reset_callbacks_state(void)
 {
 	memset(&state.last_rx, 0, sizeof(state.last_rx));
 	memset(&state.last_event_packet, 0, sizeof(state.last_event_packet));
+	memset(&state.last_received_packet, 0, sizeof(state.last_received_packet));
 	memset(state.last_rx_payload, 0, sizeof(state.last_rx_payload));
 	memset(state.last_event_payload, 0, sizeof(state.last_event_payload));
+	memset(state.last_received_payload, 0, sizeof(state.last_received_payload));
 	memset(&state.last_event, 0, sizeof(state.last_event));
+	memset(&state.last_received, 0, sizeof(state.last_received));
 	state.last_rx_payload_len = 0U;
 	state.last_event_payload_len = 0U;
+	state.last_received_payload_len = 0U;
 	state.recv_count = 0U;
 	state.event_count = 0U;
 	k_sem_reset(&state.rx_sem);
@@ -256,6 +264,23 @@ static void on_event(const struct meshtastic_event *event, void *user_data)
 		memset(&state.last_event_packet, 0, sizeof(state.last_event_packet));
 		memset(state.last_event_payload, 0, sizeof(state.last_event_payload));
 		state.last_event_payload_len = 0U;
+	}
+	/*
+	 * Capture PACKET_RECEIVED into a dedicated slot so assertions on a
+	 * delivered packet survive a later async event (e.g. the relay TX_DONE
+	 * a broadcast downlink also produces) clobbering the shared last_event.
+	 */
+	if (event->type == MESHTASTIC_EVENT_PACKET_RECEIVED) {
+		state.last_received = *event;
+		if (event->packet != NULL) {
+			state.last_received_packet = *event->packet;
+			state.last_received_packet.payload = state.last_received_payload;
+			state.last_received_payload_len = event->packet->payload_len;
+			if (event->packet->payload_len > 0U) {
+				memcpy(state.last_received_payload, event->packet->payload,
+				       event->packet->payload_len);
+			}
+		}
 	}
 	state.event_count++;
 	if (event->type == MESHTASTIC_EVENT_TX_DONE || event->type == MESHTASTIC_EVENT_TX_FAILED) {
@@ -332,6 +357,16 @@ static void assert_event_payload(const void *expected, size_t expected_len)
 	if (expected_len > 0U) {
 		zassert_mem_equal(state.last_event_payload, expected, expected_len,
 				  "unexpected event payload");
+	}
+}
+
+static void assert_received_payload(const void *expected, size_t expected_len)
+{
+	zassert_equal(state.last_received_payload_len, expected_len,
+		      "unexpected received payload len");
+	if (expected_len > 0U) {
+		zassert_mem_equal(state.last_received_payload, expected, expected_len,
+				  "unexpected received payload");
 	}
 }
 
@@ -1582,10 +1617,10 @@ ZTEST(protocol_stack, test_downlink_decoded_broadcast_delivers_locally_via_mqtt)
 	zassert_ok(ret, "downlink inject failed: %d", ret);
 
 	zassert_equal(state.recv_count, 1U, "broadcast downlink should be delivered");
-	zassert_equal(state.last_event.type, MESHTASTIC_EVENT_PACKET_RECEIVED,
+	zassert_equal(state.last_received.type, MESHTASTIC_EVENT_PACKET_RECEIVED,
 		      "unexpected downlink event");
-	zassert_true(state.last_event_packet.via_mqtt, "downlink should be marked via MQTT");
-	assert_event_payload(body, sizeof(body) - 1U);
+	zassert_true(state.last_received_packet.via_mqtt, "downlink should be marked via MQTT");
+	assert_received_payload(body, sizeof(body) - 1U);
 	assert_mock_send_count(1U);
 }
 
