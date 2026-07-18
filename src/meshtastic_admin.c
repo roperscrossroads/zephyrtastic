@@ -419,13 +419,18 @@ static bool owner_name_all_whitespace(const char *name)
 #define ADMIN_LEGACY_CHANNEL_NAME "admin"
 
 /* True if the sender's stored public key matches a configured admin key
- * (SecurityConfig.admin_key[0..2]) — the modern, secure remote-admin gate. */
+ * (SecurityConfig.admin_key[0..2]) — the modern, secure remote-admin gate.
+ * Uses the hot→warm key lookup (not the hot-only nodedb_get): an admin whose
+ * hot record was evicted, its key surviving only in the warm ring, must not be
+ * locked out of remote admin (A-1). */
 static bool admin_key_matches_sender(uint32_t from)
 {
-	struct meshtastic_nodedb_node node;
+	uint8_t sender_key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
 	meshtastic_Config cfg;
 
-	if (meshtastic_nodedb_get(from, &node) != 0 || node.public_key_len != ADMIN_PUBKEY_LEN) {
+	BUILD_ASSERT(sizeof(sender_key) == ADMIN_PUBKEY_LEN, "key length mismatch");
+
+	if (meshtastic_nodedb_copy_pubkey(from, sender_key) != 0) {
 		return false;
 	}
 	if (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg) != 0 ||
@@ -437,7 +442,7 @@ static bool admin_key_matches_sender(uint32_t from)
 			&cfg.payload_variant.security.admin_key[i];
 
 		if (k->size == ADMIN_PUBKEY_LEN &&
-		    memcmp(k->bytes, node.public_key, ADMIN_PUBKEY_LEN) == 0) {
+		    memcmp(k->bytes, sender_key, ADMIN_PUBKEY_LEN) == 0) {
 			return true;
 		}
 	}

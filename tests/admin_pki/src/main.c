@@ -334,6 +334,63 @@ ZTEST(admin_pki, test_pkc_admin_key_authorized_applies)
 	set_admin_key(NULL, 0U);
 }
 
+/* Create/refresh a keyless hot NodeDB entry for @p num (apply_basic_packet),
+ * the way any heard packet does. Used to saturate the hot store. */
+static void hot_fill_node(uint32_t num)
+{
+	struct meshtastic_packet p = {
+		.from = num,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.id = num ^ 0x5EEDU,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"x",
+		.payload_len = 1U,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	meshtastic_handle_inbound_packet(&p, NULL, 0U, true);
+}
+
+/* A-1: PKC admin authorization must not depend on hot-store residency. Evict
+ * the admin's hot record (its key survives only in the warm ring) and replay a
+ * genuine PKC admin frame: it must still authorize and apply. */
+ZTEST(admin_pki, test_pkc_admin_key_authorized_after_hot_eviction)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	uint8_t warm_key[MESHTASTIC_PKI_KEY_LEN];
+	struct meshtastic_nodedb_node snap;
+	size_t len;
+
+	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
+
+	/* Saturate the hot store with fresh keyless nodes until PEER's record is
+	 * evicted (capped well above MAX_NODES so a tie-break change can't hang
+	 * the loop). */
+	for (uint32_t i = 0U; i < 64U && meshtastic_nodedb_get(PEER_NODE_ID, &snap) == 0; i++) {
+		hot_fill_node(0x5A000001U + i);
+	}
+	zassert_equal(meshtastic_nodedb_get(PEER_NODE_ID, &snap), -ENOENT,
+		      "PEER should be evicted from the hot store");
+	zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_NODE_ID, warm_key),
+		   "PEER's key must survive in the warm ring");
+	zassert_mem_equal(warm_key, peer_pubkey, sizeof(peer_pubkey),
+			  "warm ring must hold PEER's real key");
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_ROUTER, key, sizeof(key), buf,
+				    sizeof(buf));
+
+	inject_pkc_admin(buf, len, 0x0AD10003U);
+	k_sleep(K_MSEC(50));
+
+	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "hot-store eviction must not lock out an authorized PKC admin");
+
+	set_admin_key(NULL, 0U);
+}
+
 /* A real PKC admin decrypts (pki_encrypted set), but its sender key is NOT in
  * admin_key[] -> refused, config unchanged. */
 ZTEST(admin_pki, test_pkc_non_admin_key_refused)
