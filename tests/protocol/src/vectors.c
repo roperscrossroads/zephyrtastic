@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "meshtastic_channels.h"
+#include "meshtastic_region_presets.h"
 #include "vectors/meshtastic_vectors.h"
 
 /* Vector labels whose PSK is a full-length key, i.e. one the channel layer
@@ -265,6 +266,85 @@ ZTEST(wire_vectors, test_preset_display_names_are_sane)
 					  "upstream's default case");
 		}
 	}
+}
+
+/* Every preset must resolve to exactly the SF/BW/CR stock firmware uses
+ * (parity: radio D2).
+ *
+ * This is the assertion the whole harness exists for. The values on the right
+ * were produced by running upstream's own modemPresetToParams; the values on
+ * the left come from our re-expression of it as a table. A transcription slip
+ * in any of 15 rows × 2 bandwidth columns fails here rather than putting a
+ * node on a modem config no stock radio can hear.
+ */
+ZTEST(wire_vectors, test_preset_params_match_upstream)
+{
+	unsigned checked = 0;
+
+	for (unsigned i = 0; i < MT_VEC_COUNT(mt_vec_presets); i++) {
+		const struct mt_vec_preset *v = &mt_vec_presets[i];
+		struct meshtastic_modem_params got;
+		meshtastic_Config_LoRaConfig_ModemPreset preset;
+		bool matched = false;
+
+		/* Resolve the vector's preset name back to its enum via the
+		 * display-name table, which carries the same enum-name keys. */
+		for (unsigned p = 0; p < MT_VEC_COUNT(mt_vec_preset_names); p++) {
+			if (strcmp(mt_vec_preset_names[p].preset, v->name) == 0) {
+				matched = true;
+				break;
+			}
+		}
+		zassert_true(matched, "vector preset %s has no display-name entry",
+			     v->name);
+
+		preset = (meshtastic_Config_LoRaConfig_ModemPreset)v->preset_enum;
+
+		zassert_ok(meshtastic_preset_to_params(preset, v->wide != 0, &got),
+			   "preset_to_params failed for %s", v->name);
+
+		zassert_equal(got.spread_factor, v->sf,
+			      "%s%s: SF %u != upstream %u", v->name,
+			      v->wide ? " (wide)" : "", got.spread_factor, v->sf);
+		zassert_equal(got.bandwidth_hz, v->bw_hz,
+			      "%s%s: BW %u Hz != upstream %u Hz", v->name,
+			      v->wide ? " (wide)" : "", got.bandwidth_hz, v->bw_hz);
+		zassert_equal(got.coding_rate, v->cr,
+			      "%s%s: CR 4/%u != upstream 4/%u", v->name,
+			      v->wide ? " (wide)" : "", got.coding_rate, v->cr);
+		checked++;
+	}
+
+	zassert_true(checked >= 30, "expected every preset in both widths, got %u",
+		     checked);
+	TC_PRINT("verified %u preset/width parameter sets\n", checked);
+}
+
+/* An unknown preset must fall back to LONG_FAST's parameters, not fail
+ * (parity: radio D2). The reference folds LONG_FAST and illegal presets into
+ * one default branch, so a node handed a bad preset stays on the air at the
+ * default config rather than going silent.
+ */
+ZTEST(wire_vectors, test_unknown_preset_falls_back_to_longfast)
+{
+	struct meshtastic_modem_params bogus, longfast;
+
+	zassert_ok(meshtastic_preset_to_params(
+			   (meshtastic_Config_LoRaConfig_ModemPreset)0x7F, false, &bogus),
+		   "an illegal preset must still resolve");
+	zassert_ok(meshtastic_preset_to_params(
+			   meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST, false,
+			   &longfast),
+		   "LONG_FAST must resolve");
+
+	zassert_equal(bogus.spread_factor, longfast.spread_factor, "SF differs");
+	zassert_equal(bogus.bandwidth_hz, longfast.bandwidth_hz, "BW differs");
+	zassert_equal(bogus.coding_rate, longfast.coding_rate, "CR differs");
+
+	zassert_equal(meshtastic_preset_to_params(
+			      meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST, false,
+			      NULL),
+		      -EINVAL, "NULL out must be rejected");
 }
 
 /* Reference data the port does not consume yet (parity: airtime CP-1).

@@ -600,6 +600,7 @@ def emit_header(data: dict, regions: dict[str, Region], upstream: Path,
     a(" */")
     a("struct mt_vec_preset {")
     a("\tconst char *name;")
+    a("\tint preset_enum;")
     a("\tuint8_t wide;")
     a("\tuint8_t sf;")
     a("\tuint32_t bw_hz;")
@@ -609,7 +610,7 @@ def emit_header(data: dict, regions: dict[str, Region], upstream: Path,
     for k, v in data["presets"].items():
         wide = 1 if k.endswith("_wide") else 0
         base = k[:-5] if wide else k
-        a(f"\t{{ {json.dumps(base)}, {wide}, {v['sf']}, "
+        a(f"\t{{ {json.dumps(base)}, {data['preset_enum'][base]}, {wide}, {v['sf']}, "
           f"{int(round(v['bw'] * 1000))}u, {v['cr']} }},")
     a("};")
     a("")
@@ -753,6 +754,7 @@ def main() -> int:
           f"{len(regions_tbl)} regions")
 
     data = run_probe(build_probe(regions, presets))
+    data["preset_enum"] = presets
     data["regions"] = slot_math(regions_tbl, profiles, data["presets"],
                                 data["djb2_names"])
     print(f"  probe produced {len(data['xor_hash_names'])} name hashes, "

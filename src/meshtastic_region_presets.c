@@ -9,6 +9,8 @@
 
 #include "meshtastic_region_presets.h"
 
+#include <errno.h>
+
 #include <zephyr/sys/util.h>
 
 #include <zephyr/logging/log.h>
@@ -175,4 +177,72 @@ void meshtastic_build_region_preset_map(meshtastic_LoRaRegionPresetMap *map)
 		map->region_groups[map->region_groups_count].group_index = (uint8_t)gi;
 		map->region_groups_count++;
 	}
+}
+
+/* Preset -> modem parameters, ported from the reference firmware's
+ * modemPresetToParams (MeshRadio.h). Expressed as a table rather than the
+ * reference's switch; the wire_vectors suite asserts every row against values
+ * harvested by running the reference function itself, so any transcription
+ * error fails the build rather than reaching the air.
+ *
+ * bw_wide_hz repeats bw_narrow_hz for the presets that pin one bandwidth and
+ * ignore wideLora entirely (Lite, Narrow, Tiny).
+ *
+ * Bandwidths are exact: the reference's 15.6/62.5/406.25/812.5/1625.0 kHz
+ * become 15600/62500/406250/812500/1625000 Hz.
+ */
+struct preset_params_row {
+	meshtastic_Config_LoRaConfig_ModemPreset preset;
+	uint32_t bw_narrow_hz;
+	uint32_t bw_wide_hz;
+	uint8_t spread_factor;
+	uint8_t coding_rate;
+};
+
+/* LONG_FAST is deliberately absent: the reference folds it into the same
+ * `default` branch as an illegal preset, and so does the lookup below. */
+static const struct preset_params_row preset_params[] = {
+	{PRESET(SHORT_TURBO), 500000U, 1625000U, 7U, 5U},
+	{PRESET(SHORT_FAST), 250000U, 812500U, 7U, 5U},
+	{PRESET(SHORT_SLOW), 250000U, 812500U, 8U, 5U},
+	{PRESET(MEDIUM_FAST), 250000U, 812500U, 9U, 5U},
+	{PRESET(MEDIUM_SLOW), 250000U, 812500U, 10U, 5U},
+	{PRESET(MEDIUM_TURBO), 500000U, 1625000U, 9U, 5U},
+	{PRESET(LONG_TURBO), 500000U, 1625000U, 11U, 8U},
+	{PRESET(LONG_MODERATE), 125000U, 406250U, 11U, 8U},
+	{PRESET(LONG_SLOW), 125000U, 406250U, 12U, 8U},
+	{PRESET(LITE_FAST), 125000U, 125000U, 9U, 5U},
+	{PRESET(LITE_SLOW), 125000U, 125000U, 10U, 5U},
+	{PRESET(NARROW_FAST), 62500U, 62500U, 7U, 6U},
+	{PRESET(NARROW_SLOW), 62500U, 62500U, 8U, 6U},
+	{PRESET(TINY_FAST), 15600U, 15600U, 7U, 5U},
+	{PRESET(TINY_SLOW), 15600U, 15600U, 8U, 6U},
+};
+
+/* The reference's `default:` branch — LONG_FAST and anything illegal. */
+static const struct preset_params_row preset_params_default = {
+	PRESET(LONG_FAST), 250000U, 812500U, 11U, 5U,
+};
+
+int meshtastic_preset_to_params(meshtastic_Config_LoRaConfig_ModemPreset preset,
+				bool wide_lora, struct meshtastic_modem_params *out)
+{
+	const struct preset_params_row *row = &preset_params_default;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+
+	for (size_t i = 0U; i < ARRAY_SIZE(preset_params); i++) {
+		if (preset_params[i].preset == preset) {
+			row = &preset_params[i];
+			break;
+		}
+	}
+
+	out->bandwidth_hz = wide_lora ? row->bw_wide_hz : row->bw_narrow_hz;
+	out->spread_factor = row->spread_factor;
+	out->coding_rate = row->coding_rate;
+
+	return 0;
 }
