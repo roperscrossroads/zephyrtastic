@@ -10,4 +10,4 @@ target_include_directories(app PRIVATE
   ${CMAKE_BINARY_DIR}/modules/meshtastic-zephyr/src/proto
 )
 
-target_sources(app PRIVATE src/main.c src/sched.c src/phonequeue.c src/vectors.c)
+target_sources(app PRIVATE src/main.c src/sched.c src/phonequeue.c src/vectors.c src/channels.c)

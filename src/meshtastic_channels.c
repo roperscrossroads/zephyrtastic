@@ -66,11 +66,23 @@ static int channel_get_key(uint8_t index, struct meshtastic_channel_key *key)
 	key->len = settings->psk.size;
 
 	if (key->len == 0U) {
-		if (ch->role == meshtastic_Channel_Role_SECONDARY) {
+		/* A secondary with no PSK borrows the primary's key. The index check
+		 * prevents unbounded recursion when the primary slot is ITSELF marked
+		 * SECONDARY: nothing enforces that channel_slots[primary_index] has
+		 * role PRIMARY, so without it channel_get_key(primary_index) recurses
+		 * into itself forever. It is a tail call, so the compiler turns it
+		 * into an infinite loop rather than a stack overflow — the node hangs
+		 * instead of crashing. Reachable from meshtastic_channels_set_slot(),
+		 * i.e. from the admin set_channel path.
+		 */
+		if (ch->role == meshtastic_Channel_Role_SECONDARY &&
+		    index != primary_index) {
 			return channel_get_key(primary_index, key);
 		}
 
-		/* PRIMARY with empty PSK: cleartext (length stays 0). */
+		/* PRIMARY with empty PSK, or a self-referential secondary: cleartext
+		 * (length stays 0).
+		 */
 		return 0;
 	}
 
