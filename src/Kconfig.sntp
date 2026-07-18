@@ -1,0 +1,47 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_SNTP
+	bool "Seed the wall clock from SNTP over IP"
+	depends on NETWORKING && NET_IPV4 && DNS_RESOLVER
+	select SNTP
+	help
+	  On a networked build with no GNSS and no battery-backed RTC, query an
+	  SNTP server whenever the interface gets an IPv4 lease (and periodically
+	  after) to seed meshtastic_clock. Without this the wall clock is only set
+	  by the phone's set_time_only admin message, so CLI-driven nodes report
+	  timestamps stuck at the epoch floor.
+
+if MESHTASTIC_SNTP
+
+config MESHTASTIC_SNTP_SERVER
+	string "SNTP server (hostname or IP)"
+	default "pool.ntp.org"
+	help
+	  Use a numeric IP on networks that block/intercept DNS (port 53) — e.g.
+	  Cloudflare's NTP anycast "162.159.200.123" — so the query needs no
+	  name resolution.
+
+config MESHTASTIC_SNTP_TIMEOUT_MS
+	int "SNTP query timeout (ms)"
+	default 5000
+
+config MESHTASTIC_SNTP_RESYNC_HOURS
+	int "Periodic re-sync interval (hours; 0 = only on lease/reconnect)"
+	default 12
+
+config MESHTASTIC_SNTP_STACK_SIZE
+	int "SNTP worker stack size"
+	default 2560
+	help
+	  Dedicated workqueue stack. sntp_simple() blocks on DNS + UDP, so it must
+	  not run on the system workqueue (which also completes LoRa DIO work).
+
+config MESHTASTIC_SNTP_PRIORITY
+	int "SNTP worker thread priority"
+	default 10
+	help
+	  Keep below LoRa/radio processing so a slow NTP query never delays mesh
+	  sends.
+
+endif # MESHTASTIC_SNTP

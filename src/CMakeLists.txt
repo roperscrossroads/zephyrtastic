@@ -76,5 +76,6 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_RELIABLE_DELIVERY meshtastic_reliable.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_MQTT meshtastic_mqtt.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_WIFI_AUTOCONNECT meshtastic_wifi_auto.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SNTP meshtastic_sntp.c)
 
 endif()
