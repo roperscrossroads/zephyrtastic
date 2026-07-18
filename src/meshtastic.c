@@ -29,6 +29,7 @@
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_reliable.h"
+#include "meshtastic_router.h"
 #include "meshtastic_sched.h"
 
 #include "meshtastic_settings.h"
@@ -513,6 +514,13 @@ static int send_packet_prepare(const struct meshtastic_packet *packet,
 	if (local->channel_index == MESHTASTIC_CHANNEL_INDEX_INVALID) {
 		local->channel_index = meshtastic_channels_primary_index();
 	}
+
+	/* Next-hop routing (increment 2): stamp our relayer byte + learned next hop
+	 * on directed unicasts we originate. Covers every internal originator and the
+	 * decoded phoneAPI path; the encrypted phoneAPI/PKC path stamps in
+	 * meshtastic_send_mesh_pb. */
+	meshtastic_router_stamp_originated(local->to, local->from, &local->next_hop,
+					   &local->relay_node);
 
 	k_mutex_lock(&mt_ws.lock, K_FOREVER);
 	ret = meshtastic_build_wire_packet(local, wire, pkt_len);

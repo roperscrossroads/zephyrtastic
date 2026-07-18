@@ -25,6 +25,8 @@
 #include <pb_decode.h>
 #include <pb_encode.h>
 
+#include <zephyr/meshtastic/nodedb.h>
+
 #include "meshtastic/mesh.pb.h"
 
 #include "meshtastic_channels.h"
@@ -83,6 +85,13 @@ static void notify_failure(uint32_t id, uint32_t to)
 {
 	meshtastic_sched_stat_reliable_fail();
 	LOG_WRN("reliable: id=0x%08x to 0x%08x exhausted retries", id, to);
+
+	/* The learned next hop toward this destination just failed to deliver
+	 * despite retransmits: treat the route as stale and drop it so the next send
+	 * floods and rediscovers a working path (self-healing). No-op if nothing was
+	 * learned. Note this fires only on retransmit exhaustion, not on a NAK — a
+	 * NAK means the peer received it, so its route is fine. */
+	(void)meshtastic_nodedb_set_next_hop(to, 0U);
 
 	meshtastic_emit_event(MESHTASTIC_EVENT_TX_FAILED, -ETIMEDOUT,
 			      &(struct meshtastic_packet){

@@ -62,6 +62,39 @@ void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *h
 void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet);
 
 /**
+ * @brief Stamp next-hop routing fields on a directed unicast this node originates.
+ *
+ * Next-hop routing (increment 2). For a directed unicast we originate
+ * (@p from is this node), marks us as the relayer (@p relay_node low byte) and
+ * sets the learned next hop toward @p to (@p next_hop, 0 = none → flood).
+ * Broadcasts and packets we relay for others are left untouched, so only traffic
+ * we source carries a routing preference. The next-hop byte comes from
+ * @ref meshtastic_nodedb_get_next_hop, populated by
+ * @ref meshtastic_routing_learn_next_hop (increment 3); an unlearned destination
+ * stamps @p relay_node only and floods.
+ *
+ * @param to         Destination node number of the packet.
+ * @param from       Originating node number (already resolved, never 0).
+ * @param next_hop   In/out: learned next-hop byte; set when 0 and we originate.
+ * @param relay_node In/out: relayer byte; set to our low byte when 0 and we originate.
+ */
+void meshtastic_router_stamp_originated(uint32_t to, uint32_t from, uint8_t *next_hop,
+					uint8_t *relay_node);
+
+/**
+ * @brief Learn the next hop toward a node from a unicast it sent us.
+ *
+ * Next-hop route learning (increment 3). When @p packet is a decoded unicast
+ * addressed to this node (an ACK/reply to one of our want_ack sends, or a direct
+ * message), its @c relay_node byte is the neighbour that last relayed it toward
+ * us — i.e. our next hop back to @c packet->from. Records that in the NodeDB so
+ * @ref meshtastic_nodedb_get_next_hop can steer our future unicasts to that node.
+ * Broadcasts and MQTT-injected packets are ignored (no confirmed LoRa return
+ * path). Must be called after NodeDB module dispatch so the source entry exists.
+ */
+void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet);
+
+/**
  * @brief Post-RX hook for relay policy.
  *
  * Currently delegates to @ref meshtastic_routing_sniff_rebroadcast.

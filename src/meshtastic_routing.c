@@ -7,6 +7,8 @@
 
 #include <pb_encode.h>
 
+#include <zephyr/meshtastic/nodedb.h>
+
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
@@ -127,6 +129,41 @@ void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet)
 
 	if (packet->want_ack && packet->to == mt.node_id) {
 		(void)routing_send_ack(packet);
+	}
+}
+
+void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet)
+{
+	uint8_t self_byte;
+
+	if (packet == NULL) {
+		return;
+	}
+
+	/* Next-hop route learning (increment 3). Learn a route only from traffic
+	 * that crossed the LoRa mesh addressed to this node specifically -- a unicast
+	 * we can attribute a working return path to. The relay_node byte is then the
+	 * neighbour that last transmitted the frame toward us, i.e. our next hop back
+	 * to the source. ROUTING ACKs/replies to our own want_ack sends are the
+	 * canonical case (the "ACK/relay correlation" the NodeDB tracks); direct
+	 * messages to us qualify too. Excluded: broadcasts (no confirmed return
+	 * path) and MQTT-gateway injections (relay_node never rode the air, so it
+	 * says nothing about the LoRa topology). */
+	if (packet->to != mt.node_id || packet->from == 0U || packet->from == mt.node_id ||
+	    packet->via_mqtt) {
+		return;
+	}
+
+	/* relay_node 0 carries no route hint; our own low byte would mean relaying
+	 * through ourselves, which is never a valid next hop. */
+	self_byte = (uint8_t)(mt.node_id & 0xFFU);
+	if (packet->relay_node == 0U || packet->relay_node == self_byte) {
+		return;
+	}
+
+	if (meshtastic_nodedb_set_next_hop(packet->from, packet->relay_node) == 0) {
+		LOG_DBG("route learn: next_hop(0x%08x)=0x%02x", (unsigned int)packet->from,
+			packet->relay_node);
 	}
 }
 

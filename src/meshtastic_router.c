@@ -12,6 +12,8 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include <zephyr/meshtastic/nodedb.h>
+
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
 #include "meshtastic_modules.h"
@@ -99,6 +101,12 @@ static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wi
 	 * nodes can attribute the rebroadcast — required for next-hop learning and
 	 * loop attribution. */
 	relay_hdr->relay_node = (uint8_t)(mt.node_id & 0xFFU);
+	/* Onward next hop: our own learned route toward the final destination
+	 * (0 = none → flood onward). Also clears the incoming byte so a frame
+	 * addressed to us isn't re-addressed to us again. Routes are learned from
+	 * unicasts we receive (increment 3, meshtastic_routing_learn_next_hop); an
+	 * unlearned destination still resolves to 0 = flood. */
+	relay_hdr->next_hop = meshtastic_nodedb_get_next_hop(sys_le32_to_cpu(hdr->dest));
 
 	ret = meshtastic_radio_send_wire(relay_buf, (uint32_t)len);
 	if (ret < 0) {
@@ -197,6 +205,17 @@ void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *h
 
 	if (meshtastic_rebroadcast_mode() ==
 	    meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY) {
+		return;
+	}
+
+	/* Next-hop honor (increment 2): if this frame names a specific next relay
+	 * that isn't us, stay quiet — the addressed node relays it, cutting the
+	 * duplicate airtime a pure flood would spend. NO_PREF (0) still floods.
+	 * Residual: a remote node sharing our low byte also matches here; narrowing
+	 * that needs a wider on-wire field (see resolve_unique_last_byte). */
+	if (hdr->next_hop != 0U && hdr->next_hop != (uint8_t)(mt.node_id & 0xFFU)) {
+		LOG_DBG("Not relaying id=0x%08x: next_hop=0x%02x addressed elsewhere",
+			(unsigned int)sys_le32_to_cpu(hdr->id), hdr->next_hop);
 		return;
 	}
 
@@ -446,6 +465,9 @@ void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, co
 #endif
 		meshtastic_routing_on_decoded(packet);
 		meshtastic_dispatch_modules(packet);
+		/* After module dispatch: the NodeDB has now created/refreshed the
+		 * source entry, so a learned next hop has somewhere to land. */
+		meshtastic_routing_learn_next_hop(packet);
 	} else if (hdr != NULL) {
 		LOG_DBG("RX encrypted relay 0x%08x->0x%08x id=0x%08x", packet->from, packet->to,
 			packet->id);
@@ -453,5 +475,24 @@ void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, co
 
 	if (hdr != NULL) {
 		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, packet);
+	}
+}
+
+void meshtastic_router_stamp_originated(uint32_t to, uint32_t from, uint8_t *next_hop,
+					uint8_t *relay_node)
+{
+	/* Only stamp directed unicasts this node actually sources. Broadcasts carry
+	 * no next-hop preference, and a packet we relay for someone else keeps the
+	 * originator's routing fields untouched (from != our id, or relay_node
+	 * already set by the relay path). */
+	if (to == MESHTASTIC_NODE_BROADCAST || from != mt.node_id) {
+		return;
+	}
+
+	if (relay_node != NULL && *relay_node == 0U) {
+		*relay_node = (uint8_t)(mt.node_id & 0xFFU);
+	}
+	if (next_hop != NULL && *next_hop == 0U) {
+		*next_hop = meshtastic_nodedb_get_next_hop(to);
 	}
 }

@@ -22,6 +22,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
+#include "meshtastic_router.h"
 #include "meshtastic_mqtt.h"
 #if defined(CONFIG_MESHTASTIC_PKI)
 #include "meshtastic_pki.h"
@@ -748,8 +749,16 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 	} else {
 		hdr->channel = (mesh->channel != 0U) ? (uint8_t)mesh->channel : mt.ch_hash;
 	}
-	hdr->next_hop = mesh->next_hop;
-	hdr->relay_node = mesh->relay_node;
+	uint8_t nh = mesh->next_hop;
+	uint8_t rn = mesh->relay_node;
+
+	/* Next-hop routing (increment 2): the app/PKC path arrives already
+	 * encrypted and bypasses send_packet_prepare, so stamp our relayer byte +
+	 * learned next hop here. hdr->dest/src are already normalized above. */
+	meshtastic_router_stamp_originated(sys_le32_to_cpu(hdr->dest), sys_le32_to_cpu(hdr->src),
+					   &nh, &rn);
+	hdr->next_hop = nh;
+	hdr->relay_node = rn;
 	memcpy(mt_ws.wire + MESHTASTIC_HDR_LEN, mesh->encrypted.bytes, encrypted_len);
 
 	{
@@ -772,8 +781,8 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 				.channel = hdr->channel,
 				.want_ack = mesh->want_ack,
 				.via_mqtt = mesh->via_mqtt,
-				.next_hop = mesh->next_hop,
-				.relay_node = mesh->relay_node,
+				.next_hop = nh,
+				.relay_node = rn,
 			};
 
 			meshtastic_mqtt_on_tx(&tx_packet, wire, wire_len);

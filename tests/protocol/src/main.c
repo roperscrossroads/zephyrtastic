@@ -10,6 +10,7 @@
 #include <pb_encode.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
+#include <zephyr/meshtastic/nodedb.h>
 
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_channels.h"
@@ -1115,6 +1116,126 @@ ZTEST(protocol_stack, test_reliable_implicit_ack_cancels_retransmit)
 	meshtastic_sched_stats_get(&st);
 	zassert_equal(st.reliable_acked, 1U, "implicit ack should stop retransmission");
 	zassert_equal(st.reliable_failed, 0U);
+}
+
+/* --- Next-hop route learning (increment 3) -------------------------------- */
+
+/* Inject a decoded TEXT frame from @p from to @p to carrying an explicit
+ * relay_node byte (the neighbour that last relayed it toward us). */
+static void inject_with_relay(uint32_t from, uint32_t to, uint32_t id, uint8_t relay_node)
+{
+	struct meshtastic_packet p = {
+		.from = from,
+		.to = to,
+		.id = id,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"hi",
+		.payload_len = 2U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.relay_node = relay_node,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	zassert_ok(meshtastic_build_wire_packet(&p, wire, &wire_len));
+	inject_rx_frame(wire, wire_len, -40, 5);
+}
+
+/* A unicast addressed to us teaches the next hop back to its source: the
+ * relay_node byte becomes the learned route toward that node. */
+ZTEST(protocol_stack, test_learn_next_hop_from_unicast_to_us)
+{
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xB100U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x99U,
+		      "relay_node of a unicast to us should be learned as its next hop");
+}
+
+/* Broadcasts have no confirmed return path, so they must not set a next hop. */
+ZTEST(protocol_stack, test_no_learn_next_hop_from_broadcast)
+{
+	/* Establish a known route first. */
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xB110U, 0x11U);
+	k_sleep(K_MSEC(30));
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x11U, "baseline learn failed");
+
+	/* A broadcast from the same node with a different relay_node must not change it. */
+	inject_with_relay(PEER_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0xB111U, 0x22U);
+	k_sleep(K_MSEC(30));
+
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x11U,
+		      "a broadcast must not overwrite the learned next hop");
+}
+
+/* A relay_node equal to our own low byte would mean routing through ourselves;
+ * it must be rejected rather than learned. */
+ZTEST(protocol_stack, test_no_learn_next_hop_when_relay_is_self)
+{
+	/* OTHER_NODE_ID low byte 0x68; our low byte is 0x78. */
+	inject_with_relay(OTHER_NODE_ID, TEST_NODE_ID, 0xB120U, 0x33U);
+	k_sleep(K_MSEC(30));
+	zassert_equal(meshtastic_nodedb_get_next_hop(OTHER_NODE_ID), 0x33U, "baseline learn failed");
+
+	inject_with_relay(OTHER_NODE_ID, TEST_NODE_ID, 0xB121U, (uint8_t)(TEST_NODE_ID & 0xFFU));
+	k_sleep(K_MSEC(30));
+
+	zassert_equal(meshtastic_nodedb_get_next_hop(OTHER_NODE_ID), 0x33U,
+		      "our own low byte must not be learned as a next hop");
+}
+
+/* A packet delivered via the MQTT gateway never rode the LoRa air, so its
+ * relay_node says nothing about topology and must not be learned. */
+ZTEST(protocol_stack, test_no_learn_next_hop_from_mqtt_downlink)
+{
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	int ret;
+
+	/* Establish a known route first. */
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xB130U, 0x55U);
+	k_sleep(K_MSEC(30));
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x55U, "baseline learn failed");
+
+	/* An MQTT downlink to us from the same node, carrying a different relay_node. */
+	mesh.from = PEER_NODE_ID;
+	mesh.to = TEST_NODE_ID;
+	mesh.id = 0xB131U;
+	mesh.channel = meshtastic_channels_primary_index();
+	mesh.hop_limit = 3U;
+	mesh.hop_start = 3U;
+	mesh.relay_node = 0x44U;
+	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh.decoded.portnum = MESHTASTIC_PORT_TEXT_MESSAGE;
+	memcpy(mesh.decoded.payload.bytes, "hi", 2U);
+	mesh.decoded.payload.size = 2U;
+
+	ret = meshtastic_inject_downlink_mesh_packet(&mesh);
+	zassert_ok(ret, "downlink inject failed: %d", ret);
+	k_sleep(K_MSEC(30));
+
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x55U,
+		      "an MQTT-injected packet must not overwrite the learned next hop");
+}
+
+/* When a reliable send exhausts its retransmits, the learned (now stale) next
+ * hop toward that destination is cleared so future sends flood and rediscover. */
+ZTEST(protocol_stack, test_reliable_failure_clears_learned_next_hop)
+{
+	/* Learn a route to PEER. */
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xB140U, 0x66U);
+	k_sleep(K_MSEC(30));
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0x66U, "baseline learn failed");
+
+	/* A reliable DM to PEER that is never ACKed exhausts its retransmits. */
+	zassert_ok(meshtastic_sched_set("reliable.retries", "2"));
+	zassert_ok(meshtastic_sched_set("reliable.timeout", "100"));
+	send_reliable_dm(0xB141U);
+	k_sleep(K_MSEC(450)); /* original + 2 retransmits, then exhaustion */
+
+	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0U,
+		      "delivery failure should clear the stale next hop");
 }
 
 /* Verifies duplicate foreign packets do not trigger additional relay transmissions. */
