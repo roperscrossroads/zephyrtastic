@@ -492,6 +492,7 @@ static void fill_packet_from_header(const struct meshtastic_wire_header *hdr, in
 	packet->relay_node = hdr->relay_node;
 	packet->want_ack = (hdr->flags & MESHTASTIC_FLAGS_WANT_ACK) != 0U;
 	packet->via_mqtt = (hdr->flags & MESHTASTIC_FLAGS_VIA_MQTT) != 0U;
+	packet->pki_encrypted = false; /* set true below only if PKC decrypt succeeds */
 	packet->rssi = rssi;
 	packet->snr = snr;
 }
@@ -566,7 +567,8 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 		if (fail_reason != NULL) {
 			*fail_reason = MESHTASTIC_DECODE_FAIL_NONE; /* PKC succeeded */
 		}
-		channel_index = 0U; /* PKC pseudo-channel */
+		channel_index = 0U;           /* PKC pseudo-channel */
+		packet->pki_encrypted = true; /* authenticated to the sender's key */
 #else
 		return 0;
 #endif

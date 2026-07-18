@@ -2139,4 +2139,125 @@ ZTEST(protocol_stack, test_remote_admin_channel_requires_passkey)
 	admin_set_is_managed(false);
 }
 
+/* A fixed 32-byte "peer public key". The admin_key authorization path only
+ * memcmps NodeDB key vs SecurityConfig.admin_key — no crypto validation — so any
+ * stable 32 bytes exercise the PKC match/mismatch without a PKI build. (The real
+ * X25519 decrypt that sets pki_encrypted is covered by tests/admin_pki.) */
+static const uint8_t admin_peer_pubkey[32] = {
+	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+	0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+	0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+};
+
+/* Seed PEER_NODE_ID's public key into the NodeDB by delivering a NodeInfo — the
+ * same path the stack learns a peer's key on the air (apply_user). */
+static void seed_peer_pubkey(const uint8_t key[32])
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet ni = {
+		.from = PEER_NODE_ID,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	user.public_key.size = 32U;
+	memcpy(user.public_key.bytes, key, 32U);
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode failed");
+	ni.payload = buf;
+	ni.payload_len = os.bytes_written;
+
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+}
+
+/* Set (key != NULL) or clear (key == NULL) SecurityConfig.admin_key[0]. */
+static void admin_set_admin_key(const uint8_t *key, size_t len)
+{
+	meshtastic_Config sec = meshtastic_Config_init_zero;
+
+	sec.which_payload_variant = meshtastic_Config_security_tag;
+	if (key != NULL && len > 0U) {
+		sec.payload_variant.security.admin_key_count = 1U;
+		sec.payload_variant.security.admin_key[0].size = (pb_size_t)len;
+		memcpy(sec.payload_variant.security.admin_key[0].bytes, key, len);
+	}
+	zassert_ok(meshtastic_config_store_set_config(&sec), "set admin_key failed");
+}
+
+/* A PKC (pki_encrypted) remote admin whose sender key is in admin_key[] is
+ * authorized; with a valid passkey the mutating op applies. Exercises the
+ * admin_key match without real crypto (pki_encrypted set directly). */
+ZTEST(protocol_stack, test_remote_admin_pkc_admin_key_authorized)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	struct meshtastic_packet pkt;
+	size_t len;
+
+	admin_set_is_managed(false);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	seed_peer_pubkey(admin_peer_pubkey);
+	admin_set_admin_key(admin_peer_pubkey, sizeof(admin_peer_pubkey));
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role_key(meshtastic_Config_DeviceConfig_Role_ROUTER, key, sizeof(key),
+					buf, sizeof(buf));
+
+	make_remote_admin_packet(&pkt, buf, len, 0U, true); /* channel 0 = PKC pseudo-channel */
+	pkt.pki_encrypted = true;
+
+	reset_mock_lora();
+	meshtastic_admin_handle_remote(&pkt);
+	k_sleep(ADMIN_REPLY_SETTLE);
+	assert_mock_send_count(1U); /* success ROUTING ACK */
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "PKC admin whose key is in admin_key[] must be authorized and applied");
+
+	admin_set_admin_key(NULL, 0U);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	admin_set_is_managed(false);
+}
+
+/* A PKC remote admin whose sender key is NOT in admin_key[] is refused
+ * (ADMIN_PUBLIC_KEY_UNAUTHORIZED) and not applied. */
+ZTEST(protocol_stack, test_remote_admin_pkc_wrong_key_unauthorized)
+{
+	static const uint8_t other_key[32] = {
+		0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44,
+		0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+		0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+	};
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	struct meshtastic_packet pkt;
+	size_t len;
+
+	admin_set_is_managed(false);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	seed_peer_pubkey(admin_peer_pubkey);         /* PEER's key in the NodeDB */
+	admin_set_admin_key(other_key, sizeof(other_key)); /* a different admin_key */
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role_key(meshtastic_Config_DeviceConfig_Role_ROUTER, key, sizeof(key),
+					buf, sizeof(buf));
+
+	make_remote_admin_packet(&pkt, buf, len, 0U, true);
+	pkt.pki_encrypted = true;
+
+	reset_mock_lora();
+	meshtastic_admin_handle_remote(&pkt);
+	k_sleep(ADMIN_REPLY_SETTLE);
+	assert_mock_send_count(1U); /* ADMIN_PUBLIC_KEY_UNAUTHORIZED NAK */
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "PKC admin whose key is not in admin_key[] must be refused");
+
+	admin_set_admin_key(NULL, 0U);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	admin_set_is_managed(false);
+}
+
 #endif /* CONFIG_MESHTASTIC_ADMIN */
