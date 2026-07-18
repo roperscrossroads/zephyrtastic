@@ -139,6 +139,13 @@ TARGETS = [
     ("modem_preset_to_params", "src/mesh/MeshRadio.h", "static inline void modemPresetToParams("),
     # AES-CTR / PKC nonce layout (parity: crypto, security H1)
     ("init_nonce", "src/mesh/CryptoEngine.cpp", "void CryptoEngine::initNonce("),
+    # preset -> display name. NOT cosmetic: the display name is hashed to pick
+    # the frequency slot, and substitutes for an empty channel name when
+    # hashing the channel. Upstream calls it "a stable literal for
+    # channel-name hashing and default-channel detection". A wrong string here
+    # puts the node on the wrong frequency AND the wrong channel hash.
+    ("preset_display_name", "src/DisplayFormatters.cpp",
+     "const char *DisplayFormatters::getModemPresetDisplayName("),
 ]
 
 
@@ -268,6 +275,11 @@ enum meshtastic_Config_LoRaConfig_ModemPreset {
 %(modem_preset_to_params)s
 // ===== END VERBATIM =====
 
+// getModemPresetDisplayName is a DisplayFormatters static member. Only the
+// class qualifier is dropped to make it a free function; the body -- every
+// returned literal -- is verbatim. (%(preset_display_name_src)s)
+%(preset_display_name_shim)s
+
 // initNonce is a CryptoEngine member writing to a member buffer. The BODY below
 // is verbatim; only the signature is shimmed to a free function over a caller
 // buffer. The subtlety worth capturing: extraNonce lands at offset 4, which
@@ -303,6 +315,11 @@ int main(void) {
     printf("  \"presets\": {\n");
 %(preset_calls)s
     printf("    \"_\": {\"sf\":0,\"bw\":0,\"cr\":0}\n  },\n");
+
+    // ---- preset display names + the slot hash computed over them ----
+    printf("  \"preset_names\": {\n");
+%(preset_name_calls)s
+    printf("    \"_\": {}\n  },\n");
 
     // ---- nonce layouts ----
     printf("  \"nonces\": {\n");
@@ -345,6 +362,11 @@ def build_probe(regions: dict[str, Region], presets: dict[str, int]) -> str:
         + body
     )
 
+    # Drop only the class qualifier so the member becomes a free function.
+    # Every returned literal stays verbatim -- those literals ARE the data.
+    dn_region = regions["preset_display_name"].text
+    display_name_shim = "static " + dn_region.replace("DisplayFormatters::", "", 1)
+
     name_calls = "\n".join(
         f'    printf("    \\"%s\\": %u,\\n", {c_str(n)}, '
         f"(unsigned)xorHash((const uint8_t *){c_str(n)}, strlen({c_str(n)})));"
@@ -375,6 +397,27 @@ def build_probe(regions: dict[str, Region], presets: dict[str, int]) -> str:
                 f" sf, bw, cr); }}"
             )
 
+    # Display name per preset, plus the djb2 hash OF that name -- which is the
+    # value that actually selects a frequency slot. Also emits the usePreset=false
+    # case, whose literal ("Custom") is what a custom-modem node hashes.
+    preset_name_calls = []
+    for pname in sorted(presets):
+        preset_name_calls.append(
+            f"    {{ const char *d = getModemPresetDisplayName(PRESET({pname}), false, true);\n"
+            f"      const char *s = getModemPresetDisplayName(PRESET({pname}), true, true);\n"
+            f'      printf("    \\"{pname}\\": {{\\"display\\":\\"%s\\",\\"short\\":\\"%s\\","'
+            f'             "\\"djb2\\":%u,\\"xor\\":%u}},\\n",'
+            f" d, s, (unsigned)hash(d),"
+            f" (unsigned)xorHash((const uint8_t *)d, strlen(d))); }}"
+        )
+    preset_name_calls.append(
+        '    { const char *d = getModemPresetDisplayName(PRESET(LONG_FAST), false, false);\n'
+        '      printf("    \\"_CUSTOM\\": {\\"display\\":\\"%s\\",\\"short\\":\\"%s\\","'
+        '             "\\"djb2\\":%u,\\"xor\\":%u},\\n",'
+        ' d, d, (unsigned)hash(d),'
+        ' (unsigned)xorHash((const uint8_t *)d, strlen(d))); }'
+    )
+
     # Cases chosen to expose the offset-4 overlap between packetId and extraNonce.
     nonce_cases = [
         ("psk_id1_from0", 1, 0, 0),
@@ -404,6 +447,12 @@ def build_probe(regions: dict[str, Region], presets: dict[str, int]) -> str:
             f"{regions['modem_preset_to_params'].line}"
         ),
         "init_nonce_shim": init_nonce_shim,
+        "preset_display_name_shim": display_name_shim,
+        "preset_display_name_src": (
+            f"{regions['preset_display_name'].relpath}:"
+            f"{regions['preset_display_name'].line}"
+        ),
+        "preset_name_calls": "\n".join(preset_name_calls),
         "name_hash_calls": name_calls,
         "djb2_calls": djb2_calls,
         "psk_hash_calls": "\n".join(psk_calls),
@@ -562,6 +611,30 @@ def emit_header(data: dict, regions: dict[str, Region], upstream: Path,
         base = k[:-5] if wide else k
         a(f"\t{{ {json.dumps(base)}, {wide}, {v['sf']}, "
           f"{int(round(v['bw'] * 1000))}u, {v['cr']} }},")
+    a("};")
+    a("")
+
+    a("/* --- Preset display names (parity: radio D3 + crypto #1) -------------")
+    a(" * Not cosmetic. `djb2` is the hash OF the display name, and that is what")
+    a(" * selects the frequency slot. The display name also substitutes for an")
+    a(" * empty channel name when computing the channel hash -- which is why the")
+    a(' * port hardcoding "LongFast" is only correct while the modem is frozen')
+    a(" * at LongFast. Get a string wrong and the node lands on the wrong")
+    a(" * frequency AND the wrong channel hash, with no error anywhere.")
+    a(" *")
+    a(' * `_CUSTOM` is the use_preset=false literal, hashed the same way.')
+    a(" */")
+    a("struct mt_vec_preset_name {")
+    a("\tconst char *preset;")
+    a("\tconst char *display;")
+    a("\tconst char *short_name;")
+    a("\tuint32_t djb2;")
+    a("\tuint8_t xor_hash;")
+    a("};")
+    a("static const struct mt_vec_preset_name mt_vec_preset_names[] = {")
+    for k, v in data["preset_names"].items():
+        a(f"\t{{ {json.dumps(k)}, {json.dumps(v['display'])}, "
+          f"{json.dumps(v['short'])}, {v['djb2']}u, {v['xor']} }},")
     a("};")
     a("")
 

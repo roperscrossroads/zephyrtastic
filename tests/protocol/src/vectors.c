@@ -202,6 +202,71 @@ ZTEST(wire_vectors, test_nonce_vectors_encode_the_overlap)
 			  "bytes 4..7 must be zero when extraNonce is unused");
 }
 
+/* The port's hardcoded default channel name must equal upstream's LONG_FAST
+ * display name (parity: crypto #1, radio D3).
+ *
+ * That string is not decorative: it is hashed to pick the frequency slot, and
+ * it substitutes for an empty channel name when computing the channel hash.
+ * Hardcoding it is correct only while the modem is frozen at LongFast; when
+ * preset support lands, the substitution must follow the active preset. This
+ * pins the current constant to the harvested literal so the two cannot drift
+ * apart silently in the meantime.
+ */
+ZTEST(wire_vectors, test_default_channel_name_matches_upstream_longfast)
+{
+	const struct mt_vec_preset_name *lf = NULL;
+
+	for (unsigned i = 0; i < MT_VEC_COUNT(mt_vec_preset_names); i++) {
+		if (strcmp(mt_vec_preset_names[i].preset, "LONG_FAST") == 0) {
+			lf = &mt_vec_preset_names[i];
+			break;
+		}
+	}
+	zassert_not_null(lf, "vector table missing the LONG_FAST display name");
+
+	zassert_str_equal(MESHTASTIC_CHANNEL_LONGFAST, lf->display,
+			  "the port's default channel name has drifted from "
+			  "upstream's LONG_FAST display name");
+}
+
+/* Guard the harvested display-name table itself.
+ *
+ * Every preset must yield a non-empty name, and distinct presets must not
+ * collide on the djb2 hash -- a collision would put two presets on the same
+ * default frequency slot. Note VERY_LONG_SLOW is deliberately absent from
+ * upstream's switch and falls through to "Invalid"; that is upstream's real
+ * behaviour, not a harvest error, so it is asserted rather than excluded.
+ */
+ZTEST(wire_vectors, test_preset_display_names_are_sane)
+{
+	unsigned n = MT_VEC_COUNT(mt_vec_preset_names);
+
+	zassert_true(n >= 16, "expected the full preset set, got %u", n);
+
+	for (unsigned i = 0; i < n; i++) {
+		const struct mt_vec_preset_name *p = &mt_vec_preset_names[i];
+
+		zassert_true(p->display != NULL && p->display[0] != '\0',
+			     "preset %s has an empty display name", p->preset);
+		zassert_not_equal(p->djb2, 0, "preset %s hashes to zero", p->preset);
+
+		for (unsigned j = i + 1; j < n; j++) {
+			zassert_not_equal(p->djb2, mt_vec_preset_names[j].djb2,
+					  "presets %s and %s share a slot hash",
+					  p->preset, mt_vec_preset_names[j].preset);
+		}
+	}
+
+	/* The deprecated preset really does hash the literal "Invalid". */
+	for (unsigned i = 0; i < n; i++) {
+		if (strcmp(mt_vec_preset_names[i].preset, "VERY_LONG_SLOW") == 0) {
+			zassert_str_equal(mt_vec_preset_names[i].display, "Invalid",
+					  "VERY_LONG_SLOW should fall through to "
+					  "upstream's default case");
+		}
+	}
+}
+
 /* Reference data the port does not consume yet (parity: airtime CP-1).
  *
  * The port measures TX airtime but never gates on it, so an EU build can

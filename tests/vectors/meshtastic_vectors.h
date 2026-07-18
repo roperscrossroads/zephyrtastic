@@ -14,6 +14,7 @@
  *   djb2_hash                src/mesh/RadioInterface.cpp:908  a40dc5227198efd3
  *   modem_preset_to_params   src/mesh/MeshRadio.h:203  ae57bdd95cbc01a9
  *   init_nonce               src/mesh/CryptoEngine.cpp:428  80e7d0462008af80
+ *   preset_display_name      src/DisplayFormatters.cpp:4  745b97c5d1836239
  */
 
 #ifndef MESHTASTIC_VECTORS_H_
@@ -137,6 +138,44 @@ static const struct mt_vec_preset mt_vec_presets[] = {
 	{ "TINY_SLOW", 1, 8, 15600u, 6 },
 	{ "VERY_LONG_SLOW", 0, 11, 250000u, 5 },
 	{ "VERY_LONG_SLOW", 1, 11, 812500u, 5 },
+};
+
+/* --- Preset display names (parity: radio D3 + crypto #1) -------------
+ * Not cosmetic. `djb2` is the hash OF the display name, and that is what
+ * selects the frequency slot. The display name also substitutes for an
+ * empty channel name when computing the channel hash -- which is why the
+ * port hardcoding "LongFast" is only correct while the modem is frozen
+ * at LongFast. Get a string wrong and the node lands on the wrong
+ * frequency AND the wrong channel hash, with no error anywhere.
+ *
+ * `_CUSTOM` is the use_preset=false literal, hashed the same way.
+ */
+struct mt_vec_preset_name {
+	const char *preset;
+	const char *display;
+	const char *short_name;
+	uint32_t djb2;
+	uint8_t xor_hash;
+};
+static const struct mt_vec_preset_name mt_vec_preset_names[] = {
+	{ "LITE_FAST", "LiteFast", "LiteF", 1203997249u, 20 },
+	{ "LITE_SLOW", "LiteSlow", "LiteS", 1204476280u, 19 },
+	{ "LONG_FAST", "LongFast", "LongF", 130429955u, 10 },
+	{ "LONG_MODERATE", "LongMod", "LongM", 3908476213u, 108 },
+	{ "LONG_SLOW", "LongSlow", "LongS", 130908986u, 13 },
+	{ "LONG_TURBO", "LongTurbo", "LongT", 26541281u, 116 },
+	{ "MEDIUM_FAST", "MediumFast", "MedF", 1461075348u, 29 },
+	{ "MEDIUM_SLOW", "MediumSlow", "MedS", 1461554379u, 26 },
+	{ "MEDIUM_TURBO", "MediumTurbo", "MedT", 988166290u, 99 },
+	{ "NARROW_FAST", "NarrowFast", "NarF", 474665740u, 23 },
+	{ "NARROW_SLOW", "NarrowSlow", "NarS", 475144771u, 16 },
+	{ "SHORT_FAST", "ShortFast", "ShortF", 603668899u, 114 },
+	{ "SHORT_SLOW", "ShortSlow", "ShortS", 604147930u, 117 },
+	{ "SHORT_TURBO", "ShortTurbo", "ShortT", 2758524545u, 12 },
+	{ "TINY_FAST", "TinyFast", "TinyF", 2638030743u, 10 },
+	{ "TINY_SLOW", "TinySlow", "TinyS", 2638509774u, 13 },
+	{ "VERY_LONG_SLOW", "Invalid", "Custom", 4242220u, 81 },
+	{ "_CUSTOM", "Custom", "Custom", 2897143200u, 51 },
 };
 
 /* --- Region table (parity: radio D3 + airtime CP-1) ------------------

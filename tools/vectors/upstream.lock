@@ -24,6 +24,12 @@
       "line": 428,
       "anchor": "void CryptoEngine::initNonce(",
       "sha256": "80e7d0462008af8011fecdc66738ae8a862af7933f62b235de89d116d2ad572a"
+    },
+    "preset_display_name": {
+      "file": "src/DisplayFormatters.cpp",
+      "line": 4,
+      "anchor": "const char *DisplayFormatters::getModemPresetDisplayName(",
+      "sha256": "745b97c5d18362391bad4c10277cc66ef0119a25e33b17f0705a1f713bc55409"
     }
   }
 }
