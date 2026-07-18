@@ -104,6 +104,54 @@ static void mqtt_work_notify(void)
 
 static void mqtt_drain_queue(int max_publish);
 
+/* Broker-reconnect backoff (operator-specified ladder): 1 s, 8 s, 32 s, 64 s,
+ * 4 min — then hold at 4 min plus random jitter up to +4 min (4-8 min), so a
+ * long broker outage costs a handful of connect attempts per hour instead of
+ * hundreds (each attempt against an unreachable broker burns seconds of SYN
+ * retransmits — wasted power and buffers), and a fleet of nodes doesn't
+ * re-thunder at a recovering broker in lockstep. The ladder resets on a
+ * successful connect and on a fresh IPv4 lease (new network, new chances —
+ * the reset also cuts short an in-flight backoff sleep). MQTT failures never
+ * drive WiFi reconnects. */
+static const uint16_t mqtt_backoff_ladder_s[] = {1U, 8U, 32U, 64U, 240U};
+static uint8_t mqtt_backoff_step;
+static volatile bool mqtt_backoff_skip;
+
+static uint32_t mqtt_backoff_next_ms(void)
+{
+	uint32_t delay_s;
+
+	if (mqtt_backoff_step < ARRAY_SIZE(mqtt_backoff_ladder_s) - 1U) {
+		delay_s = mqtt_backoff_ladder_s[mqtt_backoff_step];
+		mqtt_backoff_step++;
+	} else {
+		uint32_t cap_s = mqtt_backoff_ladder_s[ARRAY_SIZE(mqtt_backoff_ladder_s) - 1U];
+
+		delay_s = cap_s + (sys_rand32_get() % cap_s);
+	}
+
+	return delay_s * MSEC_PER_SEC;
+}
+
+static void mqtt_backoff_reset(void)
+{
+	mqtt_backoff_step = 0U;
+	mqtt_backoff_skip = true;
+}
+
+/* Chunked backoff sleep: stays responsive to thread shutdown and to a ladder
+ * reset (fresh network) instead of holding the thread for minutes. */
+static void mqtt_backoff_sleep_ms(uint32_t ms)
+{
+	mqtt_backoff_skip = false;
+	while (ms > 0U && mqtt_ctx.thread_running && !mqtt_backoff_skip) {
+		uint32_t slice = MIN(ms, 1000U);
+
+		k_sleep(K_MSEC(slice));
+		ms -= slice;
+	}
+}
+
 static void mqtt_net_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 				   struct net_if *iface)
 {
@@ -112,6 +160,7 @@ static void mqtt_net_event_handler(struct net_mgmt_event_callback *cb, uint64_t 
 
 	if (mgmt_event == NET_EVENT_IPV4_ADDR_ADD) {
 		mqtt_net_has_ipv4 = true;
+		mqtt_backoff_reset();
 		LOG_INF("Network ready for MQTT");
 	} else if (mgmt_event == NET_EVENT_IPV4_ADDR_DEL) {
 		mqtt_net_has_ipv4 = false;
@@ -830,6 +879,7 @@ static void mqtt_evt_handler(struct mqtt_client *client, const struct mqtt_evt *
 
 		mqtt_ctx.connected = true;
 		mqtt_ctx.drop_warned = false; /* broker back: warn afresh next episode */
+		mqtt_backoff_step = 0U;       /* connected: next outage starts at 1 s */
 		LOG_INF("MQTT connected to %s", CONFIG_MESHTASTIC_MQTT_BROKER_HOST);
 		mqtt_prepare_fds();
 		mqtt_drain_queue(MQTT_PUBLISH_BUDGET_ON_CONNECT);
@@ -1086,9 +1136,11 @@ static void mqtt_thread_fn(void *p1, void *p2, void *p3)
 				ret = mqtt_try_connect();
 			}
 			if (ret != 0) {
-				LOG_DBG("MQTT connect failed (%d), retry in %d ms", ret,
-					CONFIG_MESHTASTIC_MQTT_RECONNECT_INTERVAL_MS);
-				k_sleep(K_MSEC(CONFIG_MESHTASTIC_MQTT_RECONNECT_INTERVAL_MS));
+				uint32_t backoff_ms = mqtt_backoff_next_ms();
+
+				LOG_DBG("MQTT connect failed (%d), retry in %u ms", ret,
+					backoff_ms);
+				mqtt_backoff_sleep_ms(backoff_ms);
 				continue;
 			}
 		}
@@ -1104,11 +1156,16 @@ static void mqtt_thread_fn(void *p1, void *p2, void *p3)
 
 		ret = mqtt_process_once(0);
 		if (ret != 0) {
-			LOG_DBG("MQTT session error (%d), reconnecting", ret);
+			/* The session had connected, so the ladder was reset: the first
+			 * reconnect attempt after a session error comes quickly (1 s)
+			 * and only escalates if the broker stays gone. */
+			uint32_t backoff_ms = mqtt_backoff_next_ms();
+
+			LOG_DBG("MQTT session error (%d), reconnecting in %u ms", ret, backoff_ms);
 			mqtt_disconnect(&mqtt_ctx.client, NULL);
 			mqtt_ctx.connected = false;
 			mqtt_clear_fds();
-			k_sleep(K_MSEC(CONFIG_MESHTASTIC_MQTT_RECONNECT_INTERVAL_MS));
+			mqtt_backoff_sleep_ms(backoff_ms);
 		} else {
 			mqtt_drain_queue(MQTT_PUBLISH_BUDGET_PER_LOOP);
 			mqtt_perhaps_report_to_map();
