@@ -32,7 +32,8 @@ extern "C" {
 struct meshtastic_dup_entry {
 	uint32_t src;
 	uint32_t id;
-	uint32_t ms; /* k_uptime_get_32() when recorded, for TTL expiry */
+	uint32_t ms;       /* k_uptime_get_32() when recorded, for TTL expiry */
+	uint8_t hop_limit; /* highest hop budget seen for this (src,id) */
 };
 
 struct meshtastic_context {

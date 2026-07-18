@@ -107,6 +107,20 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
 				   meshtastic_Routing_Error err);
 
 /**
+ * @brief Re-ACK the retransmission of a reliable unicast we already handled.
+ *
+ * Called from the dedup drop path when a duplicate arrives with the
+ * repeated-reliable signature (@c hop_start == @c hop_limit, i.e. straight from
+ * the originator — our first ACK was lost). Sends a fresh ROUTING ACK for
+ * @p id back to @p from without re-delivering the packet, so the sender stops
+ * retrying instead of reporting a false delivery failure (mirrors the reference
+ * NextHopRouter dup-path re-ACK). Works from wire-header fields alone — no
+ * payload decode; @p wire_hash selects the reply channel.
+ */
+void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire_hash,
+					uint8_t hop_limit, uint8_t hop_start);
+
+/**
  * @brief Post-RX hook for relay policy.
  *
  * Currently delegates to @ref meshtastic_routing_sniff_rebroadcast.

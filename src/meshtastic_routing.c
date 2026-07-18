@@ -129,6 +129,26 @@ static int routing_send_ack(const struct meshtastic_packet *req)
 				  routing_ack_should_request_ack(req), K_FOREVER);
 }
 
+void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire_hash,
+					uint8_t hop_limit, uint8_t hop_start)
+{
+	struct meshtastic_packet req = {
+		.from = from,
+		.to = mt.node_id,
+		.id = id,
+		.hop_limit = hop_limit,
+		.hop_start = hop_start,
+	};
+	uint8_t ch_index = meshtastic_channels_resolve_send_index(
+		from, MESHTASTIC_CHANNEL_INDEX_INVALID, wire_hash);
+
+	/* Fire-and-forget (K_NO_WAIT): this runs on the RX path, and a dropped
+	 * re-ACK is recoverable — the sender's next retransmission triggers
+	 * another. Never request an ACK for an ACK. */
+	(void)routing_send_reply(from, id, ch_index, meshtastic_Routing_Error_NONE,
+				 routing_hop_limit_for_reply(&req), false, K_NO_WAIT);
+}
+
 void meshtastic_routing_send_error(const struct meshtastic_packet *req,
 				   meshtastic_Routing_Error err)
 {

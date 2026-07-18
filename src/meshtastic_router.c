@@ -36,7 +36,14 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-static bool dup_check(uint32_t src, uint32_t id)
+enum dup_verdict {
+	DUP_NEW = 0,  /* first sighting — process normally */
+	DUP_SEEN,     /* plain duplicate — drop */
+	DUP_UPGRADE,  /* duplicate with strictly more hops left — relay once */
+};
+
+static enum dup_verdict dup_check_hops(uint32_t src, uint32_t id, uint8_t hop_limit,
+				       bool allow_upgrade)
 {
 	/* Single scalar, captured once for the whole scan — a direct atomic read is
 	 * sufficient (see the concurrency note in meshtastic_sched.h). */
@@ -54,22 +61,35 @@ static bool dup_check(uint32_t src, uint32_t id)
 			saw_expired = true;
 			continue;
 		}
+		if (allow_upgrade && hop_limit > mt.dup_cache[i].hop_limit) {
+			/* A later copy with more hops left reaches further than the
+			 * one we already handled (upstream PacketHistory hop
+			 * upgrade). Remember the higher budget so this fires once. */
+			mt.dup_cache[i].hop_limit = hop_limit;
+			return DUP_UPGRADE;
+		}
 		mt.status.duplicate_packets++;
-		return true;
+		return DUP_SEEN;
 	}
 
 	if (saw_expired) {
 		meshtastic_sched_stat_dedup_expired();
 	}
 
-	return false;
+	return DUP_NEW;
 }
 
-static void dup_add(uint32_t src, uint32_t id)
+static bool dup_check(uint32_t src, uint32_t id)
+{
+	return dup_check_hops(src, id, 0U, false) != DUP_NEW;
+}
+
+static void dup_add(uint32_t src, uint32_t id, uint8_t hop_limit)
 {
 	mt.dup_cache[mt.dup_head].src = src;
 	mt.dup_cache[mt.dup_head].id = id;
 	mt.dup_cache[mt.dup_head].ms = k_uptime_get_32();
+	mt.dup_cache[mt.dup_head].hop_limit = hop_limit;
 	mt.dup_head = (uint8_t)((mt.dup_head + 1U) % CONFIG_MESHTASTIC_DUP_CACHE_SIZE);
 }
 
@@ -304,15 +324,55 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 		return;
 	}
 
-	if (dup_check(src, pkt_id)) {
+	uint8_t rx_hop_limit = hdr->flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK;
+
+	switch (dup_check_hops(src, pkt_id, rx_hop_limit, true)) {
+	case DUP_SEEN: {
+		uint8_t hop_start = (hdr->flags & MESHTASTIC_FLAGS_HOP_START_MASK) >>
+				    MESHTASTIC_FLAGS_HOP_START_SHIFT;
+		bool want_ack = (hdr->flags & MESHTASTIC_FLAGS_WANT_ACK) != 0U;
+
+		/* Repeated-reliable signature: hop_start == hop_limit means this copy
+		 * came straight from the originator — it retransmitted because our
+		 * first ACK was lost. Re-ACK (no re-delivery) so the sender stops
+		 * retrying instead of reporting a false failure. All fields needed are
+		 * in the wire header; no decode. */
+		if (sys_le32_to_cpu(hdr->dest) == mt.node_id && want_ack && hop_start != 0U &&
+		    hop_start == rx_hop_limit) {
+			LOG_DBG("Re-ACK repeated reliable id=0x%08x from 0x%08x", pkt_id, src);
+			meshtastic_routing_reack_duplicate(src, pkt_id, hdr->channel, rx_hop_limit,
+							   hop_start);
+		}
+
 		LOG_DBG("Duplicate (src=0x%08x id=0x%08x)", src, pkt_id);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
+	case DUP_UPGRADE: {
+		/* Already handled once, but this copy has strictly more hops left:
+		 * relay the wider-reach copy (policy gates still apply), never
+		 * re-deliver. The payload stays undecoded. */
+		struct meshtastic_packet upgraded = {
+			.from = src,
+			.to = sys_le32_to_cpu(hdr->dest),
+			.id = pkt_id,
+		};
 
-	dup_add(src, pkt_id);
+		LOG_DBG("Hop-upgraded duplicate (src=0x%08x id=0x%08x hops=%u): relay", src,
+			pkt_id, rx_hop_limit);
+		meshtastic_routing_sniff_rebroadcast(hdr, buf, (size_t)len, &upgraded);
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+#endif
+		return;
+	}
+	case DUP_NEW:
+		break;
+	}
+
+	dup_add(src, pkt_id, rx_hop_limit);
 
 	ret = meshtastic_try_decode_wire_packet(buf, len, rssi, snr, &packet, payload,
 						sizeof(payload), &decoded, &fail_reason);
@@ -408,7 +468,7 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 		return -EALREADY;
 	}
 
-	dup_add(work.from, work.id);
+	dup_add(work.from, work.id, (uint8_t)(work.hop_limit & MESHTASTIC_FLAGS_HOP_LIMIT_MASK));
 
 	local = (work.to == mt.node_id || work.to == MESHTASTIC_NODE_BROADCAST);
 	relay = (work.to != mt.node_id &&

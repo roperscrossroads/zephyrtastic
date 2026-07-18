@@ -1149,6 +1149,148 @@ ZTEST(protocol_stack, test_reliable_implicit_ack_cancels_retransmit)
 	zassert_equal(st.reliable_failed, 0U);
 }
 
+/* Verifies a repeated reliable DM to us (the originator retransmitted because
+ * our first ACK was lost — hop_start == hop_limit) is re-ACKed straight from
+ * the dedup path without a second app delivery, while a relayed duplicate copy
+ * (hop_limit already decremented) stays a plain drop. */
+ZTEST(protocol_stack, test_repeated_reliable_dm_is_reacked_not_redelivered)
+{
+	struct meshtastic_packet dm = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.id = 0x8801U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"hi",
+		.payload_len = 2U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_ack = true,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	struct meshtastic_wire_header *whdr;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_packet ack;
+	uint8_t ack_payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_Routing routing = meshtastic_Routing_init_zero;
+	pb_istream_t is;
+
+	zassert_ok(meshtastic_build_wire_packet(&dm, wire, &wire_len));
+
+	/* First copy: delivered (and ACKed on the decoded path). */
+	inject_rx_frame(wire, wire_len, -40, 5);
+	k_sleep(K_MSEC(100));
+	zassert_equal(state.recv_count, 1U, "first copy must deliver");
+
+	/* Identical retransmission: re-ACK from the dup path, no re-delivery. */
+	reset_mock_lora();
+	inject_rx_frame(wire, wire_len, -40, 5);
+	k_sleep(K_MSEC(100));
+
+	zassert_equal(state.recv_count, 1U, "duplicate must not re-deliver");
+	decode_last_tx(&ack, ack_payload, sizeof(ack_payload));
+	zassert_equal(ack.portnum, MESHTASTIC_PORT_ROUTING, "re-ACK should be a ROUTING packet");
+	zassert_equal(ack.to, PEER_NODE_ID, "re-ACK should target the sender");
+	zassert_equal(ack.from, TEST_NODE_ID, "re-ACK should originate from us");
+	zassert_equal(ack.request_id, dm.id, "re-ACK should reference the DM id");
+	is = pb_istream_from_buffer(ack_payload, ack.payload_len);
+	zassert_true(pb_decode(&is, meshtastic_Routing_fields, &routing), "routing decode");
+	zassert_equal(routing.error_reason, meshtastic_Routing_Error_NONE,
+		      "re-ACK should carry error NONE");
+
+	/* A relayed duplicate (hop_limit != hop_start) is a plain dupe: no TX. */
+	reset_mock_lora();
+	whdr = (struct meshtastic_wire_header *)wire;
+	whdr->flags = (whdr->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) | 2U;
+	inject_rx_frame(wire, wire_len, -40, 5);
+	k_sleep(K_MSEC(100));
+	assert_mock_send_count(0U);
+	zassert_equal(state.recv_count, 1U, "relayed dupe must not re-deliver");
+}
+
+/* Verifies a duplicate arriving with strictly more hops left is relayed once as
+ * an upgraded copy (wider reach), while later copies at or below the stored
+ * hop budget drop as plain dupes (H3, upstream PacketHistory hop upgrade). */
+ZTEST(protocol_stack, test_hop_limit_upgraded_duplicate_relays_once)
+{
+	uint8_t wire2[MESHTASTIC_PKT_MAX];
+	uint8_t wire3[MESHTASTIC_PKT_MAX];
+	uint32_t wire2_len;
+	uint32_t wire3_len;
+	struct meshtastic_wire_header hdr;
+	struct meshtastic_status base;
+	struct meshtastic_status after;
+
+	/* Prime PEER as known (has_user) so no NodeInfo-request TX interleaves
+	 * with the relay assertions below. */
+	{
+		meshtastic_User user = meshtastic_User_init_zero;
+		uint8_t ni_buf[64];
+		pb_ostream_t os = pb_ostream_from_buffer(ni_buf, sizeof(ni_buf));
+		uint8_t ni_wire[MESHTASTIC_PKT_MAX];
+		uint32_t ni_wire_len;
+
+		strcpy(user.id, "!87654321");
+		strcpy(user.long_name, "Peer");
+		strcpy(user.short_name, "P1");
+		zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode failed");
+		build_wire_packet(PEER_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0xA301U, 1U,
+				  MESHTASTIC_PORT_NODEINFO, ni_buf, os.bytes_written, ni_wire,
+				  &ni_wire_len);
+		inject_rx_frame(ni_wire, ni_wire_len, -40, 5);
+		k_sleep(K_MSEC(100));
+	}
+
+	zassert_ok(meshtastic_get_status(&base));
+
+	/* First sighting at hop_limit=2: normal relay, hop 1 on the wire. */
+	build_wire_packet(PEER_NODE_ID, OTHER_NODE_ID, 0xA302U, 2U, MESHTASTIC_PORT_TEXT_MESSAGE,
+			  (const uint8_t *)"up", 2U, wire2, &wire2_len);
+	inject_rx_frame(wire2, wire2_len, -40, 5);
+	k_sleep(K_MSEC(100));
+	zassert_ok(meshtastic_get_status(&after));
+	zassert_equal(after.relayed_packets, base.relayed_packets + 1U, "first copy must relay");
+	copy_last_tx_header(&hdr);
+	zassert_equal(hdr.flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK, 1U,
+		      "first relay should carry hop_limit-1");
+
+	/* Same (src,id) with hop_limit=3: one upgraded relay, hop 2 on the wire. */
+	build_wire_packet(PEER_NODE_ID, OTHER_NODE_ID, 0xA302U, 3U, MESHTASTIC_PORT_TEXT_MESSAGE,
+			  (const uint8_t *)"up", 2U, wire3, &wire3_len);
+	inject_rx_frame(wire3, wire3_len, -40, 5);
+	k_sleep(K_MSEC(100));
+	zassert_ok(meshtastic_get_status(&after));
+	zassert_equal(after.relayed_packets, base.relayed_packets + 2U,
+		      "hop-upgraded duplicate must relay once");
+	zassert_equal(after.duplicate_packets, base.duplicate_packets,
+		      "an upgrade is not a plain duplicate");
+	copy_last_tx_header(&hdr);
+	zassert_equal(hdr.flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK, 2U,
+		      "upgraded relay should carry the higher hop_limit-1");
+
+	/* Equal hop budget again: plain dupe, no further relay. */
+	inject_rx_frame(wire3, wire3_len, -40, 5);
+	k_sleep(K_MSEC(100));
+	zassert_ok(meshtastic_get_status(&after));
+	zassert_equal(after.relayed_packets, base.relayed_packets + 2U,
+		      "equal-hop duplicate must not relay");
+	zassert_equal(after.duplicate_packets, base.duplicate_packets + 1U,
+		      "equal-hop duplicate counts as a dupe");
+
+	/* Lower hop budget: plain dupe as well. */
+	inject_rx_frame(wire2, wire2_len, -40, 5);
+	k_sleep(K_MSEC(100));
+	zassert_ok(meshtastic_get_status(&after));
+	zassert_equal(after.relayed_packets, base.relayed_packets + 2U,
+		      "lower-hop duplicate must not relay");
+	zassert_equal(after.duplicate_packets, base.duplicate_packets + 2U,
+		      "lower-hop duplicate counts as a dupe");
+
+	/* Only the NodeInfo primer was addressed to us (broadcast): the upgrade
+	 * path never re-delivers to the app. */
+	zassert_equal(state.recv_count, 1U, "upgrade must not re-deliver");
+}
+
 /* --- Next-hop route learning (increment 3) -------------------------------- */
 
 /* Inject a decoded TEXT frame from @p from to @p to carrying an explicit
