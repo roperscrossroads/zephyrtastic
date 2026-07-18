@@ -82,6 +82,7 @@ static struct {
 	bool thread_running;
 	bool started;
 	bool disconnect_pending;
+	bool drop_warned; /* one WRN per queue-full episode, not per packet */
 } mqtt_ctx;
 
 static struct net_mgmt_event_callback mqtt_net_mgmt_cb;
@@ -293,6 +294,23 @@ static int mqtt_encode_envelope(const meshtastic_MeshPacket *mesh, const char *c
 	return 0;
 }
 
+/* Drop the oldest queued publish to make room (caller holds mqtt_ctx.lock).
+ * Warn once per queue-full episode, not per packet: with the broker
+ * unreachable every heard packet lands here, and a per-drop WRN floods the
+ * log (and its syslog uplink). Upstream drops oldest silently (MQTT.cpp
+ * MAX_MQTT_QUEUE); we keep one WRN per episode plus a DBG per drop. */
+static void mqtt_drop_oldest_locked(void)
+{
+	if (!mqtt_ctx.drop_warned) {
+		LOG_WRN("MQTT publish queue full — dropping oldest until the broker is back");
+		mqtt_ctx.drop_warned = true;
+	} else {
+		LOG_DBG("MQTT publish queue full, dropping oldest");
+	}
+	mqtt_ctx.queue_head = (mqtt_ctx.queue_head + 1U) % CONFIG_MESHTASTIC_MQTT_PUBLISH_QUEUE_SIZE;
+	mqtt_ctx.queue_count--;
+}
+
 static void mqtt_queue_publish(const char *topic, const uint8_t *payload, size_t len)
 {
 	struct mqtt_pub_entry entry;
@@ -310,10 +328,7 @@ static void mqtt_queue_publish(const char *topic, const uint8_t *payload, size_t
 	k_mutex_lock(&mqtt_ctx.lock, K_FOREVER);
 
 	if (mqtt_ctx.queue_count >= CONFIG_MESHTASTIC_MQTT_PUBLISH_QUEUE_SIZE) {
-		LOG_WRN("MQTT publish queue full, dropping oldest");
-		mqtt_ctx.queue_head =
-			(mqtt_ctx.queue_head + 1U) % CONFIG_MESHTASTIC_MQTT_PUBLISH_QUEUE_SIZE;
-		mqtt_ctx.queue_count--;
+		mqtt_drop_oldest_locked();
 	}
 
 	mqtt_ctx.queue[mqtt_ctx.queue_tail] = entry;
@@ -371,6 +386,7 @@ static void mqtt_drain_queue(int max_publish)
 	while (mqtt_ctx.connected && published < max_publish) {
 		k_mutex_lock(&mqtt_ctx.lock, K_FOREVER);
 		if (mqtt_ctx.queue_count == 0U) {
+			mqtt_ctx.drop_warned = false; /* drained: next full episode warns again */
 			k_mutex_unlock(&mqtt_ctx.lock);
 			break;
 		}
@@ -663,10 +679,7 @@ static void mqtt_queue_uplink(const struct meshtastic_packet *packet, const uint
 	k_mutex_lock(&mqtt_ctx.lock, K_FOREVER);
 
 	if (mqtt_ctx.queue_count >= CONFIG_MESHTASTIC_MQTT_PUBLISH_QUEUE_SIZE) {
-		LOG_WRN("MQTT publish queue full, dropping oldest");
-		mqtt_ctx.queue_head =
-			(mqtt_ctx.queue_head + 1U) % CONFIG_MESHTASTIC_MQTT_PUBLISH_QUEUE_SIZE;
-		mqtt_ctx.queue_count--;
+		mqtt_drop_oldest_locked();
 	}
 
 	struct mqtt_pub_entry *entry = &mqtt_ctx.queue[mqtt_ctx.queue_tail];
@@ -816,6 +829,7 @@ static void mqtt_evt_handler(struct mqtt_client *client, const struct mqtt_evt *
 		}
 
 		mqtt_ctx.connected = true;
+		mqtt_ctx.drop_warned = false; /* broker back: warn afresh next episode */
 		LOG_INF("MQTT connected to %s", CONFIG_MESHTASTIC_MQTT_BROKER_HOST);
 		mqtt_prepare_fds();
 		mqtt_drain_queue(MQTT_PUBLISH_BUDGET_ON_CONNECT);

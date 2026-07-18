@@ -151,8 +151,15 @@ config MESHTASTIC_MQTT_UPLINK_QUEUE_SIZE
 
 config MESHTASTIC_MQTT_RECONNECT_INTERVAL_MS
 	int "Reconnect interval when broker is unreachable (ms)"
-	default 5000
+	default 30000
 	range 1000 60000
+	help
+	  How long to wait between connect attempts while the broker is
+	  unreachable. The reference firmware retries every 30 s ("TCP
+	  connections are EXPENSIVE so try rarely", MQTT.cpp runOnce): each
+	  attempt against a filtered port costs seconds of SYN retransmits on
+	  the constrained net stack, so an aggressive interval mostly buys
+	  wasted buffers, airtime-adjacent churn, and log noise.
 
 config MESHTASTIC_MQTT_RX_BUFFER_SIZE
 	int "MQTT client RX buffer size"
