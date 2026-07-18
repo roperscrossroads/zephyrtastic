@@ -1,0 +1,59 @@
+name: vectors-drift
+
+# Deliberately NOT a pull-request gate.
+#
+# This checks our harvested known-answer vectors against upstream firmware at
+# HEAD, which moves independently of this repo. Gating merges on it would mean
+# an unrelated upstream refactor blocks our PRs. A failure here is a signal to
+# go look -- "upstream changed an algorithm we depend on for wire
+# compatibility" -- not an assertion that someone broke something.
+#
+# The vectors themselves are asserted on every PR by the wire_vectors suite in
+# the sim workflow; that uses the committed header and needs no upstream tree.
+
+on:
+  schedule:
+    # Weekly, Monday morning UTC. Offset off the hour to avoid the scheduler
+    # stampede that makes on-the-hour cron jobs queue.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  drift:
+    name: upstream algorithm drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: zephyrtastic
+
+      # Only src/mesh sources and the generated protobuf headers are read, so
+      # a shallow clone is enough. No submodules are needed.
+      - name: Checkout upstream firmware
+        uses: actions/checkout@v4
+        with:
+          repository: meshtastic/firmware
+          path: firmware
+          fetch-depth: 1
+
+      - name: Record upstream revision
+        run: |
+          echo "upstream firmware: $(git -C firmware rev-parse --short HEAD)"
+          echo "vectors harvested from: $(python3 -c \
+            'import json;print(json.load(open("zephyrtastic/tools/vectors/upstream.lock"))["upstream"])')"
+
+      - name: Check for algorithm drift
+        run: |
+          python3 zephyrtastic/tools/vectors/harvest.py \
+            --upstream firmware --check
+
+      - name: Explain a failure
+        if: failure()
+        run: |
+          echo "::warning::Upstream changed a region our vectors were harvested from."
+          echo "This is informational, not a broken build. Read the upstream diff"
+          echo "for the reported region and decide whether the wire format moved."
+          echo "If it did, this port has an interop gap to close. Re-harvest with:"
+          echo "  python3 tools/vectors/harvest.py --upstream <firmware-tree>"
+          echo "Do not delete upstream.lock to silence this."

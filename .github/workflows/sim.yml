@@ -1,0 +1,50 @@
+name: sim
+
+# The native_sim ztest suites are the only pre-hardware proof tier in this
+# repo. Until this workflow existed they were run by hand, which meant
+# "sim-green" decayed silently -- the suites were at one point unbuildable
+# for weeks with no signal, because the break was invisible from the
+# hardware side where the code is normally compiled.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: sim-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  twister:
+    name: native_sim ztest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: zephyrtastic
+
+      # This repo is itself the west manifest, so the workspace is created
+      # from it rather than from an upstream manifest.
+      - name: Set up Zephyr workspace
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: zephyrtastic
+          toolchains: xtensa-espressif_esp32s3_zephyr-elf
+
+      - name: Run twister
+        working-directory: zephyrtastic
+        run: west twister -T tests -p native_sim/native/64 --inline-logs
+
+      - name: Upload twister report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twister-out
+          path: |
+            zephyrtastic/twister-out/twister.xml
+            zephyrtastic/twister-out/twister.json
+          retention-days: 14
+          if-no-files-found: warn
