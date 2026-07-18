@@ -27,17 +27,52 @@ cd <workspace>
 west update
 ```
 
-Build the sample for a supported board:
+Build the sample for a supported board. Board targets need their full
+qualifier — the bare board name is rejected:
 
 ```console
-west build -b <board> samples/meshtastic
+west build -b heltec_wifi_lora32_v4/esp32s3/procpu samples/meshtastic
 ```
+
+Note this repository is a Zephyr *module*, not an application: its top-level
+`CMakeLists.txt` is included by the build rather than being an entry point.
+Build `samples/meshtastic`, not the repository root.
 
 See [`samples/meshtastic/README.rst`](samples/meshtastic/README.rst) for
 build options and optional features (BLE, GNSS, shell, MQTT, telemetry).
 
 For the detailed feature matrix and shell command reference, see
 [`README.rst`](README.rst).
+
+## Testing
+
+The `native_sim` ztest suites are the pre-hardware proof tier. Run both from
+the workspace:
+
+```console
+west twister -T tests -p native_sim/native/64 --inline-logs
+```
+
+CI runs exactly this on every push and pull request
+([`.github/workflows/sim.yml`](.github/workflows/sim.yml)).
+
+Sim-green is necessary but not sufficient — the radio PHY is mocked, and
+several subsystems are gated out of the suites entirely. Anything touching
+modulation, timing, regional frequencies, flash durability, or power draw
+needs real hardware before it can be called proven.
+
+### Wire compatibility
+
+`tests/vectors/meshtastic_vectors.h` holds known-answer vectors harvested by
+compiling and running upstream firmware's own functions, so that a
+*symmetric* error — one where our encoder and decoder are wrong in the same
+way, and every self-loopback test still passes — is caught. The
+`wire_vectors` suite asserts against them and needs no upstream tree.
+
+A scheduled job re-checks those vectors against upstream at HEAD and reports
+when an algorithm we depend on has changed. It is intentionally not a merge
+gate. See [`tools/vectors/README.md`](tools/vectors/README.md) for the trust
+model and how to re-harvest.
 
 ## Credit
 
