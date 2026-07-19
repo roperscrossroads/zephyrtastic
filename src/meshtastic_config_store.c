@@ -309,10 +309,35 @@ static bool config_is_valid(const meshtastic_Config *config)
 					return false;
 				}
 
-				/* Amateur bands are for licensed operators only, mirroring
-				 * the reference (RadioInterface.cpp: licensedOnly). */
-				if (info.licensed_only && !store.is_licensed) {
-					LOG_WRN("region %d requires a licensed operator",
+				/* Amateur (ITU) allocations are rejected outright, not
+				 * merely gated on the licensed flag, for two independent
+				 * reasons.
+				 *
+				 * Regulatory: the reference disables encryption in
+				 * licensed mode — it suppresses PKI keygen and forces
+				 * rebroadcast_mode to LOCAL_ONLY (NodeDB.cpp:577, :3862)
+				 * — because amateur service forbids transmissions
+				 * "encoded for the purpose of obscuring their meaning"
+				 * (FCC Part 97.113(a)(4) and equivalents). This port does
+				 * neither: keygen is unconditional and rebroadcast_mode is
+				 * never forced. Honouring the licensed flag without those
+				 * obligations would put encrypted traffic on amateur
+				 * spectrum, so the flag alone is not enough to permit it.
+				 *
+				 * Hardware: the 2 m allocations are 144-146 MHz, below the
+				 * SX1262's 150 MHz lower limit — it cannot tune there at
+				 * all. The 125 cm and 70 cm allocations are within the
+				 * chip's range, but the boards' front-end module and
+				 * matching network are built for 863-928 MHz, so they
+				 * would be severely mismatched.
+				 *
+				 * Supporting these needs the encryption obligations
+				 * implemented AND hardware that can reach the band. Until
+				 * both hold, refusing is the honest answer.
+				 */
+				if (info.licensed_only) {
+					LOG_WRN("region %d is an amateur allocation; "
+						"unsupported (see config_is_valid)",
 						(int)region);
 					return false;
 				}

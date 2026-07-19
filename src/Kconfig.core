@@ -101,9 +101,19 @@ config MESHTASTIC_DEFAULT_REGION
 	  8 KR, 9 TW, 10 IN, 11 NZ_865, 12 TH.  See the RegionCode enum in
 	  meshtastic/config.proto for the full list.
 
-	  Amateur (ITU) regions additionally require the owner record to be
-	  marked licensed, and are rejected otherwise.  The 2.4 GHz LORA_24
-	  region is always rejected: this port has no wide-LoRa radio support.
+	  Rejected regions:
+
+	  - Amateur (ITU) allocations, whether or not the owner record is marked
+	    licensed.  Amateur service forbids obscuring the meaning of a
+	    transmission, and this port does not yet disable encryption in
+	    licensed mode the way the reference firmware does.  Separately, the
+	    2 m allocations (144-146 MHz) are below the SX1262's 150 MHz tuning
+	    floor, and the 125 cm / 70 cm allocations fall far outside the
+	    supported boards' 863-928 MHz front end.
+
+	  - LORA_24 (2.4 GHz): no wide-LoRa radio support in this port.
+
+	  A US device needs no licence: 902-928 MHz is unlicensed ISM spectrum.
 
 config MESHTASTIC_TX_POWER
 	int "Default TX power (dBm)"

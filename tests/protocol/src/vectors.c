@@ -766,35 +766,63 @@ ZTEST(wire_vectors, test_region_selection_is_bounded_by_its_band)
 	zassert_ok(meshtastic_config_store_set_config(&c), "restore failed");
 }
 
-/* Amateur bands require a licensed operator (parity with the reference's
- * licensedOnly gate). Opening region selection without this would let an
- * unlicensed device select an amateur allocation.
+/* Amateur allocations are refused outright, not gated on the licensed flag.
+ *
+ * Two independent reasons, either sufficient. Regulatory: the reference
+ * disables encryption in licensed mode (suppressed keygen, forced LOCAL_ONLY)
+ * because amateur service forbids obscuring meaning; this port implements
+ * neither, so honouring the flag would put encrypted traffic on amateur
+ * spectrum. Hardware: 2 m is 144-146 MHz, below the SX1262's 150 MHz floor,
+ * and the 125 cm / 70 cm bands sit far outside the boards' 863-928 MHz
+ * front-end.
+ *
+ * This asserts the flag does NOT unlock them, which is the whole point --
+ * a future change that "fixes" the licence gate would otherwise silently
+ * re-open a band this firmware cannot lawfully or physically use.
  */
-ZTEST(wire_vectors, test_amateur_regions_require_a_licence)
+ZTEST(wire_vectors, test_amateur_regions_are_refused_outright)
 {
-	meshtastic_Config c = lora_cfg(meshtastic_Config_LoRaConfig_RegionCode_ITU1_2M,
-				       0.0f);
+	static const meshtastic_Config_LoRaConfig_RegionCode ham[] = {
+		meshtastic_Config_LoRaConfig_RegionCode_ITU1_2M,
+		meshtastic_Config_LoRaConfig_RegionCode_ITU2_2M,
+		meshtastic_Config_LoRaConfig_RegionCode_ITU3_2M,
+		meshtastic_Config_LoRaConfig_RegionCode_ITU2_125CM,
+		meshtastic_Config_LoRaConfig_RegionCode_ITU1_70CM,
+		meshtastic_Config_LoRaConfig_RegionCode_ITU2_70CM,
+		meshtastic_Config_LoRaConfig_RegionCode_ITU3_70CM,
+	};
 	struct meshtastic_region_info info;
 
+	for (unsigned i = 0; i < ARRAY_SIZE(ham); i++) {
+		meshtastic_Config c = lora_cfg(ham[i], 0.0f);
+
+		zassert_ok(meshtastic_region_info(ham[i], &info),
+			   "region %d should have band data", (int)ham[i]);
+		zassert_true(info.licensed_only,
+			     "region %d should be flagged amateur", (int)ham[i]);
+		zassert_equal(meshtastic_config_store_set_config(&c), -EINVAL,
+			      "amateur region %d must be refused", (int)ham[i]);
+	}
+
+	/* The 2 m allocations are below the SX1262's tuning floor entirely. */
 	zassert_ok(meshtastic_region_info(
 			   meshtastic_Config_LoRaConfig_RegionCode_ITU1_2M, &info),
-		   "ITU1_2M should have band data");
-	zassert_true(info.licensed_only, "ITU1_2M is an amateur allocation");
+		   "ITU1_2M info");
+	zassert_true(info.freq_end_hz < 150000000U,
+		     "2 m tops out at %u Hz, under the SX1262's 150 MHz floor",
+		     info.freq_end_hz);
 
-	/* The default owner record is unlicensed. */
-	zassert_equal(meshtastic_config_store_set_config(&c), -EINVAL,
-		      "an amateur region must be refused without a licence");
-
-	/* A non-amateur region is unaffected by the same gate. */
+	/* A non-amateur region is unaffected. */
 	zassert_ok(meshtastic_region_info(meshtastic_Config_LoRaConfig_RegionCode_US,
 					  &info),
 		   "US should have band data");
-	zassert_false(info.licensed_only, "US is not licence-gated");
+	zassert_false(info.licensed_only, "US is not an amateur allocation");
 
-	c = lora_cfg((meshtastic_Config_LoRaConfig_RegionCode)
-			     CONFIG_MESHTASTIC_DEFAULT_REGION,
-		     0.0f);
-	zassert_ok(meshtastic_config_store_set_config(&c), "restore failed");
+	meshtastic_Config restore =
+		lora_cfg((meshtastic_Config_LoRaConfig_RegionCode)
+				 CONFIG_MESHTASTIC_DEFAULT_REGION,
+			 0.0f);
+	zassert_ok(meshtastic_config_store_set_config(&restore), "restore failed");
 }
 
 /* Region power limits must match upstream, since they now bound TX power. */

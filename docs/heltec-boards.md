@@ -10,7 +10,32 @@ radio plan: **US 906.875 MHz, SF11, BW250, CR 4/5**. The firmware ships a US
 default (902–928 MHz) as a deliberate, safe out-of-the-box choice so a
 freshly flashed board never transmits on an unintended band — the hardware
 itself supports both 868 and 915 MHz, so the region is a firmware setting,
-not a hardware limit.
+not a hardware limit. Set it with `CONFIG_MESHTASTIC_DEFAULT_REGION`.
+
+**No licence is required for US operation:** 902–928 MHz is unlicensed ISM
+spectrum. The amateur-radio "licensed operator" flag matters only for the ITU
+amateur allocations and for exceeding a region's power limit.
+
+### Bands these boards cannot use
+
+The firmware rejects two groups of regions outright:
+
+- **Amateur (ITU) allocations.** Partly regulatory — amateur service forbids
+  obscuring the meaning of a transmission, and this port does not yet disable
+  encryption in licensed mode the way the reference firmware does (it neither
+  suppresses PKI keygen nor forces `LOCAL_ONLY` rebroadcast). Partly physical:
+  the **2 m allocations are 144–146 MHz, below the SX1262's 150 MHz tuning
+  floor**, so the radio cannot reach them at all. The 125 cm (220 MHz) and
+  70 cm (430–440 MHz) allocations are within the chip's range but sit far
+  outside these boards' 863–928 MHz front end and matching network, where the
+  PA would be badly mismatched.
+
+- **LORA_24 (2.4 GHz)**, which needs a wide-LoRa capable radio this port does
+  not support.
+
+The 433 MHz ISM regions (`EU_433`, `ANZ_433`, `UA_433`, …) are *accepted* by
+the config validator but are equally outside these boards' front end. They are
+meaningful only if this firmware is ever built for a 433 MHz Heltec variant.
 
 ## Variants
 
