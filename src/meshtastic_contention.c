@@ -10,6 +10,8 @@
 
 #include <psa/crypto.h>
 
+#include "meshtastic_sched.h"
+
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -35,22 +37,34 @@ static int32_t map_i32(int32_t x, int32_t in_min, int32_t in_max, int32_t out_mi
 	return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
+/* Live window bounds. Defaults reproduce the reference (3, 8); the "legacy"
+ * policy zeroes them to restore transmit-immediately. A max below min is
+ * operator error rather than a state worth honouring — collapse to min, which
+ * degrades to "one slot" instead of inverting the window. */
+static void cw_bounds(uint8_t *lo, uint8_t *hi)
+{
+	const struct meshtastic_sched_config *c = meshtastic_sched_get();
+
+	*lo = c->cw_min;
+	*hi = (c->cw_max < c->cw_min) ? c->cw_min : c->cw_max;
+}
+
 /*
  * Deliberate divergence from the reference: it does not clamp getCWsize(), so an
- * SNR outside [-20, 10] produces an exponent outside [CWmin, CWmax]. That is
+ * SNR outside [-20, 10] produces an exponent outside the window bounds. That is
  * harmless there because the SNR handed in is a real radio measurement, but our
  * snr is an int8 carried in the packet struct and an out-of-range value would
  * become a shift count — snr 127 maps to 27, and 1 << 27 slots of 28 ms is about
  * an hour. Clamping keeps a malformed or hostile value from turning into an
  * unbounded delay.
  */
-static uint8_t cw_clamp(int32_t cw)
+static uint8_t cw_clamp(int32_t cw, uint8_t lo, uint8_t hi)
 {
-	if (cw < (int32_t)MESHTASTIC_CW_MIN) {
-		return (uint8_t)MESHTASTIC_CW_MIN;
+	if (cw < (int32_t)lo) {
+		return lo;
 	}
-	if (cw > (int32_t)MESHTASTIC_CW_MAX) {
-		return (uint8_t)MESHTASTIC_CW_MAX;
+	if (cw > (int32_t)hi) {
+		return hi;
 	}
 	return (uint8_t)cw;
 }
@@ -111,17 +125,40 @@ uint32_t meshtastic_contention_slot_ms(uint8_t spread_factor, uint32_t bandwidth
 
 uint8_t meshtastic_contention_cw_from_snr(int8_t snr)
 {
+	uint8_t lo, hi;
+
+	cw_bounds(&lo, &hi);
 	/* Reference getCWsize(): SNR_MIN -20, SNR_MAX 10. */
-	return cw_clamp(map_i32((int32_t)snr, -20, 10, (int32_t)MESHTASTIC_CW_MIN,
-				(int32_t)MESHTASTIC_CW_MAX));
+	return cw_clamp(map_i32((int32_t)snr, -20, 10, (int32_t)lo, (int32_t)hi), lo, hi);
 }
 
 uint8_t meshtastic_contention_cw_from_util(uint8_t util_pct)
 {
 	uint8_t util = MIN(util_pct, 100U);
+	uint8_t lo, hi;
 
-	return cw_clamp(map_i32((int32_t)util, 0, 100, (int32_t)MESHTASTIC_CW_MIN,
-				(int32_t)MESHTASTIC_CW_MAX));
+	cw_bounds(&lo, &hi);
+	return cw_clamp(map_i32((int32_t)util, 0, 100, (int32_t)lo, (int32_t)hi), lo, hi);
+}
+
+/* Slots a client waits before its own random window opens. */
+static uint32_t relay_offset_slots(void)
+{
+	uint8_t lo, hi;
+
+	cw_bounds(&lo, &hi);
+	return (uint32_t)meshtastic_sched_get()->cw_relay_offset * (uint32_t)hi;
+}
+
+uint32_t meshtastic_contention_effective_slot_ms(uint8_t spread_factor, uint32_t bandwidth_hz,
+						 bool wide_lora)
+{
+	uint16_t override_ms = meshtastic_sched_get()->cw_slot_ms;
+
+	if (override_ms != 0U) {
+		return override_ms;
+	}
+	return meshtastic_contention_slot_ms(spread_factor, bandwidth_hz, wide_lora);
 }
 
 uint32_t meshtastic_contention_delay_own_ms(uint8_t util_pct, uint32_t slot_ms)
@@ -141,12 +178,12 @@ uint32_t meshtastic_contention_delay_relay_ms(int8_t snr, bool early_like_router
 
 	/* Offset past the whole router window first, so a router's relay reliably
 	 * precedes a client's rather than merely tending to. */
-	return (2U * MESHTASTIC_CW_MAX * slot_ms) + (random_below(BIT(cw)) * slot_ms);
+	return (relay_offset_slots() * slot_ms) + (random_below(BIT(cw)) * slot_ms);
 }
 
 uint32_t meshtastic_contention_delay_relay_worst_ms(int8_t snr, uint32_t slot_ms)
 {
 	uint8_t cw = meshtastic_contention_cw_from_snr(snr);
 
-	return (2U * MESHTASTIC_CW_MAX * slot_ms) + (BIT(cw) * slot_ms);
+	return (relay_offset_slots() * slot_ms) + (BIT(cw) * slot_ms);
 }

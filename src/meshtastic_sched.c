@@ -29,6 +29,15 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define RELIABLE_TIMEOUT_DEFAULT 3000U /* ms between retransmits of an unacked send */
 #define ROUTE_TTL_DEFAULT        1800U /* s a learned next-hop stays trusted (upstream 30 min) */
 
+/* Contention window defaults reproduce the reference firmware exactly:
+ * RadioInterface.h CWmin/CWmax, and the 2*CWmax router offset from
+ * getTxDelayMsecWeighted(). Slot time 0 means "derive from the modem preset",
+ * which is what the reference does. */
+#define CW_MIN_DEFAULT          3U
+#define CW_MAX_DEFAULT          8U
+#define CW_RELAY_OFFSET_DEFAULT 2U
+#define CW_SLOT_MS_DEFAULT      0U
+
 /* Guards writes to, and whole-struct snapshots of, cfg. A leaf mutex: nothing is
  * called while it is held, so it may be nested under any other lock. */
 static K_MUTEX_DEFINE(cfg_lock);
@@ -44,6 +53,10 @@ static struct meshtastic_sched_config cfg = {
 	.reliable_retries = RELIABLE_RETRIES_DEFAULT,
 	.reliable_timeout_ms = RELIABLE_TIMEOUT_DEFAULT,
 	.route_ttl_sec = ROUTE_TTL_DEFAULT,
+	.cw_min = CW_MIN_DEFAULT,
+	.cw_max = CW_MAX_DEFAULT,
+	.cw_relay_offset = CW_RELAY_OFFSET_DEFAULT,
+	.cw_slot_ms = CW_SLOT_MS_DEFAULT,
 };
 
 struct preset {
@@ -56,12 +69,17 @@ static const struct preset presets[] = {
 	{"default",
 	 {MT_SCHED_ORDER_PRIORITY, MT_SCHED_OVF_DROP_LOWEST, OB_DEFAULT, MT_SCHED_PHONE_PROTECT,
 	  AIRTIME_MAX_DEFAULT, DEDUP_TTL_DEFAULT, RELIABLE_RETRIES_DEFAULT,
-	  RELIABLE_TIMEOUT_DEFAULT, ROUTE_TTL_DEFAULT}},
+	  RELIABLE_TIMEOUT_DEFAULT, ROUTE_TTL_DEFAULT, CW_MIN_DEFAULT, CW_MAX_DEFAULT,
+	  CW_RELAY_OFFSET_DEFAULT, CW_SLOT_MS_DEFAULT}},
 	/* Reliable delivery and route health are correctness features, not
 	 * egress-policy choices, so "legacy" keeps the "default" behavior for both. */
+	/* "legacy" also zeroes the contention window, restoring transmit-on-a-clear-
+	 * channel — the port's behaviour before this existed, and the control arm
+	 * for an on-air A/B. */
 	{"legacy",
 	 {MT_SCHED_ORDER_FIFO, MT_SCHED_OVF_DROP_NEWEST, OB_DEFAULT, MT_SCHED_PHONE_DROP_OLDEST,
-	  0U, 0U, RELIABLE_RETRIES_DEFAULT, RELIABLE_TIMEOUT_DEFAULT, ROUTE_TTL_DEFAULT}},
+	  0U, 0U, RELIABLE_RETRIES_DEFAULT, RELIABLE_TIMEOUT_DEFAULT, ROUTE_TTL_DEFAULT, 0U, 0U,
+	  0U, 0U}},
 };
 
 const struct meshtastic_sched_config *meshtastic_sched_get(void)
@@ -217,6 +235,26 @@ int meshtastic_sched_set(const char *key, const char *val)
 		ret = parse_uint(val, 0, UINT16_MAX, &v);
 		if (ret == 0) {
 			cfg.route_ttl_sec = (uint16_t)v;
+		}
+	} else if (strcmp(key, "cw.min") == 0) {
+		ret = parse_uint(val, 0, 16, &v);
+		if (ret == 0) {
+			cfg.cw_min = (uint8_t)v;
+		}
+	} else if (strcmp(key, "cw.max") == 0) {
+		ret = parse_uint(val, 0, 16, &v);
+		if (ret == 0) {
+			cfg.cw_max = (uint8_t)v;
+		}
+	} else if (strcmp(key, "cw.offset") == 0) {
+		ret = parse_uint(val, 0, 8, &v);
+		if (ret == 0) {
+			cfg.cw_relay_offset = (uint8_t)v;
+		}
+	} else if (strcmp(key, "cw.slot") == 0) {
+		ret = parse_uint(val, 0, 5000, &v);
+		if (ret == 0) {
+			cfg.cw_slot_ms = (uint16_t)v;
 		}
 	}
 

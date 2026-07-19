@@ -21,6 +21,7 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_contention.h"
+#include "meshtastic_sched.h"
 #include "meshtastic_region_presets.h"
 #include "vectors/meshtastic_vectors.h"
 
@@ -87,6 +88,11 @@ static void vectors_before(void *fixture)
 {
 	ARG_UNUSED(fixture);
 	meshtastic_channels_init_defaults();
+	/* The contention vectors assert against the reference constants, which are
+	 * the *default* policy rather than fixed values. Restore it per test so a
+	 * test that retunes the window (or one that fails partway through doing so)
+	 * cannot silently rewrite what the next one is measuring. */
+	meshtastic_sched_defaults();
 }
 
 /* The interop check that matters: our channel hash must equal
@@ -1030,4 +1036,59 @@ ZTEST(wire_vectors, test_own_delay_scales_with_utilisation)
 		zassert_true(d < (uint32_t)BIT(MESHTASTIC_CW_MAX) * slot,
 			     "own delay %u outside the widest window", d);
 	}
+}
+
+/* The window is runtime policy, not a compile-time constant: the defaults
+ * reproduce the reference, and "legacy" zeroes them so the port's original
+ * transmit-immediately behaviour is the control arm of an on-air A/B. */
+ZTEST(wire_vectors, test_contention_window_is_runtime_policy)
+{
+	const uint32_t slot = meshtastic_contention_slot_ms(11U, 250000U, false);
+	uint8_t cw_default;
+
+	/* Defaults must match the reference constants, or every vector assertion
+	 * above is only testing whatever the policy happens to be. */
+	zassert_ok(meshtastic_sched_apply_preset("default"));
+	zassert_equal(meshtastic_sched_get()->cw_min, MESHTASTIC_CW_MIN);
+	zassert_equal(meshtastic_sched_get()->cw_max, MESHTASTIC_CW_MAX);
+	cw_default = meshtastic_contention_cw_from_snr(0);
+
+	/* Narrowing the window narrows the exponent it can produce. */
+	zassert_ok(meshtastic_sched_set("cw.max", "4"));
+	zassert_true(meshtastic_contention_cw_from_snr(10) <= 4U,
+		     "cw.max must bound the exponent");
+
+	/* Zeroing it removes the delay entirely — the legacy behaviour. */
+	zassert_ok(meshtastic_sched_set("cw.min", "0"));
+	zassert_ok(meshtastic_sched_set("cw.max", "0"));
+	zassert_ok(meshtastic_sched_set("cw.offset", "0"));
+	for (unsigned int trial = 0; trial < 16U; trial++) {
+		zassert_equal(meshtastic_contention_delay_relay_ms(5, false, slot), 0U,
+			      "a zeroed window must not delay at all");
+		zassert_equal(meshtastic_contention_delay_own_ms(100U, slot), 0U,
+			      "a zeroed window must not delay our own traffic either");
+	}
+
+	/* The "legacy" policy is exactly that control arm. */
+	zassert_ok(meshtastic_sched_apply_preset("legacy"));
+	zassert_equal(meshtastic_sched_get()->cw_max, 0U, "legacy should disable the window");
+	zassert_equal(meshtastic_contention_delay_relay_ms(5, false, slot), 0U);
+
+	/* Slot override replaces the preset-derived value. */
+	zassert_ok(meshtastic_sched_apply_preset("default"));
+	zassert_equal(meshtastic_contention_effective_slot_ms(11U, 250000U, false), slot,
+		      "with no override the effective slot is the derived one");
+	zassert_ok(meshtastic_sched_set("cw.slot", "100"));
+	zassert_equal(meshtastic_contention_effective_slot_ms(11U, 250000U, false), 100U,
+		      "cw.slot must override the derived slot");
+
+	/* A max below min is operator error; it must degrade, not invert. */
+	zassert_ok(meshtastic_sched_set("cw.min", "6"));
+	zassert_ok(meshtastic_sched_set("cw.max", "2"));
+	zassert_equal(meshtastic_contention_cw_from_snr(0), 6U,
+		      "an inverted window should collapse to cw.min");
+
+	zassert_ok(meshtastic_sched_apply_preset("default"));
+	zassert_equal(meshtastic_contention_cw_from_snr(0), cw_default,
+		      "restoring the default policy must restore the default mapping");
 }

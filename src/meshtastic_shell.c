@@ -1264,6 +1264,22 @@ static int cmd_sched_show(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "  route.ttl    off       [0=never expire]");
 	}
 
+	shell_print(sh, "Contention window:");
+	if (c.cw_max != 0U) {
+		shell_print(sh, "  cw.min/max   %u/%u       [pool = 1<<cw slots]", c.cw_min,
+			    c.cw_max);
+		shell_print(sh, "  cw.offset    %u         [client waits offset*cw.max slots]",
+			    c.cw_relay_offset);
+	} else {
+		shell_print(sh, "  cw.max       off       [0 = transmit without waiting]");
+	}
+	if (c.cw_slot_ms != 0U) {
+		shell_print(sh, "  cw.slot      %ums      [override; 0 = derive from preset]",
+			    c.cw_slot_ms);
+	} else {
+		shell_print(sh, "  cw.slot      derived   [from the active modem preset]");
+	}
+
 	shell_fprintf(sh, SHELL_NORMAL, "presets:");
 	for (int i = 0; meshtastic_sched_preset_name(i) != NULL; i++) {
 		shell_fprintf(sh, SHELL_NORMAL, " %s", meshtastic_sched_preset_name(i));
@@ -1299,7 +1315,7 @@ static int cmd_sched_set(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "usage: meshtastic sched set <key> <value>");
 		shell_print(sh, "keys: tx.order tx.overflow tx.depth phone.evict "
 				"airtime.max dedup.ttl reliable.retries reliable.timeout "
-				"route.ttl");
+				"route.ttl cw.min cw.max cw.offset cw.slot");
 		return -EINVAL;
 	}
 

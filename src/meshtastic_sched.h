@@ -78,6 +78,20 @@ struct meshtastic_sched_config {
 				   * route older than this decays back to flood at
 				   * read time (upstream RouteHealth staleness).
 				   * 0 = never expire. */
+	/* Contention window (see meshtastic_contention.h). Defaults reproduce the
+	 * reference firmware; the "legacy" preset zeroes them, which restores this
+	 * port's original transmit-immediately behaviour. Being able to switch that
+	 * at runtime is what makes an A/B on a live mesh possible without a
+	 * reflash. */
+	uint8_t cw_min;           /* min window exponent, pool = 1 << cw (ref 3) */
+	uint8_t cw_max;           /* max window exponent (ref 8). 0 = no delay. */
+	uint8_t cw_relay_offset;  /* client relays wait cw_relay_offset * cw_max
+				   * slots before their own random window, so a
+				   * router's relay reliably precedes theirs
+				   * (ref 2). 0 = no router priority. */
+	uint16_t cw_slot_ms;      /* slot-time override; 0 = derive from the active
+				   * modem preset, which is what the reference
+				   * does. Non-zero is for experiments. */
 };
 
 /* Gap buckets (ms) between our relay of a (src,id) and hearing a peer relay the

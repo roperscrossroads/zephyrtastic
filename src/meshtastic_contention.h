@@ -22,8 +22,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Contention-window bounds, as exponents: the pool of slots is 1 << CWsize.
- * Reference RadioInterface.h (CWmin/CWmax). */
+/* Reference contention-window bounds, as exponents: the pool of slots is
+ * 1 << CWsize (RadioInterface.h CWmin/CWmax). These are the *defaults* — the
+ * live bounds come from the scheduler policy (cw.min / cw.max), so they can be
+ * retuned, or zeroed to restore transmit-immediately, without a reflash. */
 #define MESHTASTIC_CW_MIN 3U
 #define MESHTASTIC_CW_MAX 8U
 
@@ -44,6 +46,16 @@
  */
 uint32_t meshtastic_contention_slot_ms(uint8_t spread_factor, uint32_t bandwidth_hz,
 				       bool wide_lora);
+
+/**
+ * @brief Slot time honouring the runtime override.
+ *
+ * Returns the @c cw.slot policy value when set, otherwise derives the slot from
+ * the modem configuration. Callers scheduling a real transmission want this;
+ * meshtastic_contention_slot_ms() is the pure form the vectors pin down.
+ */
+uint32_t meshtastic_contention_effective_slot_ms(uint8_t spread_factor, uint32_t bandwidth_hz,
+						 bool wide_lora);
 
 /**
  * @brief Contention-window exponent for a received SNR.
