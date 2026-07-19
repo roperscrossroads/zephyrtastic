@@ -2223,6 +2223,133 @@ ZTEST(protocol_stack, test_plain_client_ignores_favourites)
 	(void)meshtastic_nodedb_set_favorite(PEER_NODE_ID, false);
 }
 
+/* --- Late-rebroadcast window ------------------------------------------------ */
+
+/* ROUTER_LATE still relays after hearing a peer — it just goes last. Neither
+ * cancelling (a CLIENT) nor keeping its original slot (a ROUTER). */
+ZTEST(protocol_stack, test_router_late_defers_instead_of_cancelling)
+{
+	struct meshtastic_sched_stats st;
+	uint32_t before;
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER_LATE);
+	zassert_ok(meshtastic_sched_set("cw.min", "3"));
+	zassert_ok(meshtastic_sched_set("cw.max", "3"));
+	meshtastic_sched_stats_reset();
+
+	before = mock_lora.send_count;
+	inject_broadcast_hops(PEER_NODE_ID, 0x1A7E0001U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(20));
+	inject_broadcast_hops(PEER_NODE_ID, 0x1A7E0001U, 2U, 3U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_cancelled, 0U, "ROUTER_LATE must not cancel");
+	zassert_equal(st.relay_deferred_late, 1U, "ROUTER_LATE should defer to the late window");
+	zassert_equal(mock_lora.send_count, before, "the deferred relay should not have gone yet");
+
+	/* It does eventually transmit — deferred, not dropped. */
+	for (int i = 0; i < 150 && mock_lora.send_count == before; i++) {
+		k_sleep(K_MSEC(20));
+	}
+	zassert_true(mock_lora.send_count > before, "a late relay must still transmit");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}
+
+/* Hearing further copies must not keep pushing the deadline out. Re-clamping on
+ * every duplicate would starve the relay forever on a busy mesh — the frame
+ * would be perpetually "about to" transmit and never would. */
+ZTEST(protocol_stack, test_late_window_is_not_re_applied)
+{
+	struct meshtastic_sched_stats st;
+	uint32_t before;
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER_LATE);
+	zassert_ok(meshtastic_sched_set("cw.min", "3"));
+	zassert_ok(meshtastic_sched_set("cw.max", "3"));
+	meshtastic_sched_stats_reset();
+
+	before = mock_lora.send_count;
+	inject_broadcast_hops(PEER_NODE_ID, 0x1A7E0002U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(20));
+
+	/* Several peers relay the same frame. */
+	for (int i = 0; i < 4; i++) {
+		inject_broadcast_hops(PEER_NODE_ID, 0x1A7E0002U, 2U, 3U, (uint8_t)(0x90U + i));
+		k_sleep(K_MSEC(15));
+	}
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_deferred_late, 1U,
+		      "only the first overheard copy should move the deadline");
+
+	for (int i = 0; i < 150 && mock_lora.send_count == before; i++) {
+		k_sleep(K_MSEC(20));
+	}
+	zassert_true(mock_lora.send_count > before,
+		     "repeated duplicates must not starve the relay indefinitely");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}
+
+/* CLIENT_BASE defers rather than cancels for a favourite — the same treatment
+ * ROUTER_LATE gets, and the reason the favourite exemption exists at all. */
+ZTEST(protocol_stack, test_client_base_defers_favourite_to_late_window)
+{
+	struct meshtastic_sched_stats st;
+	uint32_t before;
+
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0x1A7E0010U, 0x55U);
+	k_sleep(K_MSEC(30));
+	zassert_ok(meshtastic_nodedb_set_favorite(PEER_NODE_ID, true), "favourite failed");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT_BASE);
+	zassert_ok(meshtastic_sched_set("cw.min", "3"));
+	zassert_ok(meshtastic_sched_set("cw.max", "3"));
+	meshtastic_sched_stats_reset();
+
+	before = mock_lora.send_count;
+	inject_broadcast_hops(PEER_NODE_ID, 0x1A7E0011U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(20));
+	inject_broadcast_hops(PEER_NODE_ID, 0x1A7E0011U, 2U, 3U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_cancelled, 0U, "a favourite must not be cancelled");
+	zassert_equal(st.relay_deferred_late, 1U, "a favourite should go to the late window");
+
+	for (int i = 0; i < 150 && mock_lora.send_count == before; i++) {
+		k_sleep(K_MSEC(20));
+	}
+	zassert_true(mock_lora.send_count > before, "the favourite's relay must still transmit");
+
+	(void)meshtastic_nodedb_set_favorite(PEER_NODE_ID, false);
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}
+
+/* A ROUTER keeps its original early slot: neither cancelled nor deferred. */
+ZTEST(protocol_stack, test_router_keeps_its_original_schedule)
+{
+	struct meshtastic_sched_stats st;
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+	zassert_ok(meshtastic_sched_set("cw.min", "3"));
+	zassert_ok(meshtastic_sched_set("cw.max", "3"));
+	meshtastic_sched_stats_reset();
+
+	inject_broadcast_hops(PEER_NODE_ID, 0x1A7E0020U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(20));
+	inject_broadcast_hops(PEER_NODE_ID, 0x1A7E0020U, 2U, 3U, 0x99U);
+	k_sleep(K_MSEC(400));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_cancelled, 0U, "a ROUTER must not cancel");
+	zassert_equal(st.relay_deferred_late, 0U, "a ROUTER must not defer either");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}
+
 /* --- Packet-id unpredictability -------------------------------------------- */
 
 /* The AES-CTR channel nonce is built from (packet id, source node id) and

@@ -1365,6 +1365,9 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 	/* Flood redundancy: how many of our relays a peer also relayed, and how
 	 * soon after ours theirs arrived. Gaps inside a plausible contention window
 	 * are the transmissions a delay + overhear-cancel would have saved. */
+	if (st.relay_deferred_late > 0U) {
+		shell_print(sh, "relays deferred to the late window: %u", st.relay_deferred_late);
+	}
 	shell_print(sh, "relays cancelled on overhear: %u (transmitted %u of %u queued)",
 		    st.relay_cancelled, st.relay_sent - MIN(st.relay_cancelled, st.relay_sent),
 		    st.relay_sent);

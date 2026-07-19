@@ -34,6 +34,13 @@ struct ob_item {
 	 * caller did not explicitly defer. Compared with a signed difference so a
 	 * 32-bit uptime wrap does not strand an item for 49 days. */
 	uint32_t send_after;
+	/* Already pushed into the late-rebroadcast window. The reference gets this
+	 * for free — there, only a clamped packet carries tx_after at all, since a
+	 * normal relay delay lives on a queue-head timer. Our deadline is per-item,
+	 * so every deferred relay has send_after and the distinction needs its own
+	 * flag. Without it a node hearing repeated copies would re-clamp on each
+	 * one and never actually transmit. */
+	bool late;
 	struct k_sem *done; /* non-NULL => a blocking caller is waiting; never evict */
 	int *result;
 };
@@ -248,6 +255,7 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 	ob_items[idx].tier = tier;
 	/* A deadline of 0 means "now"; bump a zero-valued uptime by 1 ms so the
 	 * sentinel keeps its meaning at the very start of boot. */
+	ob_items[idx].late = false;
 	if (delay_ms == 0U) {
 		ob_items[idx].send_after = 0U;
 	} else {
@@ -297,6 +305,40 @@ int meshtastic_radio_send_wire_after(uint8_t *pkt, uint32_t pkt_len, uint8_t tie
 				     uint32_t delay_ms)
 {
 	return outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, delay_ms);
+}
+
+int meshtastic_outbound_defer_late(uint32_t src, uint32_t id, uint32_t delay_ms)
+{
+	int moved = 0;
+
+	k_mutex_lock(&ob_lock, K_FOREVER);
+
+	for (int i = 0; i < (int)ob_count; i++) {
+		const struct meshtastic_wire_header *h;
+		uint32_t due;
+
+		if (ob_items[i].len < MESHTASTIC_HDR_LEN || ob_items[i].late ||
+		    ob_items[i].done != NULL) {
+			continue; /* already late, or someone is waiting on it */
+		}
+
+		h = (const struct meshtastic_wire_header *)ob_items[i].wire;
+		if (sys_le32_to_cpu(h->src) != src || sys_le32_to_cpu(h->id) != id) {
+			continue;
+		}
+
+		/* Measured from now — the moment we heard the peer — not from the
+		 * original deadline, matching the reference. The point is to let
+		 * everyone else finish before we add our copy. */
+		due = k_uptime_get_32() + delay_ms;
+		ob_items[i].send_after = (due == 0U) ? 1U : due;
+		ob_items[i].late = true;
+		moved++;
+	}
+
+	k_mutex_unlock(&ob_lock);
+
+	return moved;
 }
 
 int meshtastic_outbound_cancel(uint32_t src, uint32_t id)

@@ -108,7 +108,13 @@ static void dup_mark_relayed(uint32_t src, uint32_t id)
 	meshtastic_sched_stat_relay_sent();
 }
 
-static bool relay_role_allows_cancel(uint32_t from, uint32_t to);
+enum relay_dupe_action {
+	RELAY_DUPE_CANCEL = 0, /* drop our queued relay */
+	RELAY_DUPE_KEEP,       /* leave it exactly as scheduled */
+	RELAY_DUPE_LATE,       /* re-schedule it to the back of the window */
+};
+
+static enum relay_dupe_action relay_dupe_action(uint32_t from, uint32_t to);
 
 /*
  * Flood-redundancy measurement.
@@ -125,7 +131,7 @@ static bool relay_role_allows_cancel(uint32_t from, uint32_t to);
  *     a reliable-delivery retransmission rather than a relay.
  */
 static void note_possible_redundant_relay(const struct meshtastic_wire_header *hdr, uint32_t src,
-					  uint32_t id, uint8_t rx_hop_limit)
+					  uint32_t id, uint8_t rx_hop_limit, int8_t snr)
 {
 	const struct meshtastic_dup_entry *e = dup_find(src, id);
 	uint8_t hop_start;
@@ -150,14 +156,35 @@ static void note_possible_redundant_relay(const struct meshtastic_wire_header *h
 	LOG_DBG("Redundant relay: peer 0x%02x also relayed (src=0x%08x id=0x%08x) %u ms after us",
 		hdr->relay_node, src, id, gap);
 
-	/* Overhear-cancel. If our own relay is still sitting in its contention
-	 * window, the peer has already covered this frame and ours would be pure
-	 * duplicate airtime — drop it. Nothing happens when our copy is already on
-	 * air, which is the common case for a short window. */
-	if (relay_role_allows_cancel(src, sys_le32_to_cpu(hdr->dest)) &&
-	    meshtastic_outbound_cancel(src, id) > 0) {
-		meshtastic_sched_stat_relay_cancelled();
-		LOG_DBG("Cancelled our queued relay of (src=0x%08x id=0x%08x)", src, id);
+	/* Our own relay may still be sitting in its contention window; what we do
+	 * with it depends on the role. Only reachable for a LoRa duplicate — this
+	 * runs on the LoRa RX path, matching the reference's TRANSPORT_LORA gate.
+	 * Nothing happens when our copy is already on air, the common case for a
+	 * short window. */
+	switch (relay_dupe_action(src, sys_le32_to_cpu(hdr->dest))) {
+	case RELAY_DUPE_CANCEL:
+		if (meshtastic_outbound_cancel(src, id) > 0) {
+			meshtastic_sched_stat_relay_cancelled();
+			LOG_DBG("Cancelled our queued relay of (src=0x%08x id=0x%08x)", src, id);
+		}
+		break;
+	case RELAY_DUPE_LATE: {
+		/* A fresh worst-case delay from now, so our copy lands after every
+		 * peer that is still working through its own window. */
+		uint32_t late_ms = meshtastic_contention_delay_relay_worst_ms(
+			snr, meshtastic_contention_effective_slot_ms(mt.modem.spread_factor,
+								     mt.modem.bandwidth_hz, false));
+
+		if (meshtastic_outbound_defer_late(src, id, late_ms) > 0) {
+			meshtastic_sched_stat_relay_deferred_late();
+			LOG_DBG("Deferred our relay of (src=0x%08x id=0x%08x) to +%u ms", src, id,
+				late_ms);
+		}
+		break;
+	}
+	case RELAY_DUPE_KEEP:
+	default:
+		break;
 	}
 }
 
@@ -195,32 +222,34 @@ static bool relay_early_like_router(void)
 	return meshtastic_device_role() == meshtastic_Config_DeviceConfig_Role_ROUTER;
 }
 
-/* Whether this node may drop a queued relay on hearing a peer relay the same
- * frame. Mirrors the reference roleAllowsCancelingDupe().
+/*
+ * What to do with our own queued relay when we hear a peer relay the same frame.
  *
- * ROUTER and ROUTER_LATE never cancel: infrastructure is expected to relay even
- * redundantly, because its copy may be the one that reaches a node the peer's
- * did not.
+ * The reference expresses this as two independent conditionals in
+ * perhapsCancelDupe() — a roleAllowsCancelingDupe() gate on cancelling, then
+ * separate ROUTER_LATE and CLIENT_BASE-favourite clamps. Written out as one
+ * decision the truth table is identical and easier to check:
  *
- * CLIENT_BASE is the interesting case, and the whole reason the role exists. It
- * behaves like a client for general traffic — cancelling to save airtime — but
- * like a router for traffic touching one of its favourites, where the extra
- * copy is worth the airtime. That distinction is what makes CLIENT_BASE
- * something other than a slower CLIENT. */
-static bool relay_role_allows_cancel(uint32_t from, uint32_t to)
+ *   CLIENT                  -> CANCEL  (save the airtime, the peer covered it)
+ *   CLIENT_MUTE             -> CANCEL  (never relays, so nothing is queued)
+ *   ROUTER                  -> KEEP    (relay on the original early schedule)
+ *   ROUTER_LATE             -> LATE    (still relay, but after everyone else)
+ *   CLIENT_BASE, favourite  -> LATE    (router-like, but yields first)
+ *   CLIENT_BASE, otherwise  -> CANCEL  (client-like)
+ */
+static enum relay_dupe_action relay_dupe_action(uint32_t from, uint32_t to)
 {
-	meshtastic_Config_DeviceConfig_Role role = meshtastic_device_role();
-
-	if (role == meshtastic_Config_DeviceConfig_Role_ROUTER ||
-	    role == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE) {
-		return false;
+	switch (meshtastic_device_role()) {
+	case meshtastic_Config_DeviceConfig_Role_ROUTER:
+		return RELAY_DUPE_KEEP;
+	case meshtastic_Config_DeviceConfig_Role_ROUTER_LATE:
+		return RELAY_DUPE_LATE;
+	case meshtastic_Config_DeviceConfig_Role_CLIENT_BASE:
+		return meshtastic_nodedb_is_from_or_to_favorite(from, to) ? RELAY_DUPE_LATE
+									 : RELAY_DUPE_CANCEL;
+	default:
+		return RELAY_DUPE_CANCEL;
 	}
-
-	if (role == meshtastic_Config_DeviceConfig_Role_CLIENT_BASE) {
-		return !meshtastic_nodedb_is_from_or_to_favorite(from, to);
-	}
-
-	return true;
 }
 
 static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wire_header *hdr,
@@ -480,7 +509,7 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 							   hop_start);
 		}
 
-		note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit);
+		note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
 
 		LOG_DBG("Duplicate (src=0x%08x id=0x%08x)", src, pkt_id);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
@@ -498,7 +527,7 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 			.id = pkt_id,
 		};
 
-		note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit);
+		note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
 
 		LOG_DBG("Hop-upgraded duplicate (src=0x%08x id=0x%08x hops=%u): relay", src,
 			pkt_id, rx_hop_limit);

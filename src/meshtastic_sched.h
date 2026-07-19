@@ -117,6 +117,7 @@ struct meshtastic_sched_stats {
 	uint32_t relay_sent;      /* relays queued (transmitted = sent - cancelled) */
 	uint32_t relay_redundant;
 	uint32_t relay_cancelled; /* queued relays dropped on hearing a peer's copy */
+	uint32_t relay_deferred_late; /* queued relays pushed to the late window instead */
 	uint32_t relay_gap[MT_RELAY_GAP_BUCKETS];
 };
 
@@ -208,6 +209,9 @@ void meshtastic_sched_stat_relay_redundant(uint32_t gap_ms);
 
 /** Count a queued relay we dropped because a peer relayed it first. */
 void meshtastic_sched_stat_relay_cancelled(void);
+
+/** Count a queued relay we pushed to the late window instead of dropping. */
+void meshtastic_sched_stat_relay_deferred_late(void);
 
 #ifdef __cplusplus
 }

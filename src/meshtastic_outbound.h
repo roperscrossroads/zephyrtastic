@@ -73,6 +73,23 @@ int meshtastic_radio_send_wire_after(uint8_t *pkt, uint32_t pkt_len, uint8_t tie
  */
 int meshtastic_outbound_cancel(uint32_t src, uint32_t id);
 
+/**
+ * @brief Push a queued frame into the late-rebroadcast window.
+ *
+ * Mirrors the reference clampToLateRebroadcastWindow(). Used by roles that
+ * should relay even after hearing a peer cover the frame, but should go last:
+ * ROUTER_LATE always, and CLIENT_BASE for traffic touching a favourite. The
+ * relay still happens — it just stops competing with everyone else's.
+ *
+ * The new deadline is measured from now rather than from the original one, and
+ * a frame already in the late window is left alone: re-clamping on every
+ * further copy heard would keep pushing the deadline out and the frame would
+ * never transmit at all.
+ *
+ * @return number of frames moved (0 if ours already went out, or was already late).
+ */
+int meshtastic_outbound_defer_late(uint32_t src, uint32_t id, uint32_t delay_ms);
+
 #ifdef __cplusplus
 }
 #endif
