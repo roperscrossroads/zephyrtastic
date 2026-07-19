@@ -71,6 +71,14 @@ int meshtastic_nodeinfo_init(void);
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_TBEAM
 #elif defined(CONFIG_BOARD_TTGO_LORA32)
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_TLORA_V2_1_1P8
+/* V4_R8 before V4: they are independent boards today (the R8 carries octal PSRAM
+ * and is not a revision of the plain V4), so the order is not load-bearing — but
+ * keeping the more specific symbol first means this stays correct if the R8 is
+ * ever folded in as a variant that also defines the base symbol. */
+#elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V4_R8)
+#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V4_R8
+#elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V4)
+#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V4
 #elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V3)
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V3
 #elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V2)
@@ -84,6 +92,10 @@ int meshtastic_nodeinfo_init(void);
 #elif defined(CONFIG_BOARD_RAK4631)
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_RAK4631
 #else
+/* An unmapped board advertises PRIVATE_HW to every peer and to the phone app.
+ * That is the honest answer for hardware upstream has no enum for, but it is the
+ * wrong answer for a board that does have one — add the case above rather than
+ * letting a supported board fall through here. */
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_PRIVATE_HW
 #endif
 
