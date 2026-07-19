@@ -996,6 +996,32 @@ int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite)
 	return nodedb_set_bit(node_num, NODEINFO_BITFIELD_IS_FAVORITE_BIT, favorite);
 }
 
+bool meshtastic_nodedb_is_from_or_to_favorite(uint32_t from, uint32_t to)
+{
+	struct nodedb_entry *e;
+	bool favorite = false;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+
+	e = find_entry_locked(from);
+	if (e != NULL && IS_BIT_SET(e->node.bitfield, NODEINFO_BITFIELD_IS_FAVORITE_BIT)) {
+		favorite = true;
+	}
+
+	/* The broadcast address is never a stored node, so only the sender can
+	 * make a broadcast favorite-relevant. Checking it would always miss. */
+	if (!favorite && to != MESHTASTIC_NODE_BROADCAST) {
+		e = find_entry_locked(to);
+		if (e != NULL && IS_BIT_SET(e->node.bitfield, NODEINFO_BITFIELD_IS_FAVORITE_BIT)) {
+			favorite = true;
+		}
+	}
+
+	k_mutex_unlock(&nodedb_lock);
+
+	return favorite;
+}
+
 int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored)
 {
 	return nodedb_set_bit(node_num, NODEINFO_BITFIELD_IS_IGNORED_BIT, ignored);

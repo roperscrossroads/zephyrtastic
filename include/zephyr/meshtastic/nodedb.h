@@ -165,6 +165,18 @@ void meshtastic_nodedb_note_route_success(uint32_t dest);
 int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite);
 
 /**
+ * @brief True if either end of a packet is a favorited node.
+ *
+ * Mirrors the reference NodeDB::isFromOrToFavoritedNode. Used by the relay path:
+ * a CLIENT_BASE node treats traffic touching one of its favorites the way a
+ * router would, relaying even after hearing a peer relay it first.
+ *
+ * @p to of @ref MESHTASTIC_NODE_BROADCAST is only tested via @p from — the
+ * broadcast address is never a stored node, so looking it up always misses.
+ */
+bool meshtastic_nodedb_is_from_or_to_favorite(uint32_t from, uint32_t to);
+
+/**
  * @brief Mark a node ignored / un-ignored in the in-RAM NodeDB.
  *
  * @retval 0 Flag updated.

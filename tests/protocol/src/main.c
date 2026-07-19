@@ -2134,6 +2134,95 @@ ZTEST(protocol_stack, test_cancel_only_removes_the_matching_relay)
 		     "only one of the two relays should have transmitted");
 }
 
+/* --- CLIENT_BASE favourite handling ----------------------------------------- */
+
+/* CLIENT_BASE behaves like a CLIENT for ordinary traffic: it cancels a queued
+ * relay when a peer covers the frame first. */
+ZTEST(protocol_stack, test_client_base_cancels_for_ordinary_traffic)
+{
+	struct meshtastic_sched_stats st;
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT_BASE);
+	zassert_ok(meshtastic_sched_set("cw.min", "4"));
+	zassert_ok(meshtastic_sched_set("cw.max", "4"));
+	meshtastic_sched_stats_reset();
+
+	inject_broadcast_hops(PEER_NODE_ID, 0xFA0001U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(20));
+	inject_broadcast_hops(PEER_NODE_ID, 0xFA0001U, 2U, 3U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_cancelled, 1U,
+		      "CLIENT_BASE should cancel like a CLIENT for a non-favourite");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}
+
+/* ...but like a ROUTER for traffic touching a favourite: the extra copy is
+ * worth the airtime, so the relay stands. This is the distinction that makes
+ * CLIENT_BASE a role rather than an alias for CLIENT. */
+ZTEST(protocol_stack, test_client_base_keeps_relay_for_a_favourite)
+{
+	struct meshtastic_sched_stats st;
+	uint32_t before;
+
+	/* Teach the NodeDB about PEER, then favourite it. */
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xFA0010U, 0x55U);
+	k_sleep(K_MSEC(30));
+	zassert_ok(meshtastic_nodedb_set_favorite(PEER_NODE_ID, true), "favourite failed");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT_BASE);
+	zassert_ok(meshtastic_sched_set("cw.min", "4"));
+	zassert_ok(meshtastic_sched_set("cw.max", "4"));
+	meshtastic_sched_stats_reset();
+
+	before = mock_lora.send_count;
+	inject_broadcast_hops(PEER_NODE_ID, 0xFA0011U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(20));
+	inject_broadcast_hops(PEER_NODE_ID, 0xFA0011U, 2U, 3U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_cancelled, 0U,
+		      "CLIENT_BASE must not cancel a relay touching a favourite");
+
+	/* Drain it so it cannot fire during a later test. */
+	for (int i = 0; i < 100 && mock_lora.send_count == before; i++) {
+		k_sleep(K_MSEC(20));
+	}
+	zassert_true(mock_lora.send_count > before, "the favourite's relay should still go out");
+
+	(void)meshtastic_nodedb_set_favorite(PEER_NODE_ID, false);
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}
+
+/* A plain CLIENT ignores favourites entirely — the exemption is CLIENT_BASE's
+ * alone, so favouriting a node must not change a CLIENT's relay behaviour. */
+ZTEST(protocol_stack, test_plain_client_ignores_favourites)
+{
+	struct meshtastic_sched_stats st;
+
+	inject_with_relay(PEER_NODE_ID, TEST_NODE_ID, 0xFA0020U, 0x55U);
+	k_sleep(K_MSEC(30));
+	zassert_ok(meshtastic_nodedb_set_favorite(PEER_NODE_ID, true), "favourite failed");
+
+	zassert_ok(meshtastic_sched_set("cw.min", "4"));
+	zassert_ok(meshtastic_sched_set("cw.max", "4"));
+	meshtastic_sched_stats_reset();
+
+	inject_broadcast_hops(PEER_NODE_ID, 0xFA0021U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(20));
+	inject_broadcast_hops(PEER_NODE_ID, 0xFA0021U, 2U, 3U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_cancelled, 1U,
+		      "a CLIENT should cancel regardless of favourite status");
+
+	(void)meshtastic_nodedb_set_favorite(PEER_NODE_ID, false);
+}
+
 /* --- Packet-id unpredictability -------------------------------------------- */
 
 /* The AES-CTR channel nonce is built from (packet id, source node id) and

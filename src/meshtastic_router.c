@@ -108,7 +108,7 @@ static void dup_mark_relayed(uint32_t src, uint32_t id)
 	meshtastic_sched_stat_relay_sent();
 }
 
-static bool relay_role_allows_cancel(void);
+static bool relay_role_allows_cancel(uint32_t from, uint32_t to);
 
 /*
  * Flood-redundancy measurement.
@@ -154,7 +154,8 @@ static void note_possible_redundant_relay(const struct meshtastic_wire_header *h
 	 * window, the peer has already covered this frame and ours would be pure
 	 * duplicate airtime — drop it. Nothing happens when our copy is already on
 	 * air, which is the common case for a short window. */
-	if (relay_role_allows_cancel() && meshtastic_outbound_cancel(src, id) > 0) {
+	if (relay_role_allows_cancel(src, sys_le32_to_cpu(hdr->dest)) &&
+	    meshtastic_outbound_cancel(src, id) > 0) {
 		meshtastic_sched_stat_relay_cancelled();
 		LOG_DBG("Cancelled our queued relay of (src=0x%08x id=0x%08x)", src, id);
 	}
@@ -195,20 +196,31 @@ static bool relay_early_like_router(void)
 }
 
 /* Whether this node may drop a queued relay on hearing a peer relay the same
- * frame. Mirrors the reference roleAllowsCancelingDupe(): ROUTER and ROUTER_LATE
- * never cancel, because infrastructure is expected to relay even redundantly —
- * its copy may be the one that reaches a node the peer's did not.
+ * frame. Mirrors the reference roleAllowsCancelingDupe().
  *
- * The reference also exempts CLIENT_BASE for traffic to or from a favourited
- * node. Not implemented here: favourites exist in the NodeDB but are not yet
- * consulted on the relay path, so claiming the exemption would be a lie. A
- * CLIENT_BASE node currently cancels like a CLIENT. */
-static bool relay_role_allows_cancel(void)
+ * ROUTER and ROUTER_LATE never cancel: infrastructure is expected to relay even
+ * redundantly, because its copy may be the one that reaches a node the peer's
+ * did not.
+ *
+ * CLIENT_BASE is the interesting case, and the whole reason the role exists. It
+ * behaves like a client for general traffic — cancelling to save airtime — but
+ * like a router for traffic touching one of its favourites, where the extra
+ * copy is worth the airtime. That distinction is what makes CLIENT_BASE
+ * something other than a slower CLIENT. */
+static bool relay_role_allows_cancel(uint32_t from, uint32_t to)
 {
 	meshtastic_Config_DeviceConfig_Role role = meshtastic_device_role();
 
-	return role != meshtastic_Config_DeviceConfig_Role_ROUTER &&
-	       role != meshtastic_Config_DeviceConfig_Role_ROUTER_LATE;
+	if (role == meshtastic_Config_DeviceConfig_Role_ROUTER ||
+	    role == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE) {
+		return false;
+	}
+
+	if (role == meshtastic_Config_DeviceConfig_Role_CLIENT_BASE) {
+		return !meshtastic_nodedb_is_from_or_to_favorite(from, to);
+	}
+
+	return true;
 }
 
 static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wire_header *hdr,
