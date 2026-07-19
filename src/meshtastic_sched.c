@@ -72,11 +72,14 @@ static const struct preset presets[] = {
 	  RELIABLE_TIMEOUT_DEFAULT, ROUTE_TTL_DEFAULT, CW_MIN_DEFAULT, CW_MAX_DEFAULT,
 	  CW_RELAY_OFFSET_DEFAULT, CW_SLOT_MS_DEFAULT}},
 	/* Reliable delivery and route health are correctness features, not
-	 * egress-policy choices, so "legacy" keeps the "default" behavior for both. */
-	/* "legacy" also zeroes the contention window, restoring transmit-on-a-clear-
-	 * channel — the port's behaviour before this existed, and the control arm
-	 * for an on-air A/B. */
-	{"legacy",
+	 * egress-policy choices, so "no-backoff" keeps the "default" behavior for both. */
+	/* "no-backoff" removes every voluntary wait this node does: the contention
+	 * window, the airtime gate and the dedup TTL. That restores how the port
+	 * behaved before those existed, which makes it the control arm for measuring
+	 * them — and also makes it a poor mesh citizen, since it transmits ahead of
+	 * neighbours that are backing off. Named for what it does, not when it was
+	 * written. */
+	{"no-backoff",
 	 {MT_SCHED_ORDER_FIFO, MT_SCHED_OVF_DROP_NEWEST, OB_DEFAULT, MT_SCHED_PHONE_DROP_OLDEST,
 	  0U, 0U, RELIABLE_RETRIES_DEFAULT, RELIABLE_TIMEOUT_DEFAULT, ROUTE_TTL_DEFAULT, 0U, 0U,
 	  0U, 0U}},

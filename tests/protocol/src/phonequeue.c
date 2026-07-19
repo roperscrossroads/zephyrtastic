@@ -174,7 +174,8 @@ ZTEST(phonequeue, test_protect_evicts_oldest_droppable_first)
 	zassert_equal(got[3], 5);
 }
 
-/* drop-oldest: legacy policy evicts the strict-oldest frame regardless of tier. */
+/* drop-oldest: the no-backoff policy evicts the strict-oldest frame regardless
+ * of tier. */
 ZTEST(phonequeue, test_drop_oldest_legacy)
 {
 	struct meshtastic_sched_stats st;

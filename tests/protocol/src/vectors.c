@@ -1039,7 +1039,7 @@ ZTEST(wire_vectors, test_own_delay_scales_with_utilisation)
 }
 
 /* The window is runtime policy, not a compile-time constant: the defaults
- * reproduce the reference, and "legacy" zeroes them so the port's original
+ * reproduce the reference, and "no-backoff" zeroes them so the port's original
  * transmit-immediately behaviour is the control arm of an on-air A/B. */
 ZTEST(wire_vectors, test_contention_window_is_runtime_policy)
 {
@@ -1058,7 +1058,7 @@ ZTEST(wire_vectors, test_contention_window_is_runtime_policy)
 	zassert_true(meshtastic_contention_cw_from_snr(10) <= 4U,
 		     "cw.max must bound the exponent");
 
-	/* Zeroing it removes the delay entirely — the legacy behaviour. */
+	/* Zeroing it removes the delay entirely — the port's original behaviour. */
 	zassert_ok(meshtastic_sched_set("cw.min", "0"));
 	zassert_ok(meshtastic_sched_set("cw.max", "0"));
 	zassert_ok(meshtastic_sched_set("cw.offset", "0"));
@@ -1069,9 +1069,10 @@ ZTEST(wire_vectors, test_contention_window_is_runtime_policy)
 			      "a zeroed window must not delay our own traffic either");
 	}
 
-	/* The "legacy" policy is exactly that control arm. */
-	zassert_ok(meshtastic_sched_apply_preset("legacy"));
-	zassert_equal(meshtastic_sched_get()->cw_max, 0U, "legacy should disable the window");
+	/* The "no-backoff" policy is exactly that control arm. */
+	zassert_ok(meshtastic_sched_apply_preset("no-backoff"));
+	zassert_equal(meshtastic_sched_get()->cw_max, 0U,
+		      "no-backoff should disable the window");
 	zassert_equal(meshtastic_contention_delay_relay_ms(5, false, slot), 0U);
 
 	/* Slot override replaces the preset-derived value. */

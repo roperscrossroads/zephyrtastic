@@ -169,7 +169,7 @@ the Zephyr . Commands marked *(optional)* are only present when their correspond
    * - ``meshtastic sched [show]``
      - Show the scheduler / QoS policy and knobs
    * - ``meshtastic sched policy <name>``
-     - Apply a policy preset (``default``, ``legacy``)
+     - Apply a policy preset (``default``, ``no-backoff``)
    * - ``meshtastic sched set <key> <value>``
      - Tune one knob live: ``tx.order``, ``tx.overflow``, ``tx.depth``, ``phone.evict``, ``airtime.max`` (% channel util that gates background self-broadcasts, 0=off), ``dedup.ttl`` (seconds a duplicate is remembered, 0=never), ``reliable.retries`` (retransmits of an unacked DM, 0=off), ``reliable.timeout`` (ms between retransmits), ``route.ttl`` (seconds a learned next-hop stays trusted, 0=never), ``cw.min``/``cw.max`` (contention-window exponents, ``cw.max 0`` disables), ``cw.offset`` (client relay offset in ``cw.max`` slots), ``cw.slot`` (slot-time override in ms, 0=derive from preset)
    * - ``meshtastic sched stats [reset]``
@@ -207,14 +207,18 @@ upstream does. A node nobody has touched waits before relaying, the same way its
 neighbours do.
 
 ``cw.max 0`` switches that off and transmits as soon as the channel is clear.
-The ``legacy`` policy preset does exactly this, along with disabling the airtime
-gate and dedup TTL — it restores how this port behaved before those mechanisms
-existed. It is retained because it is the control arm for measuring them (see
-``meshtastic sched stats``, which counts relays a peer also relayed), **not
-because it is a reasonable way to run a node on a shared mesh.** A node running
-``legacy`` transmits ahead of every neighbour that is backing off politely, and
-takes more than its share of a channel it does not own. Use it to measure, then
-put it back.
+The ``no-backoff`` policy preset does exactly this, along with disabling the
+airtime gate and dedup TTL — it removes every voluntary wait the node performs,
+restoring how this port behaved before those mechanisms existed. It is retained
+because it is the control arm for measuring them (see ``meshtastic sched stats``,
+which counts relays a peer also relayed), **not because it is a reasonable way to
+run a node on a shared mesh.** A node running ``no-backoff`` transmits ahead of
+every neighbour that is backing off politely, and takes more than its share of a
+channel it does not own. Use it to measure, then put it back.
+
+It is named for what it does rather than when it was written: "legacy" read like
+"the safe old default" to anyone who had not read this section, which is exactly
+backwards.
 
 The scheduler policy is a runtime-tunable QoS surface (RAM-only — a reboot
 restores compiled defaults). Changing a knob or applying a preset resets the

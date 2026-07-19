@@ -110,14 +110,14 @@ ZTEST(sched, test_set_invalid_rejected)
 
 ZTEST(sched, test_presets)
 {
-	zassert_ok(meshtastic_sched_apply_preset("legacy"));
+	zassert_ok(meshtastic_sched_apply_preset("no-backoff"));
 	zassert_equal(meshtastic_sched_get()->tx_order, MT_SCHED_ORDER_FIFO,
-		      "legacy must be FIFO for A/B comparison");
+		      "no-backoff must be FIFO for A/B comparison");
 	zassert_equal(meshtastic_sched_get()->tx_overflow, MT_SCHED_OVF_DROP_NEWEST);
 	zassert_equal(meshtastic_sched_get()->airtime_max_util, 0,
-		      "legacy disables the airtime gate");
+		      "no-backoff disables the airtime gate");
 	zassert_equal(meshtastic_sched_get()->dedup_ttl_sec, 0,
-		      "legacy uses a never-expiring dedup ring");
+		      "no-backoff uses a never-expiring dedup ring");
 
 	zassert_ok(meshtastic_sched_apply_preset("default"));
 	zassert_equal(meshtastic_sched_get()->tx_order, MT_SCHED_ORDER_PRIORITY);
@@ -160,13 +160,13 @@ ZTEST(sched, test_snapshot_coherent)
 {
 	struct meshtastic_sched_config snap;
 
-	zassert_ok(meshtastic_sched_apply_preset("legacy"));
+	zassert_ok(meshtastic_sched_apply_preset("no-backoff"));
 	meshtastic_sched_snapshot(&snap);
 	zassert_equal(snap.tx_order, MT_SCHED_ORDER_FIFO);
 	zassert_equal(snap.tx_overflow, MT_SCHED_OVF_DROP_NEWEST);
 	zassert_equal(snap.phone_evict, MT_SCHED_PHONE_DROP_OLDEST);
-	zassert_equal(snap.airtime_max_util, 0, "legacy bundle must be coherent");
-	zassert_equal(snap.dedup_ttl_sec, 0, "legacy bundle must be coherent");
+	zassert_equal(snap.airtime_max_util, 0, "no-backoff bundle must be coherent");
+	zassert_equal(snap.dedup_ttl_sec, 0, "no-backoff bundle must be coherent");
 
 	zassert_ok(meshtastic_sched_apply_preset("default"));
 	meshtastic_sched_snapshot(&snap);
@@ -215,7 +215,7 @@ ZTEST(sched, test_stats_reset_on_mode_change)
 	zassert_equal(st.tx_drop[MT_SCHED_TIER_BG], 1, "rejected set must not reset stats");
 
 	/* Applying a preset resets. */
-	zassert_ok(meshtastic_sched_apply_preset("legacy"));
+	zassert_ok(meshtastic_sched_apply_preset("no-backoff"));
 	meshtastic_sched_stats_get(&st);
 	zassert_equal(st.tx_drop[MT_SCHED_TIER_BG], 0, "preset must reset drop stats");
 

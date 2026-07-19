@@ -79,7 +79,7 @@ struct meshtastic_sched_config {
 				   * read time (upstream RouteHealth staleness).
 				   * 0 = never expire. */
 	/* Contention window (see meshtastic_contention.h). Defaults reproduce the
-	 * reference firmware; the "legacy" preset zeroes them, which restores this
+	 * reference firmware; the "no-backoff" preset zeroes them, which restores this
 	 * port's original transmit-immediately behaviour. Being able to switch that
 	 * at runtime is what makes an A/B on a live mesh possible without a
 	 * reflash. */
@@ -157,7 +157,7 @@ uint8_t meshtastic_sched_tier_for(uint32_t portnum);
 void meshtastic_sched_defaults(void);
 
 /**
- * Apply a named policy preset ("default", "legacy", ...).
+ * Apply a named policy preset ("default", "no-backoff", ...).
  * @retval 0 applied, -ENOENT unknown preset.
  */
 int meshtastic_sched_apply_preset(const char *name);
