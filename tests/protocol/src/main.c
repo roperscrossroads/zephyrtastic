@@ -1858,6 +1858,49 @@ ZTEST(protocol_stack, test_nodedb_reset_keeps_favorites)
 	meshtastic_nodedb_reset(false);
 }
 
+/* --- Packet-id unpredictability -------------------------------------------- */
+
+/* The AES-CTR channel nonce is built from (packet id, source node id) and
+ * nothing else, and the source id never changes — so the packet id is the only
+ * thing keeping the (key, nonce) pair unique. A counter that restarts at a
+ * fixed value each boot therefore re-emits packets under nonces already used,
+ * and two ciphertexts sharing a keystream leak the XOR of their plaintexts.
+ *
+ * A sim test cannot reboot, so it asserts the property that makes the reuse
+ * impossible: ids are not a plain ascending counter. Before the fix every
+ * allocation was exactly the previous one plus one, so this fails outright. */
+ZTEST(protocol_stack, test_packet_ids_are_not_a_plain_counter)
+{
+	uint32_t ids[64];
+	unsigned int non_sequential = 0U;
+
+	for (size_t i = 0; i < ARRAY_SIZE(ids); i++) {
+		ids[i] = meshtastic_allocate_packet_id();
+		zassert_not_equal(ids[i], 0U, "packet id 0 is reserved and must never be issued");
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(ids); i++) {
+		for (size_t j = i + 1U; j < ARRAY_SIZE(ids); j++) {
+			zassert_not_equal(ids[i], ids[j], "packet ids %zu and %zu collided (0x%08x)",
+					  i, j, ids[i]);
+		}
+	}
+
+	for (size_t i = 1; i < ARRAY_SIZE(ids); i++) {
+		if (ids[i] != ids[i - 1U] + 1U) {
+			non_sequential++;
+		}
+	}
+
+	/* Randomised high bits make essentially every step non-sequential. The
+	 * threshold is deliberately loose (half) so this can never flake: failing
+	 * it would need ~32 independent 2^-22 coincidences. A pure ++ counter
+	 * scores 0. */
+	zassert_true(non_sequential >= (ARRAY_SIZE(ids) - 1U) / 2U,
+		     "packet ids look like a plain counter (%u/%zu steps non-sequential)",
+		     non_sequential, ARRAY_SIZE(ids) - 1U);
+}
+
 /* --- MQTT downlink must not reach remote admin (security H4) --------------- */
 
 static meshtastic_Config_DeviceConfig_Role current_device_role(void)

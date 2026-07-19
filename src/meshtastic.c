@@ -143,13 +143,64 @@ static int node_id_from_hwinfo(uint32_t *node_id)
 }
 #endif /* CONFIG_MESHTASTIC_NODE_ID_HWINFO */
 
+/*
+ * Packet-id generation.
+ *
+ * The AES-CTR channel nonce is built from (packet id, source node id) and
+ * nothing else. The source id is fixed for the life of the node, so the id is
+ * the only thing keeping the (key, nonce) pair unique — and a counter that
+ * restarts at a fixed value every boot re-emits packets under nonces already
+ * used before the reboot. Two ciphertexts under one keystream leak their
+ * plaintexts' XOR, which on a secret-PSK channel is a real confidentiality
+ * break for anyone logging across an induced restart.
+ *
+ * So: the counter is seeded from the CSPRNG at boot, and each id carries fresh
+ * random high bits on top of it. The low bits stay a rolling counter, which
+ * keeps consecutive ids distinct even if the RNG were to repeat itself.
+ *
+ * Wire format is unchanged — the id is still an opaque 32-bit value.
+ */
+#define PKT_ID_COUNTER_BITS 10U
+#define PKT_ID_COUNTER_MASK BIT_MASK(PKT_ID_COUNTER_BITS)
+
+static int seed_packet_id(void)
+{
+	uint32_t seed = 0U;
+	psa_status_t st = psa_generate_random((uint8_t *)&seed, sizeof(seed));
+
+	if (st != PSA_SUCCESS) {
+		/* Refuse rather than silently fall back to a predictable counter:
+		 * a node that cannot seed this cannot encrypt safely, and the
+		 * failure would otherwise be invisible until someone captured
+		 * traffic across a reboot. */
+		LOG_ERR("packet-id seed failed (%d) — refusing to start with a "
+			"predictable AES-CTR nonce",
+			(int)st);
+		return -EIO;
+	}
+
+	mt.next_pkt_id = seed;
+	return 0;
+}
+
 uint32_t meshtastic_allocate_packet_id(void)
 {
-	uint32_t id = mt.next_pkt_id++;
+	uint32_t id;
 
-	if (id == 0U) {
-		id = mt.next_pkt_id++;
-	}
+	do {
+		uint32_t high = 0U;
+
+		mt.next_pkt_id++;
+
+		if (psa_generate_random((uint8_t *)&high, sizeof(high)) != PSA_SUCCESS) {
+			/* Degrade to the counter alone. Still safe for the property
+			 * that matters here: the counter was seeded randomly at
+			 * boot, so ids do not repeat across a restart. */
+			high = mt.next_pkt_id >> PKT_ID_COUNTER_BITS;
+		}
+
+		id = (mt.next_pkt_id & PKT_ID_COUNTER_MASK) | (high << PKT_ID_COUNTER_BITS);
+	} while (id == 0U); /* id 0 is reserved (see the id==0 broadcast guard) */
 
 	return id;
 }
@@ -349,6 +400,8 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	mt.long_name = (cfg->long_name != NULL) ? cfg->long_name : CONFIG_MESHTASTIC_NODE_LONG_NAME;
 	mt.short_name =
 		(cfg->short_name != NULL) ? cfg->short_name : CONFIG_MESHTASTIC_NODE_SHORT_NAME;
+	/* Seeded from the CSPRNG once PSA is up (below) — a fixed start would make
+	 * the AES-CTR nonce repeat after every reboot. */
 	mt.next_pkt_id = 1U;
 	mt.next_fromradio_id = 1U;
 	mt.dup_head = 0U;
@@ -361,6 +414,12 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	if (psa_st != PSA_SUCCESS) {
 		LOG_ERR("psa_crypto_init failed (%d)", (int)psa_st);
 		return -EIO;
+	}
+
+	/* Must follow psa_crypto_init(): the seed comes from the PSA DRBG. */
+	ret = seed_packet_id();
+	if (ret < 0) {
+		return ret;
 	}
 
 	k_mutex_init(&mt.lock);
