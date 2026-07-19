@@ -230,6 +230,34 @@ ZTEST(meshtastic_shell, test_unmanaged_node_allows_config_write)
 		      "an unmanaged node should accept a shell role write");
 }
 
+/* The favourite command is a config write: a managed node refuses it before it
+ * reaches the NodeDB, exactly like the other mutating commands. */
+ZTEST(meshtastic_shell, test_managed_node_refuses_favorite)
+{
+	const char *out;
+
+	set_managed(true);
+
+	zassert_not_equal(run_cmd("meshtastic nodedb favorite 0x12345678 on", &out), 0,
+			  "a managed node must refuse a favourite write");
+	zassert_not_null(strstr(out, "managed"), "expected a managed-node refusal, got: %s", out);
+}
+
+/* Unmanaged, the command reaches the NodeDB and reports the node is absent —
+ * proving it passed the gate rather than being refused by it. That "reached the
+ * store" signal is what distinguishes the gate from the operation. */
+ZTEST(meshtastic_shell, test_unmanaged_favorite_reaches_nodedb)
+{
+	const char *out;
+
+	/* An id certainly not in the DB (0x12345678 is our own node, which exists).
+	 * The error proves the command passed the gate and reached the store. */
+	zassert_not_equal(run_cmd("meshtastic nodedb favorite 0xDEADBEEF on", &out), 0,
+			  "favouriting an absent node should fail");
+	zassert_not_null(strstr(out, "DB"),
+			 "expected the NodeDB-layer error, not a gate refusal, got: %s", out);
+}
+
 /* The finding: a managed node refuses local admin over the PhoneAPI but the
  * shell wrote config regardless, so is_managed could be bypassed entirely by
  * anyone at the console. */

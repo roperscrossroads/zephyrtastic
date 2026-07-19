@@ -1066,6 +1066,7 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 	if (node.has_hops_away) {
 		shell_print(sh, "hops away: %u", node.hops_away);
 	}
+	shell_print(sh, "favorite: %s", node.is_favorite ? "yes" : "no");
 
 	if (node.has_user) {
 		shell_print(sh, "long name: %s", node.long_name);
@@ -1082,6 +1083,52 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t node_num;
+	bool favorite = true;
+	int ret;
+
+	if (argc < 2U || argc > 3U) {
+		shell_error(sh, "usage: meshtastic nodedb favorite <node|0xnode> [on|off]");
+		return -EINVAL;
+	}
+
+	/* A favourite is persisted device state that changes how we relay; treat it
+	 * as a config write, so a managed node refuses it the same way it refuses
+	 * the other mutating shell commands. */
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+
+	ret = parse_u32(sh, argv[1], &node_num);
+	if (ret < 0) {
+		return ret;
+	}
+
+	if (argc == 3U) {
+		if (strcmp(argv[2], "on") == 0) {
+			favorite = true;
+		} else if (strcmp(argv[2], "off") == 0) {
+			favorite = false;
+		} else {
+			shell_error(sh, "expected on or off, got %s", argv[2]);
+			return -EINVAL;
+		}
+	}
+
+	ret = meshtastic_nodedb_set_favorite(node_num, favorite);
+	if (ret < 0) {
+		shell_error(sh, "favorite failed: %d (is the node in the DB?)", ret);
+		return ret;
+	}
+
+	shell_print(sh, "node 0x%08x favorite %s", node_num, favorite ? "on" : "off");
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodedb_cmds,
 			       SHELL_CMD(list, NULL, SHELL_HELP("List NodeDB entries.", NULL),
 					 cmd_nodedb_list),
@@ -1092,6 +1139,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodedb_cmds,
 					 SHELL_HELP("List warm key-tier entries (num + LRU recency).",
 						    NULL),
 					 cmd_nodedb_warm),
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+			       SHELL_CMD(favorite, NULL,
+					 SHELL_HELP("Mark a node favorite / not.",
+						    "<node|0xnode> [on|off]"),
+					 cmd_nodedb_favorite),
+#endif
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_NODEDB */
 
