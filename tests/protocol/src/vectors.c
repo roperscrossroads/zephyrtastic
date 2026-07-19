@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "meshtastic_channels.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_region_presets.h"
 #include "vectors/meshtastic_vectors.h"
@@ -179,6 +180,66 @@ ZTEST(wire_vectors, test_empty_name_follows_the_active_preset)
 
 	mt.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
 	mt.use_preset = true;
+}
+
+/* Changing the preset at runtime must rehash every channel (parity: crypto #1).
+ *
+ * Channel hashes are cached when a slot is stored, and an unnamed channel's
+ * name now depends on the active preset -- so a cached hash could in principle
+ * go stale the moment the preset changes. It does not, because every config
+ * write funnels through apply_core(), which applies the preset and then
+ * re-stores all channels in that order.
+ *
+ * This asserts that funnel actually holds, rather than trusting the ordering
+ * comment in apply_core(): a stale hash would put the wrong channel byte on
+ * every outgoing frame, and nothing else in the suite would notice.
+ */
+ZTEST(wire_vectors, test_preset_change_rehashes_channels)
+{
+	meshtastic_Config lora = meshtastic_Config_init_zero;
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
+	bool found;
+	uint8_t psk_h = vec_psk_hash("aes128_counting", &found);
+	uint8_t lf = vec_name_hash("LongFast", &found);
+	uint8_t mf = vec_name_hash("MediumFast", &found);
+	uint8_t before, after;
+
+	zassert_true(found, "vector table missing a needed hash");
+
+	/* Install the unnamed primary through the CONFIG STORE, not through
+	 * meshtastic_channels_set_slot(). apply_core() re-stores every channel
+	 * from the store, so a slot written straight to the channels module is
+	 * silently reverted the next time any config changes -- which is exactly
+	 * what this test needs to exercise the real admin path.
+	 */
+	ch.role = meshtastic_Channel_Role_PRIMARY;
+	ch.has_settings = true;
+	ch.settings.name[0] = '\0';
+	ch.settings.psk.size = full_psks[2].len;
+	memcpy(ch.settings.psk.bytes, full_psks[2].bytes, full_psks[2].len);
+	zassert_ok(meshtastic_config_store_set_channel(0, &ch), "set_channel failed");
+
+	before = meshtastic_channels_get_hash(0);
+	zassert_equal(before, (uint8_t)(lf ^ psk_h),
+		      "unnamed channel should start on the LongFast hash: got 0x%02x "
+		      "want 0x%02x", before, (uint8_t)(lf ^ psk_h));
+
+	/* Switch preset the way an admin would, through the config store. */
+	lora.which_payload_variant = meshtastic_Config_lora_tag;
+	lora.payload_variant.lora.use_preset = true;
+	lora.payload_variant.lora.modem_preset =
+		meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST;
+	lora.payload_variant.lora.region = meshtastic_Config_LoRaConfig_RegionCode_US;
+	lora.payload_variant.lora.hop_limit = 3;
+	zassert_ok(meshtastic_config_store_set_config(&lora), "set_config(lora) failed");
+
+	after = meshtastic_channels_get_hash(0);
+	zassert_not_equal(after, before,
+			  "the cached channel hash did not follow the preset change");
+	zassert_equal(after, (uint8_t)(mf ^ psk_h),
+		      "after switching to MediumFast the unnamed channel must hash "
+		      "as \"MediumFast\": got 0x%02x want 0x%02x", after,
+		      (uint8_t)(mf ^ psk_h));
 }
 
 /* The frequency must follow the channel NAME, not just the region
