@@ -26,9 +26,19 @@ struct ob_item {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t len;
 	uint8_t tier;
+	/* Uptime (k_uptime_get_32) before which this frame must not go out — the
+	 * contention window. 0 means "eligible now", which is every frame the
+	 * caller did not explicitly defer. Compared with a signed difference so a
+	 * 32-bit uptime wrap does not strand an item for 49 days. */
+	uint32_t send_after;
 	struct k_sem *done; /* non-NULL => a blocking caller is waiting; never evict */
 	int *result;
 };
+
+static inline bool ob_eligible(const struct ob_item *it, uint32_t now)
+{
+	return it->send_after == 0U || (int32_t)(now - it->send_after) >= 0;
+}
 
 static struct ob_item ob_items[OB_MAX];
 static uint8_t ob_count;
@@ -45,22 +55,41 @@ static struct k_thread mt_outbound_thread;
 /* Index of the frame to send next: oldest under FIFO, else highest tier and
  * oldest within that tier. Returns -1 when empty. The ordering policy is passed
  * in from a caller-held snapshot rather than re-read here. */
-static int pick_next_locked(enum meshtastic_sched_order order)
+static int pick_next_locked(enum meshtastic_sched_order order, uint32_t now, uint32_t *wait_ms)
 {
-	int best;
+	int best = -1;
+	uint32_t soonest = 0U;
+	bool have_wait = false;
 
-	if (ob_count == 0U) {
-		return -1;
-	}
-	if (order == MT_SCHED_ORDER_FIFO) {
-		return 0; /* index 0 is the oldest (inserts append, removes shift down) */
-	}
+	*wait_ms = 0U;
 
-	best = 0;
-	for (int i = 1; i < (int)ob_count; i++) {
-		if (ob_items[i].tier > ob_items[best].tier) {
+	for (int i = 0; i < (int)ob_count; i++) {
+		if (!ob_eligible(&ob_items[i], now)) {
+			uint32_t due = ob_items[i].send_after - now;
+
+			/* Remember when the earliest deferred frame comes due, so the
+			 * worker can sleep exactly that long instead of spinning. */
+			if (!have_wait || due < soonest) {
+				soonest = due;
+				have_wait = true;
+			}
+			continue;
+		}
+
+		if (best < 0) {
+			best = i;
+			if (order == MT_SCHED_ORDER_FIFO) {
+				break; /* oldest eligible wins outright */
+			}
+			continue;
+		}
+		if (order != MT_SCHED_ORDER_FIFO && ob_items[i].tier > ob_items[best].tier) {
 			best = i; /* strictly-greater keeps the oldest of the top tier */
 		}
+	}
+
+	if (best < 0 && have_wait) {
+		*wait_ms = soonest;
 	}
 	return best;
 }
@@ -103,38 +132,59 @@ static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
+	/*
+	 * The wait is derived from the queue on every pass, and ob_avail is only a
+	 * wakeup hint — never a count of outstanding work.
+	 *
+	 * That distinction is load-bearing now that frames can be deferred. A pass
+	 * that finds nothing due still consumes a semaphore count, so treating the
+	 * count as authoritative would eventually leave the worker blocked on
+	 * K_FOREVER with sendable frames sitting in the queue. Deciding from queue
+	 * state instead makes that unrepresentable: we only ever sleep when there
+	 * is genuinely nothing to send, and only for as long as the earliest
+	 * deferred frame is not due.
+	 */
 	while (true) {
 		struct meshtastic_sched_config c;
+		uint32_t wait_ms = 0U;
+		bool empty;
 
-		(void)k_sem_take(&ob_avail, K_FOREVER);
-
-		/* Snapshot the policy once per send, before taking the queue lock. */
+		/* Snapshot the policy once per pass. The snapshot lock is a leaf, so
+		 * taking it before ob_lock is safe and keeps ordering consistent. */
 		meshtastic_sched_snapshot(&c);
 
 		k_mutex_lock(&ob_lock, K_FOREVER);
-		idx = pick_next_locked(c.tx_order);
-		if (idx < 0) {
+		idx = pick_next_locked(c.tx_order, k_uptime_get_32(), &wait_ms);
+		if (idx >= 0) {
+			cur = ob_items[idx];
+			remove_index_locked(idx);
 			k_mutex_unlock(&ob_lock);
-			continue; /* stale wakeup (e.g. after an eviction) */
+
+			k_sem_give(&ob_space); /* a slot opened up */
+
+			ret = meshtastic_radio_send_wire_now(cur.wire, cur.len);
+
+			if (cur.result != NULL) {
+				*cur.result = ret;
+			}
+			if (cur.done != NULL) {
+				k_sem_give(cur.done);
+			}
+			continue; /* look for more work before considering a sleep */
 		}
-		cur = ob_items[idx];
-		remove_index_locked(idx);
+		empty = (ob_count == 0U);
 		k_mutex_unlock(&ob_lock);
 
-		k_sem_give(&ob_space); /* a slot opened up */
-
-		ret = meshtastic_radio_send_wire_now(cur.wire, cur.len);
-
-		if (cur.result != NULL) {
-			*cur.result = ret;
-		}
-		if (cur.done != NULL) {
-			k_sem_give(cur.done);
-		}
+		/* Nothing sendable: wait for an enqueue if the queue is empty, else
+		 * only until the earliest deferred frame comes due. Any stale counts
+		 * left by previous passes simply return immediately and cost one more
+		 * cheap pass each; they are bounded by the queue depth. */
+		(void)k_sem_take(&ob_avail, empty ? K_FOREVER : K_MSEC(MAX(wait_ms, 1U)));
 	}
 }
 
-static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, k_timeout_t wait)
+static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, k_timeout_t wait,
+			    uint32_t delay_ms)
 {
 	struct k_sem done;
 	int result = 0;
@@ -193,6 +243,15 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 	memcpy(ob_items[idx].wire, pkt, pkt_len);
 	ob_items[idx].len = pkt_len;
 	ob_items[idx].tier = tier;
+	/* A deadline of 0 means "now"; bump a zero-valued uptime by 1 ms so the
+	 * sentinel keeps its meaning at the very start of boot. */
+	if (delay_ms == 0U) {
+		ob_items[idx].send_after = 0U;
+	} else {
+		uint32_t due = k_uptime_get_32() + delay_ms;
+
+		ob_items[idx].send_after = (due == 0U) ? 1U : due;
+	}
 	if (blocking) {
 		k_sem_init(&done, 0, 1);
 		ob_items[idx].done = &done;
@@ -220,7 +279,7 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 
 int meshtastic_radio_send_wire_prio(uint8_t *pkt, uint32_t pkt_len, uint8_t tier)
 {
-	int ret = outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT);
+	int ret = outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, 0U);
 
 	return (ret == 0) ? 0 : ret;
 }
@@ -228,7 +287,13 @@ int meshtastic_radio_send_wire_prio(uint8_t *pkt, uint32_t pkt_len, uint8_t tier
 int meshtastic_radio_send_wire_wait_prio(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
 					 k_timeout_t timeout)
 {
-	return outbound_enqueue(pkt, pkt_len, tier, timeout);
+	return outbound_enqueue(pkt, pkt_len, tier, timeout, 0U);
+}
+
+int meshtastic_radio_send_wire_after(uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
+				     uint32_t delay_ms)
+{
+	return outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, delay_ms);
 }
 
 int meshtastic_radio_send_wire(uint8_t *pkt, uint32_t pkt_len)
@@ -238,7 +303,7 @@ int meshtastic_radio_send_wire(uint8_t *pkt, uint32_t pkt_len)
 
 int meshtastic_radio_send_wire_wait(const uint8_t *pkt, uint32_t pkt_len, k_timeout_t timeout)
 {
-	return outbound_enqueue(pkt, pkt_len, MT_SCHED_TIER_NORMAL, timeout);
+	return outbound_enqueue(pkt, pkt_len, MT_SCHED_TIER_NORMAL, timeout, 0U);
 }
 
 int meshtastic_outbound_init(void)

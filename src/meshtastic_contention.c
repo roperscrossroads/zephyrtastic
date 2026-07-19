@@ -65,10 +65,23 @@ static void cw_policy_get(struct cw_policy *p)
 
 	meshtastic_sched_snapshot(&c);
 
+	p->slot_override_ms = c.cw_slot_ms;
+
+	if (c.cw_max == 0U) {
+		/* cw.max 0 means OFF, and must mean that whatever cw.min happens to
+		 * be — the disable has to be reachable with one command. Checked
+		 * before the inversion rule below, which would otherwise "repair"
+		 * cw.max 0 / cw.min 3 into a live 3-wide window and silently keep
+		 * delaying. A zero window yields BIT(0) = 1 slot, i.e. no wait. */
+		p->lo = 0U;
+		p->hi = 0U;
+		p->offset = 0U;
+		return;
+	}
+
 	p->lo = c.cw_min;
 	p->hi = (c.cw_max < c.cw_min) ? c.cw_min : c.cw_max;
 	p->offset = c.cw_relay_offset;
-	p->slot_override_ms = c.cw_slot_ms;
 }
 
 static uint8_t cw_from_snr_p(const struct cw_policy *p, int8_t snr);

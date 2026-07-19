@@ -1126,3 +1126,30 @@ ZTEST(wire_vectors, test_plan_is_internally_consistent)
 	meshtastic_contention_plan_relay(0, false, 11U, 250000U, false, &plan);
 	zassert_equal(plan.slot_ms, 50U, "cw.slot must reach the plan");
 }
+
+/* cw.max 0 must disable the window on its own, with cw.min left at whatever it
+ * was. Requiring both to be zeroed would make the documented one-command
+ * disable a lie, and the inversion rule is exactly what would "repair" the
+ * disable back into a live window. */
+ZTEST(wire_vectors, test_cw_max_zero_disables_regardless_of_cw_min)
+{
+	const uint32_t slot = meshtastic_contention_slot_ms(11U, 250000U, false);
+	struct meshtastic_contention_plan plan;
+
+	zassert_ok(meshtastic_sched_apply_preset("default"));
+	zassert_equal(meshtastic_sched_get()->cw_min, MESHTASTIC_CW_MIN,
+		      "cw.min should still be at its default");
+
+	zassert_ok(meshtastic_sched_set("cw.max", "0"));
+
+	for (unsigned int trial = 0; trial < 32U; trial++) {
+		zassert_equal(meshtastic_contention_delay_relay_ms(5, false, slot), 0U,
+			      "cw.max 0 must disable even with cw.min non-zero");
+		meshtastic_contention_plan_relay(5, false, 11U, 250000U, false, &plan);
+		zassert_equal(plan.delay_ms, 0U, "the plan must agree the window is off");
+		/* worst_ms keeps the reference's formula, which bounds a 1-slot pool at
+		 * one slot rather than zero. Loose, but it is a bound and the delay
+		 * respects it — the invariant callers clamp against still holds. */
+		zassert_true(plan.delay_ms <= plan.worst_ms, "delay must respect its bound");
+	}
+}

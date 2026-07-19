@@ -18,6 +18,7 @@
 #include "meshtastic_admin.h"
 #endif
 #include "meshtastic_channels.h"
+#include "meshtastic_contention.h"
 #include "meshtastic_core.h"
 #include "meshtastic_modules.h"
 #include "meshtastic_outbound.h"
@@ -173,11 +174,21 @@ static void log_wire_rx(const uint8_t *pkt, int len, int16_t rssi, int8_t snr)
 }
 #endif /* CONFIG_MESHTASTIC_PACKET_HEXDUMP */
 
+/* True when this node relays without waiting out the client offset. Mirrors the
+ * reference shouldRebroadcastEarlyLikeRouter(): ROUTER only. A router is
+ * infrastructure — its relay is the one most worth having, so it is given
+ * priority over every client's. */
+static bool relay_early_like_router(void)
+{
+	return meshtastic_device_role() == meshtastic_Config_DeviceConfig_Role_ROUTER;
+}
+
 static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wire_header *hdr,
-			 uint8_t hop_limit)
+			 uint8_t hop_limit, int8_t snr)
 {
 	uint8_t relay_buf[MESHTASTIC_PKT_MAX];
 	struct meshtastic_wire_header *relay_hdr;
+	struct meshtastic_contention_plan plan;
 	int ret;
 
 	if (len > (int)MESHTASTIC_PKT_MAX || hop_limit == 0U) {
@@ -199,12 +210,26 @@ static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wi
 	 * unlearned destination still resolves to 0 = flood. */
 	relay_hdr->next_hop = meshtastic_nodedb_get_next_hop(sys_le32_to_cpu(hdr->dest));
 
-	ret = meshtastic_radio_send_wire(relay_buf, (uint32_t)len);
+	/* Contention window. wide_lora is false to match how the modem itself is
+	 * configured (meshtastic.c resolves the preset with wide_lora=false); if
+	 * 2.4 GHz support ever lands, both call sites move together. */
+	meshtastic_contention_plan_relay(snr, relay_early_like_router(), mt.modem.spread_factor,
+					 mt.modem.bandwidth_hz, false, &plan);
+
+	ret = meshtastic_radio_send_wire_after(relay_buf, (uint32_t)len, MT_SCHED_TIER_NORMAL,
+					       plan.delay_ms);
 	if (ret < 0) {
 		LOG_ERR("Relay TX failed (%d)", ret);
 	} else {
+		/* Counted as relayed at queue time, not at transmit time. The frame
+		 * is committed here — the only thing that can still stop it is an
+		 * overhear-cancel, which is precisely what we want the redundancy
+		 * counters to measure once that lands. */
 		mt.status.relayed_packets++;
 		dup_mark_relayed(sys_le32_to_cpu(hdr->src), sys_le32_to_cpu(hdr->id));
+		LOG_DBG("Relay queued id=0x%08x after %u ms (cw=%u slot=%u snr=%d)",
+			(unsigned int)sys_le32_to_cpu(hdr->id), plan.delay_ms, plan.cw,
+			plan.slot_ms, snr);
 	}
 }
 
@@ -311,7 +336,7 @@ void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *h
 		return;
 	}
 
-	relay_packet(wire, (int)wire_len, hdr, hop_limit);
+	relay_packet(wire, (int)wire_len, hdr, hop_limit, packet->snr);
 }
 
 static meshtastic_Routing_Error decode_fail_to_routing_err(enum meshtastic_decode_fail r)

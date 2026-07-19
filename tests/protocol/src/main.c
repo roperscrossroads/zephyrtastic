@@ -329,6 +329,14 @@ static void protocol_before(void *fixture)
 	memset(mt.dup_cache, 0, sizeof(mt.dup_cache));
 	mt.dup_head = 0U;
 	meshtastic_sched_defaults();
+	/* This suite asserts routing *semantics* — hop-limit decrement, dedup,
+	 * egress ordering — by injecting a frame and checking what went out. The
+	 * default contention window defers a relay by hundreds of milliseconds to
+	 * seconds, which would turn every one of those into a sleep-and-hope race.
+	 * Pin the window off so the timing is deterministic and the assertions
+	 * measure what they claim to. The window itself is covered by the
+	 * contention tests below and by the vector suite. */
+	zassert_ok(meshtastic_sched_set("cw.max", "0"));
 	meshtastic_reliable_reset();
 	reset_mock_lora();
 	reset_callbacks_state();
@@ -1960,6 +1968,80 @@ ZTEST(protocol_stack, test_own_relayer_byte_is_not_counted_redundant)
 
 	meshtastic_sched_stats_get(&st);
 	zassert_equal(st.relay_redundant, 0U, "our own relayer byte must not count as a peer");
+}
+
+/* --- Contention window on the relay path ----------------------------------- */
+
+/* With the window enabled a relay must NOT go out immediately — it sits in the
+ * outbound queue until its deadline. That gap is the whole point: it is the
+ * only interval during which an overhear-cancel could suppress the relay. */
+ZTEST(protocol_stack, test_relay_is_deferred_by_the_contention_window)
+{
+	uint32_t before;
+
+	/* A narrow but non-zero window keeps the test quick while still deferring:
+	 * cw.max 3 with the default offset gives 2*3 = 6 slots of ~28 ms minimum. */
+	zassert_ok(meshtastic_sched_set("cw.min", "3"));
+	zassert_ok(meshtastic_sched_set("cw.max", "3"));
+
+	before = mock_lora.send_count;
+	inject_broadcast_hops(PEER_NODE_ID, 0xC0FFEE01U, 3U, 3U, 0U);
+
+	/* Immediately after injection the relay is queued, not sent. */
+	k_sleep(K_MSEC(30));
+	zassert_equal(mock_lora.send_count, before,
+		      "a relay must not transmit before its contention delay elapses");
+
+	/* It does go out once the window closes. */
+	k_sleep(K_MSEC(1200));
+	zassert_true(mock_lora.send_count > before,
+		     "the deferred relay should have transmitted after the window");
+}
+
+/* The window is policy: zeroed, a relay goes out on the spot. This is both the
+ * port's original behaviour and the control arm of the on-air A/B. */
+ZTEST(protocol_stack, test_zero_window_relays_immediately)
+{
+	uint32_t before = mock_lora.send_count;
+
+	zassert_ok(meshtastic_sched_set("cw.max", "0"));
+
+	inject_broadcast_hops(PEER_NODE_ID, 0xC0FFEE02U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(50));
+
+	zassert_true(mock_lora.send_count > before,
+		     "with the window disabled the relay should already be out");
+}
+
+/* A deferred relay must not block traffic queued behind it: the worker skips
+ * over anything not yet due. Without that, one waiting relay would stall every
+ * ACK and reply behind it for the length of its window. */
+ZTEST(protocol_stack, test_deferred_relay_does_not_block_later_traffic)
+{
+	uint32_t before;
+
+	zassert_ok(meshtastic_sched_set("cw.min", "4"));
+	zassert_ok(meshtastic_sched_set("cw.max", "4"));
+
+	before = mock_lora.send_count;
+	inject_broadcast_hops(PEER_NODE_ID, 0xC0FFEE03U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(20));
+	zassert_equal(mock_lora.send_count, before, "relay should still be waiting");
+
+	/* Our own traffic is not deferred, so it must overtake the parked relay. */
+	zassert_ok(meshtastic_send_text(OTHER_NODE_ID, "urgent"));
+	k_sleep(K_MSEC(60));
+	zassert_true(mock_lora.send_count > before,
+		     "undeferred traffic must overtake a relay still inside its window");
+
+	/* Do not leave the deferred relay queued: it would fire partway through
+	 * whichever test runs next and be counted against that test's traffic.
+	 * A deferred frame outliving its test is a leak, so drain it here. */
+	for (int i = 0; i < 100 && mock_lora.send_count < before + 2U; i++) {
+		k_sleep(K_MSEC(20));
+	}
+	zassert_true(mock_lora.send_count >= before + 2U,
+		     "the deferred relay should have drained before the test ended");
 }
 
 /* --- Packet-id unpredictability -------------------------------------------- */

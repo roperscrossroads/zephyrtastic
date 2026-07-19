@@ -43,6 +43,21 @@ int meshtastic_radio_send_wire_wait_prio(const uint8_t *pkt, uint32_t pkt_len, u
 /* Driver-level TX; only called from the outbound worker thread. */
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len);
 
+/**
+ * @brief Queue a frame that must not go out for at least @p delay_ms.
+ *
+ * The contention window (see meshtastic_contention.h). The frame occupies a
+ * queue slot immediately — so it is subject to the usual depth and overflow
+ * policy — but the worker will not transmit it until the delay elapses, and
+ * higher-tier traffic queued behind it still goes first. @p delay_ms of 0 is
+ * identical to meshtastic_radio_send_wire_prio().
+ *
+ * Deferring is what makes a relay cancellable: until the deadline passes there
+ * is a queued frame to remove.
+ */
+int meshtastic_radio_send_wire_after(uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
+				     uint32_t delay_ms);
+
 #ifdef __cplusplus
 }
 #endif
