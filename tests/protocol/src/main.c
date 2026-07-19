@@ -2350,6 +2350,152 @@ ZTEST(protocol_stack, test_router_keeps_its_original_schedule)
 	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 }
 
+/* --- Hop-limit preservation between trusted routers ------------------------- */
+
+/* Teach the NodeDB a node with a User record and role, the way it would learn
+ * one on air. Also stops the node being "unknown", which would otherwise make
+ * the stack originate a NodeInfo request and leave *that* as the last frame
+ * transmitted rather than the relay under test. */
+static void seed_node_user(uint32_t num, meshtastic_Config_DeviceConfig_Role role)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet ni = {
+		.from = num,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	snprintk(user.id, sizeof(user.id), "!%08x", num);
+	snprintk(user.long_name, sizeof(user.long_name), "n%08x", num);
+	snprintk(user.short_name, sizeof(user.short_name), "%04x", (unsigned int)(num & 0xFFFFU));
+	user.role = role;
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "user encode failed");
+
+	ni.payload = buf;
+	ni.payload_len = os.bytes_written;
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+	k_sleep(K_MSEC(20));
+}
+
+/* A favourited, router-like relayer whose last byte the NodeDB can resolve. */
+static void seed_favourite_router(uint32_t num)
+{
+	seed_node_user(num, meshtastic_Config_DeviceConfig_Role_ROUTER);
+	zassert_ok(meshtastic_nodedb_set_favorite(num, true), "favourite failed");
+}
+
+/* Inject a relayed broadcast and return the hop_limit we put back on air.
+ * Asserts the frame examined is actually our relay of @p id, so an unrelated
+ * transmission cannot be mistaken for the result. */
+static uint8_t relay_and_get_out_hop_limit(uint32_t id, uint8_t hop_limit, uint8_t hop_start,
+					   uint8_t relay_node)
+{
+	struct meshtastic_wire_header out;
+
+	reset_mock_lora();
+	inject_broadcast_hops(PEER_NODE_ID, id, hop_limit, hop_start, relay_node);
+	k_sleep(K_MSEC(80));
+
+	zassert_true(mock_lora.send_count > 0U, "expected a relay");
+	copy_last_tx_header(&out);
+	zassert_equal(sys_le32_to_cpu(out.id), id,
+		      "last transmission was not the relay under test (id 0x%08x)",
+		      (unsigned int)sys_le32_to_cpu(out.id));
+	return out.flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK;
+}
+
+/* A relay from a favourited router-like peer, to a router-like us, preserves
+ * hop_limit — the backbone hop does not spend the sender's budget. */
+ZTEST(protocol_stack, test_hop_limit_preserved_between_favourite_routers)
+{
+	const uint32_t relayer = 0x11223399U;
+
+	seed_node_user(PEER_NODE_ID, meshtastic_Config_DeviceConfig_Role_CLIENT);
+	seed_favourite_router(relayer);
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+
+	/* hop_start 3 > hop_limit 2: already travelled a hop, so not the first. */
+	zassert_equal(relay_and_get_out_hop_limit(0x40F00001U, 2U, 3U, (uint8_t)(relayer & 0xFFU)),
+		      2U, "hop_limit should be preserved between trusted routers");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	(void)meshtastic_nodedb_remove(relayer);
+}
+
+/* The first hop always decrements, even between trusted routers: preserving
+ * there would give a packet more reach than its originator asked for. */
+ZTEST(protocol_stack, test_first_hop_always_decrements)
+{
+	const uint32_t relayer = 0x1122339AU;
+
+	seed_node_user(PEER_NODE_ID, meshtastic_Config_DeviceConfig_Role_CLIENT);
+	seed_favourite_router(relayer);
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+
+	/* hop_start == hop_limit: straight from the originator. */
+	zassert_equal(relay_and_get_out_hop_limit(0x40F00002U, 3U, 3U, (uint8_t)(relayer & 0xFFU)),
+		      2U, "the first hop must decrement");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	(void)meshtastic_nodedb_remove(relayer);
+}
+
+/* A plain CLIENT always decrements, however trusted the relayer is. */
+ZTEST(protocol_stack, test_non_router_always_decrements)
+{
+	const uint32_t relayer = 0x1122339BU;
+
+	seed_node_user(PEER_NODE_ID, meshtastic_Config_DeviceConfig_Role_CLIENT);
+	seed_favourite_router(relayer);
+	/* role stays CLIENT */
+
+	zassert_equal(relay_and_get_out_hop_limit(0x40F00003U, 2U, 3U, (uint8_t)(relayer & 0xFFU)),
+		      1U, "a CLIENT must always decrement");
+
+	(void)meshtastic_nodedb_remove(relayer);
+}
+
+/* An un-favourited router-like relayer does not earn preservation: favourite is
+ * what distinguishes "trusted" from "merely claims to be a router". */
+ZTEST(protocol_stack, test_unfavourited_router_does_not_preserve)
+{
+	const uint32_t relayer = 0x1122339CU;
+
+	seed_node_user(PEER_NODE_ID, meshtastic_Config_DeviceConfig_Role_CLIENT);
+	seed_node_user(relayer, meshtastic_Config_DeviceConfig_Role_ROUTER); /* not favourited */
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+
+	zassert_equal(relay_and_get_out_hop_limit(0x40F00004U, 2U, 3U, (uint8_t)(relayer & 0xFFU)),
+		      1U, "an un-favourited relayer must not get hop preservation");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	(void)meshtastic_nodedb_remove(relayer);
+}
+
+/* An ambiguous relay_node byte decrements. The field is one byte of a 32-bit
+ * node number; two nodes sharing it must not let either inherit the other's
+ * trust. */
+ZTEST(protocol_stack, test_ambiguous_relayer_byte_does_not_preserve)
+{
+	const uint32_t a = 0x1122339DU;
+	const uint32_t b = 0xAABBCC9DU; /* same last byte */
+
+	seed_node_user(PEER_NODE_ID, meshtastic_Config_DeviceConfig_Role_CLIENT);
+	seed_favourite_router(a);
+	seed_favourite_router(b);
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+
+	zassert_equal(relay_and_get_out_hop_limit(0x40F00005U, 2U, 3U, 0x9DU), 1U,
+		      "an ambiguous relayer byte must decrement");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	(void)meshtastic_nodedb_remove(a);
+	(void)meshtastic_nodedb_remove(b);
+}
+
 /* --- Packet-id unpredictability -------------------------------------------- */
 
 /* The AES-CTR channel nonce is built from (packet id, source node id) and

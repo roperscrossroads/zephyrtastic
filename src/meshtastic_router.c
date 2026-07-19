@@ -213,6 +213,76 @@ static void log_wire_rx(const uint8_t *pkt, int len, int16_t rssi, int8_t snr)
 }
 #endif /* CONFIG_MESHTASTIC_PACKET_HEXDUMP */
 
+/* ROUTER, ROUTER_LATE and CLIENT_BASE are "router-like": infrastructure that
+ * carries traffic for others rather than merely participating. The reference
+ * groups them the same way for hop-limit preservation. */
+static bool role_is_router_like(meshtastic_Config_DeviceConfig_Role role)
+{
+	return role == meshtastic_Config_DeviceConfig_Role_ROUTER ||
+	       role == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE ||
+	       role == meshtastic_Config_DeviceConfig_Role_CLIENT_BASE;
+}
+
+/*
+ * Whether to decrement hop_limit when relaying. Ports the reference
+ * Router::shouldDecrementHopLimit().
+ *
+ * Normally every relay decrements, which is what bounds a flood. The exception
+ * is a hop between two router-like nodes that trust each other: preserving the
+ * count there lets a backbone carry traffic further without spending the
+ * sender's hop budget on infrastructure links.
+ *
+ * This is the only wire-visible piece of the role work — it changes hop_limit
+ * on frames we put on air — so every condition is a reason to decrement unless
+ * *all* of them say otherwise:
+ *
+ *   - The first hop always decrements. Preserving there would let a packet
+ *     leave its originator with more reach than it asked for, and the reference
+ *     notes it also breaks retry handling.
+ *   - We must be router-like ourselves.
+ *   - The previous relayer must resolve UNAMBIGUOUSLY from its last byte. The
+ *     relay_node field is one byte of a 32-bit node number, so on a dense mesh
+ *     it collides; a "first match wins" scan would preserve hops for whichever
+ *     node happened to sort first. Ambiguous or unknown means decrement.
+ *   - That resolved node must be a favourite, have a real User record, and be
+ *     router-like itself. Favourite is what makes it "trusted" rather than
+ *     merely "claims to be a router".
+ */
+static bool relay_should_decrement_hop_limit(const struct meshtastic_wire_header *hdr,
+					     uint8_t hop_limit)
+{
+	uint8_t hop_start = (hdr->flags & MESHTASTIC_FLAGS_HOP_START_MASK) >>
+			    MESHTASTIC_FLAGS_HOP_START_SHIFT;
+	struct meshtastic_nodedb_node peer;
+	uint32_t resolved;
+
+	/* hops_away == 0: straight from the originator. */
+	if (hop_start == 0U || hop_start <= hop_limit) {
+		return true;
+	}
+
+	if (!role_is_router_like(meshtastic_device_role())) {
+		return true;
+	}
+
+	resolved = meshtastic_nodedb_resolve_unique_last_byte(hdr->relay_node);
+	if (resolved == 0U) {
+		return true; /* ambiguous or unknown — the safe default */
+	}
+
+	if (meshtastic_nodedb_get(resolved, &peer) != 0) {
+		return true;
+	}
+
+	if (peer.is_favorite && peer.has_user && role_is_router_like(peer.role)) {
+		LOG_DBG("Preserving hop_limit: relayer 0x%02x resolved to favourite router 0x%08x",
+			hdr->relay_node, resolved);
+		return false;
+	}
+
+	return true;
+}
+
 /* True when this node relays without waiting out the client offset. Mirrors the
  * reference shouldRebroadcastEarlyLikeRouter(): ROUTER only. A router is
  * infrastructure — its relay is the one most worth having, so it is given
@@ -258,6 +328,7 @@ static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wi
 	uint8_t relay_buf[MESHTASTIC_PKT_MAX];
 	struct meshtastic_wire_header *relay_hdr;
 	struct meshtastic_contention_plan plan;
+	uint8_t out_hop_limit;
 	int ret;
 
 	if (len > (int)MESHTASTIC_PKT_MAX || hop_limit == 0U) {
@@ -266,8 +337,10 @@ static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wi
 
 	memcpy(relay_buf, buf, (size_t)len);
 	relay_hdr = (struct meshtastic_wire_header *)relay_buf;
+	out_hop_limit = relay_should_decrement_hop_limit(hdr, hop_limit) ? (hop_limit - 1U)
+									: hop_limit;
 	relay_hdr->flags = (hdr->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) |
-			   ((hop_limit - 1U) & MESHTASTIC_FLAGS_HOP_LIMIT_MASK);
+			   (out_hop_limit & MESHTASTIC_FLAGS_HOP_LIMIT_MASK);
 	/* Stamp ourselves as the relayer (low byte of our node id) so downstream
 	 * nodes can attribute the rebroadcast — required for next-hop learning and
 	 * loop attribution. */
