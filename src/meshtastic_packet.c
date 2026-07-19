@@ -119,6 +119,25 @@ static int encode_packet_data(const struct meshtastic_packet *packet, uint8_t *b
 		memcpy(data.payload.bytes, packet->payload, packet->payload_len);
 	}
 	data.want_response = packet->want_response;
+
+	/* Every packet we originate carries the bitfield, mirroring the reference
+	 * (Router.cpp: set under isFromUs). Bit 0 is our own MQTT consent, taken
+	 * from config.lora.config_ok_to_mqtt; bit 1 mirrors want_response.
+	 *
+	 * Always emitting the field — even when consent is false — matters: a
+	 * receiver cannot distinguish "declined" from "too old to say" if the
+	 * field is absent, and it must treat absence as declined. Sending it
+	 * makes our answer explicit either way.
+	 */
+	data.has_bitfield = true;
+	data.bitfield = 0U;
+	if (mt.config_ok_to_mqtt) {
+		data.bitfield |= MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK;
+	}
+	if (packet->want_response) {
+		data.bitfield |= MESHTASTIC_BITFIELD_WANT_RESPONSE_MASK;
+	}
+
 	data.dest = packet->data_dest;
 	data.source = packet->data_source;
 	data.request_id = packet->request_id;
@@ -587,6 +606,13 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 	packet->request_id = data.request_id;
 	packet->reply_id = data.reply_id;
 	packet->want_response = data.want_response;
+	/* Carried through so the MQTT bridge can honour the sender's consent.
+	 * has_bitfield is kept separate from the value: an absent field means
+	 * the sender never expressed a preference, which is NOT the same as
+	 * expressing "no" — though both must be treated as "do not republish".
+	 */
+	packet->has_bitfield = data.has_bitfield;
+	packet->bitfield = data.has_bitfield ? (uint8_t)data.bitfield : 0U;
 	packet->channel_index = channel_index;
 
 	if (decoded != NULL) {

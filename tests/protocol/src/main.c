@@ -474,6 +474,67 @@ static void inject_rx_frame(const uint8_t *wire, uint32_t wire_len, int16_t rssi
 	cb(lora_dev, frame, wire_len, rssi, snr, user_data);
 }
 
+
+/* Every packet we originate must carry Data.bitfield, with bit 0 reflecting
+ * config.lora.config_ok_to_mqtt (parity: mqtt #1, our half of the consent).
+ *
+ * The field is emitted even when consent is false. That is the point: a
+ * receiver cannot tell "declined" from "too old to have an opinion" if the
+ * field is absent, and it must treat absence as declined — so staying silent
+ * would mean our own traffic is dropped by any gateway honouring the flag.
+ */
+ZTEST(protocol_stack, test_outgoing_packets_carry_mqtt_consent)
+{
+	struct meshtastic_packet decoded;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	bool saved = mt.config_ok_to_mqtt;
+
+	/* Consent granted: the bit is set. */
+	mt.config_ok_to_mqtt = true;
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "consent-yes"),
+		   "send failed");
+	decode_last_tx(&decoded, payload, sizeof(payload));
+	zassert_true(decoded.has_bitfield, "an originated packet must carry a bitfield");
+	zassert_true(decoded.bitfield & MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK,
+		     "OK_TO_MQTT must be set when config_ok_to_mqtt is true");
+
+	/* Consent withheld: the field is still present, the bit is clear. */
+	protocol_before(NULL);
+	mt.config_ok_to_mqtt = false;
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "consent-no"),
+		   "send failed");
+	decode_last_tx(&decoded, payload, sizeof(payload));
+	zassert_true(decoded.has_bitfield,
+		     "the bitfield must be emitted even when consent is withheld, so "
+		     "\"declined\" is distinguishable from \"never asked\"");
+	zassert_false(decoded.bitfield & MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK,
+		      "OK_TO_MQTT must be clear when config_ok_to_mqtt is false");
+
+	mt.config_ok_to_mqtt = saved;
+}
+
+/* Bit 1 of the same field mirrors want_response, matching the reference's
+ * BITFIELD_WANT_RESPONSE_SHIFT. Asserted so a future edit to the consent bit
+ * cannot quietly clobber its neighbour.
+ */
+ZTEST(protocol_stack, test_bitfield_carries_want_response)
+{
+	struct meshtastic_packet decoded;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	bool saved = mt.config_ok_to_mqtt;
+
+	mt.config_ok_to_mqtt = true;
+	/* A plain text send does not request a response. */
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "no-resp"), "send failed");
+	decode_last_tx(&decoded, payload, sizeof(payload));
+	zassert_false(decoded.bitfield & MESHTASTIC_BITFIELD_WANT_RESPONSE_MASK,
+		      "want_response bit should be clear for a plain text message");
+	zassert_true(decoded.bitfield & MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK,
+		     "the consent bit is independent of want_response");
+
+	mt.config_ok_to_mqtt = saved;
+}
+
 ZTEST_SUITE(protocol_stack, NULL, protocol_suite_setup, protocol_before, NULL, NULL);
 
 /* Verifies local text sends produce one LoRa frame, a TX_DONE event, and a decodable payload. */

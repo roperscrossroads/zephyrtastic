@@ -53,6 +53,21 @@ extern "C" {
 /** Channel name for the default Meshtastic "LongFast" channel. */
 #define MESHTASTIC_CHANNEL_LONGFAST "LongFast"
 
+/**
+ * @name Data.bitfield flags
+ *
+ * Wire-visible flags on a decoded payload, matching the reference firmware's
+ * BITFIELD_* shifts (Router.h). Bit 0 is the sender's consent to having their
+ * traffic republished to MQTT — the "DontMqttMeBro" opt-out, expressed as an
+ * opt-in.
+ * @{
+ */
+#define MESHTASTIC_BITFIELD_OK_TO_MQTT_SHIFT     0
+#define MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK      (1U << MESHTASTIC_BITFIELD_OK_TO_MQTT_SHIFT)
+#define MESHTASTIC_BITFIELD_WANT_RESPONSE_SHIFT  1
+#define MESHTASTIC_BITFIELD_WANT_RESPONSE_MASK   (1U << MESHTASTIC_BITFIELD_WANT_RESPONSE_SHIFT)
+/** @} */
+
 /** @ref meshtastic_packet.channel_index when the RX channel is unknown. */
 #define MESHTASTIC_CHANNEL_INDEX_INVALID 0xFFU
 
@@ -185,6 +200,20 @@ struct meshtastic_packet {
 	bool pki_encrypted;
 	/** Application payload asks peers to respond in kind. */
 	bool want_response;
+	/**
+	 * The decoded payload carried a @c Data.bitfield.
+	 *
+	 * Distinguishes "the sender cleared every flag" from "the sender is old
+	 * enough not to send the field at all". The MQTT bridge treats both as
+	 * "do not republish", but only because absence means unknown consent —
+	 * so the two must stay distinguishable here.
+	 */
+	bool has_bitfield;
+	/**
+	 * Decoded @c Data.bitfield. Bit 0 is OK_TO_MQTT (the sender consents to
+	 * their traffic being republished to MQTT), bit 1 mirrors want_response.
+	 */
+	uint8_t bitfield;
 	/** Receive RSSI in dBm, when known. */
 	int16_t rssi;
 	/** Receive SNR value reported by the LoRa driver, when known. */

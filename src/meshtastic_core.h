@@ -54,6 +54,10 @@ struct meshtastic_context {
 	 * slot. */
 	meshtastic_Config_LoRaConfig_ModemPreset modem_preset;
 	bool use_preset;
+	/* config.lora.config_ok_to_mqtt: our consent to having our own traffic
+	 * republished to MQTT by any gateway that hears it. Stamped into every
+	 * packet we originate. */
+	bool config_ok_to_mqtt;
 	const char *channel_name;
 	const char *long_name;
 	const char *short_name;

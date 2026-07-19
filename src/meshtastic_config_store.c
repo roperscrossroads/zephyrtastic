@@ -534,6 +534,7 @@ int meshtastic_config_store_apply_core(void)
 	 * the previous preset. */
 	mt.modem_preset = lora.modem_preset;
 	mt.use_preset = lora.use_preset;
+	mt.config_ok_to_mqtt = lora.config_ok_to_mqtt;
 
 	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		ret = meshtastic_channels_set_slot(i, &channels[i]);

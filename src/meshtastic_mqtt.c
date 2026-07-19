@@ -238,6 +238,32 @@ static bool mqtt_is_default_broker(void)
 	return strcmp(CONFIG_MESHTASTIC_MQTT_BROKER_HOST, MQTT_DEFAULT_BROKER) == 0;
 }
 
+/* True when the configured broker is a literal RFC1918 / loopback address.
+ *
+ * Mirrors the reference's isMqttServerAddressPrivate, which is
+ * `ip.fromString(host) && isPrivateIpAddress(ip)` — note it requires the host to
+ * PARSE as an IP. A hostname is deliberately not treated as private even if it
+ * happens to resolve to one: the check runs on configuration, not on DNS, so a
+ * name that resolves differently later cannot silently downgrade the gate.
+ */
+static bool mqtt_broker_is_private(void)
+{
+	struct in_addr addr;
+	uint32_t host_order;
+
+	if (net_addr_pton(AF_INET, CONFIG_MESHTASTIC_MQTT_BROKER_HOST, &addr) < 0) {
+		return false; /* not a literal IPv4 address — treat as public */
+	}
+
+	host_order = ntohl(addr.s_addr);
+
+	/* 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8 */
+	return ((host_order & 0xFF000000U) == 0x0A000000U) ||
+	       ((host_order & 0xFFF00000U) == 0xAC100000U) ||
+	       ((host_order & 0xFFFF0000U) == 0xC0A80000U) ||
+	       ((host_order & 0xFF000000U) == 0x7F000000U);
+}
+
 static bool mqtt_should_skip_portnum(uint32_t portnum, bool from_us)
 {
 	if (from_us || !mqtt_is_default_broker()) {
@@ -697,6 +723,33 @@ static void mqtt_queue_uplink(const struct meshtastic_packet *packet, const uint
 	if (mqtt_should_skip_portnum(packet->portnum, from_us)) {
 		LOG_DBG("Skipping MQTT uplink port=%u on default broker", packet->portnum);
 		return;
+	}
+
+	/* Honour the sender's MQTT consent — "DontMqttMeBro" (parity: mqtt #1).
+	 *
+	 * Republishing another node's traffic takes it off the local RF mesh and
+	 * puts it somewhere the sender may never have agreed to. The reference
+	 * gates that on the OK_TO_MQTT bit, and treats an ABSENT bitfield as
+	 * "no": a node too old to express a preference cannot be assumed to have
+	 * given one.
+	 *
+	 * Two exemptions, both from the reference (MQTT.cpp onSend):
+	 *   - our own packets: we consented via config_ok_to_mqtt, and the bit we
+	 *     stamped is our answer, not a gate on ourselves
+	 *   - a private broker: the concern is exposure to a public broker, not
+	 *     to a broker on the operator's own network
+	 */
+	if (!from_us && !mqtt_broker_is_private()) {
+		bool ok_to_mqtt = packet->has_bitfield &&
+				  (packet->bitfield & MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK);
+
+		if (!ok_to_mqtt) {
+			LOG_DBG("Skipping MQTT uplink 0x%08x id=0x%08x (%s)", packet->from,
+				packet->id,
+				packet->has_bitfield ? "OK_TO_MQTT clear"
+						     : "no bitfield, consent unknown");
+			return;
+		}
 	}
 
 	char topic[128];
