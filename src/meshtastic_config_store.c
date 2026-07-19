@@ -415,6 +415,8 @@ static void seed_config_defaults(const struct meshtastic_config *cfg)
 
 	idx = index_for_config_tag(meshtastic_Config_lora_tag);
 	store.configs[idx].payload_variant.lora.use_preset = true;
+	store.configs[idx].payload_variant.lora.config_ok_to_mqtt =
+		IS_ENABLED(CONFIG_MESHTASTIC_DEFAULT_OK_TO_MQTT);
 	store.configs[idx].payload_variant.lora.modem_preset =
 		meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
 	/* Declared, not inferred. The region used to be derived from the

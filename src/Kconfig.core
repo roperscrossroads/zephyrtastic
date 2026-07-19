@@ -115,6 +115,24 @@ config MESHTASTIC_DEFAULT_REGION
 
 	  A US device needs no licence: 902-928 MHz is unlicensed ISM spectrum.
 
+config MESHTASTIC_DEFAULT_OK_TO_MQTT
+	bool "Consent to our traffic being republished to MQTT by default"
+	default n
+	help
+	  Seeds config.lora.config_ok_to_mqtt on first boot. When set, every
+	  packet this node originates carries the OK_TO_MQTT bit, telling any
+	  gateway that hears it that our traffic may be republished to an MQTT
+	  broker — including a public one.
+
+	  Defaults to n, matching the reference firmware: consent to being
+	  rebroadcast off the local RF mesh should be opt-in.
+
+	  This governs only OUR OWN traffic. Whether this node republishes other
+	  people's packets is a separate matter, decided by their bit and by
+	  whether the configured broker is private.
+
+	  A later admin or phone-app change overrides this seed.
+
 config MESHTASTIC_TX_POWER
 	int "Default TX power (dBm)"
 	default 17
