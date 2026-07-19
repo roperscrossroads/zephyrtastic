@@ -444,6 +444,26 @@ static void log_inject_mesh_packet(const char *phase, const meshtastic_MeshPacke
 		mesh->hop_limit, mesh->hop_start, mesh->channel, mesh->via_mqtt ? 1 : 0);
 }
 
+/* True if a mesh packet carries a visible ADMIN_APP payload.
+ *
+ * Admin never legitimately arrives over a downlink: the broker is not a mesh
+ * peer and the packet's channel is forced to primary on the way in, so the
+ * remote-admin dispatcher would authorize it by channel *name* alone — an
+ * identity-less gate reachable by any peer on a plaintext or bridged broker.
+ * Upstream rejects admin on the downlink path; so do we, for the relay onto RF
+ * as well as for local delivery (relaying someone else's admin traffic onto our
+ * physical mesh is the same exposure one hop removed).
+ *
+ * Only the decoded case is visible here. An encrypted admin frame is caught
+ * after decrypt, and admin.c independently refuses the identity-less channel
+ * gate for any via_mqtt packet.
+ */
+static bool inject_is_admin(const meshtastic_MeshPacket *mesh)
+{
+	return mesh->which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
+	       mesh->decoded.portnum == (meshtastic_PortNum)MESHTASTIC_PORT_ADMIN;
+}
+
 int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 {
 	meshtastic_MeshPacket work;
@@ -464,6 +484,13 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 	work.transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT;
 
 	log_inject_mesh_packet("entry", &work);
+
+	if (inject_is_admin(&work)) {
+		LOG_WRN("inject rejected: ADMIN_APP is not accepted from a downlink "
+			"(0x%08x->0x%08x id=0x%08x)",
+			work.from, work.to, work.id);
+		return -EACCES;
+	}
 
 	if (dup_check(work.from, work.id)) {
 		LOG_DBG("inject duplicate (src=0x%08x id=0x%08x)", work.from, work.id);
@@ -517,6 +544,15 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 		}
 
 		decoded = true;
+
+		/* The payload was opaque at ingest; now that it has decrypted,
+		 * re-apply the ADMIN_APP rejection above. */
+		if (inject_is_admin(&work)) {
+			LOG_WRN("inject rejected: encrypted downlink decrypted to ADMIN_APP "
+				"(0x%08x->0x%08x id=0x%08x)",
+				work.from, work.to, work.id);
+			return -EACCES;
+		}
 	}
 
 	ret = meshtastic_mesh_pb_to_packet(&work, &packet, payload, sizeof(payload));

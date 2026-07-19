@@ -1858,6 +1858,205 @@ ZTEST(protocol_stack, test_nodedb_reset_keeps_favorites)
 	meshtastic_nodedb_reset(false);
 }
 
+/* --- MQTT downlink must not reach remote admin (security H4) --------------- */
+
+static meshtastic_Config_DeviceConfig_Role current_device_role(void)
+{
+	meshtastic_Config dev;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag, &dev),
+		   "device config read failed");
+	return dev.payload_variant.device.role;
+}
+
+/* Admin writes the role through the config store; meshtastic_set_device_role()
+ * only updates the runtime copy, so it cannot be used to set up or clean up
+ * these tests. Write the store directly, the way admin does. */
+static void force_device_role(meshtastic_Config_DeviceConfig_Role role)
+{
+	meshtastic_Config dev = meshtastic_Config_init_zero;
+
+	dev.which_payload_variant = meshtastic_Config_device_tag;
+	dev.payload_variant.device.role = role;
+	zassert_ok(meshtastic_config_store_set_config(&dev), "device config write failed");
+}
+
+/* Enable the legacy identity-less admin gate and name the primary channel
+ * "admin" — the exact configuration that made the downlink path exploitable. */
+static void enable_legacy_admin_channel(bool enable)
+{
+	meshtastic_Config sec = meshtastic_Config_init_zero;
+
+	sec.which_payload_variant = meshtastic_Config_security_tag;
+	sec.payload_variant.security.admin_channel_enabled = enable;
+	zassert_ok(meshtastic_config_store_set_config(&sec), "security config write failed");
+}
+
+/* Build an MQTT-borne, decoded ADMIN_APP packet carrying a valid session
+ * passkey. Everything about it is legitimate except its provenance. */
+static void build_admin_downlink(meshtastic_MeshPacket *mesh, uint32_t id)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	pb_ostream_t os;
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
+	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_device_tag;
+	am.payload_variant.set_config.payload_variant.device.role =
+		meshtastic_Config_DeviceConfig_Role_ROUTER;
+	am.session_passkey.size = (pb_size_t)sizeof(key);
+	memcpy(am.session_passkey.bytes, key, sizeof(key));
+
+	*mesh = (meshtastic_MeshPacket)meshtastic_MeshPacket_init_zero;
+	mesh->from = PEER_NODE_ID;
+	mesh->to = TEST_NODE_ID;
+	mesh->id = id;
+	mesh->channel = meshtastic_channels_primary_index();
+	mesh->hop_limit = 3U;
+	mesh->hop_start = 3U;
+	mesh->which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh->decoded.portnum = (meshtastic_PortNum)MESHTASTIC_PORT_ADMIN;
+
+	os = pb_ostream_from_buffer(mesh->decoded.payload.bytes,
+				    sizeof(mesh->decoded.payload.bytes));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	mesh->decoded.payload.size = (pb_size_t)os.bytes_written;
+}
+
+/* H4: an ADMIN_APP packet arriving over the MQTT downlink must be refused at
+ * ingest. The broker is not a mesh peer, and an injected packet's channel is
+ * forced to primary, so the legacy gate would authorize it on channel *name*
+ * alone — no identity at all. On a plaintext or bridged broker that is remote
+ * admin for any internet peer, gated only by a cleartext-visible passkey. */
+ZTEST(protocol_stack, test_mqtt_downlink_admin_is_rejected)
+{
+	meshtastic_MeshPacket mesh;
+	int ret;
+
+	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	enable_legacy_admin_channel(true);
+
+	build_admin_downlink(&mesh, 0xADD10001U);
+	ret = meshtastic_inject_downlink_mesh_packet(&mesh);
+	k_sleep(K_MSEC(50));
+
+	zassert_equal(ret, -EACCES, "ADMIN_APP downlink must be rejected at ingest, got %d", ret);
+	zassert_equal(current_device_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "an MQTT-borne admin packet must not mutate config");
+
+	enable_legacy_admin_channel(false);
+	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}
+
+/* Rename the primary channel, returning the previous slot so it can be put
+ * back — the channel hash is derived from the name, so leaving it changed
+ * would perturb every later test. */
+static void swap_primary_channel_name(const char *name, meshtastic_Channel *saved)
+{
+	uint8_t index = meshtastic_channels_primary_index();
+	meshtastic_Channel ch;
+
+	*saved = *meshtastic_channels_get(index);
+	ch = *saved;
+	strncpy(ch.settings.name, name, sizeof(ch.settings.name) - 1U);
+	ch.settings.name[sizeof(ch.settings.name) - 1U] = '\0';
+	zassert_ok(meshtastic_channels_set_slot(index, &ch), "channel rename failed");
+}
+
+/* H4, second layer: even with the primary channel literally named "admin" and
+ * the legacy gate enabled — the one configuration where identity-less admin is
+ * accepted — a packet marked via_mqtt must still be refused.
+ *
+ * This is the case the ingest filter cannot see: an admin payload that arrives
+ * encrypted has no visible portnum until after decrypt, and a frame can also
+ * reach us over RF with the via_mqtt wire flag already set. Authorization by
+ * channel name carries no identity, so MQTT provenance has to disqualify it. */
+ZTEST(protocol_stack, test_mqtt_borne_admin_refused_on_legacy_admin_channel)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	uint8_t payload[128];
+	pb_ostream_t os;
+	meshtastic_Channel saved;
+	struct meshtastic_packet pkt = {0};
+
+	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	enable_legacy_admin_channel(true);
+	swap_primary_channel_name("admin", &saved);
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
+	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_device_tag;
+	am.payload_variant.set_config.payload_variant.device.role =
+		meshtastic_Config_DeviceConfig_Role_ROUTER;
+	am.session_passkey.size = (pb_size_t)sizeof(key);
+	memcpy(am.session_passkey.bytes, key, sizeof(key));
+
+	os = pb_ostream_from_buffer(payload, sizeof(payload));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+
+	pkt.from = PEER_NODE_ID;
+	pkt.to = TEST_NODE_ID;
+	pkt.id = 0xADD10003U;
+	pkt.portnum = MESHTASTIC_PORT_ADMIN;
+	pkt.channel_index = meshtastic_channels_primary_index();
+	pkt.payload = payload;
+	pkt.payload_len = os.bytes_written;
+
+	/* The MQTT-marked packet runs first so the refusal is asserted against a
+	 * known-CLIENT starting state, with no store write needed between the two
+	 * phases. */
+	pkt.via_mqtt = true;
+	meshtastic_admin_handle_remote(&pkt);
+	k_sleep(K_MSEC(30));
+	zassert_equal(current_device_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "an MQTT-borne packet must not get identity-less channel authorization");
+
+	/* Now the identical packet without the MQTT mark. It must apply — proving
+	 * the assertion above was the via_mqtt check firing and not simply a
+	 * fixture that never authorizes anything. */
+	pkt.id = 0xADD10004U;
+	pkt.via_mqtt = false;
+	meshtastic_admin_handle_remote(&pkt);
+	k_sleep(K_MSEC(30));
+	zassert_equal(current_device_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "control: a mesh-borne admin on the legacy channel should apply");
+
+	zassert_ok(meshtastic_channels_set_slot(meshtastic_channels_primary_index(), &saved),
+		   "channel restore failed");
+	enable_legacy_admin_channel(false);
+	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}
+
+/* The rejection must be specific to ADMIN_APP — ordinary downlink traffic is
+ * the whole point of the feature and has to keep working. */
+ZTEST(protocol_stack, test_mqtt_downlink_non_admin_still_delivered)
+{
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	int ret;
+
+	mesh.from = PEER_NODE_ID;
+	mesh.to = TEST_NODE_ID;
+	mesh.id = 0xADD10002U;
+	mesh.channel = meshtastic_channels_primary_index();
+	mesh.hop_limit = 3U;
+	mesh.hop_start = 3U;
+	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh.decoded.portnum = MESHTASTIC_PORT_TEXT_MESSAGE;
+	memcpy(mesh.decoded.payload.bytes, "hi", 2U);
+	mesh.decoded.payload.size = 2U;
+
+	ret = meshtastic_inject_downlink_mesh_packet(&mesh);
+	k_sleep(K_MSEC(30));
+
+	zassert_ok(ret, "a non-admin downlink must still be accepted: %d", ret);
+}
+
 /* --- Region -> preset map (want_config handshake) ------------------------- */
 
 /* Find the preset group a region maps to, or -1 if the region is absent. */

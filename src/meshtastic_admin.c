@@ -478,6 +478,24 @@ static bool admin_remote_authorized(const struct meshtastic_packet *pkt,
 		*err = meshtastic_Routing_Error_ADMIN_PUBLIC_KEY_UNAUTHORIZED;
 		return false;
 	}
+	/* The legacy channel gate authorizes by channel *name* with no identity,
+	 * so it is only ever safe for a packet that actually reached us over the
+	 * mesh. A packet that traversed MQTT has no such provenance: the broker is
+	 * not a mesh peer, an injected packet's channel is forced to primary, and
+	 * on a plaintext or bridged broker any internet peer can produce one. The
+	 * downlink path already rejects ADMIN_APP outright; this refuses the
+	 * identity-less gate for anything that gets here claiming via_mqtt,
+	 * including a frame that arrived over RF with the wire flag set. PKC admin
+	 * is unaffected — its authorization is a key match, which MQTT cannot
+	 * forge. */
+	if (pkt->via_mqtt) {
+		LOG_WRN("admin: refusing legacy-channel authorization for an MQTT-borne "
+			"packet from 0x%08x",
+			pkt->from);
+		*err = meshtastic_Routing_Error_NOT_AUTHORIZED;
+		return false;
+	}
+
 	if (admin_channel_authorized(pkt->channel_index)) {
 		return true;
 	}
