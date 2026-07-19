@@ -48,6 +48,12 @@ struct meshtastic_context {
 	int8_t tx_power;
 	uint32_t frequency;
 	struct meshtastic_modem_params modem; /* resolved from the active preset */
+	/* The active preset is kept alongside its resolved parameters because the
+	 * preset's display name is itself protocol data: it stands in for an empty
+	 * channel name when hashing the channel and when picking the frequency
+	 * slot. */
+	meshtastic_Config_LoRaConfig_ModemPreset modem_preset;
+	bool use_preset;
 	const char *channel_name;
 	const char *long_name;
 	const char *short_name;

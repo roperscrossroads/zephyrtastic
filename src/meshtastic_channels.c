@@ -295,7 +295,15 @@ const char *meshtastic_channels_get_name(uint8_t index)
 
 	ch = &channel_slots[index];
 	if (!ch->has_settings || ch->settings.name[0] == '\0') {
-		return MESHTASTIC_CHANNEL_LONGFAST;
+		/* An empty name means "the default channel for the active preset",
+		 * and the substituted string is protocol data, not a label: it is
+		 * hashed for the channel byte and for the frequency slot. It must
+		 * therefore follow the preset rather than be pinned to LongFast --
+		 * a node on MediumFast with an unnamed channel belongs on
+		 * "MediumFast", not "LongFast", and pinning it produced both the
+		 * wrong channel hash and the wrong frequency (parity: crypto #1).
+		 */
+		return meshtastic_preset_display_name(mt.modem_preset, mt.use_preset);
 	}
 
 	return ch->settings.name;

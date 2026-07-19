@@ -198,20 +198,6 @@ static meshtastic_Config_LoRaConfig_RegionCode lora_region_from_frequency(uint32
 	return meshtastic_Config_LoRaConfig_RegionCode_UNSET;
 }
 
-static uint32_t frequency_from_region(meshtastic_Config_LoRaConfig_RegionCode region)
-{
-	switch (region) {
-	case meshtastic_Config_LoRaConfig_RegionCode_US:
-		return MESHTASTIC_FREQ_US;
-	case meshtastic_Config_LoRaConfig_RegionCode_EU_868:
-		return MESHTASTIC_FREQ_EU;
-	case meshtastic_Config_LoRaConfig_RegionCode_EU_433:
-		return 433175000U;
-	default:
-		return 0U;
-	}
-}
-
 static int encode_record(const pb_msgdesc_t *fields, const void *msg, void *buf, size_t buf_len)
 {
 	pb_ostream_t stream;
@@ -479,7 +465,6 @@ int meshtastic_config_store_apply_core(void)
 	meshtastic_Config_DeviceConfig device;
 	meshtastic_Config_LoRaConfig lora;
 	meshtastic_Channel channels[MESHTASTIC_MAX_CHANNELS];
-	uint32_t frequency;
 	int device_idx;
 	int lora_idx;
 	int ret;
@@ -496,6 +481,13 @@ int meshtastic_config_store_apply_core(void)
 	lora = store.configs[lora_idx].payload_variant.lora;
 
 	store_unlock();
+
+	/* Must precede the channel loop: an unnamed channel takes the active
+	 * preset's display name, and set_slot hashes that name as it stores each
+	 * slot. Applying the preset afterwards would hash every channel against
+	 * the previous preset. */
+	mt.modem_preset = lora.modem_preset;
+	mt.use_preset = lora.use_preset;
 
 	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		ret = meshtastic_channels_set_slot(i, &channels[i]);
@@ -542,11 +534,35 @@ int meshtastic_config_store_apply_core(void)
 			mt.frequency = hz;
 		}
 	} else {
-		frequency = frequency_from_region(lora.region);
-		/* Only honor a US region's frequency; UNSET/other keeps the default. */
-		if (frequency != 0U &&
-		    lora.region == meshtastic_Config_LoRaConfig_RegionCode_US) {
-			mt.frequency = frequency;
+		struct meshtastic_freq_plan plan;
+		meshtastic_Config_LoRaConfig_RegionCode region = lora.region;
+
+		/* UNSET means "keep the compile-time default", which is US; the
+		 * validator permits only UNSET or US, so this resolves both. */
+		if (region == meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
+			region = meshtastic_Config_LoRaConfig_RegionCode_US;
+		}
+
+		/* The frequency follows the PRIMARY channel's name, which is why this
+		 * runs after the channel loop. Pinning one frequency per region was
+		 * wrong even within a single region: stock firmware puts a node named
+		 * "MyMesh" on slot djb2("MyMesh") % 104, not on LongFast's slot, so a
+		 * renamed channel could not hear stock radios at all.
+		 */
+		ret = meshtastic_region_freq_plan(region, mt.modem_preset,
+						  meshtastic_channels_primary_name(),
+						  mt.use_preset, &plan);
+		if (ret == 0) {
+			mt.frequency = plan.frequency_hz;
+			LOG_DBG("region %d: slot %u/%u -> %u Hz (duty %d%%)", (int)region,
+				plan.slot, plan.num_slots, plan.frequency_hz,
+				(int)plan.duty_cycle_pct);
+		} else {
+			/* No plan means no band data for this region (obsolete or
+			 * unknown). Keep the previous frequency rather than invent one;
+			 * transmitting on a guess is worse than not moving. */
+			LOG_WRN("no frequency plan for region %d (%d); keeping %u Hz",
+				(int)region, ret, mt.frequency);
 		}
 	}
 

@@ -136,27 +136,83 @@ ZTEST(wire_vectors, test_channel_hash_matches_upstream)
 	TC_PRINT("verified %u name/psk channel-hash combinations\n", checked);
 }
 
-/* Characterisation of the known gap (parity: crypto #1).
+/* An empty channel name must resolve to the ACTIVE preset's display name
+ * (parity: crypto #1).
  *
- * An empty channel name resolves to the hardcoded string "LongFast" rather
- * than the *active preset's* display name. That is correct only while the
- * modem is frozen at LongFast (parity: radio D2). When preset support lands,
- * this test must change to expect the preset-derived name -- it is here so
- * that change is deliberate and visible, not silent.
+ * The substituted string is protocol data, not a label: it is hashed for the
+ * channel byte and again for the frequency slot. Pinning it to "LongFast"
+ * was correct only while the modem was frozen there; now that a node can run
+ * MediumFast, a pinned name produces both the wrong channel hash and the
+ * wrong frequency, and stock radios simply never hear it.
  */
-ZTEST(wire_vectors, test_empty_name_currently_defaults_to_longfast)
+ZTEST(wire_vectors, test_empty_name_follows_the_active_preset)
 {
 	bool found;
-	uint8_t longfast = vec_name_hash("LongFast", &found);
+	uint8_t psk_h = vec_psk_hash("aes128_counting", &found);
+	uint8_t lf = vec_name_hash("LongFast", &found);
+	uint8_t mf = vec_name_hash("MediumFast", &found);
 
-	zassert_true(found, "vector table missing the LongFast name hash");
+	zassert_true(found, "vector table missing a needed name hash");
 
+	/* Default preset: the unnamed channel hashes as "LongFast". */
+	mt.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+	mt.use_preset = true;
 	set_primary("", full_psks[2].bytes, full_psks[2].len);
+	zassert_str_equal(meshtastic_channels_get_name(0), "LongFast",
+			  "unnamed channel should take the LongFast display name");
+	zassert_equal(meshtastic_channels_get_hash(0), (uint8_t)(lf ^ psk_h),
+		      "unnamed channel hash should match upstream's LongFast");
 
-	zassert_equal(meshtastic_channels_get_hash(0),
-		      (uint8_t)(longfast ^ vec_psk_hash("aes128_counting", &found)),
-		      "empty-name default changed; if preset support landed, "
-		      "update this test to the preset display name");
+	/* Switch preset: the same unnamed channel must now hash as "MediumFast". */
+	mt.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST;
+	set_primary("", full_psks[2].bytes, full_psks[2].len);
+	zassert_str_equal(meshtastic_channels_get_name(0), "MediumFast",
+			  "unnamed channel must follow the preset, not stay on LongFast");
+	zassert_equal(meshtastic_channels_get_hash(0), (uint8_t)(mf ^ psk_h),
+		      "unnamed channel hash must follow the preset");
+
+	/* use_preset=false is its own literal upstream. */
+	mt.use_preset = false;
+	set_primary("", full_psks[2].bytes, full_psks[2].len);
+	zassert_str_equal(meshtastic_channels_get_name(0), "Custom",
+			  "a custom modem config hashes as \"Custom\"");
+
+	mt.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+	mt.use_preset = true;
+}
+
+/* The frequency must follow the channel NAME, not just the region
+ * (parity: radio D3).
+ *
+ * This is a live bug inside the US region alone: stock firmware puts a node
+ * whose primary channel is "MyMesh" on slot djb2("MyMesh") % 104, well away
+ * from LongFast's slot 19. Pinning one frequency per region left a renamed
+ * channel unable to hear stock radios at all.
+ */
+ZTEST(wire_vectors, test_frequency_follows_channel_name)
+{
+	struct meshtastic_freq_plan def, renamed;
+
+	zassert_ok(meshtastic_region_freq_plan(
+			   meshtastic_Config_LoRaConfig_RegionCode_US,
+			   meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+			   "LongFast", true, &def),
+		   "default plan failed");
+	zassert_ok(meshtastic_region_freq_plan(
+			   meshtastic_Config_LoRaConfig_RegionCode_US,
+			   meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+			   "MyMesh", true, &renamed),
+		   "renamed plan failed");
+
+	zassert_equal(def.frequency_hz, MESHTASTIC_FREQ_US,
+		      "the default channel keeps the established frequency");
+	zassert_not_equal(renamed.frequency_hz, def.frequency_hz,
+			  "a renamed channel must move frequency slot");
+	zassert_equal(renamed.slot, 40,
+		      "\"MyMesh\" hashes to US slot 40, got %u", renamed.slot);
+	zassert_equal(renamed.frequency_hz, 912125000,
+		      "\"MyMesh\" belongs on 912.125 MHz, got %u Hz",
+		      renamed.frequency_hz);
 }
 
 /* Guard on the harvested contract itself.
