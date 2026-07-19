@@ -20,6 +20,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_contention.h"
 #include "meshtastic_region_presets.h"
 #include "vectors/meshtastic_vectors.h"
 
@@ -894,3 +895,139 @@ ZTEST(wire_vectors, test_region_duty_cycle_table_present)
 }
 
 ZTEST_SUITE(wire_vectors, NULL, NULL, vectors_before, NULL, NULL);
+
+/* --- Contention window timing ---------------------------------------------
+ *
+ * The port recomputes upstream's slot time in integer arithmetic where upstream
+ * uses floats, so these vectors are the only thing standing between us and a
+ * silent drift that would scale every contention delay.
+ */
+
+/* Map a vector label ("LONG_FAST", "LONG_FAST_wide") onto our preset resolver. */
+static bool vec_label_to_params(const char *label, struct meshtastic_modem_params *out,
+				bool *wide)
+{
+	static const struct {
+		const char *name;
+		meshtastic_Config_LoRaConfig_ModemPreset preset;
+	} map[] = {
+		{"LONG_FAST", meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST},
+		{"LONG_SLOW", meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW},
+		{"LONG_MODERATE", meshtastic_Config_LoRaConfig_ModemPreset_LONG_MODERATE},
+		{"MEDIUM_FAST", meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST},
+		{"MEDIUM_SLOW", meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_SLOW},
+		{"SHORT_FAST", meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST},
+		{"SHORT_SLOW", meshtastic_Config_LoRaConfig_ModemPreset_SHORT_SLOW},
+		{"SHORT_TURBO", meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO},
+	};
+	size_t len = strlen(label);
+
+	*wide = false;
+	if (len > 5U && strcmp(label + len - 5, "_wide") == 0) {
+		*wide = true;
+		len -= 5U;
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(map); i++) {
+		if (strlen(map[i].name) == len && strncmp(label, map[i].name, len) == 0) {
+			return meshtastic_preset_to_params(map[i].preset, *wide, out) == 0;
+		}
+	}
+	return false; /* preset we do not model (LITE_*, etc.) — skipped */
+}
+
+ZTEST(wire_vectors, test_slot_time_matches_upstream)
+{
+	unsigned int checked = 0U;
+
+	for (unsigned int i = 0; i < MT_VEC_COUNT(mt_vec_slot_times); i++) {
+		const struct mt_vec_slot_time *v = &mt_vec_slot_times[i];
+		struct meshtastic_modem_params p;
+		bool wide;
+		uint32_t got;
+
+		if (!vec_label_to_params(v->preset, &p, &wide)) {
+			continue;
+		}
+
+		got = meshtastic_contention_slot_ms(p.spread_factor, p.bandwidth_hz, wide);
+		zassert_equal(got, v->slot_ms,
+			      "slot time for %s: got %u ms, upstream says %u ms", v->preset, got,
+			      v->slot_ms);
+		checked++;
+	}
+
+	zassert_true(checked >= 8U, "expected to check a useful number of presets, did %u",
+		     checked);
+}
+
+/* In the mapped SNR range we must match upstream exactly. Outside it we must
+ * clamp where upstream does not — the vectors record upstream returning 241 for
+ * an SNR of -128 and 27 for +127, and either would become a shift count. */
+ZTEST(wire_vectors, test_cw_from_snr_matches_upstream_in_range_and_clamps_outside)
+{
+	for (unsigned int i = 0; i < MT_VEC_COUNT(mt_vec_cw_from_snr); i++) {
+		const struct mt_vec_cw_snr *v = &mt_vec_cw_from_snr[i];
+		uint8_t got = meshtastic_contention_cw_from_snr((int8_t)v->snr);
+
+		if (v->cw_unclamped >= (int32_t)MESHTASTIC_CW_MIN &&
+		    v->cw_unclamped <= (int32_t)MESHTASTIC_CW_MAX) {
+			zassert_equal(got, (uint8_t)v->cw_unclamped,
+				      "snr %d: got CW %u, upstream says %d", v->snr, got,
+				      v->cw_unclamped);
+		} else {
+			zassert_true(got >= MESHTASTIC_CW_MIN && got <= MESHTASTIC_CW_MAX,
+				     "snr %d: upstream's unclamped %d must clamp into range, got %u",
+				     v->snr, v->cw_unclamped, got);
+		}
+	}
+}
+
+/* A relay delay must sit inside the window its own worst-case bound describes,
+ * and a non-router must always wait out the router offset first — that ordering
+ * is the whole point of the weighting. */
+ZTEST(wire_vectors, test_relay_delay_respects_router_priority_and_bounds)
+{
+	const uint32_t slot = meshtastic_contention_slot_ms(11U, 250000U, false);
+	const int8_t snrs[] = {-20, -10, 0, 5, 10};
+
+	zassert_equal(slot, 28U, "LongFast slot time should be 28 ms, got %u", slot);
+
+	for (unsigned int i = 0; i < ARRAY_SIZE(snrs); i++) {
+		uint32_t worst = meshtastic_contention_delay_relay_worst_ms(snrs[i], slot);
+		uint32_t router_floor = 2U * MESHTASTIC_CW_MAX * slot;
+
+		for (unsigned int trial = 0; trial < 32U; trial++) {
+			uint32_t client = meshtastic_contention_delay_relay_ms(snrs[i], false, slot);
+			uint32_t router = meshtastic_contention_delay_relay_ms(snrs[i], true, slot);
+
+			zassert_true(client >= router_floor,
+				     "a client relay must wait past the router window: %u < %u",
+				     client, router_floor);
+			zassert_true(client <= worst, "client delay %u exceeded worst case %u",
+				     client, worst);
+			zassert_true(router < router_floor,
+				     "a router relay must land inside the router window: %u >= %u",
+				     router, router_floor);
+		}
+	}
+}
+
+/* Our own traffic widens its window with channel utilisation, and never carries
+ * the router offset — that offset exists only to order relays. */
+ZTEST(wire_vectors, test_own_delay_scales_with_utilisation)
+{
+	const uint32_t slot = meshtastic_contention_slot_ms(11U, 250000U, false);
+
+	zassert_equal(meshtastic_contention_cw_from_util(0U), MESHTASTIC_CW_MIN);
+	zassert_equal(meshtastic_contention_cw_from_util(100U), MESHTASTIC_CW_MAX);
+	zassert_true(meshtastic_contention_cw_from_util(200U) <= MESHTASTIC_CW_MAX,
+		     "out-of-range utilisation must still clamp");
+
+	for (unsigned int trial = 0; trial < 64U; trial++) {
+		uint32_t d = meshtastic_contention_delay_own_ms(100U, slot);
+
+		zassert_true(d < (uint32_t)BIT(MESHTASTIC_CW_MAX) * slot,
+			     "own delay %u outside the widest window", d);
+	}
+}

@@ -48,6 +48,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_packet.c
     meshtastic_radio.c
     meshtastic_outbound.c
+    meshtastic_contention.c
     meshtastic_sched.c
     meshtastic_router.c
     meshtastic_routing.c

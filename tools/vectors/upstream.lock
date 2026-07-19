@@ -30,6 +30,18 @@
       "line": 4,
       "anchor": "const char *DisplayFormatters::getModemPresetDisplayName(",
       "sha256": "745b97c5d18362391bad4c10277cc66ef0119a25e33b17f0705a1f713bc55409"
+    },
+    "compute_slot_time": {
+      "file": "src/mesh/RadioInterface.cpp",
+      "line": 1364,
+      "anchor": "uint32_t RadioInterface::computeSlotTimeMsec(",
+      "sha256": "0975fc4b008d1941a251bca7490f3dc373359d8ea79ba8ec157052ce5b4086ff"
+    },
+    "get_cw_size": {
+      "file": "src/mesh/RadioInterface.cpp",
+      "line": 759,
+      "anchor": "uint8_t RadioInterface::getCWsize(",
+      "sha256": "b0e8505473141b47de7568a7f34acea19f84981d38fb1da8cde632d227440386"
     }
   }
 }

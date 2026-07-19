@@ -146,6 +146,15 @@ TARGETS = [
     # puts the node on the wrong frequency AND the wrong channel hash.
     ("preset_display_name", "src/DisplayFormatters.cpp",
      "const char *DisplayFormatters::getModemPresetDisplayName("),
+    # Contention-window timing. computeSlotTimeMsec is float maths upstream and
+    # integer maths in the port, which is exactly where a silent 1 ms drift
+    # would hide -- so it gets vectors rather than trust.
+    ("compute_slot_time", "src/mesh/RadioInterface.cpp",
+     "uint32_t RadioInterface::computeSlotTimeMsec("),
+    # SNR -> contention window exponent. Note upstream does NOT clamp; the port
+    # does, deliberately, and the vectors record the unclamped mapping so the
+    # divergence stays visible instead of being absorbed.
+    ("get_cw_size", "src/mesh/RadioInterface.cpp", "uint8_t RadioInterface::getCWsize("),
 ]
 
 
@@ -309,6 +318,31 @@ enum meshtastic_Config_LoRaConfig_ModemPreset {
 static uint8_t nonce[16];
 %(init_nonce_shim)s
 
+// Members/helpers computeSlotTimeMsec and getCWsize close over. pow_of_2 and
+// map are reproduced from upstream meshUtils.h / Arduino.h; CWmin/CWmax are the
+// RadioInterface.h constants. Only the *signatures* of the two extracted
+// functions are shimmed -- sf/bw/wideLora become parameters instead of members.
+static inline uint32_t pow_of_2(uint32_t n) { return 1 << n; }
+static inline long map(long x, long in_min, long in_max, long out_min, long out_max) {
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+static constexpr uint8_t CWmin = 3;
+static constexpr uint8_t CWmax = 8;
+// Arduino's max() is a macro, which is how the extracted body can compare a
+// double literal against an int expression. Defined after the includes so it
+// cannot shadow std::max for anything above.
+#define max(a, b) ((a) > (b) ? (a) : (b))
+static constexpr uint8_t NUM_SYM_CAD = 2;
+static constexpr uint8_t NUM_SYM_CAD_24GHZ = 4;
+
+// ===== VERBATIM UPSTREAM BODY: computeSlotTimeMsec (%(compute_slot_time_src)s) =====
+%(compute_slot_time_shim)s
+// ===== END VERBATIM =====
+
+// ===== VERBATIM UPSTREAM BODY: getCWsize (%(get_cw_size_src)s) =====
+%(get_cw_size_shim)s
+// ===== END VERBATIM =====
+
 static void emit_bytes(const char *k, const uint8_t *b, int n) {
     printf("    \"%%s\": [", k);
     for (int i = 0; i < n; i++) printf("%%s%%u", i ? "," : "", b[i]);
@@ -342,6 +376,16 @@ int main(void) {
     printf("  \"preset_names\": {\n");
 %(preset_name_calls)s
     printf("    \"_\": {}\n  },\n");
+
+    // ---- contention slot time per preset ----
+    printf("  \"slot_time_ms\": {\n");
+%(slot_calls)s
+    printf("    \"_\": 0\n  },\n");
+
+    // ---- SNR -> contention window exponent (upstream, unclamped) ----
+    printf("  \"cw_from_snr\": {\n");
+%(cw_calls)s
+    printf("    \"_\": 0\n  },\n");
 
     // ---- nonce layouts ----
     printf("  \"nonces\": {\n");
@@ -440,6 +484,42 @@ def build_probe(regions: dict[str, Region], presets: dict[str, int]) -> str:
         ' (unsigned)xorHash((const uint8_t *)d, strlen(d))); }'
     )
 
+    # computeSlotTimeMsec is a member closing over sf/bw and myRegion->wideLora.
+    # Two substitutions only -- the signature, and the region deref that becomes
+    # a parameter. The arithmetic is untouched, and the arithmetic is the data.
+    slot_region = regions["compute_slot_time"].text
+    slot_body = slot_region[slot_region.find("{"):]
+    slot_shim = (
+        "static uint32_t computeSlotTimeMsec(uint8_t sf, float bw, bool wideLora)\n"
+        + slot_body.replace("myRegion->wideLora", "wideLora")
+    )
+
+    # getCWsize only needs the class qualifier dropped; SNR_MIN/SNR_MAX are
+    # declared inside the body, and CWmin/CWmax are provided above.
+    cw_region = regions["get_cw_size"].text
+    cw_shim = "static " + cw_region.replace("RadioInterface::", "", 1)
+
+    # Slot time for every preset, both bandwidth columns -- the value that scales
+    # the whole contention window.
+    slot_calls = []
+    for pname in sorted(presets):
+        for wide in (False, True):
+            key = f"{pname}{'_wide' if wide else ''}"
+            slot_calls.append(
+                f"    {{ float bw = 0; uint8_t sf = 0, cr = 0;\n"
+                f"      modemPresetToParams(PRESET({pname}), {str(wide).lower()}, bw, sf, cr);\n"
+                f'      printf("    \\"{key}\\": %u,\\n",'
+                f" (unsigned)computeSlotTimeMsec(sf, bw, {str(wide).lower()})); }}"
+            )
+
+    # SNR -> CW exponent across and beyond the mapped range, so the unclamped
+    # tails upstream produces are on record next to the port's clamped ones.
+    cw_snrs = [-128, -30, -20, -15, -10, -5, 0, 5, 10, 11, 20, 127]
+    cw_calls = "\n".join(
+        f'    printf("    \\"{v}\\": %d,\\n", (int)getCWsize({v}.0f));'
+        for v in cw_snrs
+    )
+
     # Cases chosen to expose the offset-4 overlap between packetId and extraNonce.
     nonce_cases = [
         ("psk_id1_from0", 1, 0, 0),
@@ -480,6 +560,16 @@ def build_probe(regions: dict[str, Region], presets: dict[str, int]) -> str:
         "psk_hash_calls": "\n".join(psk_calls),
         "preset_calls": "\n".join(preset_calls),
         "nonce_calls": nonce_calls,
+        "compute_slot_time_shim": slot_shim,
+        "compute_slot_time_src": (
+            f"{regions['compute_slot_time'].relpath}:{regions['compute_slot_time'].line}"
+        ),
+        "get_cw_size_shim": cw_shim,
+        "get_cw_size_src": (
+            f"{regions['get_cw_size'].relpath}:{regions['get_cw_size'].line}"
+        ),
+        "slot_calls": "\n".join(slot_calls),
+        "cw_calls": cw_calls,
     }
 
 
@@ -717,6 +807,40 @@ def emit_header(data: dict, regions: dict[str, Region], upstream: Path,
     for k, v in data["nonces"].items():
         bs = ", ".join(f"0x{b:02x}" for b in v)
         a(f"\t{{ {json.dumps(k)}, {{ {bs} }} }},")
+    a("};")
+    a("")
+
+    a("/* --- Contention slot time per preset ---------------------------------")
+    a(" * Reference computeSlotTimeMsec(): CAD + propagation + turnaround + MAC.")
+    a(" * Upstream computes this in floating point and truncates to uint32; the")
+    a(" * port does it in integers. These values are what pin the two together --")
+    a(" * a 1 ms drift here scales the whole contention window.")
+    a(" */")
+    a("struct mt_vec_slot_time { const char *preset; uint32_t slot_ms; };")
+    a("static const struct mt_vec_slot_time mt_vec_slot_times[] = {")
+    for k, v in data["slot_time_ms"].items():
+        if k == "_":
+            continue
+        a(f"\t{{ {json.dumps(k)}, {v}U }},")
+    a("};")
+    a("")
+
+    a("/* --- SNR -> contention window exponent -------------------------------")
+    a(" * Reference getCWsize(): map(snr, -20, 10, CWmin=3, CWmax=8).")
+    a(" *")
+    a(" * Recorded UNCLAMPED, exactly as upstream computes it: an SNR outside")
+    a(" * [-20, 10] maps outside [3, 8]. Upstream gets away with that because the")
+    a(" * value is a real radio measurement; the port clamps, because its snr is")
+    a(" * an int8 from the packet struct and the result becomes a shift count.")
+    a(" * Tests assert the port matches in range and clamps outside it -- so the")
+    a(" * divergence stays visible rather than being quietly absorbed.")
+    a(" */")
+    a("struct mt_vec_cw_snr { int32_t snr; int32_t cw_unclamped; };")
+    a("static const struct mt_vec_cw_snr mt_vec_cw_from_snr[] = {")
+    for k, v in data["cw_from_snr"].items():
+        if k == "_":
+            continue
+        a(f"\t{{ {k}, {v} }},")
     a("};")
     a("")
 

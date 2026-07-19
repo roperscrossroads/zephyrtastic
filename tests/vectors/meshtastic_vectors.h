@@ -15,6 +15,8 @@
  *   modem_preset_to_params   src/mesh/MeshRadio.h:203  ae57bdd95cbc01a9
  *   init_nonce               src/mesh/CryptoEngine.cpp:428  80e7d0462008af80
  *   preset_display_name      src/DisplayFormatters.cpp:4  745b97c5d1836239
+ *   compute_slot_time        src/mesh/RadioInterface.cpp:1364  0975fc4b008d1941
+ *   get_cw_size              src/mesh/RadioInterface.cpp:759  b0e8505473141b47
  */
 
 #ifndef MESHTASTIC_VECTORS_H_
@@ -259,6 +261,76 @@ static const struct mt_vec_nonce mt_vec_nonces[] = {
 	{ "pkc_extra_1", { 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x00, 0x00 } },
 	{ "pkc_extra_aabbccdd", { 0x01, 0x00, 0x00, 0x00, 0xdd, 0xcc, 0xbb, 0xaa, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x00, 0x00 } },
 	{ "pkc_bigid_extra", { 0x08, 0x07, 0x06, 0x05, 0xdd, 0xcc, 0xbb, 0xaa, 0x44, 0x33, 0x22, 0x11, 0x00, 0x00, 0x00, 0x00 } },
+};
+
+/* --- Contention slot time per preset ---------------------------------
+ * Reference computeSlotTimeMsec(): CAD + propagation + turnaround + MAC.
+ * Upstream computes this in floating point and truncates to uint32; the
+ * port does it in integers. These values are what pin the two together --
+ * a 1 ms drift here scales the whole contention window.
+ */
+struct mt_vec_slot_time { const char *preset; uint32_t slot_ms; };
+static const struct mt_vec_slot_time mt_vec_slot_times[] = {
+	{ "LITE_FAST", 17U },
+	{ "LITE_FAST_wide", 23U },
+	{ "LITE_SLOW", 28U },
+	{ "LITE_SLOW_wide", 40U },
+	{ "LONG_FAST", 28U },
+	{ "LONG_FAST_wide", 17U },
+	{ "LONG_MODERATE", 48U },
+	{ "LONG_MODERATE_wide", 27U },
+	{ "LONG_SLOW", 89U },
+	{ "LONG_SLOW_wide", 47U },
+	{ "LONG_TURBO", 17U },
+	{ "LONG_TURBO_wide", 12U },
+	{ "MEDIUM_FAST", 12U },
+	{ "MEDIUM_FAST_wide", 10U },
+	{ "MEDIUM_SLOW", 17U },
+	{ "MEDIUM_SLOW_wide", 12U },
+	{ "MEDIUM_TURBO", 10U },
+	{ "MEDIUM_TURBO_wide", 8U },
+	{ "NARROW_FAST", 12U },
+	{ "NARROW_FAST_wide", 15U },
+	{ "NARROW_SLOW", 17U },
+	{ "NARROW_SLOW_wide", 23U },
+	{ "SHORT_FAST", 8U },
+	{ "SHORT_FAST_wide", 8U },
+	{ "SHORT_SLOW", 10U },
+	{ "SHORT_SLOW_wide", 8U },
+	{ "SHORT_TURBO", 8U },
+	{ "SHORT_TURBO_wide", 7U },
+	{ "TINY_FAST", 28U },
+	{ "TINY_FAST_wide", 40U },
+	{ "TINY_SLOW", 48U },
+	{ "TINY_SLOW_wide", 73U },
+	{ "VERY_LONG_SLOW", 28U },
+	{ "VERY_LONG_SLOW_wide", 17U },
+};
+
+/* --- SNR -> contention window exponent -------------------------------
+ * Reference getCWsize(): map(snr, -20, 10, CWmin=3, CWmax=8).
+ *
+ * Recorded UNCLAMPED, exactly as upstream computes it: an SNR outside
+ * [-20, 10] maps outside [3, 8]. Upstream gets away with that because the
+ * value is a real radio measurement; the port clamps, because its snr is
+ * an int8 from the packet struct and the result becomes a shift count.
+ * Tests assert the port matches in range and clamps outside it -- so the
+ * divergence stays visible rather than being quietly absorbed.
+ */
+struct mt_vec_cw_snr { int32_t snr; int32_t cw_unclamped; };
+static const struct mt_vec_cw_snr mt_vec_cw_from_snr[] = {
+	{ -128, 241 },
+	{ -30, 2 },
+	{ -20, 3 },
+	{ -15, 3 },
+	{ -10, 4 },
+	{ -5, 5 },
+	{ 0, 6 },
+	{ 5, 7 },
+	{ 10, 8 },
+	{ 11, 8 },
+	{ 20, 9 },
+	{ 127, 27 },
 };
 
 #define MT_VEC_COUNT(a) ((unsigned)(sizeof(a) / sizeof((a)[0])))
