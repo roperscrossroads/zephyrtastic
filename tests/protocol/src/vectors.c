@@ -1092,3 +1092,36 @@ ZTEST(wire_vectors, test_contention_window_is_runtime_policy)
 	zassert_equal(meshtastic_contention_cw_from_snr(0), cw_default,
 		      "restoring the default policy must restore the default mapping");
 }
+
+/* A plan is computed from a single policy snapshot, so its parts agree with
+ * each other. Computing delay and bound through separate calls is what would
+ * let a live "sched set" slip between them and produce a delay above its own
+ * stated maximum. */
+ZTEST(wire_vectors, test_plan_is_internally_consistent)
+{
+	struct meshtastic_contention_plan plan;
+	const int8_t snrs[] = {-20, -10, 0, 5, 10};
+
+	for (unsigned int i = 0; i < ARRAY_SIZE(snrs); i++) {
+		for (unsigned int trial = 0; trial < 32U; trial++) {
+			meshtastic_contention_plan_relay(snrs[i], false, 11U, 250000U, false,
+							 &plan);
+			zassert_equal(plan.slot_ms, 28U, "LongFast slot should be 28 ms");
+			zassert_true(plan.delay_ms <= plan.worst_ms,
+				     "delay %u exceeded its own bound %u", plan.delay_ms,
+				     plan.worst_ms);
+			zassert_true(plan.cw >= MESHTASTIC_CW_MIN && plan.cw <= MESHTASTIC_CW_MAX,
+				     "cw %u outside the policy window", plan.cw);
+
+			meshtastic_contention_plan_own(50U, 11U, 250000U, false, &plan);
+			zassert_true(plan.delay_ms <= plan.worst_ms,
+				     "own delay %u exceeded bound %u", plan.delay_ms,
+				     plan.worst_ms);
+		}
+	}
+
+	/* The override reaches the plan too, rather than only the standalone call. */
+	zassert_ok(meshtastic_sched_set("cw.slot", "50"));
+	meshtastic_contention_plan_relay(0, false, 11U, 250000U, false, &plan);
+	zassert_equal(plan.slot_ms, 50U, "cw.slot must reach the plan");
+}

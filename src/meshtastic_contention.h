@@ -113,4 +113,29 @@ uint32_t meshtastic_contention_delay_relay_ms(int8_t snr, bool early_like_router
  */
 uint32_t meshtastic_contention_delay_relay_worst_ms(int8_t snr, uint32_t slot_ms);
 
+/** A scheduling decision: everything one transmission needs, from one policy. */
+struct meshtastic_contention_plan {
+	uint32_t delay_ms; /**< wait this long before transmitting */
+	uint32_t worst_ms; /**< upper bound of the window delay_ms was drawn from */
+	uint32_t slot_ms;  /**< effective slot time used (override or derived) */
+	uint8_t cw;        /**< window exponent chosen */
+};
+
+/**
+ * @brief Plan the transmission of a packet we are relaying.
+ *
+ * Prefer this over calling the individual functions when more than one of the
+ * values is needed. The policy is snapshotted once, so @c delay_ms, @c worst_ms
+ * and @c slot_ms are guaranteed to describe the same policy — computing them
+ * separately would let a live @c sched @c set slip between the calls and yield a
+ * delay exceeding the very bound the caller clamps against.
+ */
+void meshtastic_contention_plan_relay(int8_t snr, bool early_like_router, uint8_t spread_factor,
+				      uint32_t bandwidth_hz, bool wide_lora,
+				      struct meshtastic_contention_plan *out);
+
+/** @brief Plan the transmission of a packet we originated. */
+void meshtastic_contention_plan_own(uint8_t util_pct, uint8_t spread_factor, uint32_t bandwidth_hz,
+				    bool wide_lora, struct meshtastic_contention_plan *out);
+
 #endif /* MESHTASTIC_CONTENTION_H_ */

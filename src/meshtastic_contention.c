@@ -37,17 +37,41 @@ static int32_t map_i32(int32_t x, int32_t in_min, int32_t in_max, int32_t out_mi
 	return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-/* Live window bounds. Defaults reproduce the reference (3, 8); the "legacy"
- * policy zeroes them to restore transmit-immediately. A max below min is
- * operator error rather than a state worth honouring — collapse to min, which
- * degrades to "one slot" instead of inverting the window. */
-static void cw_bounds(uint8_t *lo, uint8_t *hi)
-{
-	const struct meshtastic_sched_config *c = meshtastic_sched_get();
+/*
+ * One coherent view of the window policy.
+ *
+ * Every decision here reads three or four policy fields, which per the contract
+ * in meshtastic_sched.h means a whole-struct snapshot rather than repeated
+ * meshtastic_sched_get() reads. It matters concretely: a "sched set cw.max"
+ * landing between the exponent lookup and the offset lookup would produce a
+ * delay computed half from each policy — and, because the worst-case bound is
+ * derived from the same fields, a delay that exceeds its own stated maximum.
+ * Take the snapshot once, decide entirely from the copy.
+ *
+ * A max below min is operator error rather than a state worth honouring:
+ * collapse to min, which degrades to a single slot instead of inverting the
+ * window.
+ */
+struct cw_policy {
+	uint8_t lo;
+	uint8_t hi;
+	uint8_t offset;
+	uint16_t slot_override_ms;
+};
 
-	*lo = c->cw_min;
-	*hi = (c->cw_max < c->cw_min) ? c->cw_min : c->cw_max;
+static void cw_policy_get(struct cw_policy *p)
+{
+	struct meshtastic_sched_config c;
+
+	meshtastic_sched_snapshot(&c);
+
+	p->lo = c.cw_min;
+	p->hi = (c.cw_max < c.cw_min) ? c.cw_min : c.cw_max;
+	p->offset = c.cw_relay_offset;
+	p->slot_override_ms = c.cw_slot_ms;
 }
+
+static uint8_t cw_from_snr_p(const struct cw_policy *p, int8_t snr);
 
 /*
  * Deliberate divergence from the reference: it does not clamp getCWsize(), so an
@@ -123,54 +147,76 @@ uint32_t meshtastic_contention_slot_ms(uint8_t spread_factor, uint32_t bandwidth
 	return (slot_hundredths + FIXED_TIME_HUNDREDTHS) / 100U;
 }
 
+/* Reference getCWsize(): SNR_MIN -20, SNR_MAX 10. */
+static uint8_t cw_from_snr_p(const struct cw_policy *p, int8_t snr)
+{
+	return cw_clamp(map_i32((int32_t)snr, -20, 10, (int32_t)p->lo, (int32_t)p->hi), p->lo,
+			p->hi);
+}
+
+static uint8_t cw_from_util_p(const struct cw_policy *p, uint8_t util_pct)
+{
+	uint8_t util = MIN(util_pct, 100U);
+
+	return cw_clamp(map_i32((int32_t)util, 0, 100, (int32_t)p->lo, (int32_t)p->hi), p->lo,
+			p->hi);
+}
+
+/* Slots a client waits before its own random window opens. */
+static uint32_t relay_offset_slots(const struct cw_policy *p)
+{
+	return (uint32_t)p->offset * (uint32_t)p->hi;
+}
+
+static uint32_t effective_slot_p(const struct cw_policy *p, uint8_t spread_factor,
+				 uint32_t bandwidth_hz, bool wide_lora)
+{
+	if (p->slot_override_ms != 0U) {
+		return p->slot_override_ms;
+	}
+	return meshtastic_contention_slot_ms(spread_factor, bandwidth_hz, wide_lora);
+}
+
 uint8_t meshtastic_contention_cw_from_snr(int8_t snr)
 {
-	uint8_t lo, hi;
+	struct cw_policy p;
 
-	cw_bounds(&lo, &hi);
-	/* Reference getCWsize(): SNR_MIN -20, SNR_MAX 10. */
-	return cw_clamp(map_i32((int32_t)snr, -20, 10, (int32_t)lo, (int32_t)hi), lo, hi);
+	cw_policy_get(&p);
+	return cw_from_snr_p(&p, snr);
 }
 
 uint8_t meshtastic_contention_cw_from_util(uint8_t util_pct)
 {
-	uint8_t util = MIN(util_pct, 100U);
-	uint8_t lo, hi;
+	struct cw_policy p;
 
-	cw_bounds(&lo, &hi);
-	return cw_clamp(map_i32((int32_t)util, 0, 100, (int32_t)lo, (int32_t)hi), lo, hi);
-}
-
-/* Slots a client waits before its own random window opens. */
-static uint32_t relay_offset_slots(void)
-{
-	uint8_t lo, hi;
-
-	cw_bounds(&lo, &hi);
-	return (uint32_t)meshtastic_sched_get()->cw_relay_offset * (uint32_t)hi;
+	cw_policy_get(&p);
+	return cw_from_util_p(&p, util_pct);
 }
 
 uint32_t meshtastic_contention_effective_slot_ms(uint8_t spread_factor, uint32_t bandwidth_hz,
 						 bool wide_lora)
 {
-	uint16_t override_ms = meshtastic_sched_get()->cw_slot_ms;
+	struct cw_policy p;
 
-	if (override_ms != 0U) {
-		return override_ms;
-	}
-	return meshtastic_contention_slot_ms(spread_factor, bandwidth_hz, wide_lora);
+	cw_policy_get(&p);
+	return effective_slot_p(&p, spread_factor, bandwidth_hz, wide_lora);
 }
 
 uint32_t meshtastic_contention_delay_own_ms(uint8_t util_pct, uint32_t slot_ms)
 {
-	uint8_t cw = meshtastic_contention_cw_from_util(util_pct);
+	struct cw_policy p;
 
-	return random_below(BIT(cw)) * slot_ms;
+	cw_policy_get(&p);
+	return random_below(BIT(cw_from_util_p(&p, util_pct))) * slot_ms;
 }
 
 uint32_t meshtastic_contention_delay_relay_ms(int8_t snr, bool early_like_router, uint32_t slot_ms)
 {
-	uint8_t cw = meshtastic_contention_cw_from_snr(snr);
+	struct cw_policy p;
+	uint8_t cw;
+
+	cw_policy_get(&p);
+	cw = cw_from_snr_p(&p, snr);
 
 	if (early_like_router) {
 		return random_below(2U * (uint32_t)cw) * slot_ms;
@@ -178,12 +224,62 @@ uint32_t meshtastic_contention_delay_relay_ms(int8_t snr, bool early_like_router
 
 	/* Offset past the whole router window first, so a router's relay reliably
 	 * precedes a client's rather than merely tending to. */
-	return (relay_offset_slots() * slot_ms) + (random_below(BIT(cw)) * slot_ms);
+	return (relay_offset_slots(&p) * slot_ms) + (random_below(BIT(cw)) * slot_ms);
 }
 
 uint32_t meshtastic_contention_delay_relay_worst_ms(int8_t snr, uint32_t slot_ms)
 {
-	uint8_t cw = meshtastic_contention_cw_from_snr(snr);
+	struct cw_policy p;
 
-	return (relay_offset_slots() * slot_ms) + (BIT(cw) * slot_ms);
+	cw_policy_get(&p);
+	return (relay_offset_slots(&p) * slot_ms) + (BIT(cw_from_snr_p(&p, snr)) * slot_ms);
+}
+
+void meshtastic_contention_plan_relay(int8_t snr, bool early_like_router, uint8_t spread_factor,
+				      uint32_t bandwidth_hz, bool wide_lora,
+				      struct meshtastic_contention_plan *out)
+{
+	struct cw_policy p;
+	uint8_t cw;
+
+	if (out == NULL) {
+		return;
+	}
+
+	/* Single snapshot for the whole plan: delay, its bound and the slot time
+	 * that scales both are guaranteed to describe one policy. Computing them
+	 * with separate calls would let a policy change slip between them and
+	 * produce a delay larger than the bound the caller clamps against. */
+	cw_policy_get(&p);
+	cw = cw_from_snr_p(&p, snr);
+
+	out->slot_ms = effective_slot_p(&p, spread_factor, bandwidth_hz, wide_lora);
+	out->cw = cw;
+	out->worst_ms = (relay_offset_slots(&p) * out->slot_ms) + (BIT(cw) * out->slot_ms);
+
+	if (early_like_router) {
+		out->delay_ms = random_below(2U * (uint32_t)cw) * out->slot_ms;
+	} else {
+		out->delay_ms = (relay_offset_slots(&p) * out->slot_ms) +
+				(random_below(BIT(cw)) * out->slot_ms);
+	}
+}
+
+void meshtastic_contention_plan_own(uint8_t util_pct, uint8_t spread_factor, uint32_t bandwidth_hz,
+				    bool wide_lora, struct meshtastic_contention_plan *out)
+{
+	struct cw_policy p;
+	uint8_t cw;
+
+	if (out == NULL) {
+		return;
+	}
+
+	cw_policy_get(&p);
+	cw = cw_from_util_p(&p, util_pct);
+
+	out->slot_ms = effective_slot_p(&p, spread_factor, bandwidth_hz, wide_lora);
+	out->cw = cw;
+	out->worst_ms = BIT(cw) * out->slot_ms;
+	out->delay_ms = random_below(BIT(cw)) * out->slot_ms;
 }

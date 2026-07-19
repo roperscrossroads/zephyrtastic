@@ -171,7 +171,7 @@ the Zephyr . Commands marked *(optional)* are only present when their correspond
    * - ``meshtastic sched policy <name>``
      - Apply a policy preset (``default``, ``legacy``)
    * - ``meshtastic sched set <key> <value>``
-     - Tune one knob live: ``tx.order``, ``tx.overflow``, ``tx.depth``, ``phone.evict``, ``airtime.max`` (% channel util that gates background self-broadcasts, 0=off), ``dedup.ttl`` (seconds a duplicate is remembered, 0=never), ``reliable.retries`` (retransmits of an unacked DM, 0=off), ``reliable.timeout`` (ms between retransmits)
+     - Tune one knob live: ``tx.order``, ``tx.overflow``, ``tx.depth``, ``phone.evict``, ``airtime.max`` (% channel util that gates background self-broadcasts, 0=off), ``dedup.ttl`` (seconds a duplicate is remembered, 0=never), ``reliable.retries`` (retransmits of an unacked DM, 0=off), ``reliable.timeout`` (ms between retransmits), ``route.ttl`` (seconds a learned next-hop stays trusted, 0=never), ``cw.min``/``cw.max`` (contention-window exponents, ``cw.max 0`` disables), ``cw.offset`` (client relay offset in ``cw.max`` slots), ``cw.slot`` (slot-time override in ms, 0=derive from preset)
    * - ``meshtastic sched stats [reset]``
      - Show live TX/RX counters, per-tier egress, phone-queue drops, airtime-gated broadcasts, dedup TTL expiries and reliable-delivery acked/failed; ``reset`` to zero them
 
@@ -189,6 +189,32 @@ kind — so these are gated two ways:
 ``meshtastic channel show`` prints a PSK summary (kind and length) but never
 the key itself. Raw hex requires ``CONFIG_MESHTASTIC_SHELL_PSK_HEX`` (default
 ``n``), which discloses live key material to anyone who can read the console.
+
+Defaults: behave like a stock node
+==================================
+
+**Every runtime knob defaults to the value that makes this node behave like a
+stock meshtastic/firmware node.** The mesh is shared infrastructure — other
+people's nodes relay our traffic and we relay theirs — so the default posture is
+to be an ordinary, well-behaved participant, not to be locally optimal at the
+shared channel's expense. Anything that trades airtime fairness for our own
+latency or delivery rate is opt-in, never the default.
+
+The contention window is the clearest example. ``cw.min``/``cw.max``/``cw.offset``
+default to the reference firmware's CWmin 3, CWmax 8 and 2×CWmax client offset,
+and ``cw.slot`` derives the slot time from the active modem preset exactly as
+upstream does. A node nobody has touched waits before relaying, the same way its
+neighbours do.
+
+``cw.max 0`` switches that off and transmits as soon as the channel is clear.
+The ``legacy`` policy preset does exactly this, along with disabling the airtime
+gate and dedup TTL — it restores how this port behaved before those mechanisms
+existed. It is retained because it is the control arm for measuring them (see
+``meshtastic sched stats``, which counts relays a peer also relayed), **not
+because it is a reasonable way to run a node on a shared mesh.** A node running
+``legacy`` transmits ahead of every neighbour that is backing off politely, and
+takes more than its share of a channel it does not own. Use it to measure, then
+put it back.
 
 The scheduler policy is a runtime-tunable QoS surface (RAM-only — a reboot
 restores compiled defaults). Changing a knob or applying a preset resets the
