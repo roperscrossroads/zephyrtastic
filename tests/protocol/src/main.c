@@ -1686,7 +1686,12 @@ ZTEST(protocol_stack, test_route_ttl_decay_returns_to_flood)
 	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), rbyte, "baseline learn failed");
 
 	zassert_ok(meshtastic_sched_set("route.ttl", "1"));
-	k_sleep(K_MSEC(1500));
+	/* Decay compares truncated seconds with a strict >, so clearing a ttl of 1
+	 * needs the second-counter to advance by 2. A 1500 ms sleep only achieves
+	 * that when the learn happened late in its second — it passed or failed on
+	 * sub-second phase alone, and adding unrelated tests ahead of this one was
+	 * enough to flip it. Sleep past the boundary regardless of phase. */
+	k_sleep(K_MSEC(2500));
 
 	zassert_equal(meshtastic_nodedb_get_next_hop(PEER_NODE_ID), 0U,
 		      "a stale route must decay to flood");
@@ -1856,6 +1861,105 @@ ZTEST(protocol_stack, test_nodedb_reset_keeps_favorites)
 	/* Leave the DB clean for later tests. */
 	(void)meshtastic_nodedb_set_favorite(PEER_NODE_ID, false);
 	meshtastic_nodedb_reset(false);
+}
+
+/* --- Flood-redundancy measurement ------------------------------------------ */
+
+/* A broadcast with independently-set hop budget and relayer byte. hop_start
+ * greater than hop_limit is what distinguishes a relayed copy from one straight
+ * off the originator. */
+static void inject_broadcast_hops(uint32_t from, uint32_t id, uint8_t hop_limit, uint8_t hop_start,
+				  uint8_t relay_node)
+{
+	struct meshtastic_packet p = {
+		.from = from,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.id = id,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"hi",
+		.payload_len = 2U,
+		.hop_limit = hop_limit,
+		.hop_start = hop_start,
+		.relay_node = relay_node,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	zassert_ok(meshtastic_build_wire_packet(&p, wire, &wire_len));
+	inject_rx_frame(wire, wire_len, -40, 5);
+}
+
+/* We relay a broadcast, then hear a peer relay the same frame: that relay of
+ * ours was redundant, and is the thing a contention delay plus overhear-cancel
+ * would have saved. */
+ZTEST(protocol_stack, test_peer_relay_of_our_relay_is_counted_redundant)
+{
+	struct meshtastic_sched_stats st;
+
+	meshtastic_sched_stats_reset();
+
+	/* Straight from the originator (hop_start == hop_limit): we relay it. */
+	inject_broadcast_hops(PEER_NODE_ID, 0xE1A70001U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_true(st.relay_sent >= 1U, "expected to have relayed the broadcast");
+	zassert_equal(st.relay_redundant, 0U, "nothing redundant yet");
+
+	/* The same frame, now relayed by another node (hop_limit decremented, a
+	 * relayer byte that is not ours). */
+	inject_broadcast_hops(PEER_NODE_ID, 0xE1A70001U, 2U, 3U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_redundant, 1U, "peer's relay of our relay should be counted");
+	{
+		uint32_t bucketed = 0U;
+
+		for (int i = 0; i < MT_RELAY_GAP_BUCKETS; i++) {
+			bucketed += st.relay_gap[i];
+		}
+		zassert_equal(bucketed, 1U, "the redundant relay should land in exactly one bucket");
+	}
+}
+
+/* An originator retransmitting (reliable delivery) is not a relay. Counting it
+ * would inflate the redundancy figure and argue for work that would not help. */
+ZTEST(protocol_stack, test_originator_retransmit_is_not_counted_redundant)
+{
+	struct meshtastic_sched_stats st;
+
+	meshtastic_sched_stats_reset();
+
+	inject_broadcast_hops(PEER_NODE_ID, 0xE1A70002U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(30));
+
+	/* Same frame again, still hop_start == hop_limit and no relayer byte. */
+	inject_broadcast_hops(PEER_NODE_ID, 0xE1A70002U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_true(st.relay_sent >= 1U, "baseline relay expected");
+	zassert_equal(st.relay_redundant, 0U,
+		      "an originator retransmission must not count as a peer relay");
+}
+
+/* Our own relayer byte coming back to us is our echo, not a peer relaying. */
+ZTEST(protocol_stack, test_own_relayer_byte_is_not_counted_redundant)
+{
+	struct meshtastic_sched_stats st;
+
+	meshtastic_sched_stats_reset();
+
+	inject_broadcast_hops(PEER_NODE_ID, 0xE1A70003U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(30));
+
+	inject_broadcast_hops(PEER_NODE_ID, 0xE1A70003U, 2U, 3U, (uint8_t)(TEST_NODE_ID & 0xFFU));
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_redundant, 0U, "our own relayer byte must not count as a peer");
 }
 
 /* --- Packet-id unpredictability -------------------------------------------- */

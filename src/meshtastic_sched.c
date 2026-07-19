@@ -271,6 +271,9 @@ static atomic_t st_phone_drop_protected;
 static atomic_t st_airtime_drop;
 static atomic_t st_dedup_expired;
 static atomic_t st_reliable_acked;
+static atomic_t st_relay_sent;
+static atomic_t st_relay_redundant;
+static atomic_t st_relay_gap[MT_RELAY_GAP_BUCKETS];
 static atomic_t st_reliable_failed;
 
 void meshtastic_sched_stat_enq(uint8_t tier, uint8_t occupancy)
@@ -318,6 +321,29 @@ void meshtastic_sched_stat_reliable_fail(void)
 	atomic_inc(&st_reliable_failed);
 }
 
+const uint16_t meshtastic_relay_gap_bounds[MT_RELAY_GAP_BUCKETS - 1] = {25U,  50U,  100U,
+								       250U, 500U, 1000U};
+
+void meshtastic_sched_stat_relay_sent(void)
+{
+	atomic_inc(&st_relay_sent);
+}
+
+void meshtastic_sched_stat_relay_redundant(uint32_t gap_ms)
+{
+	size_t b = MT_RELAY_GAP_BUCKETS - 1U; /* the >= final-bound bucket */
+
+	atomic_inc(&st_relay_redundant);
+
+	for (size_t i = 0; i < ARRAY_SIZE(meshtastic_relay_gap_bounds); i++) {
+		if (gap_ms < meshtastic_relay_gap_bounds[i]) {
+			b = i;
+			break;
+		}
+	}
+	atomic_inc(&st_relay_gap[b]);
+}
+
 void meshtastic_sched_stats_get(struct meshtastic_sched_stats *out)
 {
 	if (out == NULL) {
@@ -335,6 +361,11 @@ void meshtastic_sched_stats_get(struct meshtastic_sched_stats *out)
 	out->dedup_expired = (uint32_t)atomic_get(&st_dedup_expired);
 	out->reliable_acked = (uint32_t)atomic_get(&st_reliable_acked);
 	out->reliable_failed = (uint32_t)atomic_get(&st_reliable_failed);
+	out->relay_sent = (uint32_t)atomic_get(&st_relay_sent);
+	out->relay_redundant = (uint32_t)atomic_get(&st_relay_redundant);
+	for (int i = 0; i < MT_RELAY_GAP_BUCKETS; i++) {
+		out->relay_gap[i] = (uint32_t)atomic_get(&st_relay_gap[i]);
+	}
 }
 
 void meshtastic_sched_stats_reset(void)
@@ -350,4 +381,9 @@ void meshtastic_sched_stats_reset(void)
 	atomic_set(&st_dedup_expired, 0);
 	atomic_set(&st_reliable_acked, 0);
 	atomic_set(&st_reliable_failed, 0);
+	atomic_set(&st_relay_sent, 0);
+	atomic_set(&st_relay_redundant, 0);
+	for (int i = 0; i < MT_RELAY_GAP_BUCKETS; i++) {
+		atomic_set(&st_relay_gap[i], 0);
+	}
 }

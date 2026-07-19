@@ -84,12 +84,80 @@ static bool dup_check(uint32_t src, uint32_t id)
 	return dup_check_hops(src, id, 0U, false) != DUP_NEW;
 }
 
+static struct meshtastic_dup_entry *dup_find(uint32_t src, uint32_t id)
+{
+	for (int i = 0; i < CONFIG_MESHTASTIC_DUP_CACHE_SIZE; i++) {
+		if (mt.dup_cache[i].src == src && mt.dup_cache[i].id == id) {
+			return &mt.dup_cache[i];
+		}
+	}
+	return NULL;
+}
+
+/* Record that we transmitted a relay of this (src,id), so a later duplicate can
+ * tell whether a peer relayed the same frame we already put on air. */
+static void dup_mark_relayed(uint32_t src, uint32_t id)
+{
+	struct meshtastic_dup_entry *e = dup_find(src, id);
+
+	if (e != NULL) {
+		e->relayed = true;
+		e->relayed_ms = k_uptime_get_32();
+	}
+	meshtastic_sched_stat_relay_sent();
+}
+
+/*
+ * Flood-redundancy measurement.
+ *
+ * We relay immediately and synchronously, with no delay and no way to cancel a
+ * queued relay, so every node that hears a broadcast transmits. This counts the
+ * cases where that was redundant: we relayed (src,id), and afterwards heard a
+ * *peer* relay the same frame.
+ *
+ * Two things are deliberately excluded, because counting them would inflate the
+ * result and argue for work that would not actually help:
+ *   - relay_node == 0 or == our own low byte: not another node's relay.
+ *   - hop_start == hop_limit: the frame came straight from the originator, i.e.
+ *     a reliable-delivery retransmission rather than a relay.
+ */
+static void note_possible_redundant_relay(const struct meshtastic_wire_header *hdr, uint32_t src,
+					  uint32_t id, uint8_t rx_hop_limit)
+{
+	const struct meshtastic_dup_entry *e = dup_find(src, id);
+	uint8_t hop_start;
+	uint32_t gap;
+
+	if (e == NULL || !e->relayed) {
+		return;
+	}
+
+	if (hdr->relay_node == 0U || hdr->relay_node == (uint8_t)(mt.node_id & 0xFFU)) {
+		return;
+	}
+
+	hop_start = (hdr->flags & MESHTASTIC_FLAGS_HOP_START_MASK) >>
+		    MESHTASTIC_FLAGS_HOP_START_SHIFT;
+	if (hop_start != 0U && hop_start == rx_hop_limit) {
+		return; /* originator retransmission, not a relay */
+	}
+
+	gap = k_uptime_get_32() - e->relayed_ms;
+	meshtastic_sched_stat_relay_redundant(gap);
+	LOG_DBG("Redundant relay: peer 0x%02x also relayed (src=0x%08x id=0x%08x) %u ms after us",
+		hdr->relay_node, src, id, gap);
+}
+
 static void dup_add(uint32_t src, uint32_t id, uint8_t hop_limit)
 {
 	mt.dup_cache[mt.dup_head].src = src;
 	mt.dup_cache[mt.dup_head].id = id;
 	mt.dup_cache[mt.dup_head].ms = k_uptime_get_32();
 	mt.dup_cache[mt.dup_head].hop_limit = hop_limit;
+	/* Ring slots are reused: clear the relay marks or a new (src,id) inherits
+	 * the previous occupant's and mis-attributes a redundant relay. */
+	mt.dup_cache[mt.dup_head].relayed = false;
+	mt.dup_cache[mt.dup_head].relayed_ms = 0U;
 	mt.dup_head = (uint8_t)((mt.dup_head + 1U) % CONFIG_MESHTASTIC_DUP_CACHE_SIZE);
 }
 
@@ -136,6 +204,7 @@ static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wi
 		LOG_ERR("Relay TX failed (%d)", ret);
 	} else {
 		mt.status.relayed_packets++;
+		dup_mark_relayed(sys_le32_to_cpu(hdr->src), sys_le32_to_cpu(hdr->id));
 	}
 }
 
@@ -346,6 +415,8 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 							   hop_start);
 		}
 
+		note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit);
+
 		LOG_DBG("Duplicate (src=0x%08x id=0x%08x)", src, pkt_id);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
@@ -361,6 +432,8 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 			.to = sys_le32_to_cpu(hdr->dest),
 			.id = pkt_id,
 		};
+
+		note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit);
 
 		LOG_DBG("Hop-upgraded duplicate (src=0x%08x id=0x%08x hops=%u): relay", src,
 			pkt_id, rx_hop_limit);

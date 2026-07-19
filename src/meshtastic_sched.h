@@ -80,6 +80,13 @@ struct meshtastic_sched_config {
 				   * 0 = never expire. */
 };
 
+/* Gap buckets (ms) between our relay of a (src,id) and hearing a peer relay the
+ * same one: <25, <50, <100, <250, <500, <1000, >=1000. The point is to see
+ * whether redundant relays land inside the window a contention delay would
+ * occupy — those are the transmissions an overhear-cancel would have saved. */
+#define MT_RELAY_GAP_BUCKETS 7
+extern const uint16_t meshtastic_relay_gap_bounds[MT_RELAY_GAP_BUCKETS - 1];
+
 struct meshtastic_sched_stats {
 	uint32_t tx_enq[MT_SCHED_TIER_COUNT];  /* frames queued, per tier */
 	uint32_t tx_drop[MT_SCHED_TIER_COUNT]; /* frames dropped at egress, per tier */
@@ -90,6 +97,12 @@ struct meshtastic_sched_stats {
 	uint32_t dedup_expired;                /* dup-cache hits ignored because TTL had elapsed */
 	uint32_t reliable_acked;               /* want_ack sends confirmed delivered (ack/implicit) */
 	uint32_t reliable_failed;              /* want_ack sends that exhausted all retransmits */
+	/* Flood-redundancy measurement (see meshtastic_sched_stat_relay_redundant).
+	 * relay_sent is the denominator; relay_redundant counts our relays that a
+	 * peer also relayed, and relay_gap buckets how long after ours theirs came. */
+	uint32_t relay_sent;
+	uint32_t relay_redundant;
+	uint32_t relay_gap[MT_RELAY_GAP_BUCKETS];
 };
 
 /*
@@ -164,6 +177,19 @@ void meshtastic_sched_stat_airtime_drop(void);
 void meshtastic_sched_stat_dedup_expired(void);
 void meshtastic_sched_stat_reliable_ack(void);
 void meshtastic_sched_stat_reliable_fail(void);
+
+/** Count a relay we transmitted (denominator for the redundancy ratio). */
+void meshtastic_sched_stat_relay_sent(void);
+
+/**
+ * Count a relay of ours that a peer also performed, @p gap_ms after we sent it.
+ *
+ * Measurement for the flood-contention work: the port relays immediately, with
+ * no delay and no way to cancel a pending relay, so every node that hears a
+ * broadcast transmits. This counts how often that was redundant, and how
+ * tightly the redundant transmissions cluster in time.
+ */
+void meshtastic_sched_stat_relay_redundant(uint32_t gap_ms);
 
 #ifdef __cplusplus
 }

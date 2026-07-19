@@ -34,8 +34,10 @@ extern "C" {
 struct meshtastic_dup_entry {
 	uint32_t src;
 	uint32_t id;
-	uint32_t ms;       /* k_uptime_get_32() when recorded, for TTL expiry */
-	uint8_t hop_limit; /* highest hop budget seen for this (src,id) */
+	uint32_t ms;        /* k_uptime_get_32() when recorded, for TTL expiry */
+	uint32_t relayed_ms; /* when WE relayed it; valid only if relayed */
+	uint8_t hop_limit;  /* highest hop budget seen for this (src,id) */
+	bool relayed;       /* we transmitted a relay of this (src,id) */
 };
 
 struct meshtastic_context {

@@ -1345,6 +1345,26 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "dedup TTL expiries: %u", st.dedup_expired);
 	shell_print(sh, "reliable delivery: %u acked, %u failed", st.reliable_acked,
 		    st.reliable_failed);
+
+	/* Flood redundancy: how many of our relays a peer also relayed, and how
+	 * soon after ours theirs arrived. Gaps inside a plausible contention window
+	 * are the transmissions a delay + overhear-cancel would have saved. */
+	shell_print(sh, "relays sent: %u  also relayed by a peer: %u (%u%%)", st.relay_sent,
+		    st.relay_redundant,
+		    st.relay_sent ? (unsigned int)((st.relay_redundant * 100U) / st.relay_sent) : 0U);
+	if (st.relay_redundant > 0U) {
+		shell_fprintf(sh, SHELL_NORMAL, "  peer-relay gap after ours:");
+		for (int i = 0; i < MT_RELAY_GAP_BUCKETS; i++) {
+			if (i == MT_RELAY_GAP_BUCKETS - 1) {
+				shell_fprintf(sh, SHELL_NORMAL, " >=%ums:%u",
+					      meshtastic_relay_gap_bounds[i - 1], st.relay_gap[i]);
+			} else {
+				shell_fprintf(sh, SHELL_NORMAL, " <%ums:%u",
+					      meshtastic_relay_gap_bounds[i], st.relay_gap[i]);
+			}
+		}
+		shell_print(sh, "");
+	}
 	return 0;
 }
 
