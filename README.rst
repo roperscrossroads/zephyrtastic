@@ -145,13 +145,13 @@ the Zephyr . Commands marked *(optional)* are only present when their correspond
    * - ``meshtastic channel show <index>``
      - Show one channel slot
    * - ``meshtastic channel set <index> [name|role|psk|uplink|downlink]...``
-     - Update fields of a channel slot
+     - Update fields of a channel slot *(config write)*
    * - ``meshtastic channel disable <index>``
-     - Disable a channel slot
+     - Disable a channel slot *(config write)*
    * - ``meshtastic device role [name]``
-     - Get / set the device role
+     - Get the device role; setting one is a *(config write)*
    * - ``meshtastic device rebroadcast [mode]``
-     - Get / set the rebroadcast mode
+     - Get the rebroadcast mode; setting one is a *(config write)*
    * - ``meshtastic text send [-c <index>] [dest|broadcast] <message>``
      - Send a text message *(optional)*
    * - ``meshtastic nodedb list``
@@ -174,6 +174,21 @@ the Zephyr . Commands marked *(optional)* are only present when their correspond
      - Tune one knob live: ``tx.order``, ``tx.overflow``, ``tx.depth``, ``phone.evict``, ``airtime.max`` (% channel util that gates background self-broadcasts, 0=off), ``dedup.ttl`` (seconds a duplicate is remembered, 0=never), ``reliable.retries`` (retransmits of an unacked DM, 0=off), ``reliable.timeout`` (ms between retransmits)
    * - ``meshtastic sched stats [reset]``
      - Show live TX/RX counters, per-tier egress, phone-queue drops, airtime-gated broadcasts, dedup TTL expiries and reliable-delivery acked/failed; ``reset`` to zero them
+
+Commands marked *(config write)* persist changes to the device configuration.
+The shell is **not** an authenticated transport — anyone with console access
+(UART, USB or RTT) reaches it with no pairing, passkey or key check of any
+kind — so these are gated two ways:
+
+* ``CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE`` (default ``y``) compiles them in.
+  Set it to ``n`` for a production build and only the read-only forms remain,
+  so ``meshtastic device role`` still reports the current role.
+* At runtime they honour ``SecurityConfig.is_managed``. A managed node refuses
+  them exactly as it refuses local admin over the PhoneAPI.
+
+``meshtastic channel show`` prints a PSK summary (kind and length) but never
+the key itself. Raw hex requires ``CONFIG_MESHTASTIC_SHELL_PSK_HEX`` (default
+``n``), which discloses live key material to anyone who can read the console.
 
 The scheduler policy is a runtime-tunable QoS surface (RAM-only — a reboot
 restores compiled defaults). Changing a knob or applying a preset resets the

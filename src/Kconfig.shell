@@ -31,4 +31,37 @@ config MESHTASTIC_SHELL_QUEUE_SIZE
 	help
 	  Number of deferred shell commands that can be queued.
 
+config MESHTASTIC_SHELL_CONFIG_WRITE
+	bool "Allow the shell to modify device configuration"
+	default y
+	help
+	  Include the shell subcommands that persist configuration changes:
+	  "channel set", "channel disable", and the argument forms of
+	  "device role" and "device rebroadcast".
+
+	  The shell is not an authenticated transport. Anyone with console
+	  access (UART, USB or RTT) reaches it with no pairing, passkey or
+	  public-key check of any kind, so it is a configuration write surface
+	  in its own right, independent of the admin model.
+
+	  Say n to compile these writes out of a production build. The
+	  read-only forms stay available either way, so "device role" with no
+	  argument still reports the current role.
+
+	  Independently of this option, the writes honour
+	  SecurityConfig.is_managed: a managed node refuses them exactly as it
+	  refuses local admin over the PhoneAPI.
+
+config MESHTASTIC_SHELL_PSK_HEX
+	bool "Print raw channel PSK bytes in the shell"
+	default n
+	help
+	  Let "meshtastic channel show" print a channel's pre-shared key as raw
+	  hex. This discloses live key material to anyone with console access,
+	  and is only useful when debugging a key mismatch against another node.
+
+	  Disabled by default. The PSK summary (kind and length) is always
+	  printed and is normally enough to tell which key a slot is using;
+	  "channel list" only ever prints the summary.
+
 endif # MESHTASTIC_SHELL

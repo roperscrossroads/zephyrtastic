@@ -17,6 +17,9 @@
 #include <zephyr/meshtastic/nodeinfo.h>
 #include <zephyr/meshtastic/telemetry.h>
 
+#if defined(CONFIG_MESHTASTIC_ADMIN)
+#include "meshtastic_admin.h"
+#endif
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_sched.h"
@@ -297,6 +300,8 @@ static const char *shell_channel_role_name(meshtastic_Channel_Role role)
 	}
 }
 
+/* Parsers used only by the config-write commands below. */
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int shell_parse_channel_role(const struct shell *sh, const char *arg,
 				    meshtastic_Channel_Role *role)
 {
@@ -313,6 +318,7 @@ static int shell_parse_channel_role(const struct shell *sh, const char *arg,
 
 	return 0;
 }
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 static const char *shell_device_role_name(meshtastic_Config_DeviceConfig_Role role)
 {
@@ -344,6 +350,8 @@ static const char *shell_device_role_name(meshtastic_Config_DeviceConfig_Role ro
 	}
 }
 
+/* Parsers used only by the config-write commands below. */
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int shell_parse_device_role(const struct shell *sh, const char *arg,
 				   meshtastic_Config_DeviceConfig_Role *role)
 {
@@ -376,6 +384,7 @@ static int shell_parse_device_role(const struct shell *sh, const char *arg,
 
 	return 0;
 }
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 static const char *shell_rebroadcast_mode_name(meshtastic_Config_DeviceConfig_RebroadcastMode mode)
 {
@@ -397,6 +406,8 @@ static const char *shell_rebroadcast_mode_name(meshtastic_Config_DeviceConfig_Re
 	}
 }
 
+/* Parsers used only by the config-write commands below. */
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int shell_parse_rebroadcast_mode(const struct shell *sh, const char *arg,
 					meshtastic_Config_DeviceConfig_RebroadcastMode *mode)
 {
@@ -419,6 +430,7 @@ static int shell_parse_rebroadcast_mode(const struct shell *sh, const char *arg,
 
 	return 0;
 }
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 static int shell_parse_channel_index(const struct shell *sh, const char *arg, uint8_t *index)
 {
@@ -435,6 +447,8 @@ static int shell_parse_channel_index(const struct shell *sh, const char *arg, ui
 	return 0;
 }
 
+/* Parsers used only by the config-write commands below. */
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int shell_parse_hex_nibble(char c)
 {
 	if (c >= '0' && c <= '9') {
@@ -449,7 +463,10 @@ static int shell_parse_hex_nibble(char c)
 
 	return -1;
 }
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
+/* Parsers used only by the config-write commands below. */
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int shell_parse_hex_psk(const struct shell *sh, const char *hex, uint8_t *out,
 			       size_t *out_len)
 {
@@ -477,6 +494,7 @@ static int shell_parse_hex_psk(const struct shell *sh, const char *hex, uint8_t 
 	*out_len = byte_len;
 	return 0;
 }
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 static void shell_print_psk_summary(const struct shell *sh, const meshtastic_Channel *ch)
 {
@@ -510,8 +528,14 @@ static void shell_print_psk_summary(const struct shell *sh, const meshtastic_Cha
 	shell_print(sh, "psk: %u-byte key", (unsigned int)settings->psk.size);
 }
 
+/* Raw key material, so it is opt-in at build time
+ * (CONFIG_MESHTASTIC_SHELL_PSK_HEX). The console has no authentication of any
+ * kind; printing a live PSK there hands the channel to anyone who can read the
+ * output or scroll back through it. The summary above says which key a slot
+ * uses without disclosing it. */
 static void shell_print_psk_hex(const struct shell *sh, const meshtastic_Channel *ch)
 {
+#if defined(CONFIG_MESHTASTIC_SHELL_PSK_HEX)
 	const meshtastic_ChannelSettings *settings;
 
 	if (ch == NULL || !ch->has_settings || ch->role == meshtastic_Channel_Role_DISABLED) {
@@ -529,7 +553,35 @@ static void shell_print_psk_hex(const struct shell *sh, const meshtastic_Channel
 		shell_fprintf(sh, SHELL_NORMAL, "%02x", settings->psk.bytes[i]);
 	}
 	shell_print(sh, "");
+#else
+	ARG_UNUSED(sh);
+	ARG_UNUSED(ch);
+#endif
 }
+
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+/* Refuse a config write when the node is administratively managed. The admin
+ * model says a managed node takes configuration only from an authorized remote
+ * admin; the shell writes the same config store, so it has to honour the same
+ * answer or the gate means nothing. Returns true when the caller should stop.
+ *
+ * With admin compiled out there is no admin model to defer to, so nothing is
+ * refused — the compile-time CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE switch is the
+ * control that still applies in that build. */
+static bool shell_config_write_refused(const struct shell *sh)
+{
+#if defined(CONFIG_MESHTASTIC_ADMIN)
+	if (meshtastic_admin_is_managed()) {
+		shell_error(sh, "refused: node is managed (SecurityConfig.is_managed) — "
+				"configuration is set by an authorized remote admin");
+		return true;
+	}
+#else
+	ARG_UNUSED(sh);
+#endif
+	return false;
+}
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 static void shell_print_channel_line(const struct shell *sh, uint8_t index)
 {
@@ -596,6 +648,8 @@ static int cmd_channel_show(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* Parsers used only by the config-write commands below. */
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int shell_apply_channel_psk(const struct shell *sh, meshtastic_Channel *ch, const char *kind,
 				   const char *arg)
 {
@@ -639,13 +693,19 @@ static int shell_apply_channel_psk(const struct shell *sh, meshtastic_Channel *c
 	ch->settings.psk.size = 1U;
 	return 0;
 }
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int cmd_channel_set(const struct shell *sh, size_t argc, char **argv)
 {
 	uint8_t index;
 	meshtastic_Channel ch;
 	int ret;
 	bool changed = false;
+
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
 
 	if (argc < 3U) {
 		shell_error(sh, "usage: meshtastic channel set <index> "
@@ -753,6 +813,10 @@ static int cmd_channel_disable(const struct shell *sh, size_t argc, char **argv)
 	meshtastic_Channel ch;
 	int ret;
 
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+
 	if (argc != 2U) {
 		shell_error(sh, "usage: meshtastic channel disable <index>");
 		return -EINVAL;
@@ -784,24 +848,24 @@ static int cmd_channel_disable(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "channel %u disabled", (unsigned int)index);
 	return 0;
 }
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_channel_cmds,
 	SHELL_CMD(list, NULL, SHELL_HELP("List channel slots.", NULL), cmd_channel_list),
 	SHELL_CMD(show, NULL, SHELL_HELP("Show one channel slot.", "<index>"), cmd_channel_show),
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 	SHELL_CMD(set, NULL,
 		  SHELL_HELP("Update a channel slot.",
 			     "<index> [name|role|psk|uplink|downlink]..."),
 		  cmd_channel_set),
 	SHELL_CMD(disable, NULL, SHELL_HELP("Disable a channel slot.", "<index>"),
 		  cmd_channel_disable),
+#endif
 	SHELL_SUBCMD_SET_END);
 
 static int cmd_device_role(const struct shell *sh, size_t argc, char **argv)
 {
-	meshtastic_Config_DeviceConfig_Role role;
-	int ret;
-
 	if (argc == 1U) {
 		shell_print(sh, "role: %s", shell_device_role_name(meshtastic_device_role()));
 		return 0;
@@ -812,25 +876,39 @@ static int cmd_device_role(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = shell_parse_device_role(sh, argv[1], &role);
-	if (ret < 0) {
-		return ret;
-	}
+	/* Reading the role is always allowed (handled above); only the write below
+	 * is gated. */
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	shell_error(sh, "refused: shell config writes are compiled out "
+			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
+	return -ENOTSUP;
+#else
+	{
+		meshtastic_Config_DeviceConfig_Role role;
+		int ret;
 
-	ret = meshtastic_config_store_set_device_role(role);
-	if (ret < 0) {
-		shell_error(sh, "role set failed: %d", ret);
-		return ret;
+		if (shell_config_write_refused(sh)) {
+			return -EACCES;
+		}
+
+		ret = shell_parse_device_role(sh, argv[1], &role);
+		if (ret < 0) {
+			return ret;
+		}
+
+		ret = meshtastic_config_store_set_device_role(role);
+		if (ret < 0) {
+			shell_error(sh, "role set failed: %d", ret);
+			return ret;
+		}
+		shell_print(sh, "role set to %s", shell_device_role_name(role));
+		return 0;
 	}
-	shell_print(sh, "role set to %s", shell_device_role_name(role));
-	return 0;
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 }
 
 static int cmd_device_rebroadcast(const struct shell *sh, size_t argc, char **argv)
 {
-	meshtastic_Config_DeviceConfig_RebroadcastMode mode;
-	int ret;
-
 	if (argc == 1U) {
 		shell_print(sh, "rebroadcast: %s",
 			    shell_rebroadcast_mode_name(meshtastic_rebroadcast_mode()));
@@ -842,18 +920,33 @@ static int cmd_device_rebroadcast(const struct shell *sh, size_t argc, char **ar
 		return -EINVAL;
 	}
 
-	ret = shell_parse_rebroadcast_mode(sh, argv[1], &mode);
-	if (ret < 0) {
-		return ret;
-	}
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	shell_error(sh, "refused: shell config writes are compiled out "
+			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
+	return -ENOTSUP;
+#else
+	{
+		meshtastic_Config_DeviceConfig_RebroadcastMode mode;
+		int ret;
 
-	ret = meshtastic_config_store_set_rebroadcast_mode(mode);
-	if (ret < 0) {
-		shell_error(sh, "rebroadcast set failed: %d", ret);
-		return ret;
+		if (shell_config_write_refused(sh)) {
+			return -EACCES;
+		}
+
+		ret = shell_parse_rebroadcast_mode(sh, argv[1], &mode);
+		if (ret < 0) {
+			return ret;
+		}
+
+		ret = meshtastic_config_store_set_rebroadcast_mode(mode);
+		if (ret < 0) {
+			shell_error(sh, "rebroadcast set failed: %d", ret);
+			return ret;
+		}
+		shell_print(sh, "rebroadcast set to %s", shell_rebroadcast_mode_name(mode));
+		return 0;
 	}
-	shell_print(sh, "rebroadcast set to %s", shell_rebroadcast_mode_name(mode));
-	return 0;
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_device_cmds,

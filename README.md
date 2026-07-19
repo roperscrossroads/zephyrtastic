@@ -46,8 +46,10 @@ For the detailed feature matrix and shell command reference, see
 
 ## Testing
 
-The `native_sim` ztest suites are the pre-hardware proof tier. Run both from
-the workspace:
+The `native_sim` ztest suites are the pre-hardware proof tier — `tests/protocol`
+(wire format, routing, MQTT downlink), `tests/admin_pki` (the real X25519 +
+AES-CCM remote-admin path) and `tests/shell` (the console write surface and its
+`is_managed` gate). Run them all from the workspace:
 
 ```console
 west twister -T tests -p native_sim/native/64 --inline-logs

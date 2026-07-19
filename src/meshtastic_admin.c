@@ -176,8 +176,12 @@ static void fill_session_passkey(meshtastic_AdminMessage *resp)
 
 /* True when this node is administratively managed — config may be changed only
  * by an authorized remote admin, so local (directly-connected app) admin is
- * refused. Mirrors AdminModule's `mp.from == 0 && is_managed` guard. */
-static bool admin_is_managed(void)
+ * refused. Mirrors AdminModule's `mp.from == 0 && is_managed` guard.
+ *
+ * Public (declared in meshtastic_admin.h): the shell writes config too, and a
+ * managed node that refuses local admin over the PhoneAPI while still accepting
+ * console writes would only be advertising a gate it does not have. */
+bool meshtastic_admin_is_managed(void)
 {
 	meshtastic_Config cfg;
 
@@ -560,7 +564,7 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	 * authorized remote admin can. Consume without applying; the app already
 	 * knows the node is managed from SecurityConfig and greys its settings out.
 	 * Config still reaches the app through the normal want_config stream. */
-	if (!admin_cur.remote && admin_is_managed()) {
+	if (!admin_cur.remote && meshtastic_admin_is_managed()) {
 		LOG_INF("admin: ignoring local admin variant %u — node is_managed",
 			(unsigned int)admin_req.which_payload_variant);
 		k_mutex_unlock(&admin_lock);

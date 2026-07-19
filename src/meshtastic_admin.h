@@ -37,4 +37,15 @@ void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt);
 /** Reset admin edit-transaction state (call on phone disconnect). */
 void meshtastic_admin_reset(void);
 
+/**
+ * True when this node is administratively managed (SecurityConfig.is_managed):
+ * configuration may be changed only by an authorized remote admin, so the local
+ * path is refused.
+ *
+ * Exported so other local write surfaces can honour the same policy. The gate is
+ * only meaningful if every path that writes config consults it — a surface that
+ * skips it silently reopens what a managed node is asserting is closed.
+ */
+bool meshtastic_admin_is_managed(void);
+
 #endif /* MESHTASTIC_ADMIN_H_ */

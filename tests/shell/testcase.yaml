@@ -1,0 +1,25 @@
+common:
+  tags:
+    - meshtastic
+    - shell
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # Default production-ish build: writes compiled in, gated at runtime by
+  # is_managed; raw PSK hex disclosure off.
+  meshtastic.shell.native_sim: {}
+
+  # Writes compiled out entirely. Also the build-coverage half: without this
+  # scenario the CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE=n paths never compile.
+  meshtastic.shell.no_config_write.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE=n
+
+  # PSK hex opt-in, to keep the disclosure path compiling and to prove the
+  # option is what actually controls it.
+  meshtastic.shell.psk_hex.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SHELL_PSK_HEX=y
