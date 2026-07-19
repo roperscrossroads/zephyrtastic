@@ -171,6 +171,19 @@ def cfloat(tok: str) -> float:
     return float(tok.strip().rstrip("fF"))
 
 
+def parse_region_enum(upstream: Path) -> dict[str, int]:
+    """Parse RegionCode enum values from the generated protobuf header."""
+    src = (upstream / "src/mesh/generated/meshtastic/config.pb.h").read_text(errors="replace")
+    out = {}
+    for m in re.finditer(
+        r"meshtastic_Config_LoRaConfig_RegionCode_([A-Z_0-9]+)\s*=\s*(\d+)", src
+    ):
+        out[m.group(1)] = int(m.group(2))
+    if not out:
+        sys.exit("error: parsed zero region codes from config.pb.h")
+    return out
+
+
 def parse_profiles(upstream: Path) -> dict[str, dict]:
     """Parse `const RegionProfile PROFILE_X = {presets, spacing, padding, ...}`.
 
@@ -667,6 +680,7 @@ def emit_header(data: dict, regions: dict[str, Region], upstream: Path,
     a(" */")
     a("struct mt_vec_region {")
     a("\tconst char *name;")
+    a("\tint region_enum;")
     a("\tfloat freq_start_mhz;")
     a("\tfloat freq_end_mhz;")
     a("\tfloat duty_cycle_pct;")
@@ -681,7 +695,8 @@ def emit_header(data: dict, regions: dict[str, Region], upstream: Path,
     a("};")
     a("static const struct mt_vec_region mt_vec_regions[] = {")
     for r in data["regions"]:
-        a(f"\t{{ {json.dumps(r['region'])}, {r['freq_start']}f, {r['freq_end']}f, "
+        a(f"\t{{ {json.dumps(r['region'])}, {data['region_enum'][r['region']]}, "
+          f"{r['freq_start']}f, {r['freq_end']}f, "
           f"{r['duty_cycle']}f, {r['power_limit']}f, "
           f"{1 if r['wide_lora'] else 0}, {json.dumps(r['default_preset'])}, "
           f"{r.get('spacing_mhz', 0)}f, {r.get('padding_mhz', 0)}f, "
@@ -781,6 +796,7 @@ def main() -> int:
 
     data = run_probe(build_probe(regions, presets))
     data["preset_enum"] = presets
+    data["region_enum"] = parse_region_enum(upstream)
     data["regions"] = slot_math(regions_tbl, profiles, data["presets"],
                                 data["djb2_names"])
     if len(data["regions"]) != len(regions_tbl):

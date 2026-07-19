@@ -384,6 +384,213 @@ ZTEST(wire_vectors, test_every_preset_converts_to_driver_codes)
 		      "an arbitrary bandwidth must be rejected");
 }
 
+/* The djb2 slot hash must match upstream for every harvested name
+ * (parity: radio D3).
+ *
+ * This is a different function from the xor hash that produces the wire
+ * channel byte. Using one where the other belongs is silent: the node lands
+ * on the wrong frequency while reporting a correct-looking configuration.
+ */
+ZTEST(wire_vectors, test_djb2_hash_matches_upstream)
+{
+	for (unsigned i = 0; i < MT_VEC_COUNT(mt_vec_djb2_hashes); i++) {
+		zassert_equal(meshtastic_djb2_hash(mt_vec_djb2_hashes[i].name),
+			      mt_vec_djb2_hashes[i].hash,
+			      "djb2(\"%s\") = %u, upstream says %u",
+			      mt_vec_djb2_hashes[i].name,
+			      meshtastic_djb2_hash(mt_vec_djb2_hashes[i].name),
+			      mt_vec_djb2_hashes[i].hash);
+	}
+
+	/* Distinctness from the channel-byte hash, on a name where they differ. */
+	zassert_not_equal(meshtastic_djb2_hash("LongFast"), 10,
+			  "djb2 must not be confused with the xor channel hash");
+}
+
+/* Preset display names must match upstream exactly (parity: radio D3, crypto #1). */
+ZTEST(wire_vectors, test_preset_display_names_match_upstream)
+{
+	for (unsigned i = 0; i < MT_VEC_COUNT(mt_vec_preset_names); i++) {
+		const struct mt_vec_preset_name *v = &mt_vec_preset_names[i];
+		meshtastic_Config_LoRaConfig_ModemPreset preset =
+			meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+		bool found = false;
+
+		if (strcmp(v->preset, "_CUSTOM") == 0) {
+			zassert_str_equal(
+				meshtastic_preset_display_name(
+					meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					false),
+				v->display, "use_preset=false must yield \"Custom\"");
+			continue;
+		}
+
+		for (unsigned p = 0; p < MT_VEC_COUNT(mt_vec_presets); p++) {
+			if (strcmp(mt_vec_presets[p].name, v->preset) == 0) {
+				preset = (meshtastic_Config_LoRaConfig_ModemPreset)
+						 mt_vec_presets[p].preset_enum;
+				found = true;
+				break;
+			}
+		}
+		zassert_true(found, "no enum for preset %s", v->preset);
+
+		zassert_str_equal(meshtastic_preset_display_name(preset, true), v->display,
+				  "%s display name differs from upstream", v->preset);
+	}
+}
+
+/* Every region's slot arithmetic must reproduce upstream's (parity: radio D3).
+ *
+ * The vectors carry both the inputs (spacing, padding, band edges) and
+ * upstream's computed slot width and count, so this checks the whole
+ * calculation rather than just the table it reads from.
+ *
+ * Note the port computes in integer Hz where upstream uses MHz floats: a
+ * float32 cannot represent 906875000 exactly. The results agree because every
+ * input is an exact integer number of hertz.
+ */
+ZTEST(wire_vectors, test_region_slot_math_matches_upstream)
+{
+	unsigned checked = 0;
+
+	for (unsigned i = 0; i < MT_VEC_COUNT(mt_vec_regions); i++) {
+		const struct mt_vec_region *v = &mt_vec_regions[i];
+		struct meshtastic_freq_plan plan;
+		meshtastic_Config_LoRaConfig_ModemPreset preset =
+			meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+		uint32_t want_width_hz;
+		bool found = false;
+
+		for (unsigned p = 0; p < MT_VEC_COUNT(mt_vec_presets); p++) {
+			if (strcmp(mt_vec_presets[p].name, v->default_preset) == 0 &&
+			    mt_vec_presets[p].wide == v->wide_lora) {
+				preset = (meshtastic_Config_LoRaConfig_ModemPreset)
+						 mt_vec_presets[p].preset_enum;
+				found = true;
+				break;
+			}
+		}
+		zassert_true(found, "no preset entry for %s/%s", v->name,
+			     v->default_preset);
+
+		zassert_ok(meshtastic_region_freq_plan(
+				   (meshtastic_Config_LoRaConfig_RegionCode)v->region_enum,
+				   preset, "LongFast", true, &plan),
+			   "%s: no frequency plan", v->name);
+
+		/* Upstream's slot width in MHz, converted exactly to Hz. */
+		want_width_hz = (uint32_t)((double)v->slot_width_mhz * 1e6 + 0.5);
+
+		zassert_equal(plan.slot_width_hz, want_width_hz,
+			      "%s: slot width %u Hz != upstream %u Hz", v->name,
+			      plan.slot_width_hz, want_width_hz);
+		zassert_equal(plan.num_slots, v->num_freq_slots,
+			      "%s: %u slots != upstream %u", v->name, plan.num_slots,
+			      v->num_freq_slots);
+
+		/* The chosen frequency must land inside the band. */
+		zassert_true(plan.frequency_hz >=
+				     (uint32_t)((double)v->freq_start_mhz * 1e6),
+			     "%s: frequency below band start", v->name);
+		zassert_true(plan.frequency_hz <=
+				     (uint32_t)((double)v->freq_end_mhz * 1e6),
+			     "%s: frequency above band end", v->name);
+		checked++;
+	}
+
+	zassert_equal(checked, MT_VEC_COUNT(mt_vec_regions),
+		      "every harvested region must have a plan: %u of %u", checked,
+		      MT_VEC_COUNT(mt_vec_regions));
+	TC_PRINT("verified slot arithmetic for %u regions\n", checked);
+
+	/* US and EU_868 are the anchors: both must reproduce the frequency this
+	 * port already transmits on, which the on-air tests also recorded.
+	 */
+	struct meshtastic_freq_plan us, eu;
+
+	zassert_ok(meshtastic_region_freq_plan(
+			   meshtastic_Config_LoRaConfig_RegionCode_US,
+			   meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+			   "LongFast", true, &us),
+		   "US plan failed");
+	zassert_equal(us.num_slots, 104, "US should divide into 104 slots, got %u",
+		      us.num_slots);
+	zassert_equal(us.slot, 19, "\"LongFast\" should hash to US slot 19, got %u",
+		      us.slot);
+	zassert_equal(us.frequency_hz, MESHTASTIC_FREQ_US,
+		      "US/LongFast must reproduce the frequency this port already "
+		      "transmits on: got %u, expected %u",
+		      us.frequency_hz, MESHTASTIC_FREQ_US);
+
+	zassert_ok(meshtastic_region_freq_plan(
+			   meshtastic_Config_LoRaConfig_RegionCode_EU_868,
+			   meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+			   "LongFast", true, &eu),
+		   "EU_868 plan failed");
+	zassert_equal(eu.frequency_hz, MESHTASTIC_FREQ_EU,
+		      "EU_868/LongFast must reproduce the existing constant: got %u, "
+		      "expected %u",
+		      eu.frequency_hz, MESHTASTIC_FREQ_EU);
+
+}
+
+/* Regions with non-zero spacing or padding are where an implementation is most
+ * likely to be wrong -- and where the official Android app diverges from the
+ * firmware (it omits spacing and padding entirely and floors instead of
+ * rounding). Assert the firmware's arithmetic explicitly, since that is what
+ * governs the air.
+ */
+ZTEST(wire_vectors, test_padded_regions_follow_firmware_not_app)
+{
+	struct meshtastic_freq_plan plan;
+
+	/* EU_866: spacing 0.4 MHz, padding 0.0375 MHz, LiteFast at 125 kHz.
+	 * Firmware: slot width 600 kHz, 4 slots. The app would compute 16. */
+	zassert_ok(meshtastic_region_freq_plan(
+			   meshtastic_Config_LoRaConfig_RegionCode_EU_866,
+			   meshtastic_Config_LoRaConfig_ModemPreset_LITE_FAST,
+			   "LiteFast", true, &plan),
+		   "EU_866 plan failed");
+	zassert_equal(plan.slot_width_hz, 600000,
+		      "EU_866 slot width must include spacing and both paddings");
+	zassert_equal(plan.num_slots, 4,
+		      "EU_866 has 4 slots, not the 16 raw bandwidth would give");
+	zassert_equal(plan.duty_cycle_pct, 2.5f, "EU_866 is duty-cycle limited");
+
+	/* EU_N_868 uses a fixed override slot rather than a name hash. */
+	zassert_ok(meshtastic_region_freq_plan(
+			   meshtastic_Config_LoRaConfig_RegionCode_EU_N_868,
+			   meshtastic_Config_LoRaConfig_ModemPreset_NARROW_SLOW,
+			   "anything", true, &plan),
+		   "EU_N_868 plan failed");
+	zassert_equal(plan.slot, 0,
+		      "EU_N_868 pins slot 1 (0-based 0) regardless of channel name");
+}
+
+/* An obsolete region must be refused, not guessed at (parity: radio D3).
+ *
+ * UA_868 is still a selectable region for the preset map, but upstream removed
+ * it from the frequency table and migrates it to EU_868 at config load. With
+ * no band edges there is no honest frequency to return.
+ */
+ZTEST(wire_vectors, test_obsolete_region_has_no_frequency_plan)
+{
+	struct meshtastic_freq_plan plan;
+
+	zassert_equal(meshtastic_region_freq_plan(
+			      meshtastic_Config_LoRaConfig_RegionCode_UA_868,
+			      meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+			      "LongFast", true, &plan),
+		      -ENOTSUP, "UA_868 has no frequency data and must be refused");
+
+	zassert_equal(meshtastic_region_freq_plan(
+			      meshtastic_Config_LoRaConfig_RegionCode_US,
+			      meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+			      NULL, true, &plan),
+		      -EINVAL, "a NULL channel name must be rejected");
+}
+
 /* Reference data the port does not consume yet (parity: airtime CP-1).
  *
  * The port measures TX airtime but never gates on it, so an EU build can
