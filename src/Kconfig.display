@@ -1,0 +1,55 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_DISPLAY
+	bool "On-device screen UI (CFB)"
+	select DISPLAY
+	select CHARACTER_FRAMEBUFFER
+	help
+	  Render a small on-device status UI on the board's monochrome display
+	  using Zephyr's Character Framebuffer (CFB). It reads node/state data
+	  from the existing Meshtastic C getters, so no phone app or shell is
+	  required.
+
+	  The board must provide a `chosen { zephyr,display }` node (e.g. the
+	  SSD1306 OLED on the Heltec WiFi LoRa 32 V4); its driver (CONFIG_SSD1306
+	  and friends) auto-enables from that devicetree node. Intended for small
+	  monochrome panels such as 128x64 and 160x80.
+
+	  This is an early prototype: it auto-cycles through a few read-only pages
+	  (device info, node list, stack status). Button input and richer screens
+	  are not implemented yet.
+
+if MESHTASTIC_DISPLAY
+
+config MESHTASTIC_DISPLAY_REFRESH_MS
+	int "Screen refresh interval (ms)"
+	default 1000
+	range 100 10000
+	help
+	  How often the current page is redrawn. Live counters (TX/RX, RSSI,
+	  uptime) update at this cadence.
+
+config MESHTASTIC_DISPLAY_PAGE_SECONDS
+	int "Seconds per page before auto-advancing"
+	default 4
+	range 1 60
+	help
+	  With no button input yet, the UI cycles through its pages on a timer.
+	  This sets how long each page stays on screen.
+
+config MESHTASTIC_DISPLAY_STACK_SIZE
+	int "Display thread stack size"
+	default 2048
+	help
+	  Stack for the dedicated screen-refresh thread. It only calls CFB and the
+	  Meshtastic getters, so a couple of KB is plenty.
+
+config MESHTASTIC_DISPLAY_PRIORITY
+	int "Display thread priority"
+	default 10
+	help
+	  Preemptible priority of the screen-refresh thread. Kept below the radio
+	  and packet-processing work so drawing never starves the mesh.
+
+endif # MESHTASTIC_DISPLAY

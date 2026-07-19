@@ -64,6 +64,9 @@ int meshtastic_nodedb_init(void);
 #if defined(CONFIG_MESHTASTIC_NODEINFO)
 int meshtastic_nodeinfo_init(void);
 #endif
+#if defined(CONFIG_MESHTASTIC_DISPLAY)
+int meshtastic_display_init(void);
+#endif
 
 #if defined(CONFIG_BOARD_TWATCH_S3)
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_T_WATCH_S3
@@ -552,6 +555,15 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 
 #if defined(CONFIG_MESHTASTIC_MQTT)
 	ret = meshtastic_mqtt_init();
+	if (ret < 0) {
+		return ret;
+	}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_DISPLAY)
+	/* Last: the screen renders from the subsystems brought up above. A
+	 * missing/failed panel is non-fatal — the node still runs headless. */
+	ret = meshtastic_display_init();
 	if (ret < 0) {
 		return ret;
 	}
