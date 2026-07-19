@@ -350,46 +350,47 @@ struct region_freq {
 	uint32_t freq_start_hz;
 	uint32_t freq_end_hz;
 	float duty_cycle_pct;
+	int8_t power_limit_dbm;
 	int8_t override_slot;
 	bool wide_lora;
 };
 
 static const struct region_freq region_freqs[] = {
-	{REGION(US), 902000000U, 928000000U, 100.0f, 0, 0},
-	{REGION(EU_433), 433000000U, 434000000U, 10.0f, 0, 0},
-	{REGION(EU_868), 869400000U, 869650000U, 10.0f, 0, 0},
-	{REGION(EU_866), 865600000U, 867600000U, 2.5f, 0, 0},
-	{REGION(EU_N_868), 869400000U, 869650000U, 10.0f, 1, 0},
-	{REGION(CN), 470000000U, 510000000U, 100.0f, 0, 0},
-	{REGION(JP), 920500000U, 923500000U, 100.0f, 0, 0},
-	{REGION(ANZ), 915000000U, 928000000U, 100.0f, 0, 0},
-	{REGION(ANZ_433), 433050000U, 434790000U, 100.0f, 0, 0},
-	{REGION(RU), 868700000U, 869200000U, 100.0f, 0, 0},
-	{REGION(KR), 920000000U, 923000000U, 100.0f, 0, 0},
-	{REGION(TW), 920000000U, 925000000U, 100.0f, 0, 0},
-	{REGION(IN), 865000000U, 867000000U, 100.0f, 0, 0},
-	{REGION(NZ_865), 864000000U, 868000000U, 100.0f, 0, 0},
-	{REGION(TH), 920000000U, 925000000U, 10.0f, 0, 0},
-	{REGION(UA_433), 433000000U, 434700000U, 10.0f, 0, 0},
-	{REGION(MY_433), 433000000U, 435000000U, 100.0f, 0, 0},
-	{REGION(MY_919), 919000000U, 924000000U, 100.0f, 0, 0},
-	{REGION(SG_923), 917000000U, 925000000U, 100.0f, 0, 0},
-	{REGION(PH_433), 433000000U, 434700000U, 100.0f, 0, 0},
-	{REGION(PH_868), 868000000U, 869400000U, 100.0f, 0, 0},
-	{REGION(PH_915), 915000000U, 918000000U, 100.0f, 0, 0},
-	{REGION(KZ_433), 433075000U, 434775000U, 100.0f, 0, 0},
-	{REGION(KZ_863), 863000000U, 868000000U, 100.0f, 0, 0},
-	{REGION(NP_865), 865000000U, 868000000U, 100.0f, 0, 0},
-	{REGION(BR_902), 902000000U, 907500000U, 100.0f, 0, 0},
-	{REGION(ITU1_2M), 144000000U, 146000000U, 100.0f, 26, 0},
-	{REGION(ITU2_2M), 144000000U, 148000000U, 100.0f, 51, 0},
-	{REGION(ITU3_2M), 144000000U, 148000000U, 100.0f, 33, 0},
-	{REGION(ITU2_125CM), 220000000U, 225000000U, 100.0f, 37, 0},
-	{REGION(ITU1_70CM), 430000000U, 440000000U, 100.0f, 37, 0},
-	{REGION(ITU2_70CM), 420000000U, 450000000U, 100.0f, 137, 0},
-	{REGION(ITU3_70CM), 430000000U, 450000000U, 100.0f, 37, 0},
-	{REGION(LORA_24), 2400000000U, 2483500000U, 100.0f, 0, 1},
-	{REGION(UNSET), 902000000U, 928000000U, 100.0f, 0, 0},
+	{REGION(US), 902000000U, 928000000U, 100.0f, 30, 0, 0},
+	{REGION(EU_433), 433000000U, 434000000U, 10.0f, 10, 0, 0},
+	{REGION(EU_868), 869400000U, 869650000U, 10.0f, 27, 0, 0},
+	{REGION(EU_866), 865600000U, 867600000U, 2.5f, 27, 0, 0},
+	{REGION(EU_N_868), 869400000U, 869650000U, 10.0f, 27, 1, 0},
+	{REGION(CN), 470000000U, 510000000U, 100.0f, 19, 0, 0},
+	{REGION(JP), 920500000U, 923500000U, 100.0f, 13, 0, 0},
+	{REGION(ANZ), 915000000U, 928000000U, 100.0f, 30, 0, 0},
+	{REGION(ANZ_433), 433050000U, 434790000U, 100.0f, 14, 0, 0},
+	{REGION(RU), 868700000U, 869200000U, 100.0f, 20, 0, 0},
+	{REGION(KR), 920000000U, 923000000U, 100.0f, 23, 0, 0},
+	{REGION(TW), 920000000U, 925000000U, 100.0f, 27, 0, 0},
+	{REGION(IN), 865000000U, 867000000U, 100.0f, 30, 0, 0},
+	{REGION(NZ_865), 864000000U, 868000000U, 100.0f, 36, 0, 0},
+	{REGION(TH), 920000000U, 925000000U, 10.0f, 27, 0, 0},
+	{REGION(UA_433), 433000000U, 434700000U, 10.0f, 10, 0, 0},
+	{REGION(MY_433), 433000000U, 435000000U, 100.0f, 20, 0, 0},
+	{REGION(MY_919), 919000000U, 924000000U, 100.0f, 27, 0, 0},
+	{REGION(SG_923), 917000000U, 925000000U, 100.0f, 20, 0, 0},
+	{REGION(PH_433), 433000000U, 434700000U, 100.0f, 10, 0, 0},
+	{REGION(PH_868), 868000000U, 869400000U, 100.0f, 14, 0, 0},
+	{REGION(PH_915), 915000000U, 918000000U, 100.0f, 24, 0, 0},
+	{REGION(KZ_433), 433075000U, 434775000U, 100.0f, 10, 0, 0},
+	{REGION(KZ_863), 863000000U, 868000000U, 100.0f, 30, 0, 0},
+	{REGION(NP_865), 865000000U, 868000000U, 100.0f, 30, 0, 0},
+	{REGION(BR_902), 902000000U, 907500000U, 100.0f, 30, 0, 0},
+	{REGION(ITU1_2M), 144000000U, 146000000U, 100.0f, 30, 26, 0},
+	{REGION(ITU2_2M), 144000000U, 148000000U, 100.0f, 30, 51, 0},
+	{REGION(ITU3_2M), 144000000U, 148000000U, 100.0f, 30, 33, 0},
+	{REGION(ITU2_125CM), 220000000U, 225000000U, 100.0f, 30, 37, 0},
+	{REGION(ITU1_70CM), 430000000U, 440000000U, 100.0f, 30, 37, 0},
+	{REGION(ITU2_70CM), 420000000U, 450000000U, 100.0f, 30, 137, 0},
+	{REGION(ITU3_70CM), 430000000U, 450000000U, 100.0f, 30, 37, 0},
+	{REGION(LORA_24), 2400000000U, 2483500000U, 100.0f, 10, 0, 1},
+	{REGION(UNSET), 902000000U, 928000000U, 100.0f, 30, 0, 0},
 };
 
 int meshtastic_region_freq_plan(meshtastic_Config_LoRaConfig_RegionCode region,
@@ -464,6 +465,42 @@ int meshtastic_region_freq_plan(meshtastic_Config_LoRaConfig_RegionCode region,
 	out->num_slots = (uint16_t)num_slots;
 	out->slot = (uint16_t)slot;
 	out->duty_cycle_pct = rf->duty_cycle_pct;
+
+	return 0;
+}
+
+int meshtastic_region_info(meshtastic_Config_LoRaConfig_RegionCode region,
+			   struct meshtastic_region_info *out)
+{
+	const struct region_freq *rf = NULL;
+	const struct region_row *row = NULL;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+
+	for (size_t i = 0U; i < ARRAY_SIZE(region_freqs); i++) {
+		if (region_freqs[i].region == region) {
+			rf = &region_freqs[i];
+			break;
+		}
+	}
+	for (size_t i = 0U; i < ARRAY_SIZE(regions); i++) {
+		if (regions[i].region == region) {
+			row = &regions[i];
+			break;
+		}
+	}
+	if (rf == NULL || row == NULL) {
+		return -ENOTSUP;
+	}
+
+	out->freq_start_hz = rf->freq_start_hz;
+	out->freq_end_hz = rf->freq_end_hz;
+	out->duty_cycle_pct = rf->duty_cycle_pct;
+	out->power_limit_dbm = rf->power_limit_dbm;
+	out->licensed_only = profiles[row->profile].licensed_only;
+	out->wide_lora = rf->wide_lora;
 
 	return 0;
 }

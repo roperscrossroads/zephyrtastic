@@ -82,6 +82,27 @@ uint32_t meshtastic_djb2_hash(const char *s);
 const char *meshtastic_preset_display_name(meshtastic_Config_LoRaConfig_ModemPreset preset,
 					   bool use_preset);
 
+/** Regulatory facts about a region, for config validation. */
+struct meshtastic_region_info {
+	uint32_t freq_start_hz;
+	uint32_t freq_end_hz;
+	float duty_cycle_pct;    /**< regulatory ceiling; 100 where unrestricted */
+	int8_t power_limit_dbm;  /**< max EIRP an unlicensed operator may use */
+	bool licensed_only;      /**< amateur band: requires a licensed operator */
+	bool wide_lora;          /**< needs a wide-LoRa capable radio (2.4 GHz) */
+};
+
+/**
+ * @brief Look up a region's regulatory parameters.
+ *
+ * @param region region code
+ * @param out    populated on success
+ * @return 0 on success, -EINVAL if @p out is NULL, -ENOTSUP if the region has
+ *         no band data (obsolete or unknown to the reference table).
+ */
+int meshtastic_region_info(meshtastic_Config_LoRaConfig_RegionCode region,
+			   struct meshtastic_region_info *out);
+
 /** A region's resolved frequency plan. */
 struct meshtastic_freq_plan {
 	uint32_t frequency_hz;  /**< centre of the selected slot */

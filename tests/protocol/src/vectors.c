@@ -708,6 +708,127 @@ ZTEST(wire_vectors, test_obsolete_region_has_no_frequency_plan)
 		      -EINVAL, "a NULL channel name must be rejected");
 }
 
+/* Helper: a minimally valid lora config for the region under test. */
+static meshtastic_Config lora_cfg(meshtastic_Config_LoRaConfig_RegionCode region,
+				  float override_mhz)
+{
+	meshtastic_Config c = meshtastic_Config_init_zero;
+
+	c.which_payload_variant = meshtastic_Config_lora_tag;
+	c.payload_variant.lora.use_preset = true;
+	c.payload_variant.lora.modem_preset =
+		meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+	c.payload_variant.lora.region = region;
+	c.payload_variant.lora.hop_limit = 3;
+	c.payload_variant.lora.override_frequency = override_mhz;
+	return c;
+}
+
+/* Region selection is open, but every region is bounded by its own allocation.
+ *
+ * The build previously hard-locked to US. Opening that up is only safe if the
+ * band implied by the chosen region is then enforced, so these are the guards
+ * that replaced the lock -- if they regress, the device can be pointed at a
+ * frequency it has no right to use.
+ */
+ZTEST(wire_vectors, test_region_selection_is_bounded_by_its_band)
+{
+	meshtastic_Config c;
+
+	/* A recognised region is accepted. */
+	c = lora_cfg(meshtastic_Config_LoRaConfig_RegionCode_EU_868, 0.0f);
+	zassert_ok(meshtastic_config_store_set_config(&c), "EU_868 should be accepted");
+
+	/* An override inside that region's allocation is accepted... */
+	c = lora_cfg(meshtastic_Config_LoRaConfig_RegionCode_EU_868, 869.5f);
+	zassert_ok(meshtastic_config_store_set_config(&c),
+		   "an in-band override should be accepted");
+
+	/* ...and one outside it is not, even though it is a legal US frequency. */
+	c = lora_cfg(meshtastic_Config_LoRaConfig_RegionCode_EU_868, 915.0f);
+	zassert_equal(meshtastic_config_store_set_config(&c), -EINVAL,
+		      "a US frequency must be refused while the region is EU_868");
+
+	/* An override with no region to bound it is refused outright. */
+	c = lora_cfg(meshtastic_Config_LoRaConfig_RegionCode_UNSET, 915.0f);
+	zassert_equal(meshtastic_config_store_set_config(&c), -EINVAL,
+		      "an override needs a region to validate against");
+
+	/* 2.4 GHz stays rejected: no wide-LoRa radio support in this port. */
+	c = lora_cfg(meshtastic_Config_LoRaConfig_RegionCode_LORA_24, 0.0f);
+	zassert_equal(meshtastic_config_store_set_config(&c), -EINVAL,
+		      "LORA_24 must remain rejected");
+
+	/* Restore the default so later tests are unaffected. */
+	c = lora_cfg((meshtastic_Config_LoRaConfig_RegionCode)
+			     CONFIG_MESHTASTIC_DEFAULT_REGION,
+		     0.0f);
+	zassert_ok(meshtastic_config_store_set_config(&c), "restore failed");
+}
+
+/* Amateur bands require a licensed operator (parity with the reference's
+ * licensedOnly gate). Opening region selection without this would let an
+ * unlicensed device select an amateur allocation.
+ */
+ZTEST(wire_vectors, test_amateur_regions_require_a_licence)
+{
+	meshtastic_Config c = lora_cfg(meshtastic_Config_LoRaConfig_RegionCode_ITU1_2M,
+				       0.0f);
+	struct meshtastic_region_info info;
+
+	zassert_ok(meshtastic_region_info(
+			   meshtastic_Config_LoRaConfig_RegionCode_ITU1_2M, &info),
+		   "ITU1_2M should have band data");
+	zassert_true(info.licensed_only, "ITU1_2M is an amateur allocation");
+
+	/* The default owner record is unlicensed. */
+	zassert_equal(meshtastic_config_store_set_config(&c), -EINVAL,
+		      "an amateur region must be refused without a licence");
+
+	/* A non-amateur region is unaffected by the same gate. */
+	zassert_ok(meshtastic_region_info(meshtastic_Config_LoRaConfig_RegionCode_US,
+					  &info),
+		   "US should have band data");
+	zassert_false(info.licensed_only, "US is not licence-gated");
+
+	c = lora_cfg((meshtastic_Config_LoRaConfig_RegionCode)
+			     CONFIG_MESHTASTIC_DEFAULT_REGION,
+		     0.0f);
+	zassert_ok(meshtastic_config_store_set_config(&c), "restore failed");
+}
+
+/* Region power limits must match upstream, since they now bound TX power. */
+ZTEST(wire_vectors, test_region_power_limits_match_upstream)
+{
+	for (unsigned i = 0; i < MT_VEC_COUNT(mt_vec_regions); i++) {
+		const struct mt_vec_region *v = &mt_vec_regions[i];
+		struct meshtastic_region_info info;
+
+		zassert_ok(meshtastic_region_info(
+				   (meshtastic_Config_LoRaConfig_RegionCode)v->region_enum,
+				   &info),
+			   "%s has no region info", v->name);
+		zassert_equal(info.power_limit_dbm, (int8_t)v->power_limit_dbm,
+			      "%s power limit %d dBm != upstream %d dBm", v->name,
+			      info.power_limit_dbm, (int)v->power_limit_dbm);
+		zassert_equal(info.duty_cycle_pct, v->duty_cycle_pct,
+			      "%s duty cycle differs from upstream", v->name);
+	}
+
+	/* The limits genuinely differ between regions -- this is why the clamp
+	 * matters once regions other than US are selectable. */
+	struct meshtastic_region_info us, eu433;
+
+	zassert_ok(meshtastic_region_info(meshtastic_Config_LoRaConfig_RegionCode_US, &us),
+		   "US info");
+	zassert_ok(meshtastic_region_info(meshtastic_Config_LoRaConfig_RegionCode_EU_433,
+					  &eu433),
+		   "EU_433 info");
+	zassert_true(us.power_limit_dbm > eu433.power_limit_dbm,
+		     "US should permit more power than EU_433 (%d vs %d dBm)",
+		     us.power_limit_dbm, eu433.power_limit_dbm);
+}
+
 /* Reference data the port does not consume yet (parity: airtime CP-1).
  *
  * The port measures TX airtime but never gates on it, so an EU build can

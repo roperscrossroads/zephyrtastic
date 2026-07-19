@@ -82,6 +82,29 @@ config MESHTASTIC_DEFAULT_HOP_LIMIT
 	  nodes.  3 is the Meshtastic firmware default; higher values increase
 	  range at the cost of additional channel utilisation.
 
+config MESHTASTIC_DEFAULT_REGION
+	int "Default LoRa region code"
+	default 1
+	range 0 24
+	help
+	  Region this device operates in, as a meshtastic_Config_LoRaConfig_RegionCode
+	  value.  1 is US (902-928 MHz) and is the default.  Seeds the stored
+	  config on first boot; a later admin or phone-app change overrides it.
+
+	  THIS IS A REGULATORY SETTING.  It determines the frequency the radio
+	  transmits on and the power limit applied.  Set it to the region you are
+	  physically operating in — transmitting outside your allocation is
+	  illegal in most jurisdictions, and the firmware cannot detect that for
+	  you.
+
+	  Common values: 1 US, 2 EU_433, 3 EU_868, 4 CN, 5 JP, 6 ANZ, 7 RU,
+	  8 KR, 9 TW, 10 IN, 11 NZ_865, 12 TH.  See the RegionCode enum in
+	  meshtastic/config.proto for the full list.
+
+	  Amateur (ITU) regions additionally require the owner record to be
+	  marked licensed, and are rejected otherwise.  The 2.4 GHz LORA_24
+	  region is always rejected: this port has no wide-LoRa radio support.
+
 config MESHTASTIC_TX_POWER
 	int "Default TX power (dBm)"
 	default 17

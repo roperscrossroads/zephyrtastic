@@ -183,21 +183,6 @@ static int index_for_module_name(const char *name)
 	return -ENOENT;
 }
 
-static meshtastic_Config_LoRaConfig_RegionCode lora_region_from_frequency(uint32_t hz)
-{
-	if (hz >= 902000000U && hz <= 928000000U) {
-		return meshtastic_Config_LoRaConfig_RegionCode_US;
-	}
-	if (hz >= 869000000U && hz <= 870000000U) {
-		return meshtastic_Config_LoRaConfig_RegionCode_EU_868;
-	}
-	if (hz >= 433000000U && hz <= 434000000U) {
-		return meshtastic_Config_LoRaConfig_RegionCode_EU_433;
-	}
-
-	return meshtastic_Config_LoRaConfig_RegionCode_UNSET;
-}
-
 static int encode_record(const pb_msgdesc_t *fields, const void *msg, void *buf, size_t buf_len)
 {
 	pb_ostream_t stream;
@@ -304,24 +289,56 @@ static bool config_is_valid(const meshtastic_Config *config)
 		    meshtastic_Config_LoRaConfig_RegionCode_LORA_24) {
 			return false;
 		}
-		/* RF-compliance hard lock: this is a US-only firmware build. Reject
-		 * any config that would move TX off the US 902-928 MHz band — a
-		 * non-US region, or an override_frequency outside the band.
-		 * RegionCode_UNSET is allowed: it leaves the US compile-time default
-		 * unchanged. This gates both the admin-set and NVS-load paths
-		 * (config_is_valid callers), so a non-US config can neither be stored
+		/* RF-compliance gate. Any region the reference defines is accepted,
+		 * but the band it implies is then enforced: this replaces an earlier
+		 * hard lock to US, and the guards below are what make that safe.
+		 * Applies to both the admin-set and NVS-load paths (every
+		 * config_is_valid caller), so a rejected config can neither be stored
 		 * nor loaded. */
-		if (config->payload_variant.lora.region !=
-			    meshtastic_Config_LoRaConfig_RegionCode_UNSET &&
-		    config->payload_variant.lora.region !=
-			    meshtastic_Config_LoRaConfig_RegionCode_US) {
-			return false;
-		}
-		if (config->payload_variant.lora.override_frequency > 0.0f) {
-			uint32_t hz = (uint32_t)(config->payload_variant.lora
-						 .override_frequency * 1000000.0f);
+		{
+			meshtastic_Config_LoRaConfig_RegionCode region =
+				config->payload_variant.lora.region;
+			struct meshtastic_region_info info;
 
-			if (hz < 902000000U || hz > 928000000U) {
+			/* UNSET keeps the compile-time default and needs no band check. */
+			if (region != meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
+				if (meshtastic_region_info(region, &info) < 0) {
+					/* Obsolete or unknown to the reference table: there
+					 * is no band to validate against, so refuse rather
+					 * than transmit somewhere unverified. */
+					return false;
+				}
+
+				/* Amateur bands are for licensed operators only, mirroring
+				 * the reference (RadioInterface.cpp: licensedOnly). */
+				if (info.licensed_only && !store.is_licensed) {
+					LOG_WRN("region %d requires a licensed operator",
+						(int)region);
+					return false;
+				}
+
+				if (config->payload_variant.lora.override_frequency > 0.0f) {
+					uint32_t hz = (uint32_t)(
+						config->payload_variant.lora
+							.override_frequency *
+						1000000.0f);
+
+					/* An override must stay inside the selected
+					 * region's allocation — the point of allowing
+					 * other regions is not to allow arbitrary
+					 * frequencies. */
+					if (hz < info.freq_start_hz ||
+					    hz > info.freq_end_hz) {
+						LOG_WRN("override %u Hz outside region %d "
+							"(%u-%u Hz)",
+							hz, (int)region,
+							info.freq_start_hz,
+							info.freq_end_hz);
+						return false;
+					}
+				}
+			} else if (config->payload_variant.lora.override_frequency > 0.0f) {
+				/* No region to bound the override against. */
 				return false;
 			}
 		}
@@ -375,7 +392,11 @@ static void seed_config_defaults(const struct meshtastic_config *cfg)
 	store.configs[idx].payload_variant.lora.use_preset = true;
 	store.configs[idx].payload_variant.lora.modem_preset =
 		meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
-	store.configs[idx].payload_variant.lora.region = lora_region_from_frequency(cfg->frequency);
+	/* Declared, not inferred. The region used to be derived from the
+	 * compile-time frequency, which became circular once the frequency
+	 * started being derived from the region and channel name. */
+	store.configs[idx].payload_variant.lora.region =
+		(meshtastic_Config_LoRaConfig_RegionCode)CONFIG_MESHTASTIC_DEFAULT_REGION;
 	store.configs[idx].payload_variant.lora.hop_limit = mt.hop_limit;
 	store.configs[idx].payload_variant.lora.tx_enabled = true;
 	store.configs[idx].payload_variant.lora.tx_power = mt.tx_power;
@@ -507,6 +528,29 @@ int meshtastic_config_store_apply_core(void)
 		mt.tx_power = lora.tx_power;
 	}
 
+	/* Clamp TX power to the region's limit unless the operator is licensed,
+	 * mirroring the reference (RadioInterface.cpp: power > powerLimit &&
+	 * !is_licensed). This matters more now that regions other than US are
+	 * selectable: their limits are markedly lower — 30 dBm in the US against
+	 * 27 in EU_868, 14 in ANZ_433, 10 in EU_433.
+	 */
+	{
+		struct meshtastic_region_info info;
+		meshtastic_Config_LoRaConfig_RegionCode region = lora.region;
+
+		if (region == meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
+			region = (meshtastic_Config_LoRaConfig_RegionCode)
+				CONFIG_MESHTASTIC_DEFAULT_REGION;
+		}
+		if (meshtastic_region_info(region, &info) == 0 &&
+		    info.power_limit_dbm > 0 && mt.tx_power > info.power_limit_dbm &&
+		    !store.is_licensed) {
+			LOG_WRN("TX power %d dBm exceeds region %d limit; clamping to %d",
+				mt.tx_power, (int)region, info.power_limit_dbm);
+			mt.tx_power = info.power_limit_dbm;
+		}
+	}
+
 	/* Resolve the modem preset. wide_lora is hardcoded false: it is a
 	 * per-region property, and the only region that sets it is the 2.4 GHz
 	 * band, which no supported board targets. It becomes a real lookup when
@@ -537,10 +581,10 @@ int meshtastic_config_store_apply_core(void)
 		struct meshtastic_freq_plan plan;
 		meshtastic_Config_LoRaConfig_RegionCode region = lora.region;
 
-		/* UNSET means "keep the compile-time default", which is US; the
-		 * validator permits only UNSET or US, so this resolves both. */
+		/* UNSET means "keep the compile-time default". */
 		if (region == meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
-			region = meshtastic_Config_LoRaConfig_RegionCode_US;
+			region = (meshtastic_Config_LoRaConfig_RegionCode)
+				CONFIG_MESHTASTIC_DEFAULT_REGION;
 		}
 
 		/* The frequency follows the PRIMARY channel's name, which is why this
