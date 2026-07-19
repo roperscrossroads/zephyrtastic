@@ -151,6 +151,63 @@ int meshtastic_send_node_info(uint32_t dest)
 	return meshtastic_send_node_info_ex(dest, false, 0U, 0U);
 }
 
+/* Ask one peer for its NodeInfo, throttled through the same per-peer request
+ * cooldown the unknown-peer path uses, and never blocking the caller.
+ *
+ * The PKC decrypt path needs this when a DM arrives from a sender whose public
+ * key we do not hold. Calling meshtastic_send_node_info_ex() directly there
+ * bypassed the cooldown entirely, so a stream of junk PKC frames with rolling
+ * ids (each decode-failing with -ENOENT, each passing dedup) turned one cheap
+ * inbound frame into one larger unthrottled TX — an airtime/battery
+ * amplification from a single spoofed id. It also sent with K_FOREVER from the
+ * RX thread, so a flood blocked RX and overflowed the inbound queue, dropping
+ * legitimate traffic on top of the amplification.
+ *
+ * Returns -EAGAIN when the cooldown suppresses the request; callers treat that
+ * as success-equivalent (we already asked this peer recently).
+ */
+int meshtastic_nodeinfo_request(uint32_t peer)
+{
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	struct meshtastic_packet packet;
+	struct nodeinfo_peer *entry;
+	int64_t now_ms;
+	bool allowed;
+	int ret;
+
+	if (peer == 0U || peer == MESHTASTIC_NODE_BROADCAST ||
+	    peer == meshtastic_get_node_id()) {
+		return -EINVAL;
+	}
+
+	now_ms = k_uptime_get();
+	k_mutex_lock(&nodeinfo_lock, K_FOREVER);
+
+	entry = peer_get_locked(peer, now_ms);
+	allowed = interval_elapsed(entry->request_time_valid, entry->last_request_ms, now_ms,
+				  (int64_t)CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC *
+					  MSEC_PER_SEC);
+	if (allowed) {
+		entry->request_time_valid = true;
+		entry->last_request_ms = now_ms;
+	}
+
+	k_mutex_unlock(&nodeinfo_lock);
+
+	if (!allowed) {
+		return -EAGAIN;
+	}
+
+	ret = nodeinfo_build_packet(peer, true, 0U, 0U, payload, &packet);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* K_NO_WAIT: callers run on the RX thread, where a blocking send would
+	 * stall inbound processing until the TX queue drains. */
+	return meshtastic_send_packet(&packet, K_NO_WAIT);
+}
+
 static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet *packet)
 {
 	const bool is_nodeinfo = packet != NULL && packet->portnum == MESHTASTIC_PORT_NODEINFO;

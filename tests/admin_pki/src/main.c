@@ -411,3 +411,49 @@ ZTEST(admin_pki, test_pkc_non_admin_key_refused)
 	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
 		      "PKC admin whose key is not authorized must be refused");
 }
+
+/* H2: a peer whose public key we do not hold makes the PKC decrypt path ask for
+ * its NodeInfo. That request must be throttled per peer and must not block the
+ * RX thread — otherwise a stream of cheap junk frames with rolling ids (each
+ * decode-failing with -ENOENT, each passing dedup) is an amplifier: one small
+ * inbound frame in, one larger NodeInfo TX out, unbounded, from a single
+ * spoofed id. Feed exactly that flood and assert the cooldown holds. */
+ZTEST(admin_pki, test_unknown_key_nodeinfo_request_is_throttled)
+{
+	/* A sender we hold no key for: PEER's key is seeded, this one is not. */
+	const uint32_t stranger = 0x0BADF00DU;
+	uint8_t wire[MESHTASTIC_HDR_LEN + 32U];
+	struct meshtastic_wire_header *hdr = (struct meshtastic_wire_header *)wire;
+	uint32_t tx_after;
+
+	/* Junk ciphertext: long enough to clear the PKC overhead check so the path
+	 * reaches the key lookup, but it will never authenticate. */
+	memset(wire + MESHTASTIC_HDR_LEN, 0xA5, 32U);
+
+	for (uint32_t i = 0U; i < 8U; i++) {
+		hdr->dest = sys_cpu_to_le32(TEST_NODE_ID);
+		hdr->src = sys_cpu_to_le32(stranger);
+		/* Rolling id: every frame is unique, so dedup never suppresses it
+		 * and each one reaches the decrypt attempt. */
+		hdr->id = sys_cpu_to_le32(0x0BAD0100U + i);
+		hdr->flags = 3U | (3U << MESHTASTIC_FLAGS_HOP_START_SHIFT);
+		hdr->channel = 0x00U; /* PKC marker channel-hash */
+		hdr->next_hop = 0U;
+		hdr->relay_node = 0U;
+
+		inject_rx_frame(wire, sizeof(wire));
+	}
+
+	k_sleep(K_MSEC(100));
+
+	k_mutex_lock(&mock_lora.lock, K_FOREVER);
+	tx_after = mock_lora.send_count;
+	k_mutex_unlock(&mock_lora.lock);
+
+	/* 8 junk frames in, at most 1 NodeInfo request out. Before the fix this
+	 * was 8 — one unthrottled K_FOREVER send per inbound frame. */
+	zassert_true(tx_after <= 1U,
+		     "unknown-key NodeInfo request must be throttled: 8 junk frames "
+		     "produced %u transmissions",
+		     tx_after);
+}

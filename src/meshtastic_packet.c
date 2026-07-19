@@ -27,12 +27,12 @@
 #if defined(CONFIG_MESHTASTIC_PKI)
 #include "meshtastic_pki.h"
 #include <zephyr/meshtastic/nodedb.h>
-#include <zephyr/meshtastic/nodeinfo.h>
-/* Module-internal (meshtastic_nodeinfo.c): send our NodeInfo with want_response
- * to pull a peer's NodeInfo — and thus its public key. Not in the public
+#if defined(CONFIG_MESHTASTIC_NODEINFO)
+/* Module-internal (meshtastic_nodeinfo.c): pull a peer's NodeInfo — and thus
+ * its public key — throttled per peer and non-blocking. Not in the public
  * header, so declared here. */
-int meshtastic_send_node_info_ex(uint32_t dest, bool want_response, uint8_t channel,
-				 uint32_t response_to_id);
+int meshtastic_nodeinfo_request(uint32_t peer);
+#endif
 #endif
 
 #include <zephyr/logging/log.h>
@@ -575,7 +575,12 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 				if (fail_reason != NULL && hdr->channel == 0U) {
 					*fail_reason = MESHTASTIC_DECODE_FAIL_PKI_UNKNOWN_PUBKEY;
 				}
-				(void)meshtastic_send_node_info_ex(packet->from, true, 0U, 0U);
+#if defined(CONFIG_MESHTASTIC_NODEINFO)
+				/* Throttled + K_NO_WAIT: this runs on the RX
+				 * thread and the sender id is attacker-chosen,
+				 * so it must not amplify or block. */
+				(void)meshtastic_nodeinfo_request(packet->from);
+#endif
 			}
 		}
 
