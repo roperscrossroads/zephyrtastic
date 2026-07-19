@@ -56,6 +56,8 @@ dkms.conf
 
 # Zephyr/west build output
 build*/
+# twister writes twister-out/, and twister-out.N/ for each repeat run
+twister-out*/
 
 # Local editor / tooling settings
 .claude/settings.local.json
