@@ -12,7 +12,10 @@
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
+
+#include "meshtastic_packet.h"
 
 #include "meshtastic_outbound.h"
 #include "meshtastic_sched.h"
@@ -294,6 +297,50 @@ int meshtastic_radio_send_wire_after(uint8_t *pkt, uint32_t pkt_len, uint8_t tie
 				     uint32_t delay_ms)
 {
 	return outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, delay_ms);
+}
+
+int meshtastic_outbound_cancel(uint32_t src, uint32_t id)
+{
+	int removed = 0;
+
+	k_mutex_lock(&ob_lock, K_FOREVER);
+
+	/* Reverse scan so remove_index_locked()'s shift-down cannot skip an entry.
+	 * A given (src,id) should only ever be queued once, but a duplicate would
+	 * be a leak rather than an error, so remove every match. */
+	for (int i = (int)ob_count - 1; i >= 0; i--) {
+		const struct meshtastic_wire_header *h;
+
+		if (ob_items[i].len < MESHTASTIC_HDR_LEN) {
+			continue;
+		}
+		/* Never cancel a frame someone is blocked waiting on: the caller owns
+		 * its completion and would wait out its timeout for a result that
+		 * never comes. Relays are always fire-and-forget, so this excludes
+		 * nothing we want to cancel. */
+		if (ob_items[i].done != NULL) {
+			continue;
+		}
+
+		h = (const struct meshtastic_wire_header *)ob_items[i].wire;
+		if (sys_le32_to_cpu(h->src) != src || sys_le32_to_cpu(h->id) != id) {
+			continue;
+		}
+
+		remove_index_locked(i);
+		removed++;
+	}
+
+	k_mutex_unlock(&ob_lock);
+
+	if (removed > 0) {
+		/* Free the slots so a blocked enqueuer can proceed. */
+		for (int i = 0; i < removed; i++) {
+			k_sem_give(&ob_space);
+		}
+	}
+
+	return removed;
 }
 
 int meshtastic_radio_send_wire(uint8_t *pkt, uint32_t pkt_len)

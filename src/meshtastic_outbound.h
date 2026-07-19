@@ -58,6 +58,21 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len);
 int meshtastic_radio_send_wire_after(uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
 				     uint32_t delay_ms);
 
+/**
+ * @brief Drop any queued frame matching @p src / @p id that has not gone out.
+ *
+ * Overhear-cancel: hearing a peer relay a packet we still have queued means our
+ * copy would be pure duplicate airtime, so it is removed before transmitting.
+ * Only reachable because relays are deferred — with no contention window there
+ * is no interval in which a queued relay exists to cancel.
+ *
+ * Frames a caller is blocked on are never cancelled.
+ *
+ * @return number of frames removed (0 if ours already went out, which is the
+ *         common case when the window is short or the peer was slow).
+ */
+int meshtastic_outbound_cancel(uint32_t src, uint32_t id);
+
 #ifdef __cplusplus
 }
 #endif

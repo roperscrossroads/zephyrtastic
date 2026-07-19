@@ -2044,6 +2044,96 @@ ZTEST(protocol_stack, test_deferred_relay_does_not_block_later_traffic)
 		     "the deferred relay should have drained before the test ended");
 }
 
+/* --- Overhear-cancel -------------------------------------------------------- */
+
+/* The payoff of the contention window: while our relay waits, we hear a peer
+ * relay the same frame, so ours is dropped before it ever transmits. Without
+ * the window there is no interval in which a queued relay exists to cancel. */
+ZTEST(protocol_stack, test_overhearing_a_peer_cancels_our_queued_relay)
+{
+	struct meshtastic_sched_stats st;
+	uint32_t before;
+
+	zassert_ok(meshtastic_sched_set("cw.min", "4"));
+	zassert_ok(meshtastic_sched_set("cw.max", "4"));
+	meshtastic_sched_stats_reset();
+
+	before = mock_lora.send_count;
+	inject_broadcast_hops(PEER_NODE_ID, 0xCA0CE101U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(30));
+	zassert_equal(mock_lora.send_count, before, "our relay should still be queued");
+
+	/* A peer relays the same frame while ours waits. */
+	inject_broadcast_hops(PEER_NODE_ID, 0xCA0CE101U, 2U, 3U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_cancelled, 1U, "hearing the peer should cancel our relay");
+
+	/* And it must never go out, even after the window would have elapsed. */
+	k_sleep(K_MSEC(900));
+	zassert_equal(mock_lora.send_count, before,
+		      "a cancelled relay must not transmit after its window closes");
+}
+
+/* A router is infrastructure: its relay may be the one that reaches a node the
+ * peer's did not, so it relays even when it has heard the frame already. */
+ZTEST(protocol_stack, test_router_role_does_not_cancel_its_relay)
+{
+	struct meshtastic_sched_stats st;
+	uint32_t before;
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+	zassert_ok(meshtastic_sched_set("cw.min", "4"));
+	zassert_ok(meshtastic_sched_set("cw.max", "4"));
+	meshtastic_sched_stats_reset();
+
+	before = mock_lora.send_count;
+	inject_broadcast_hops(PEER_NODE_ID, 0xCA0CE102U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(20));
+	inject_broadcast_hops(PEER_NODE_ID, 0xCA0CE102U, 2U, 3U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.relay_cancelled, 0U, "a ROUTER must not cancel its relay");
+
+	/* Drain it so it does not fire during a later test. */
+	for (int i = 0; i < 100 && mock_lora.send_count == before; i++) {
+		k_sleep(K_MSEC(20));
+	}
+	zassert_true(mock_lora.send_count > before, "the router's relay should still go out");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}
+
+/* Cancelling is keyed on (src,id): an unrelated frame in the queue survives. */
+ZTEST(protocol_stack, test_cancel_only_removes_the_matching_relay)
+{
+	uint32_t before;
+
+	zassert_ok(meshtastic_sched_set("cw.min", "4"));
+	zassert_ok(meshtastic_sched_set("cw.max", "4"));
+	meshtastic_sched_stats_reset();
+
+	before = mock_lora.send_count;
+	inject_broadcast_hops(PEER_NODE_ID, 0xCA0CE103U, 3U, 3U, 0U);
+	inject_broadcast_hops(OTHER_NODE_ID, 0xCA0CE104U, 3U, 3U, 0U);
+	k_sleep(K_MSEC(30));
+
+	/* Cancel only the first. */
+	inject_broadcast_hops(PEER_NODE_ID, 0xCA0CE103U, 2U, 3U, 0x99U);
+	k_sleep(K_MSEC(30));
+
+	/* The untouched relay still transmits. */
+	for (int i = 0; i < 100 && mock_lora.send_count == before; i++) {
+		k_sleep(K_MSEC(20));
+	}
+	zassert_true(mock_lora.send_count > before,
+		     "the non-matching relay should have gone out");
+	zassert_true(mock_lora.send_count <= before + 1U,
+		     "only one of the two relays should have transmitted");
+}
+
 /* --- Packet-id unpredictability -------------------------------------------- */
 
 /* The AES-CTR channel nonce is built from (packet id, source node id) and

@@ -314,6 +314,7 @@ static atomic_t st_dedup_expired;
 static atomic_t st_reliable_acked;
 static atomic_t st_relay_sent;
 static atomic_t st_relay_redundant;
+static atomic_t st_relay_cancelled;
 static atomic_t st_relay_gap[MT_RELAY_GAP_BUCKETS];
 static atomic_t st_reliable_failed;
 
@@ -370,6 +371,11 @@ void meshtastic_sched_stat_relay_sent(void)
 	atomic_inc(&st_relay_sent);
 }
 
+void meshtastic_sched_stat_relay_cancelled(void)
+{
+	atomic_inc(&st_relay_cancelled);
+}
+
 void meshtastic_sched_stat_relay_redundant(uint32_t gap_ms)
 {
 	size_t b = MT_RELAY_GAP_BUCKETS - 1U; /* the >= final-bound bucket */
@@ -404,6 +410,7 @@ void meshtastic_sched_stats_get(struct meshtastic_sched_stats *out)
 	out->reliable_failed = (uint32_t)atomic_get(&st_reliable_failed);
 	out->relay_sent = (uint32_t)atomic_get(&st_relay_sent);
 	out->relay_redundant = (uint32_t)atomic_get(&st_relay_redundant);
+	out->relay_cancelled = (uint32_t)atomic_get(&st_relay_cancelled);
 	for (int i = 0; i < MT_RELAY_GAP_BUCKETS; i++) {
 		out->relay_gap[i] = (uint32_t)atomic_get(&st_relay_gap[i]);
 	}
@@ -424,6 +431,7 @@ void meshtastic_sched_stats_reset(void)
 	atomic_set(&st_reliable_failed, 0);
 	atomic_set(&st_relay_sent, 0);
 	atomic_set(&st_relay_redundant, 0);
+	atomic_set(&st_relay_cancelled, 0);
 	for (int i = 0; i < MT_RELAY_GAP_BUCKETS; i++) {
 		atomic_set(&st_relay_gap[i], 0);
 	}

@@ -114,8 +114,9 @@ struct meshtastic_sched_stats {
 	/* Flood-redundancy measurement (see meshtastic_sched_stat_relay_redundant).
 	 * relay_sent is the denominator; relay_redundant counts our relays that a
 	 * peer also relayed, and relay_gap buckets how long after ours theirs came. */
-	uint32_t relay_sent;
+	uint32_t relay_sent;      /* relays queued (transmitted = sent - cancelled) */
 	uint32_t relay_redundant;
+	uint32_t relay_cancelled; /* queued relays dropped on hearing a peer's copy */
 	uint32_t relay_gap[MT_RELAY_GAP_BUCKETS];
 };
 
@@ -204,6 +205,9 @@ void meshtastic_sched_stat_relay_sent(void);
  * tightly the redundant transmissions cluster in time.
  */
 void meshtastic_sched_stat_relay_redundant(uint32_t gap_ms);
+
+/** Count a queued relay we dropped because a peer relayed it first. */
+void meshtastic_sched_stat_relay_cancelled(void);
 
 #ifdef __cplusplus
 }
