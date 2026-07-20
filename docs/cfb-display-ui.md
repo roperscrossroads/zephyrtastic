@@ -71,3 +71,24 @@ for a functional text UI now. The heavier alternative is the upstream
 `meshtastic/device-ui` (LVGL, C++), whose protocol/controller layer talks the
 same client protobuf API this firmware already speaks — worth adopting only
 when rendering to a colour TFT, where its mature 320×240 UI lives.
+
+## Verified on hardware (Heltec V4, over OTA)
+
+Confirmed rendering on a bench Heltec V4, flashed via mcumgr OTA. One wrinkle
+when PSRAM is left disabled (this build omits `overlay-psram.conf`): the display
+adds ~4 KB internal DRAM, which pushes the full **net** variant (WiFi +
+MQTT-over-TLS + OTA) to ~98 % — too tight to trust on a remote node. `overlay-uitest.conf` drops MQTT/TLS/GNSS (none needed to see the
+UI) and brings it back to ~89 %:
+
+```
+./wt manifest ui-test
+west build -p always --sysbuild -b heltec_wifi_lora32_v4/esp32s3/procpu \
+    samples/meshtastic -- -DEXTRA_CONF_FILE="overlay-shell.conf;overlay-wifi-shell.conf;overlay-mqtt.conf;overlay-net.conf;overlay-ota.conf;overlay-display.conf;overlay-uitest.conf"
+# then: mcumgr image upload zephyr.signed.bin -> image test <hash> -> reset -> image confirm <hash>
+```
+
+The display code itself is untouched by the slimming. The V4 has 2 MB quad
+PSRAM; enabling it (`overlay-psram.conf`) is the other way to reclaim internal
+DRAM — though WiFi-heap-to-PSRAM routing is still unsolved (only the NodeDB is
+relocated today), so the full net image can stay tight even with PSRAM on.
+
