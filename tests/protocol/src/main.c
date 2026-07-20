@@ -1871,6 +1871,151 @@ ZTEST(protocol_stack, test_nodedb_reset_keeps_favorites)
 	meshtastic_nodedb_reset(false);
 }
 
+/* --- NodeDB eviction-picker hardening: protect ignored + key-verified nodes,
+ * keyless-first eviction victim, and a protected-node cap. ------------------- */
+
+/*
+ * These three tests fill the NodeDB to capacity and reset it. This suite is not
+ * isolated per-test (protocol_before does not reset the NodeDB), and several later
+ * tests implicitly depend on nodes learned by earlier ones. Ztest runs a suite's
+ * tests in name order, so the "zzz_" prefix is deliberate: it makes these run
+ * LAST, after every other protocol_stack test, so their fill/wipe cannot disturb
+ * anything downstream. Do not rename them earlier in the alphabet.
+ */
+
+/* Inject a keyless ("boring") peer via a *keyless* NodeInfo: creates the node with
+ * a User record but no public key, so it is "boring" for eviction. Using a
+ * NodeInfo (not a bare packet) is deliberate — it sets has_user, so the node does
+ * not look "unknown" and never triggers the "ask for NodeInfo" request TX, and
+ * with want_response=false it draws no reply either. CLIENT_MUTE (set by the
+ * tests) also suppresses relay, so the bulk fill puts nothing on the mock TX path
+ * (leaving no outbound-queue residue for later tests). */
+static void inject_keyless_peer(uint32_t num, uint32_t id)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+
+	strcpy(user.long_name, "boring-peer");
+	strcpy(user.short_name, "BP");
+	inject_nodeinfo(num, id, &user); /* public_key.size stays 0 -> keyless */
+}
+
+/* Inject a key-verified peer (32-byte X25519 key) via NodeInfo. */
+static void inject_keyed_peer(uint32_t num, uint32_t id)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+
+	strcpy(user.long_name, "keyed-peer");
+	strcpy(user.short_name, "KD");
+	user.public_key.size = 32U;
+	memset(user.public_key.bytes, (uint8_t)(num & 0xFFU), sizeof(user.public_key.bytes));
+	inject_nodeinfo(num, id, &user);
+}
+
+/* Eviction prefers keyless "boring" nodes; a key-verified peer is spared
+ * while a keyless victim exists, so PKC reach survives churn. */
+ZTEST(protocol_stack, test_zzz_nodedb_eviction_prefers_keyless_over_keyed)
+{
+	const size_t max = CONFIG_MESHTASTIC_NODEDB_MAX_NODES;
+	const uint32_t keyed = 0x00010000U;
+	struct meshtastic_nodedb_node snap;
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE);
+	meshtastic_nodedb_reset(false);
+
+	/* Oldest peer is key-verified; fill the rest of the table with keyless peers
+	 * so the DB is exactly full. */
+	inject_keyed_peer(keyed, 0xE0000000U);
+	k_sleep(K_MSEC(1100)); /* make the keyed peer strictly the oldest */
+	for (size_t i = 0U; i < max - 2U; i++) {
+		inject_keyless_peer(0x00020000U + i, 0xE0010000U + i);
+	}
+	zassert_equal(meshtastic_nodedb_count(), max, "DB should be full before eviction");
+
+	/* One more peer forces an eviction. Without the keyless-first rule the victim
+	 * would be the oldest node overall — the keyed one; it must be spared and a
+	 * keyless peer dropped instead. */
+	inject_keyless_peer(0x00030000U, 0xE0020000U);
+
+	zassert_equal(meshtastic_nodedb_count(), max, "still full after eviction");
+	zassert_ok(meshtastic_nodedb_get(keyed, &snap),
+		   "key-verified peer must survive eviction while keyless victims exist");
+	zassert_ok(meshtastic_nodedb_get(0x00030000U, &snap), "new peer should be learned");
+
+	meshtastic_nodedb_reset(false);
+}
+
+/* An ignored (blocked) node is protected from eviction — it must outlast
+ * churn even though it is the oldest keyless entry (the first victim otherwise). */
+ZTEST(protocol_stack, test_zzz_nodedb_eviction_skips_ignored_node)
+{
+	const size_t max = CONFIG_MESHTASTIC_NODEDB_MAX_NODES;
+	const uint32_t ignored = 0x00040000U;
+	struct meshtastic_nodedb_node snap;
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE);
+	meshtastic_nodedb_reset(false);
+
+	/* Oldest + keyless -> the prime eviction target, until it is ignored. */
+	inject_keyless_peer(ignored, 0xE1000000U);
+	k_sleep(K_MSEC(1100)); /* strictly the oldest */
+	zassert_ok(meshtastic_nodedb_set_ignored(ignored, true), "ignore set failed");
+
+	/* Fill the table, then churn several more peers through — far more evictions
+	 * than it would take to drop an unprotected oldest-keyless node. */
+	for (size_t i = 0U; i < max - 2U; i++) {
+		inject_keyless_peer(0x00050000U + i, 0xE1010000U + i);
+	}
+	for (size_t i = 0U; i < 5U; i++) {
+		inject_keyless_peer(0x00060000U + i, 0xE1020000U + i);
+	}
+
+	zassert_ok(meshtastic_nodedb_get(ignored, &snap),
+		   "ignored node must survive eviction");
+	zassert_true(snap.is_ignored, "node should still be ignored");
+
+	(void)meshtastic_nodedb_set_ignored(ignored, false);
+	meshtastic_nodedb_reset(false);
+}
+
+/* Favorites/ignored are capped at MAX-RESERVE so a saturated DB keeps a
+ * couple of evictable slots and never wedges — new nodes still land. */
+ZTEST(protocol_stack, test_zzz_nodedb_protected_cap_keeps_learning)
+{
+	const size_t max = CONFIG_MESHTASTIC_NODEDB_MAX_NODES;
+	const size_t reserve = 2U; /* mirrors NODEDB_PROTECTED_RESERVE */
+	struct meshtastic_nodedb_node snap;
+	size_t favorited = 0U;
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE);
+	meshtastic_nodedb_reset(false);
+
+	/* Fill the table with peers, favoriting each. The cap must accept MAX-RESERVE
+	 * favorites and refuse the rest with -ENOSPC. (Favoriting needs no key.) */
+	for (size_t i = 0U; i < max - 1U; i++) {
+		uint32_t num = 0x00070000U + i;
+		int ret;
+
+		inject_keyless_peer(num, 0xE2000000U + i);
+		ret = meshtastic_nodedb_set_favorite(num, true);
+		if (ret == 0) {
+			favorited++;
+		} else {
+			zassert_equal(ret, -ENOSPC, "unexpected favorite error %d", ret);
+		}
+	}
+
+	zassert_equal(favorited, max - reserve, "favorites must cap at MAX-RESERVE (got %zu)",
+		      favorited);
+
+	/* Saturated with favorites, but the reserve keeps it learning: a brand-new
+	 * node still lands (evicting one of the unprotected reserve slots). */
+	inject_keyless_peer(0x00080000U, 0xE2FF0000U);
+	zassert_ok(meshtastic_nodedb_get(0x00080000U, &snap),
+		   "protected-node cap must leave room to learn");
+
+	meshtastic_nodedb_reset(false);
+}
+
 /* --- Flood-redundancy measurement ------------------------------------------ */
 
 /* A broadcast with independently-set hop budget and relayer byte. hop_start

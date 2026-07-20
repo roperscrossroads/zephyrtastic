@@ -184,26 +184,64 @@ static struct nodedb_entry *find_entry_locked(uint32_t node_num)
 	return NULL;
 }
 
+/* Reserve at least this many evictable (non-protected) slots so a NodeDB
+ * saturated with favorites/ignored nodes can still learn new peers.
+ * Mirrors the reference firmware's MAX_NUM_NODES-2 protected cap. */
+#define NODEDB_PROTECTED_RESERVE 2U
+
+/* Protected from eviction: favorited (operator-pinned) or ignored (a block must
+ * outlast churn). The reference NodeDB skips both; the local node is handled
+ * separately by callers. */
+static bool node_is_protected(const meshtastic_NodeInfoLite *node)
+{
+	return IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_FAVORITE_BIT) ||
+	       IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_IGNORED_BIT);
+}
+
+static size_t protected_count_locked(void)
+{
+	size_t n = 0U;
+
+	for (size_t i = 0U; i < nodedb_entry_count; i++) {
+		if (nodedb_entries[i].used && node_is_protected(&nodedb_entries[i].node)) {
+			n++;
+		}
+	}
+
+	return n;
+}
+
 static size_t oldest_evictable_index_locked(void)
 {
 	uint32_t local = meshtastic_get_node_id();
-	uint32_t oldest = UINT32_MAX;
+	uint32_t oldest = UINT32_MAX; /* oldest keyed (PKC-capable) candidate */
 	size_t oldest_index = SIZE_MAX;
+	uint32_t oldest_boring = UINT32_MAX; /* oldest keyless ("boring") candidate */
+	size_t oldest_boring_index = SIZE_MAX;
 
 	for (size_t i = 0U; i < nodedb_entry_count; i++) {
-		if (!nodedb_entries[i].used || nodedb_entries[i].node.num == local ||
-		    IS_BIT_SET(nodedb_entries[i].node.bitfield,
-			       NODEINFO_BITFIELD_IS_FAVORITE_BIT)) {
+		const meshtastic_NodeInfoLite *node = &nodedb_entries[i].node;
+
+		/* Skip favorites *and* ignored nodes — both are protected from eviction. */
+		if (!nodedb_entries[i].used || node->num == local || node_is_protected(node)) {
 			continue;
 		}
 
-		if (nodedb_entries[i].node.last_heard < oldest) {
-			oldest = nodedb_entries[i].node.last_heard;
+		/* Prefer evicting keyless "boring" nodes; a key-verified peer is
+		 * only evicted when no keyless victim exists, so PKC reach survives
+		 * churn (mirrors the reference oldestBoring split). */
+		if (node->public_key.size == 0U) {
+			if (node->last_heard < oldest_boring) {
+				oldest_boring = node->last_heard;
+				oldest_boring_index = i;
+			}
+		} else if (node->last_heard < oldest) {
+			oldest = node->last_heard;
 			oldest_index = i;
 		}
 	}
 
-	return oldest_index;
+	return (oldest_boring_index != SIZE_MAX) ? oldest_boring_index : oldest_index;
 }
 
 static struct nodedb_entry *get_or_create_entry_locked(uint32_t node_num)
@@ -983,6 +1021,19 @@ static int nodedb_set_bit(uint32_t node_num, int bit, bool value)
 	if (entry == NULL) {
 		k_mutex_unlock(&nodedb_lock);
 		return -ENOENT;
+	}
+
+	/* Protecting a node (favorite/ignored) takes it out of the eviction
+	 * pool. Refuse if that would leave fewer than NODEDB_PROTECTED_RESERVE
+	 * evictable slots, so a protection-saturated DB can still learn new peers.
+	 * Un-protecting, non-protection bits, and re-setting an already-protected
+	 * node stay unconditional. */
+	if (value &&
+	    (bit == NODEINFO_BITFIELD_IS_FAVORITE_BIT || bit == NODEINFO_BITFIELD_IS_IGNORED_BIT) &&
+	    !node_is_protected(&entry->node) &&
+	    protected_count_locked() + 1U > ARRAY_SIZE(nodedb_entries) - NODEDB_PROTECTED_RESERVE) {
+		k_mutex_unlock(&nodedb_lock);
+		return -ENOSPC;
 	}
 
 	WRITE_BIT(entry->node.bitfield, bit, value);

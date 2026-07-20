@@ -334,21 +334,32 @@ ZTEST(admin_pki, test_pkc_admin_key_authorized_applies)
 	set_admin_key(NULL, 0U);
 }
 
-/* Create/refresh a keyless hot NodeDB entry for @p num (apply_basic_packet),
- * the way any heard packet does. Used to saturate the hot store. */
+/* Create/refresh a *key-bearing* hot NodeDB entry for @p num via a NodeInfo.
+ * The fillers must be key-verified: the eviction picker spares key-verified nodes
+ * while any keyless ("boring") node is still evictable, so to push the admin's own
+ * keyed record out of the hot store the store has to be saturated with other keyed
+ * nodes (a keyless flood would never touch it). */
 static void hot_fill_node(uint32_t num)
 {
-	struct meshtastic_packet p = {
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet ni = {
 		.from = num,
 		.to = MESHTASTIC_NODE_BROADCAST,
 		.id = num ^ 0x5EEDU,
-		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
-		.payload = (const uint8_t *)"x",
-		.payload_len = 1U,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
 		.channel_index = meshtastic_channels_primary_index(),
 	};
 
-	meshtastic_handle_inbound_packet(&p, NULL, 0U, true);
+	/* A distinct non-empty filler key per node — the contents are irrelevant,
+	 * only that the entry is key-verified rather than "boring". */
+	user.public_key.size = MESHTASTIC_PKI_KEY_LEN;
+	memset(user.public_key.bytes, (uint8_t)num, MESHTASTIC_PKI_KEY_LEN);
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "filler User encode failed");
+	ni.payload = buf;
+	ni.payload_len = os.bytes_written;
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
 }
 
 /* A-1: PKC admin authorization must not depend on hot-store residency. Evict
@@ -364,9 +375,11 @@ ZTEST(admin_pki, test_pkc_admin_key_authorized_after_hot_eviction)
 
 	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
 
-	/* Saturate the hot store with fresh keyless nodes until PEER's record is
-	 * evicted (capped well above MAX_NODES so a tie-break change can't hang
-	 * the loop). */
+	/* Saturate the hot store with fresh key-bearing nodes until PEER's record is
+	 * evicted — a keyless flood would never displace PEER's keyed record. Capped
+	 * well above MAX_NODES so a tie-break change can't hang the loop; the warm
+	 * ring is sized above the hot store (prj.conf) so these fillers do not also
+	 * push PEER's key out of the warm tier. */
 	for (uint32_t i = 0U; i < 64U && meshtastic_nodedb_get(PEER_NODE_ID, &snap) == 0; i++) {
 		hot_fill_node(0x5A000001U + i);
 	}

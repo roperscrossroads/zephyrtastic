@@ -160,6 +160,8 @@ void meshtastic_nodedb_note_route_success(uint32_t dest);
  *
  * @retval 0 Flag updated.
  * @retval -ENOENT The node is not present.
+ * @retval -ENOSPC Would leave too few evictable slots (protected-node cap); the
+ *                 flag is left unchanged. Un-favoriting is never refused.
  * @retval -ENOTSUP NodeDB support is not enabled.
  */
 int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite);
@@ -179,8 +181,12 @@ bool meshtastic_nodedb_is_from_or_to_favorite(uint32_t from, uint32_t to);
 /**
  * @brief Mark a node ignored / un-ignored in the in-RAM NodeDB.
  *
+ * Ignored nodes are protected from cache eviction (a block must outlast churn).
+ *
  * @retval 0 Flag updated.
  * @retval -ENOENT The node is not present.
+ * @retval -ENOSPC Would leave too few evictable slots (protected-node cap); the
+ *                 flag is left unchanged. Un-ignoring is never refused.
  * @retval -ENOTSUP NodeDB support is not enabled.
  */
 int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored);
