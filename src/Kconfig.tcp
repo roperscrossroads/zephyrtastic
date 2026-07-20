@@ -6,6 +6,7 @@ menuconfig MESHTASTIC_TCP
 	depends on NETWORKING && NET_TCP && NET_SOCKETS
 	select MESHTASTIC_PHONEAPI
 	select NET_TCP_KEEPALIVE
+	select ZVFS_EVENTFD	# wakes the transport's blocking poll() cross-thread
 	help
 	  Expose the Meshtastic PhoneAPI over TCP using stock StreamAPI framing
 	  (0x94 0xc3 <len16> <protobuf>), so the Android app or the reference

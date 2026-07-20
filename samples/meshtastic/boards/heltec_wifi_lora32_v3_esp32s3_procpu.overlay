@@ -67,3 +67,50 @@
 &coretemp {
 	status = "okay";
 };
+
+/*
+ * Power management: make the board CAPABLE of light sleep. Same three hooks the
+ * V4/E290 board DTs carry, but V3's board definition lives in *upstream* Zephyr
+ * (boards/heltec/heltec_wifi_lora32_v3/), which we don't edit — so they go here in
+ * the sample overlay instead. Everything below is INERT unless the application
+ * sets CONFIG_PM (samples/meshtastic/overlay-pm.conf): with PM off, the counter
+ * driver isn't built and the wakeup-source flags have no consumer. This describes
+ * hardware capability; it imposes no power policy.
+ *
+ * `wakeup-source` means one thing here: under CONFIG_PM_DEVICE_SYSTEM_MANAGED these
+ * devices are skipped by the suspend-everything loop, so they stay powered across a
+ * system low-power state. It does NOT configure a pin, interrupt, or the SoC wake
+ * matrix — the application still arms the actual wake source.
+ *
+ * NOTE the Vext gpio-hog above drives GPIO36, the SAME pin as vext_ctrl's enable-gpio.
+ * POWER_DOMAIN / POWER_DOMAIN_GPIO are already =y in every shipping non-PM V3 build
+ * (upstream board Kconfig.defconfig + the enabled vext_ctrl/adc_ctrl DT nodes), and the
+ * hog coexists fine because the domain is not runtime-suspended without CONFIG_PM_DEVICE.
+ * A PM build adds PM_DEVICE_POWER_DOMAIN=y, which WOULD let vext_ctrl toggle GPIO36 and
+ * fight the hog — so overlay-pm-v3.conf pins PM_DEVICE_POWER_DOMAIN=n to keep the domain
+ * unmanaged (Vext hog-driven, as today). See that overlay's header for the full rationale.
+ */
+
+/* rtc_timer (from the esp32s3 SoC dtsi, ships disabled) is the PM wake clock. */
+&rtc_timer {
+	status = "okay";
+	wakeup-source;
+};
+
+/*
+ * gpio0 carries both wake-capable pins: the USER button (GPIO0) and the SX1262's
+ * DIO1 IRQ (GPIO14). Both are <= GPIO21, so both are inside the ESP32-S3 RTC
+ * GPIO-wake mask. Keep the controller powered across sleep or neither can wake us.
+ */
+&gpio0 {
+	wakeup-source;
+};
+
+/*
+ * Keep the radio powered across light sleep — a node that suspends its transceiver
+ * on every idle window stops hearing the mesh (matches the reference firmware's LS
+ * state, which keeps LoRa on; only deep sleep powers the radio down).
+ */
+&lora0 {
+	wakeup-source;
+};

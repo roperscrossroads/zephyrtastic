@@ -14,12 +14,14 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/socket.h>
+#include <zephyr/zvfs/eventfd.h>
 
 #include "meshtastic_phoneapi.h"
 
@@ -60,6 +62,14 @@ static struct {
 
 K_THREAD_STACK_DEFINE(tcp_thread_stack, CONFIG_MESHTASTIC_TCP_THREAD_STACK_SIZE);
 static struct k_thread tcp_thread_data;
+
+/* Wake the TCP thread's blocking poll() from another thread. The thread parks
+ * in zsock_poll([listener, client, wake_efd], idle_deadline); an enqueued
+ * FromRadio frame (tcp_data_ready, called from other threads) writes this
+ * eventfd so the frame flushes immediately instead of waiting on a fixed poll
+ * tick. All socket I/O still happens only on the TCP thread — this fd is the
+ * only thing touched cross-thread. -1 until init creates it. */
+static int tcp_wake_efd = -1;
 
 static size_t tcp_encode_frame(const uint8_t *payload, size_t payload_len, uint8_t *out,
 			       size_t out_len)
@@ -176,10 +186,14 @@ static void tcp_rx_byte(uint8_t byte)
 
 static void tcp_data_ready(struct meshtastic_phoneapi *api)
 {
-	/* No cross-thread socket I/O: the TCP thread drains on every poll cycle
-	 * (short timeout) and immediately after each RX, so async FromRadio
-	 * frames flush without waking here. */
+	/* Called (from other threads) when a FromRadio frame is queued. We do no
+	 * socket I/O here — just poke the wake eventfd so the TCP thread returns
+	 * from its blocking poll() and drains the queue. */
 	ARG_UNUSED(api);
+
+	if (tcp_wake_efd >= 0) {
+		(void)zvfs_eventfd_write(tcp_wake_efd, 1);
+	}
 }
 
 static void tcp_disconnect(struct meshtastic_phoneapi *api)
@@ -300,22 +314,50 @@ static void tcp_thread(void *p1, void *p2, void *p3)
 	LOG_INF("Meshtastic TCP PhoneAPI listening on :%u", TCP_PORT);
 
 	while (true) {
-		struct zsock_pollfd fds[2];
-		int nfds = 1;
+		struct zsock_pollfd fds[3];
+		int nfds = 0;
+		int lidx, cidx, eidx;
+		int timeout;
 		int ret;
 
-		fds[0].fd = lfd;
-		fds[0].events = ZSOCK_POLLIN;
-		fds[0].revents = 0;
+		lidx = nfds;
+		fds[nfds].fd = lfd;
+		fds[nfds].events = ZSOCK_POLLIN;
+		fds[nfds].revents = 0;
+		nfds++;
 
+		cidx = -1;
 		if (tcp.client_fd >= 0) {
-			fds[1].fd = tcp.client_fd;
-			fds[1].events = ZSOCK_POLLIN;
-			fds[1].revents = 0;
-			nfds = 2;
+			cidx = nfds;
+			fds[nfds].fd = tcp.client_fd;
+			fds[nfds].events = ZSOCK_POLLIN;
+			fds[nfds].revents = 0;
+			nfds++;
 		}
 
-		ret = zsock_poll(fds, nfds, 100);
+		eidx = -1;
+		if (tcp_wake_efd >= 0) {
+			eidx = nfds;
+			fds[nfds].fd = tcp_wake_efd;
+			fds[nfds].events = ZSOCK_POLLIN;
+			fds[nfds].revents = 0;
+			nfds++;
+		}
+
+		/* With a client connected, wake no later than its idle deadline so the
+		 * backstop below can reclaim it; otherwise block indefinitely until a
+		 * connection, client data, or a queued FromRadio frame (via the wake
+		 * eventfd). If the eventfd is unavailable, cap the wait so queued TX
+		 * still flushes (degrades to the old ~poll behaviour). */
+		if (tcp.client_fd >= 0 && TCP_IDLE_MS > 0) {
+			int64_t remaining = TCP_IDLE_MS - (k_uptime_get() - last_rx);
+
+			timeout = (remaining < 0) ? 0 : (int)MIN(remaining, (int64_t)INT_MAX);
+		} else {
+			timeout = (tcp_wake_efd >= 0) ? -1 : 200;
+		}
+
+		ret = zsock_poll(fds, nfds, timeout);
 		if (ret < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -324,20 +366,27 @@ static void tcp_thread(void *p1, void *p2, void *p3)
 			continue;
 		}
 
+		/* Drain the wake eventfd if it fired (coalesces multiple frames). */
+		if (eidx >= 0 && (fds[eidx].revents & ZSOCK_POLLIN)) {
+			zvfs_eventfd_t val;
+
+			(void)zvfs_eventfd_read(tcp_wake_efd, &val);
+		}
+
 		/* New connection: accept and preempt any stale client. */
-		if (fds[0].revents & ZSOCK_POLLIN) {
+		if (fds[lidx].revents & ZSOCK_POLLIN) {
 			tcp_accept_client(lfd);
 			last_rx = k_uptime_get();
 		}
 
 		/* Existing client activity. */
-		if (nfds == 2 && tcp.client_fd >= 0) {
-			if (fds[1].revents & (ZSOCK_POLLERR | ZSOCK_POLLHUP | ZSOCK_POLLNVAL)) {
+		if (cidx >= 0 && tcp.client_fd >= 0) {
+			if (fds[cidx].revents & (ZSOCK_POLLERR | ZSOCK_POLLHUP | ZSOCK_POLLNVAL)) {
 				tcp_close_client();
 				continue;
 			}
 
-			if (fds[1].revents & ZSOCK_POLLIN) {
+			if (fds[cidx].revents & ZSOCK_POLLIN) {
 				uint8_t chunk[256];
 				ssize_t n = zsock_recv(tcp.client_fd, chunk, sizeof(chunk), 0);
 
@@ -382,6 +431,17 @@ int meshtastic_tcp_init(void)
 {
 	meshtastic_phoneapi_init(&tcp.api, "tcp", tcp.queue, ARRAY_SIZE(tcp.queue),
 				 tcp_data_ready, tcp_disconnect, NULL, NULL);
+
+	/* Wake eventfd for the thread's blocking poll (queued FromRadio frames).
+	 * Non-fatal if unavailable — the poll then caps its wait at 200 ms so TX
+	 * still flushes, i.e. the old behaviour. Create it before register() so a
+	 * FromRadio frame can never reach tcp_data_ready with the fd uncreated. */
+	tcp_wake_efd = zvfs_eventfd(0, ZVFS_EFD_NONBLOCK);
+	if (tcp_wake_efd < 0) {
+		LOG_WRN("TCP wake eventfd unavailable (%d); using bounded poll", tcp_wake_efd);
+		tcp_wake_efd = -1;
+	}
+
 	meshtastic_phoneapi_register(&tcp.api);
 
 	k_thread_create(&tcp_thread_data, tcp_thread_stack,

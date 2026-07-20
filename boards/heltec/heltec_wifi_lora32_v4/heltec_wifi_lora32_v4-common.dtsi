@@ -244,6 +244,55 @@
 	};
 };
 
+/*
+ * Power management: make the board CAPABLE of light sleep.
+ *
+ * Zephyr's PM path for the ESP32-S3 maps PM_STATE_STANDBY -> esp_light_sleep_start()
+ * (soc/espressif/common/power.c). It has a hard prerequisite that is easy to miss:
+ * the SoC's RTC timer must be enabled AND marked as a wake source, otherwise
+ * pm_state_set() bails out with "Sleep skipped. Make sure RTC counter driver is
+ * enabled." — a log line, not a build error. The SoC dtsi ships rtc_timer as
+ * status = "disabled", so every board has to opt in. Do that here.
+ *
+ * Everything below is INERT unless the application sets CONFIG_PM (and, for the
+ * power domains above, CONFIG_PM_DEVICE): with PM off, the counter driver is not
+ * built and the wakeup-source flags have no consumer. So this describes hardware
+ * capability, it does not impose a power policy — see samples/meshtastic/overlay-pm.conf
+ * for the opt-in switch.
+ *
+ * `wakeup-source` here means exactly one thing: under CONFIG_PM_DEVICE_SYSTEM_MANAGED,
+ * these devices are skipped by the suspend-everything loop, so they stay powered
+ * across a system low-power state (subsys/pm/device_system_managed.c). It does NOT
+ * configure a pin, an interrupt, or the SoC wake matrix — the application still has
+ * to arm the actual wake source (pm_device_wakeup_enable(), and the usual GPIO
+ * interrupt config for a pin wake).
+ */
+&rtc_timer {
+	status = "okay";
+	wakeup-source;
+};
+
+/*
+ * gpio0 carries both wake-capable pins we care about: the USER button (GPIO0) and
+ * the SX1262's DIO1 IRQ (GPIO14). Both are <= GPIO21, so both are RTC-capable and
+ * inside the ESP32-S3 GPIO-wake mask (GPIO0-GPIO21). Keep the controller powered
+ * across sleep or neither can wake us.
+ */
+&gpio0 {
+	wakeup-source;
+};
+
+/*
+ * Keep the radio powered across light sleep. A mesh node that suspends its
+ * transceiver on every idle window stops hearing the mesh; the reference firmware
+ * makes the same choice (its LS state keeps LoRa on and only deep sleep powers the
+ * radio down). Note the Zephyr sx126x PM action only disconnects/reconnects the RF
+ * switch GPIOs — chip sleep is driven separately by the driver's own idle handling.
+ */
+&lora0 {
+	wakeup-source;
+};
+
 &timer0 {
 	status = "okay";
 };

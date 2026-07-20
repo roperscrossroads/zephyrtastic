@@ -23,6 +23,7 @@
 #include <zephyr/random/random.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/zvfs/eventfd.h>
 
 #include "meshtastic_ext_ram.h"
 
@@ -95,15 +96,22 @@ static bool mqtt_net_has_ipv4;
 static struct k_thread mqtt_thread;
 static K_THREAD_STACK_DEFINE(mqtt_stack, CONFIG_MESHTASTIC_MQTT_THREAD_STACK_SIZE);
 
-/* Wake the MQTT thread when uplink or publish queues gain work (max 1). */
-static K_SEM_DEFINE(mqtt_work_sem, 0, 1);
-
 static struct zsock_pollfd mqtt_fds[1];
 static int mqtt_nfds;
 
+/* Wake the MQTT thread's blocking poll() from another thread. The thread parks
+ * in zsock_poll([socket, wake_efd], keepalive_deadline); writing this eventfd
+ * makes that poll return immediately — used when the publish/uplink queue gains
+ * work and when a network-loss event needs prompt handling. All MQTT *client*
+ * access stays on the MQTT thread; only this fd is touched cross-thread, so no
+ * client lock is needed. -1 until init creates it. */
+static int mqtt_wake_efd = -1;
+
 static void mqtt_work_notify(void)
 {
-	(void)k_sem_give(&mqtt_work_sem);
+	if (mqtt_wake_efd >= 0) {
+		(void)zvfs_eventfd_write(mqtt_wake_efd, 1);
+	}
 }
 
 static void mqtt_drain_queue(int max_publish);
@@ -169,6 +177,9 @@ static void mqtt_net_event_handler(struct net_mgmt_event_callback *cb, uint64_t 
 	} else if (mgmt_event == NET_EVENT_IPV4_ADDR_DEL) {
 		mqtt_net_has_ipv4 = false;
 		mqtt_ctx.disconnect_pending = true;
+		/* Wake the thread out of its keepalive-length poll so it acts on the
+		 * pending disconnect promptly instead of up to 30 s later. */
+		mqtt_work_notify();
 		LOG_INF("Network lost, MQTT will disconnect");
 	}
 }
@@ -1142,25 +1153,75 @@ static int mqtt_try_connect(void)
 	return 0;
 }
 
-static int mqtt_process_once(int timeout_ms)
+/* Block until the broker socket is readable, the keepalive is due, or another
+ * thread wakes us via mqtt_wake_efd (queued publish work / network loss). This
+ * replaces the old fixed 200 ms poll: steady state now sleeps for up to a whole
+ * keepalive interval (~CONFIG_MQTT_KEEPALIVE) instead of spinning at ~5 Hz, so
+ * the CPU can idle, while socket data and publish work still wake us instantly.
+ * mqtt_live() only emits a PINGREQ when one is actually due, so calling it each
+ * pass is cheap. Runs only on the MQTT thread. */
+static int mqtt_wait_and_process(void)
 {
+	struct zsock_pollfd fds[2];
+	int nfds = 0;
+	int sock_idx = -1;
+	int efd_idx;
+	int left;
+	int timeout_ms;
 	int ret;
 
 	if (!mqtt_ctx.connected) {
 		return -ENOTCONN;
 	}
 
-	ret = mqtt_poll_socket(timeout_ms);
-	if (ret > 0 && (mqtt_fds[0].revents & ZSOCK_POLLIN)) {
+	if (mqtt_nfds > 0) {
+		sock_idx = nfds;
+		fds[nfds].fd = mqtt_fds[0].fd;
+		fds[nfds].events = ZSOCK_POLLIN;
+		fds[nfds].revents = 0;
+		nfds++;
+	}
+
+	efd_idx = nfds;
+	fds[nfds].fd = mqtt_wake_efd;
+	fds[nfds].events = ZSOCK_POLLIN;
+	fds[nfds].revents = 0;
+	nfds++;
+
+	/* Wake no later than the next keepalive deadline. If keepalive is disabled
+	 * (-1) or the eventfd is unavailable, fall back to a bounded wait so queued
+	 * work still drains promptly. */
+	left = mqtt_keepalive_time_left(&mqtt_ctx.client);
+	if (mqtt_wake_efd < 0) {
+		timeout_ms = (left < 0) ? 200 : CLAMP(left, 10, 200);
+	} else {
+		timeout_ms = (left < 0) ? 30000 : CLAMP(left, 10, 30000);
+	}
+
+	ret = zsock_poll(fds, nfds, timeout_ms);
+	if (ret < 0) {
+		return (errno == EINTR) ? 0 : -errno;
+	}
+
+	/* Drain the wake eventfd if it fired (coalesces multiple writes). */
+	if (fds[efd_idx].revents & ZSOCK_POLLIN) {
+		zvfs_eventfd_t val;
+
+		(void)zvfs_eventfd_read(mqtt_wake_efd, &val);
+	}
+
+	/* Incoming broker data (PUBLISH downlink, PINGRESP, PUBACK, ...). */
+	if (sock_idx >= 0 && (fds[sock_idx].revents & ZSOCK_POLLIN)) {
 		ret = mqtt_input(&mqtt_ctx.client);
 		if (ret != 0) {
 			return ret;
 		}
-	} else if (ret == 0) {
-		ret = mqtt_live(&mqtt_ctx.client);
-		if (ret != 0 && ret != -EAGAIN) {
-			return ret;
-		}
+	}
+
+	/* Send a keepalive PINGREQ if one is now due. */
+	ret = mqtt_live(&mqtt_ctx.client);
+	if (ret != 0 && ret != -EAGAIN) {
+		return ret;
 	}
 
 	return 0;
@@ -1211,7 +1272,10 @@ static void mqtt_thread_fn(void *p1, void *p2, void *p3)
 
 		mqtt_drain_queue(MQTT_PUBLISH_BUDGET_PER_LOOP);
 
-		ret = mqtt_process_once(0);
+		/* Blocks here (up to a keepalive interval) until real work arrives —
+		 * broker data, a queued publish (via mqtt_wake_efd), or the keepalive
+		 * deadline. No more fixed-interval polling. */
+		ret = mqtt_wait_and_process();
 		if (ret != 0) {
 			/* The session had connected, so the ladder was reset: the first
 			 * reconnect attempt after a session error comes quickly (1 s)
@@ -1227,13 +1291,16 @@ static void mqtt_thread_fn(void *p1, void *p2, void *p3)
 			mqtt_drain_queue(MQTT_PUBLISH_BUDGET_PER_LOOP);
 			mqtt_perhaps_report_to_map();
 
-			bool has_pending = false;
+			/* If a burst exceeded one publish budget, self-wake so the
+			 * leftover drains on the next pass instead of waiting out a
+			 * whole keepalive interval. */
+			bool has_pending;
+
 			k_mutex_lock(&mqtt_ctx.lock, K_FOREVER);
 			has_pending = (mqtt_ctx.queue_count > 0);
 			k_mutex_unlock(&mqtt_ctx.lock);
-
-			if (!has_pending) {
-				(void)k_sem_take(&mqtt_work_sem, K_MSEC(200));
+			if (has_pending) {
+				mqtt_work_notify();
 			}
 		}
 	}
@@ -1294,6 +1361,15 @@ int meshtastic_mqtt_init(void)
 	}
 
 	k_mutex_init(&mqtt_ctx.lock);
+
+	/* Wake eventfd for the thread's blocking poll (queued work / net loss).
+	 * Non-fatal if unavailable — mqtt_wait_and_process() then falls back to a
+	 * bounded 200 ms wait, i.e. the old behaviour. */
+	mqtt_wake_efd = zvfs_eventfd(0, ZVFS_EFD_NONBLOCK);
+	if (mqtt_wake_efd < 0) {
+		LOG_WRN("MQTT wake eventfd unavailable (%d); using bounded poll", mqtt_wake_efd);
+		mqtt_wake_efd = -1;
+	}
 
 	net_mgmt_init_event_callback(&mqtt_net_mgmt_cb, mqtt_net_event_handler,
 				     NET_EVENT_IPV4_ADDR_ADD | NET_EVENT_IPV4_ADDR_DEL);
