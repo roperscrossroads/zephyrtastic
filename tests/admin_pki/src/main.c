@@ -17,6 +17,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/lora.h>
 #include <zephyr/kernel.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/ztest.h>
 
@@ -522,4 +523,70 @@ ZTEST(admin_pki, test_fixed_position_record_roundtrip)
 	zassert_ok(meshtastic_config_store_setting_set("position_fixed", buf, (size_t)len));
 	zassert_equal(meshtastic_config_store_get_fixed_position(&got), -ENOENT,
 		      "cleared fixed position must not resurrect as a (0,0) fix");
+}
+
+/* ---- Persistence: curated (favorite) node identity survives reboot -------- */
+
+/* Inject a NodeInfo for @num carrying a name + 32-byte key, the way the stack
+ * learns a peer on the air (apply_user), so it lands in the hot NodeDB. */
+static void seed_named_peer(uint32_t num, const char *long_name, const uint8_t *key)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet ni = {
+		.from = num,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	strncpy(user.long_name, long_name, sizeof(user.long_name) - 1U);
+	strcpy(user.short_name, "CT");
+	user.public_key.size = MESHTASTIC_PKI_KEY_LEN;
+	memcpy(user.public_key.bytes, key, MESHTASTIC_PKI_KEY_LEN);
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode failed");
+	ni.payload = buf;
+	ni.payload_len = os.bytes_written;
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+}
+
+/* A favorited node's full identity is written to NVS (the mtrec subtree) and
+ * restored into the hot store — even into a slot that no longer holds it. Uses a
+ * dedicated node id and cleans up its own NVS record so the shared suite state
+ * is untouched. */
+ZTEST(admin_pki, test_favorite_node_record_persists)
+{
+	const uint32_t fav = 0x0FA00001U;
+	uint8_t key[MESHTASTIC_PKI_KEY_LEN];
+	struct meshtastic_nodedb_node snap;
+
+	memset(key, 0xA5, sizeof(key)); /* a distinct, real key-verified peer */
+
+	seed_named_peer(fav, "FavAlpha", key);
+	zassert_ok(meshtastic_nodedb_set_favorite(fav, true), "favorite failed");
+	zassert_ok(meshtastic_nodedb_get(fav, &snap), "seeded favorite should be present");
+	zassert_true(snap.is_favorite, "node should be favorite");
+
+	/* Persist the curated record now (bypassing the coalesced save timer). */
+	zassert_ok(settings_save_subtree("mtrec"), "mtrec save failed");
+
+	/* Drop it from the hot store. The NVS record survives — the prune is
+	 * deferred and this test never yields long enough for it to run. */
+	zassert_ok(meshtastic_nodedb_remove(fav), "remove failed");
+	zassert_equal(meshtastic_nodedb_get(fav, &snap), -ENOENT, "node should be gone from RAM");
+
+	/* Reload the subtree: the record must recreate the node with its identity. */
+	zassert_ok(settings_load_subtree("mtrec"), "mtrec load failed");
+	zassert_ok(meshtastic_nodedb_get(fav, &snap), "favorite must be restored from NVS");
+	zassert_true(snap.is_favorite, "restored node should still be favorite");
+	zassert_equal(strcmp(snap.long_name, "FavAlpha"), 0, "restored name mismatch: '%s'",
+		      snap.long_name);
+	zassert_equal(snap.public_key_len, MESHTASTIC_PKI_KEY_LEN, "restored key length mismatch");
+	zassert_equal(memcmp(snap.public_key, key, sizeof(key)), 0, "restored key mismatch");
+
+	/* Clean up: drop the node and delete its NVS record so no phantom favorite
+	 * leaks into other tests or a later run sharing this NVS partition. */
+	(void)meshtastic_nodedb_remove(fav);
+	(void)settings_delete("mtrec/0fa00001");
 }

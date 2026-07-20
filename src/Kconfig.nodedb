@@ -44,4 +44,18 @@ config MESHTASTIC_NODEDB_WARM_KEYS
 	  tier at boot (not the hot store), so a large key set never thrashes
 	  the hot store. Evicts least-recently-seen when full.
 
+config MESHTASTIC_NODEDB_PERSIST_RECORDS
+	bool "Persist favorite/ignored node records across reboots"
+	depends on MESHTASTIC_SETTINGS
+	default y
+	help
+	  Persist the full identity (name, hardware model, role, flags, public
+	  key) of nodes the operator has favorited or ignored, keyed by node id,
+	  to the settings/NVS store, and restore them into the hot NodeDB at
+	  boot. Favorites and ignored nodes are the curated set the operator has
+	  explicitly pinned or blocked; persisting them means a reboot no longer
+	  drops them until each re-announces its NodeInfo. Other nodes stay
+	  volatile and are re-learned from the mesh. The curated set is bounded
+	  by the eviction reserve, so this adds no boot-time hot-store churn.
+
 endif # MESHTASTIC_NODEDB

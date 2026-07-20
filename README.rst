@@ -103,7 +103,8 @@ Legend: ✅ Full · 🟡 Partial · ❌ Not yet
      - Periodic identity broadcast + node discovery
    * - NodeDB
      - 🟡
-     - In-RAM node cache; peer public keys persist to flash. Other node data is
+     - In-RAM node cache; peer public keys and the curated set (favorite /
+       ignored nodes, with their identity) persist to flash. Other node data is
        re-learned from the mesh after a reboot
    * - Device telemetry
      - ✅

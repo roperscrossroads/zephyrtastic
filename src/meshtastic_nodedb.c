@@ -14,6 +14,7 @@
 #include <zephyr/sys/util.h>
 
 #include <pb_decode.h>
+#include <pb_encode.h>
 
 #if defined(CONFIG_ESP_SPIRAM)
 #include <esp_attr.h>
@@ -77,6 +78,10 @@ static size_t nodedb_entry_count;
 static void nodekeys_schedule_save(void);
 static void warm_upsert_locked(uint32_t num, const uint8_t *pub);
 static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
+#endif
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+static void mtrec_schedule_save(void);
 #endif
 
 static uint32_t uptime_seconds(void)
@@ -171,6 +176,16 @@ static void apply_user(struct nodedb_entry *entry, const meshtastic_User *user)
 		  user->has_is_unmessagable);
 	WRITE_BIT(node->bitfield, NODEINFO_BITFIELD_IS_UNMESSAGABLE_BIT,
 		  user->has_is_unmessagable && user->is_unmessagable);
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+	/* A curated (favorite/ignored) node's identity changed — re-persist its
+	 * record. Volatile fields are excluded from the record, so this rewrites
+	 * NVS only on a genuine identity change, not on every heard packet. */
+	if (IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_FAVORITE_BIT) ||
+	    IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_IGNORED_BIT)) {
+		mtrec_schedule_save();
+	}
+#endif
 }
 
 static struct nodedb_entry *find_entry_locked(uint32_t node_num)
@@ -576,6 +591,274 @@ static int nodekeys_export(int (*export_func)(const char *name, const void *val,
 
 SETTINGS_STATIC_HANDLER_DEFINE(mtnode, MTNODE_SUBTREE, NULL, nodekeys_set, NULL, nodekeys_export);
 #endif /* CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS */
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+/*
+ * Curated-record tier. Persists the full identity (name, hw model, role, flags,
+ * public key) of nodes the operator has pinned (favorite) or blocked (ignored),
+ * keyed "mtrec/<id>", and restores them into the hot store at boot. Distinct
+ * from the warm-key tier above, which persists only public keys for PKC reach:
+ * the curated set is the small, operator-chosen set that should outlive a reboot
+ * intact, so each record is self-contained and carries the key too. The set is
+ * bounded by the eviction reserve (NODEDB_PROTECTED_RESERVE), so restoring it
+ * into the hot store causes no boot thrash. Volatile per-hearing fields (snr /
+ * last_heard / channel / next_hop / hops / via-mqtt) are never persisted — they
+ * are re-learned from the next packet, and excluding them keeps the record
+ * stable so it is not rewritten to NVS on every heard frame. Guarded by
+ * nodedb_lock like the rest of the store.
+ */
+#define MTREC_SUBTREE         "mtrec"
+#define MTREC_RECORD_VERSION  1U
+#define MTREC_HEADER_LEN      4U /* version, reserved, LE16 payload length */
+#define MTREC_RECONCILE_BATCH 32U
+#define MTREC_BUF_LEN         (meshtastic_NodeInfoLite_size + MTREC_HEADER_LEN)
+
+/* Set when a node leaves the curated set (un-favorited / un-ignored / removed /
+ * reset), so the next save prunes its now-orphaned NVS record. */
+static bool mtrec_reconcile;
+
+/* Copy @in, zeroing the volatile fields that must not be persisted. */
+static void mtrec_durable_copy(const meshtastic_NodeInfoLite *in, meshtastic_NodeInfoLite *out)
+{
+	*out = *in;
+	out->snr = 0.0f;
+	out->last_heard = 0U;
+	out->channel = 0U;
+	out->next_hop = 0U;
+	out->has_hops_away = false;
+	out->hops_away = 0U;
+	WRITE_BIT(out->bitfield, NODEINFO_BITFIELD_VIA_MQTT_BIT, 0);
+}
+
+static int mtrec_encode(const meshtastic_NodeInfoLite *node, uint8_t *buf, size_t buf_len)
+{
+	meshtastic_NodeInfoLite durable;
+	pb_ostream_t stream;
+
+	if (buf_len < MTREC_HEADER_LEN) {
+		return -EINVAL;
+	}
+
+	mtrec_durable_copy(node, &durable);
+	stream = pb_ostream_from_buffer(buf + MTREC_HEADER_LEN, buf_len - MTREC_HEADER_LEN);
+	if (!pb_encode(&stream, meshtastic_NodeInfoLite_fields, &durable)) {
+		LOG_WRN("NodeDB record encode failed: %s", PB_GET_ERROR(&stream));
+		return -ENOMEM;
+	}
+
+	buf[0] = MTREC_RECORD_VERSION;
+	buf[1] = 0U;
+	sys_put_le16((uint16_t)stream.bytes_written, buf + 2);
+	return (int)(stream.bytes_written + MTREC_HEADER_LEN);
+}
+
+static int mtrec_decode(const uint8_t *buf, size_t len, meshtastic_NodeInfoLite *node)
+{
+	pb_istream_t stream;
+	uint16_t payload_len;
+
+	if (len < MTREC_HEADER_LEN || buf[0] != MTREC_RECORD_VERSION) {
+		return -EINVAL;
+	}
+
+	payload_len = sys_get_le16(buf + 2);
+	if ((size_t)payload_len != len - MTREC_HEADER_LEN) {
+		return -EINVAL;
+	}
+
+	*node = (meshtastic_NodeInfoLite)meshtastic_NodeInfoLite_init_zero;
+	stream = pb_istream_from_buffer(buf + MTREC_HEADER_LEN, payload_len);
+	if (!pb_decode(&stream, meshtastic_NodeInfoLite_fields, node)) {
+		LOG_WRN("NodeDB record decode failed: %s", PB_GET_ERROR(&stream));
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+/* True if @num is still a curated node in the hot store — i.e. its NVS record
+ * should be kept rather than pruned. Takes nodedb_lock. */
+static bool mtrec_is_current(uint32_t num)
+{
+	struct nodedb_entry *e;
+	bool current;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	e = find_entry_locked(num);
+	current = (e != NULL) && node_is_protected(&e->node);
+	k_mutex_unlock(&nodedb_lock);
+
+	return current;
+}
+
+struct mtrec_reconcile_ctx {
+	uint32_t orphans[MTREC_RECONCILE_BATCH];
+	size_t count;
+	bool overflow;
+};
+
+/* Direct-load callback over the mtrec subtree: collect ids whose node is no
+ * longer curated (orphans to prune). */
+static int mtrec_reconcile_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+			      void *param)
+{
+	struct mtrec_reconcile_ctx *ctx = param;
+	const char *id = strrchr(key, '/');
+	uint32_t num;
+	char *endptr;
+
+	ARG_UNUSED(len);
+	ARG_UNUSED(read_cb);
+	ARG_UNUSED(cb_arg);
+
+	id = (id != NULL) ? id + 1 : key;
+	num = (uint32_t)strtoul(id, &endptr, 16);
+	if (*endptr != '\0' || num == 0U) {
+		return 0;
+	}
+
+	if (mtrec_is_current(num)) {
+		return 0;
+	}
+	if (ctx->count < ARRAY_SIZE(ctx->orphans)) {
+		ctx->orphans[ctx->count++] = num;
+	} else {
+		ctx->overflow = true;
+	}
+	return 0;
+}
+
+/* Prune orphaned mtrec/<id> records (nodes no longer curated) then persist the
+ * current curated set. Shared by the delayed save-work and the reset path. */
+static void mtrec_do_persist(void)
+{
+	int ret;
+
+	if (mtrec_reconcile) {
+		struct mtrec_reconcile_ctx ctx = {.count = 0U, .overflow = false};
+		char name[SETTINGS_MAX_NAME_LEN + 1];
+
+		mtrec_reconcile = false;
+		(void)settings_load_subtree_direct(MTREC_SUBTREE, mtrec_reconcile_cb, &ctx);
+
+		for (size_t i = 0U; i < ctx.count; i++) {
+			(void)snprintk(name, sizeof(name), MTREC_SUBTREE "/%08x", ctx.orphans[i]);
+			(void)settings_delete(name);
+		}
+		if (ctx.count > 0U) {
+			LOG_DBG("NodeDB pruned %zu orphaned record(s) from NVS", ctx.count);
+		}
+		if (ctx.overflow) {
+			mtrec_reconcile = true; /* more to prune next pass */
+		}
+	}
+
+	ret = settings_save_subtree(MTREC_SUBTREE);
+	if (ret < 0) {
+		LOG_WRN("NodeDB record save failed (%d)", ret);
+	}
+
+	if (mtrec_reconcile) {
+		mtrec_schedule_save();
+	}
+}
+
+static void mtrec_save_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	mtrec_do_persist();
+}
+
+static K_WORK_DELAYABLE_DEFINE(mtrec_save_work, mtrec_save_work_handler);
+
+static void mtrec_schedule_save(void)
+{
+	(void)k_work_reschedule(&mtrec_save_work,
+				K_MSEC(CONFIG_MESHTASTIC_SETTINGS_SAVE_DELAY_MS));
+}
+
+static int mtrec_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	uint8_t buf[MTREC_BUF_LEN];
+	meshtastic_NodeInfoLite node;
+	struct nodedb_entry *entry;
+	uint32_t num;
+	char *endptr;
+	ssize_t read;
+
+	if (len > sizeof(buf)) {
+		LOG_WRN("Ignoring oversized persisted node record '%s' (%zu)", key, len);
+		return 0;
+	}
+
+	read = read_cb(cb_arg, buf, len);
+	if (read != (ssize_t)len) {
+		return 0;
+	}
+
+	if (mtrec_decode(buf, len, &node) < 0) {
+		LOG_WRN("Ignoring malformed persisted node record '%s'", key);
+		return 0;
+	}
+
+	num = (uint32_t)strtoul(key, &endptr, 16);
+	if (*endptr != '\0' || num == 0U || num == meshtastic_get_node_id()) {
+		return 0;
+	}
+
+	/* Only restore genuinely-curated records; a record whose flags are clear
+	 * would just occupy a hot slot for a node the operator no longer pins. */
+	if (!node_is_protected(&node)) {
+		return 0;
+	}
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = get_or_create_entry_locked(num);
+	if (entry != NULL) {
+		node.num = num; /* the key is authoritative */
+		entry->node = node;
+		entry->used = true;
+	}
+	k_mutex_unlock(&nodedb_lock);
+
+	return 0;
+}
+
+static int mtrec_export(int (*export_func)(const char *name, const void *val, size_t val_len))
+{
+	char name[SETTINGS_MAX_NAME_LEN + 1];
+	uint8_t buf[MTREC_BUF_LEN];
+	uint32_t self = meshtastic_get_node_id();
+	int ret = 0;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	for (size_t i = 0U; i < nodedb_entry_count; i++) {
+		struct nodedb_entry *e = &nodedb_entries[i];
+		int len;
+
+		if (!e->used || e->node.num == self || !node_is_protected(&e->node)) {
+			continue;
+		}
+
+		len = mtrec_encode(&e->node, buf, sizeof(buf));
+		if (len < 0) {
+			continue; /* skip a record that will not encode, keep the rest */
+		}
+
+		(void)snprintk(name, sizeof(name), MTREC_SUBTREE "/%08x", e->node.num);
+		ret = export_func(name, buf, (size_t)len);
+		if (ret < 0) {
+			break;
+		}
+	}
+	k_mutex_unlock(&nodedb_lock);
+
+	return ret;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mtrec, MTREC_SUBTREE, NULL, mtrec_set, NULL, mtrec_export);
+#endif /* CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS */
 
 static bool decode_user_payload(const struct meshtastic_packet *packet, meshtastic_User *user)
 {
@@ -1039,6 +1322,14 @@ static int nodedb_set_bit(uint32_t node_num, int bit, bool value)
 	WRITE_BIT(entry->node.bitfield, bit, value);
 	k_mutex_unlock(&nodedb_lock);
 
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+	if (bit == NODEINFO_BITFIELD_IS_FAVORITE_BIT || bit == NODEINFO_BITFIELD_IS_IGNORED_BIT) {
+		/* The curated set changed: setting the bit adds a record, clearing it
+		 * orphans one. Reconcile prunes the orphan; the save writes the rest. */
+		mtrec_reconcile = true;
+		mtrec_schedule_save();
+	}
+#endif
 	return 0;
 }
 
@@ -1109,6 +1400,9 @@ int meshtastic_nodedb_remove(uint32_t node_num)
 		/* Preserve the "entries [0, count) are all used" invariant by
 		 * swapping the last entry into the hole, then shrinking. */
 		size_t last = nodedb_entry_count - 1U;
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+		bool was_protected = node_is_protected(&nodedb_entries[i].node);
+#endif
 
 		if (i != last) {
 			nodedb_entries[i] = nodedb_entries[last];
@@ -1117,6 +1411,13 @@ int meshtastic_nodedb_remove(uint32_t node_num)
 		nodedb_entry_count--;
 		route_health_drop_locked(node_num);
 		k_mutex_unlock(&nodedb_lock);
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+		if (was_protected) {
+			/* A curated node was removed — prune its persisted record. */
+			mtrec_reconcile = true;
+			mtrec_schedule_save();
+		}
+#endif
 		LOG_DBG("NodeDB removed 0x%08x", node_num);
 		return 0;
 	}
@@ -1169,6 +1470,11 @@ void meshtastic_nodedb_reset(bool keep_favorites)
 	nodekeys_reconcile = true;
 #endif
 
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+	/* Any curated node dropped by the reset must have its record pruned. */
+	mtrec_reconcile = true;
+#endif
+
 	k_mutex_unlock(&nodedb_lock);
 
 	LOG_INF("NodeDB reset (%s favorites): %zu node(s) retained",
@@ -1180,6 +1486,13 @@ void meshtastic_nodedb_reset(bool keep_favorites)
 	 * Runs outside the lock (the reconcile callback takes it). */
 	(void)k_work_cancel_delayable(&nodekeys_save_work);
 	nodekeys_do_persist();
+#endif
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+	/* Same synchronous prune+save for curated records: the reset reboot path
+	 * does not flush the mtrec subtree either. Runs outside the lock. */
+	(void)k_work_cancel_delayable(&mtrec_save_work);
+	mtrec_do_persist();
 #endif
 }
 
@@ -1213,6 +1526,15 @@ int meshtastic_nodedb_init(void)
 	 * path. */
 	nodekeys_reconcile = true;
 	nodekeys_schedule_save();
+#endif
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+	/* Restore curated (favorite/ignored) node records into the hot store now the
+	 * settings subsystem is up. Then reconcile so any record whose node is no
+	 * longer curated (e.g. left by an older build) is pruned off the boot path. */
+	(void)settings_load_subtree(MTREC_SUBTREE);
+	mtrec_reconcile = true;
+	mtrec_schedule_save();
 #endif
 
 	return (entry == NULL) ? -ENOMEM : 0;
