@@ -16,7 +16,8 @@ next page. On a board with no `sw0` alias — or with `CONFIG_MESHTASTIC_DISPLAY
 
 The board must expose a `chosen { zephyr,display }` node. The Heltec WiFi
 LoRa 32 **V4** already wires a 128×64 SSD1306 there (`…-common.dtsi`), so only
-the overlay is needed:
+the overlay is needed (board pin map, peripheral polarities, and a pre-flash
+checklist are in [`heltec-v4-hardware.md`](heltec-v4-hardware.md)):
 
 ```
 ./wt manifest ui-test          # if building from a worktree — REQUIRED
