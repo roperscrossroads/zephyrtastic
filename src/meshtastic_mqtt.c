@@ -24,6 +24,8 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include "meshtastic_ext_ram.h"
+
 #if defined(CONFIG_MESHTASTIC_MQTT_TLS)
 #include <zephyr/net/tls_credentials.h>
 #if !defined(CONFIG_MESHTASTIC_MQTT_TLS_NO_VERIFY)
@@ -83,7 +85,9 @@ static struct {
 	bool started;
 	bool disconnect_pending;
 	bool drop_warned; /* one WRN per queue-full episode, not per packet */
-} mqtt_ctx;
+	/* EXT_RAM_BSS_ATTR must sit AFTER the declarator (below): placed after the anonymous
+	 * struct's '}' it binds to the TYPE and is silently ignored (stays in internal DRAM). */
+} mqtt_ctx MESHTASTIC_EXT_RAM_BSS_ATTR; /* ~11.8 KB -> PSRAM on V4 (no-op on V3) */
 
 static struct net_mgmt_event_callback mqtt_net_mgmt_cb;
 static bool mqtt_net_has_ipv4;

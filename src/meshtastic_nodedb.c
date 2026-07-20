@@ -16,23 +16,7 @@
 #include <pb_decode.h>
 #include <pb_encode.h>
 
-#if defined(CONFIG_ESP_SPIRAM)
-#include <esp_attr.h>
-#endif
-
-/* EXT_RAM_BSS_ATTR is gated on CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY, which — a real
- * Kconfig footgun found 2026-07-17 — depends on the vendored ESP-IDF "SPIRAM" symbol, NOT
- * Zephyr's board-level CONFIG_ESP_SPIRAM. On V3 (no PSRAM, ESP_SPIRAM unset) that vendored
- * symbol is still =y, so EXT_RAM_BSS_ATTR is NOT the no-op it looks like — it emits an
- * .ext_ram.bss section with nowhere to go (V3's linker script has no ext_ram output region
- * at all), and the build fails to link (".ext_ram.bss.N will not fit in region IDT_LIST").
- * Gate on CONFIG_ESP_SPIRAM directly instead — the symbol that actually reflects whether
- * THIS board has a real PSRAM-backed linker region. */
-#if defined(CONFIG_ESP_SPIRAM)
-#define MESHTASTIC_EXT_RAM_BSS_ATTR EXT_RAM_BSS_ATTR
-#else
-#define MESHTASTIC_EXT_RAM_BSS_ATTR
-#endif
+#include "meshtastic_ext_ram.h"
 
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>

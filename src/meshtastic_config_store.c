@@ -17,6 +17,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_ext_ram.h"
 #include "meshtastic_settings.h"
 
 #include <zephyr/logging/log.h>
@@ -108,7 +109,10 @@ static struct {
 	meshtastic_ModuleConfig modules[ARRAY_SIZE(module_names)];
 	bool has_fixed_position;
 	meshtastic_Position fixed_position;
-} store;
+	/* EXT_RAM_BSS_ATTR goes AFTER the declarator (below) — after the anonymous struct '}'
+	 * it would bind to the TYPE and be ignored (stay in internal DRAM). */
+} store MESHTASTIC_EXT_RAM_BSS_ATTR; /* ~9.2 KB -> PSRAM on V4 (no-op on V3); records are
+                                      * pb_encoded to a local buffer before any NVS write */
 
 static void store_lock(void)
 {
