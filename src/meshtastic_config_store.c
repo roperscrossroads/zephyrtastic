@@ -22,8 +22,9 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-#define STORE_RECORD_VERSION    1U
-#define STORE_RECORD_HEADER_LEN 4U
+#define STORE_RECORD_VERSION     1U
+#define STORE_RECORD_VERSION_MIN 1U /* oldest record version still accepted on load */
+#define STORE_RECORD_HEADER_LEN  4U
 #define OWNER_LONG_NAME_LEN     40U
 #define OWNER_SHORT_NAME_LEN    5U
 
@@ -232,7 +233,18 @@ static int decode_record(const pb_msgdesc_t *fields, const void *buf, size_t len
 		return -EINVAL;
 	}
 
-	if (((const uint8_t *)buf)[0] != STORE_RECORD_VERSION) {
+	/* Accept any record version in [MIN, CUR] rather than an exact match. The
+	 * record framing (this header + a length-prefixed nanopb payload) is
+	 * self-describing, and nanopb already absorbs proto field evolution (unknown
+	 * fields ignored, missing fields defaulted), so adding a config field needs
+	 * no version bump. Bump STORE_RECORD_VERSION only for a change to the framing
+	 * itself, and advance STORE_RECORD_VERSION_MIN only to drop a format that can
+	 * no longer be read. Because a bump keeps loading every version back to MIN,
+	 * it never silently reverts stored config to compile-time defaults — which
+	 * for config/security would regenerate the X25519 identity and break PKC with
+	 * every peer that cached the old key. */
+	if (((const uint8_t *)buf)[0] < STORE_RECORD_VERSION_MIN ||
+	    ((const uint8_t *)buf)[0] > STORE_RECORD_VERSION) {
 		return -EINVAL;
 	}
 

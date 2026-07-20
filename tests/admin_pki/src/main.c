@@ -590,3 +590,49 @@ ZTEST(admin_pki, test_favorite_node_record_persists)
 	(void)meshtastic_nodedb_remove(fav);
 	(void)settings_delete("mtrec/0fa00001");
 }
+
+/* ---- Upgrade safety: config record version window ------------------------ */
+
+/* decode_record accepts a version WINDOW, not an exact match, so bumping the
+ * record version never silently drops older records back to compile-time
+ * defaults (which for config/security would regenerate the node identity). A
+ * record stamped within [MIN, CUR] loads; one stamped outside is refused
+ * without disturbing the value already held. */
+ZTEST(admin_pki, test_config_record_version_window)
+{
+	uint8_t buf[MESHTASTIC_STORE_VALUE_MAX];
+	meshtastic_Config pos = meshtastic_Config_init_zero;
+	meshtastic_Config got = meshtastic_Config_init_zero;
+	int len;
+
+	pos.which_payload_variant = meshtastic_Config_position_tag;
+	pos.payload_variant.position.position_broadcast_secs = 1234U;
+	zassert_ok(meshtastic_config_store_set_config(&pos), "set position config failed");
+
+	/* Encode the record as NVS would. Byte 0 is the record version. */
+	len = meshtastic_config_store_setting_get("config/position", buf, sizeof(buf));
+	zassert_true(len > 0, "encode failed (%d)", len);
+
+	/* The current version loads and restores the value. */
+	pos.payload_variant.position.position_broadcast_secs = 0U;
+	zassert_ok(meshtastic_config_store_set_config(&pos), "reset value failed");
+	zassert_ok(meshtastic_config_store_setting_set("config/position", buf, (size_t)len),
+		   "current-version record must load");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &got));
+	zassert_equal(got.payload_variant.position.position_broadcast_secs, 1234U,
+		      "value not restored from current-version record");
+
+	/* A version above the accepted window is refused, and the refusal leaves the
+	 * in-RAM value intact (no revert-to-default). */
+	buf[0] = 0xFFU;
+	zassert_equal(meshtastic_config_store_setting_set("config/position", buf, (size_t)len),
+		      -EINVAL, "a future-version record must be refused");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &got));
+	zassert_equal(got.payload_variant.position.position_broadcast_secs, 1234U,
+		      "a refused record must not wipe the held value");
+
+	/* A version below the window is likewise refused. */
+	buf[0] = 0x00U;
+	zassert_equal(meshtastic_config_store_setting_set("config/position", buf, (size_t)len),
+		      -EINVAL, "a too-old-version record must be refused");
+}
