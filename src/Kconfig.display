@@ -38,6 +38,32 @@ config MESHTASTIC_DISPLAY_BUTTON
 	  devicetree node. If the board has no sw0 alias, or this is disabled, the
 	  UI auto-cycles its pages on a timer instead.
 
+config MESHTASTIC_DISPLAY_BATTERY
+	bool "Show battery voltage/level from a voltage-divider (vbatt)"
+	default y
+	select ADC
+	help
+	  Read the board's battery voltage-divider (the `vbatt` node, ADC1 ch0 on
+	  the Heltec V4) and show voltage + estimated charge on the Status page.
+	  Selects the ADC subsystem; the SoC ADC driver auto-enables from the
+	  devicetree node. Compiled out when the board has no `vbatt` node.
+
+	  On the V4 the divider is gated by ADC_CTRL (GPIO37); the UI drives that
+	  line high only around each sample. State-of-charge uses the same OCV
+	  lookup curve as the upstream firmware.
+
+config MESHTASTIC_DISPLAY_BATTERY_CAL_PERMILLE
+	int "Battery ADC calibration factor (parts per 1000)"
+	default 1045
+	range 800 1300
+	depends on MESHTASTIC_DISPLAY_BATTERY
+	help
+	  Empirical correction applied on top of the devicetree divider ratio,
+	  matching the upstream firmware's ADC_MULTIPLIER. The Heltec V4 uses
+	  4.9 * 1.045, and the devicetree already encodes the 4.9, so this is the
+	  1.045 → 1045. The non-ADC_CTRL V4-R8 board uses 1035. VERIFY(hardware):
+	  confirm against a known battery voltage and adjust if it reads off.
+
 config MESHTASTIC_DISPLAY_REFRESH_MS
 	int "Screen refresh interval (ms)"
 	default 1000

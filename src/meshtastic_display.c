@@ -53,6 +53,17 @@ LOG_MODULE_REGISTER(meshtastic_display, CONFIG_MESHTASTIC_LOG_LEVEL);
 #include <zephyr/sys/atomic.h>
 #endif
 
+/* Battery UI is compiled in only when enabled and the board wires a vbatt
+ * voltage-divider node. */
+#define HAS_BATTERY \
+	(IS_ENABLED(CONFIG_MESHTASTIC_DISPLAY_BATTERY) && DT_NODE_EXISTS(DT_NODELABEL(vbatt)))
+
+#if HAS_BATTERY
+#include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/adc/voltage_divider.h>
+#include <zephyr/drivers/gpio.h>
+#endif
+
 int meshtastic_display_init(void);
 
 #if !DT_HAS_CHOSEN(zephyr_display)
@@ -99,6 +110,120 @@ static void draw_row(uint8_t row, const char *fmt, ...)
 
 	cfb_print(disp, buf, 0, (int16_t)(row * font_h));
 }
+
+#if HAS_BATTERY
+
+/* VBAT voltage-divider (ADC1 ch0). The esp32 ADC driver returns a calibrated
+ * pseudo-raw, so adc_raw_to_millivolts_dt yields true pin millivolts. */
+static const struct voltage_divider_dt_spec vbatt =
+	VOLTAGE_DIVIDER_DT_SPEC_GET(DT_NODELABEL(vbatt));
+
+#if DT_NODE_EXISTS(DT_NODELABEL(adc_ctrl))
+/* The V4 gates the divider behind ADC_CTRL (GPIO37); drive it high only while
+ * sampling. Absent on the V4-R8, where the divider is always connected. The
+ * adc_ctrl power-domain is inert without PM_DEVICE, so the UI owns this line. */
+static const struct gpio_dt_spec adc_ctrl_en =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(adc_ctrl), enable_gpios);
+#define HAS_ADC_CTRL 1
+#else
+#define HAS_ADC_CTRL 0
+#endif
+
+static bool batt_ready;
+static int batt_mv_cached = -1;
+static int64_t batt_last_ms;
+
+static void battery_setup(void)
+{
+	if (!adc_is_ready_dt(&vbatt.port) || adc_channel_setup_dt(&vbatt.port) != 0) {
+		LOG_WRN("vbatt ADC not ready; battery UI off");
+		return;
+	}
+#if HAS_ADC_CTRL
+	if (gpio_is_ready_dt(&adc_ctrl_en)) {
+		(void)gpio_pin_configure_dt(&adc_ctrl_en, GPIO_OUTPUT_INACTIVE);
+	}
+#endif
+	batt_ready = true;
+}
+
+/* Battery millivolts (single cell), or -1 on error. Cached for 5 s so button
+ * traffic does not re-sample (and re-toggle ADC_CTRL) on every redraw. */
+static int battery_millivolts(void)
+{
+	int64_t now = k_uptime_get();
+	uint16_t raw = 0;
+	int32_t mv;
+	struct adc_sequence seq = {
+		.buffer = &raw,
+		.buffer_size = sizeof(raw),
+	};
+
+	if (!batt_ready) {
+		return -1;
+	}
+	if (batt_mv_cached >= 0 && (now - batt_last_ms) < 5000) {
+		return batt_mv_cached;
+	}
+	batt_last_ms = now;
+
+#if HAS_ADC_CTRL
+	if (gpio_is_ready_dt(&adc_ctrl_en)) {
+		(void)gpio_pin_set_dt(&adc_ctrl_en, 1);
+		k_sleep(K_MSEC(2)); /* let the divider settle */
+	}
+#endif
+
+	batt_mv_cached = -1;
+	if (adc_sequence_init_dt(&vbatt.port, &seq) == 0 &&
+	    adc_read_dt(&vbatt.port, &seq) == 0) {
+		mv = raw;
+		if (adc_raw_to_millivolts_dt(&vbatt.port, &mv) == 0) {
+			/* x full/output (4.9) then the empirical factor (x1.045 on V4). */
+			(void)voltage_divider_scale_dt(&vbatt, &mv);
+			mv = (int32_t)((int64_t)mv *
+				       CONFIG_MESHTASTIC_DISPLAY_BATTERY_CAL_PERMILLE / 1000);
+			batt_mv_cached = mv;
+		}
+	}
+
+#if HAS_ADC_CTRL
+	if (gpio_is_ready_dt(&adc_ctrl_en)) {
+		(void)gpio_pin_set_dt(&adc_ctrl_en, 0);
+	}
+#endif
+
+	return batt_mv_cached;
+}
+
+/* Open-circuit-voltage lookup -> state of charge (0-100), or -1 for "no
+ * battery". Matches the upstream firmware curve (firmware/src/Power.{h,cpp}):
+ * single-cell LiPo, integer math. */
+static int battery_percent(int mv)
+{
+	static const uint16_t ocv[] = {
+		4190, 4050, 3990, 3890, 3800, 3720, 3630, 3530, 3420, 3300, 3100,
+	};
+	const int n = (int)ARRAY_SIZE(ocv);
+
+	if (mv < (int)ocv[n - 1] - 500) {
+		return -1; /* below the "no battery installed" threshold (2600 mV) */
+	}
+	for (int i = 0; i < n; i++) {
+		if (mv >= (int)ocv[i]) {
+			if (i == 0) {
+				return 100;
+			}
+			int seg = (int)ocv[i - 1] - (int)ocv[i];
+			int soc = 10 * (n - 1 - i) + (10 * (mv - (int)ocv[i])) / seg;
+
+			return CLAMP(soc, 0, 100);
+		}
+	}
+	return 0;
+}
+
+#endif /* HAS_BATTERY */
 
 /* Index of each page within pages[]/page_names[] (keep in sync with them). The
  * Nodes page is navigated specially, so its index is referenced by name. */
@@ -263,8 +388,24 @@ static void page_status(void)
 		return;
 	}
 
-	draw_row(0, "TX%u RX%u", st.tx_packets, st.rx_packets);
-	draw_row(1, "RSSI %d", st.last_rssi);
+#if HAS_BATTERY
+	{
+		int mv = battery_millivolts();
+		int pct = (mv >= 0) ? battery_percent(mv) : -1;
+
+		if (mv < 0) {
+			draw_row(0, "Bat: n/a");
+		} else if (pct < 0) {
+			draw_row(0, "Bat: no batt");
+		} else {
+			draw_row(0, "Bat %u.%uV %d%%", (unsigned int)(mv / 1000),
+				 (unsigned int)((mv % 1000) / 100), pct);
+		}
+	}
+#else
+	draw_row(0, "RSSI %d", st.last_rssi);
+#endif
+	draw_row(1, "TX%u RX%u", st.tx_packets, st.rx_packets);
 	draw_row(2, "Up%us %s", (unsigned int)(k_uptime_get() / 1000),
 		 st.ble_connected ? "BLE" : "");
 }
@@ -710,6 +851,10 @@ int meshtastic_display_init(void)
 
 	cfb_framebuffer_clear(disp, true);
 	(void)display_blanking_off(disp);
+
+#if HAS_BATTERY
+	battery_setup();
+#endif
 
 	LOG_INF("display UI up: %s %ux%u, font %ux%u -> %ux%u chars, %s", disp->name,
 		disp_w, disp_h, font_w, font_h, cols, rows,
