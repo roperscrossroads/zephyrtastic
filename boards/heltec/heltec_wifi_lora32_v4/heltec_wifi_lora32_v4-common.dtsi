@@ -159,10 +159,15 @@
 };
 
 /*
- * On-board L76K GNSS (NMEA over UART). The generic NMEA driver handles the
- * data stream; the L76K's EN / STANDBY / RESET control lines are board GPIOs
- * driven per-revision (see the per-board .dts) — their pins differ on r8.
- * VERIFY(hardware): baud (L76K defaults to 9600) and that EN is asserted.
+ * GNSS is an OPTIONAL pluggable module, not soldered on the V4. The board
+ * itself provides the SH1.25-8Pin GNSS connector, an enable/standby control
+ * GPIO (driven by the per-board .dts — a gps_standby hog; pins move on r8),
+ * and this NMEA UART. Some V4 kits include an external GPS board (typically a
+ * Quectel L76K or compatible NMEA receiver) that plugs in here. The generic
+ * NMEA driver handles any such receiver; with no module connected it simply
+ * never reports a fix, which is harmless.
+ * VERIFY(hardware): baud (L76K defaults to 9600) and that the standby/enable
+ * line is asserted.
  */
 &uart1 {
 	status = "okay";
