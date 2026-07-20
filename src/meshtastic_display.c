@@ -100,6 +100,22 @@ static void draw_row(uint8_t row, const char *fmt, ...)
 	cfb_print(disp, buf, 0, (int16_t)(row * font_h));
 }
 
+/* Index of each page within pages[]/page_names[] (keep in sync with them). The
+ * Nodes page is navigated specially, so its index is referenced by name. */
+enum {
+	PAGE_DEVICE,
+	PAGE_NODES,
+	PAGE_STATUS,
+	PAGE_RADIO,
+	PAGE_GPS,
+	PAGE_TIME,
+};
+
+/* When the Nodes page is being browsed, report which node index is highlighted
+ * (or -1) and window the visible list via @p first. Defined per build variant:
+ * the button build reads the nav cursor, the auto-cycle build has none. */
+static int nodes_cursor(size_t n, uint8_t list_rows, uint8_t *first);
+
 static void page_device(void)
 {
 	const char *sn = meshtastic_short_name();
@@ -116,6 +132,9 @@ static void page_device(void)
 static void page_nodes(void)
 {
 	size_t n = meshtastic_nodedb_count();
+	uint8_t list_rows = (content_rows > 1U) ? (uint8_t)(content_rows - 1U) : 0U;
+	uint8_t first = 0;
+	int sel = -1; /* index of the highlighted node row, or -1 for none */
 
 	draw_row(0, "Nodes: %u", (unsigned int)n);
 
@@ -124,24 +143,24 @@ static void page_nodes(void)
 		return;
 	}
 
-	for (uint8_t r = 1; r < content_rows && (size_t)(r - 1) < n; r++) {
-		struct meshtastic_nodedb_node node;
-		char fav;
+	sel = nodes_cursor(n, list_rows, &first);
 
-		if (meshtastic_nodedb_get_by_index((size_t)(r - 1), &node) != 0) {
+	for (uint8_t i = 0; i < list_rows && (size_t)(first + i) < n; i++) {
+		struct meshtastic_nodedb_node node;
+		char fav, cur;
+
+		if (meshtastic_nodedb_get_by_index((size_t)(first + i), &node) != 0) {
 			break;
 		}
 
+		cur = ((int)(first + i) == sel) ? '>' : ' ';
 		/* '*' marks a favourite node (upstream device-ui sorts these first). */
 		fav = node.is_favorite ? '*' : ' ';
 
-		/* SNR is a float; format as whole dB to avoid pulling in FP printf. */
-		if (node.has_hops_away) {
-			draw_row(r, "%c%-4s%+3d h%u", fav, node.short_name, (int)node.snr,
-				 node.hops_away);
-		} else {
-			draw_row(r, "%c%-4s%+3d", fav, node.short_name, (int)node.snr);
-		}
+		/* cursor + favourite + name + SNR (whole dB — hops move to the detail
+		 * view). SNR is a float, cast to int to avoid pulling in FP printf. */
+		draw_row((uint8_t)(1 + i), "%c%c%-4s%+4d", cur, fav, node.short_name,
+			 (int)node.snr);
 	}
 }
 
@@ -279,14 +298,45 @@ BUILD_ASSERT(ARRAY_SIZE(pages) == ARRAY_SIZE(page_names),
 
 #if HAS_BUTTON
 
-/* Footer choices on a page, cycled by short press. */
+/* Footer choices on a page, cycled by short press. On most screens the focus
+ * ring is just these two; the Nodes page prepends one entry per node. */
 enum page_focus { FOCUS_BACK = 0, FOCUS_NEXT, FOCUS_COUNT };
 
-/* Top-level UI state: the launcher menu, or an open page. */
-static enum { UI_MENU, UI_PAGE } ui_state = UI_MENU;
+/* Top-level UI state: launcher menu, an open page, or a node-detail view. */
+static enum { UI_MENU, UI_PAGE, UI_NODE_DETAIL } ui_state = UI_MENU;
 static uint8_t menu_cursor;              /* highlighted launcher entry */
 static uint8_t cur_page;                 /* page shown in UI_PAGE */
-static uint8_t page_focus = FOCUS_BACK;  /* highlighted footer choice */
+static uint8_t page_focus = FOCUS_BACK;  /* highlighted choice on a page/detail */
+static uint8_t detail_idx;               /* node index shown in UI_NODE_DETAIL */
+
+/* Short-press focus positions on the current screen. The Nodes page ring is
+ * every node (each openable) followed by the Back and Next footer choices;
+ * every other page and the detail view has only the two footer choices. */
+static uint8_t focus_count(void)
+{
+	if (ui_state == UI_PAGE && cur_page == PAGE_NODES) {
+		return (uint8_t)(meshtastic_nodedb_count() + FOCUS_COUNT);
+	}
+
+	return FOCUS_COUNT;
+}
+
+static int nodes_cursor(size_t n, uint8_t list_rows, uint8_t *first)
+{
+	*first = 0;
+
+	/* Only the Nodes page, and only when the focus is on a node (below the
+	 * Back/Next footer choices), gets a cursor. */
+	if (ui_state != UI_PAGE || cur_page != PAGE_NODES || page_focus >= n) {
+		return -1;
+	}
+
+	if (list_rows > 0 && page_focus >= list_rows) {
+		*first = (uint8_t)(page_focus - (list_rows - 1U));
+	}
+
+	return (int)page_focus;
+}
 
 /* Draw the launcher: a windowed list of pages with a '>' cursor. */
 static void render_menu(void)
@@ -304,12 +354,85 @@ static void render_menu(void)
 	}
 }
 
-/* Draw the Back/Next footer, highlighting the focused choice. */
+/* Map a device role to a 3-char code for the node-detail view. */
+static const char *role_abbrev(uint8_t role)
+{
+	switch (role) {
+	case meshtastic_Config_DeviceConfig_Role_CLIENT:         return "CLI";
+	case meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE:    return "MUT";
+	case meshtastic_Config_DeviceConfig_Role_ROUTER:         return "RTR";
+	case meshtastic_Config_DeviceConfig_Role_ROUTER_CLIENT:  return "RTC";
+	case meshtastic_Config_DeviceConfig_Role_REPEATER:       return "REP";
+	case meshtastic_Config_DeviceConfig_Role_TRACKER:        return "TRK";
+	case meshtastic_Config_DeviceConfig_Role_SENSOR:         return "SEN";
+	case meshtastic_Config_DeviceConfig_Role_TAK:            return "TAK";
+	case meshtastic_Config_DeviceConfig_Role_CLIENT_HIDDEN:  return "HID";
+	case meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND: return "LAF";
+	case meshtastic_Config_DeviceConfig_Role_TAK_TRACKER:    return "TKT";
+	case meshtastic_Config_DeviceConfig_Role_ROUTER_LATE:    return "RTL";
+	default:                                                 return "?";
+	}
+}
+
+/* Full-screen details of the node at detail_idx (drawn under the footer). */
+static void render_node_detail(void)
+{
+	struct meshtastic_nodedb_node node;
+	const char *ln;
+
+	if (meshtastic_nodedb_get_by_index((size_t)detail_idx, &node) != 0) {
+		draw_row(0, "(node gone)");
+		return;
+	}
+
+	ln = (node.long_name[0] != '\0') ? node.long_name : node.short_name;
+
+	draw_row(0, "%s", ln);
+	draw_row(1, "%08X %s", node.num, role_abbrev(node.role));
+
+	/* SNR (whole dB, no FP), hops, and flags: M = heard via MQTT, K = public
+	 * key known (PKC-capable). */
+	if (node.has_hops_away) {
+		draw_row(2, "%+ddB h%u %c%c", (int)node.snr, node.hops_away,
+			 node.via_mqtt ? 'M' : ' ', node.public_key_len ? 'K' : ' ');
+	} else {
+		draw_row(2, "%+ddB %c%c", (int)node.snr, node.via_mqtt ? 'M' : ' ',
+			 node.public_key_len ? 'K' : ' ');
+	}
+}
+
+/* Draw the Back/Next footer, highlighting whichever choice has focus (on the
+ * Nodes page the focus may instead be on a node, so neither is marked). */
 static void render_footer(void)
 {
+	uint8_t back = (uint8_t)(focus_count() - FOCUS_COUNT + FOCUS_BACK);
+
 	draw_row((uint8_t)(rows - 1), "%cBack  %cNext",
-		 page_focus == FOCUS_BACK ? '>' : ' ',
-		 page_focus == FOCUS_NEXT ? '>' : ' ');
+		 page_focus == back ? '>' : ' ',
+		 page_focus == (uint8_t)(back + 1U) ? '>' : ' ');
+}
+
+/* Keep the focus/index valid against the live NodeDB, which the mesh threads
+ * mutate underneath us. */
+static void clamp_focus(void)
+{
+	if (ui_state == UI_NODE_DETAIL) {
+		size_t n = meshtastic_nodedb_count();
+
+		if (n == 0) {
+			ui_state = UI_PAGE;
+			cur_page = PAGE_NODES;
+			page_focus = FOCUS_BACK;
+		} else if (detail_idx >= n) {
+			detail_idx = (uint8_t)(n - 1);
+		}
+	} else if (ui_state == UI_PAGE) {
+		uint8_t fc = focus_count();
+
+		if (page_focus >= fc) {
+			page_focus = (uint8_t)(fc - 1); /* fc >= FOCUS_COUNT >= 2 */
+		}
+	}
 }
 
 static void nav_short(void)
@@ -317,20 +440,47 @@ static void nav_short(void)
 	if (ui_state == UI_MENU) {
 		menu_cursor = (uint8_t)((menu_cursor + 1U) % NUM_PAGES);
 	} else {
-		page_focus = (uint8_t)((page_focus + 1U) % FOCUS_COUNT);
+		page_focus = (uint8_t)((page_focus + 1U) % focus_count());
 	}
 }
 
 static void nav_long(void)
 {
+	uint8_t back;
+
 	if (ui_state == UI_MENU) {
 		cur_page = menu_cursor;
 		page_focus = FOCUS_BACK;
 		ui_state = UI_PAGE;
-	} else if (page_focus == FOCUS_BACK) {
+		return;
+	}
+
+	if (ui_state == UI_NODE_DETAIL) {
+		size_t n = meshtastic_nodedb_count();
+
+		if (page_focus == FOCUS_BACK || n == 0) {
+			ui_state = UI_PAGE; /* return to the node list, cursor on this node */
+			cur_page = PAGE_NODES;
+			page_focus = detail_idx;
+		} else { /* FOCUS_NEXT: flip to the next node */
+			detail_idx = (uint8_t)((detail_idx + 1U) % n);
+		}
+		return;
+	}
+
+	/* ui_state == UI_PAGE */
+	back = (uint8_t)(focus_count() - FOCUS_COUNT + FOCUS_BACK);
+
+	if (cur_page == PAGE_NODES && page_focus < back) {
+		/* Focus is on a node (below the footer): open its detail view. */
+		detail_idx = page_focus;
+		page_focus = FOCUS_NEXT; /* default focus = flip to the next node */
+		ui_state = UI_NODE_DETAIL;
+	} else if (page_focus == back) {
 		ui_state = UI_MENU;
-	} else { /* FOCUS_NEXT */
+	} else { /* Next */
 		cur_page = (uint8_t)((cur_page + 1U) % NUM_PAGES);
+		page_focus = FOCUS_BACK;
 	}
 }
 
@@ -338,11 +488,19 @@ static void render_current(void)
 {
 	cfb_framebuffer_clear(disp, false);
 
-	if (ui_state == UI_MENU) {
+	switch (ui_state) {
+	case UI_MENU:
 		render_menu();
-	} else {
+		break;
+	case UI_NODE_DETAIL:
+		render_node_detail();
+		render_footer();
+		break;
+	case UI_PAGE:
+	default:
 		pages[cur_page]();
 		render_footer();
+		break;
 	}
 
 	cfb_framebuffer_finalize(disp);
@@ -420,10 +578,14 @@ static void display_loop(void *a, void *b, void *c)
 			if (blanked) {
 				(void)display_blanking_off(disp);
 				blanked = false;
-			} else if (ev == UI_EV_SHORT) {
-				nav_short();
-			} else if (ev == UI_EV_LONG) {
-				nav_long();
+			} else {
+				/* Keep the cursor valid against the live NodeDB, then act. */
+				clamp_focus();
+				if (ev == UI_EV_SHORT) {
+					nav_short();
+				} else if (ev == UI_EV_LONG) {
+					nav_long();
+				}
 			}
 			last_activity = k_uptime_get();
 		}
@@ -435,12 +597,22 @@ static void display_loop(void *a, void *b, void *c)
 		}
 
 		if (!blanked) {
+			clamp_focus();
 			render_current();
 		}
 	}
 }
 
 #else /* !HAS_BUTTON: auto-cycle the pages on a timer */
+
+/* No cursor without a button: the node list is purely informational. */
+static int nodes_cursor(size_t n, uint8_t list_rows, uint8_t *first)
+{
+	ARG_UNUSED(n);
+	ARG_UNUSED(list_rows);
+	*first = 0;
+	return -1;
+}
 
 static void render(uint8_t page)
 {
