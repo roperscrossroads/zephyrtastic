@@ -119,10 +119,11 @@ static enum relay_dupe_action relay_dupe_action(uint32_t from, uint32_t to);
 /*
  * Flood-redundancy measurement.
  *
- * We relay immediately and synchronously, with no delay and no way to cancel a
- * queued relay, so every node that hears a broadcast transmits. This counts the
- * cases where that was redundant: we relayed (src,id), and afterwards heard a
- * *peer* relay the same frame.
+ * Relays now flow through the contention window and can be cancelled or
+ * late-deferred when we overhear a peer's copy first (see relay_dupe_action).
+ * This counts the cases where a relay we still committed turned out redundant:
+ * we relayed (src,id), and afterwards heard a *peer* relay the same frame. The
+ * common residual case is our copy already being on air when the peer's arrives.
  *
  * Two things are deliberately excluded, because counting them would inflate the
  * result and argue for work that would not actually help:
