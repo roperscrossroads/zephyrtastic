@@ -1,0 +1,65 @@
+/*
+ * Pin control for the Heltec Vision Master E290 (HT-VME290).
+ *
+ * Three buses plus the console UART:
+ *   - spim2  LoRa SX1262  : SCK9  / MOSI10 / MISO11   (same map as V3/V4)
+ *   - spim3  E-Ink panel  : SCK2  / MOSI1            (write-only; no MISO)
+ *   - i2c0   QuickLink     : SDA39 / SCL38            (SH2.0-4P sensor connector)
+ *   - uart0  header/console: TX43  / RX44
+ *
+ * Pin source: Meshtastic reference variant
+ * (firmware/variants/esp32s3/heltec_vision_master_e290/variant.h + pins_arduino.h),
+ * corroborated pin-for-pin by the Heltec factory test.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/pinctrl/esp32s3-pinctrl.h>
+
+&pinctrl {
+	uart0_default: uart0_default {
+		group1 {
+			pinmux = <UART0_TX_GPIO43>;
+			output-high;
+		};
+
+		group2 {
+			pinmux = <UART0_RX_GPIO44>;
+			bias-pull-up;
+		};
+	};
+
+	i2c0_default: i2c0_default {
+		group1 {
+			pinmux = <I2C0_SDA_GPIO39>,
+				 <I2C0_SCL_GPIO38>;
+			drive-open-drain;
+		};
+	};
+
+	/* LoRa SX1262 — system SPI (SPI2). MISO is read, MOSI driven low idle. */
+	spim2_default: spim2_default {
+		group1 {
+			pinmux = <SPIM2_MISO_GPIO11>,
+				 <SPIM2_SCLK_GPIO9>;
+		};
+
+		group2 {
+			pinmux = <SPIM2_MOSI_GPIO10>;
+			output-low;
+		};
+	};
+
+	/* E-Ink panel — a SEPARATE SPI (SPI3 / HSPI). Write-only: SCLK + MOSI, no
+	 * MISO (the panel has no data-out line). */
+	spim3_default: spim3_default {
+		group1 {
+			pinmux = <SPIM3_SCLK_GPIO2>;
+		};
+
+		group2 {
+			pinmux = <SPIM3_MOSI_GPIO1>;
+			output-low;
+		};
+	};
+};

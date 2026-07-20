@@ -1,0 +1,278 @@
+/*
+ * Heltec Vision Master E290 (HT-VME290) — PROCPU.
+ * ESP32-S3R8 (8 MB octal PSRAM) + SX1262 + 2.9" B/W E-Ink (296x128).
+ *
+ * A "Vision Master" board is structurally a cross of the other Heltecs:
+ *   - SoC        : ESP32-S3R8, octal PSRAM        (like the V4-R8)
+ *   - radio      : BARE SX1262, no FEM, 21 dBm    (like the V3, NOT the V4)
+ *   - display    : SSD1680-class e-ink on its own SPI  (new; not the OLED)
+ *   - GNSS       : none on the standard E290       (a separate V0.4.1 rev adds it)
+ *   - console    : native USB-Serial-JTAG, no CP2102 (like the V4)
+ *
+ * Pins verified against the Meshtastic reference variant
+ * (firmware/variants/esp32s3/heltec_vision_master_e290/) and the Heltec factory
+ * test; the two agree pin-for-pin.
+ *
+ * FLASH SIZE: the Meshtastic build treats this board as 8 MB flash (its board
+ * JSON: flash_size 8MB, partitions default_8MB) — hence esp32s3_wroom_n8r8 +
+ * the 8M partition table. VERIFY(hardware) against the actual module before
+ * trusting the flash layout; if the unit is 16 MB, switch to _n16r8 + the 16M
+ * partitions (as the V4-R8 board does).
+ *
+ * The display + several pins are VERIFY(hardware) — this is a bring-up
+ * scaffold; e-ink orientation/offset can only be confirmed on a real panel.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/dts-v1/;
+
+#include <espressif/esp32s3/esp32s3_wroom_n8r8.dtsi>
+#include "heltec_vision_master_e290-pinctrl.dtsi"
+#include <zephyr/dt-bindings/lora/sx126x.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <espressif/partitions_0x0_amp_8M.dtsi>
+
+/ {
+	model = "Heltec Vision Master E290 PROCPU";
+	compatible = "espressif,esp32s3";
+
+	aliases {
+		led0 = &led0;
+		uart-0 = &uart0;
+		i2c-0 = &i2c0;
+		lora0 = &lora0;
+		sw0 = &button0;
+		watchdog0 = &wdt0;
+		die-temp0 = &coretemp;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		/* GPIO45. "Not populated on the earliest board variant" (variant.h). */
+		led0: led {
+			gpios = <&gpio1 13 GPIO_ACTIVE_HIGH>;	/* GPIO45 */
+			label = "White LED";
+		};
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+
+		/* Main PRG/BOOT button (also the wake button). */
+		button0: button_0 {
+			gpios = <&gpio0 0 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "USER Key";
+			zephyr,code = <INPUT_KEY_0>;
+		};
+
+		/* Second built-in button (InkHUD "next tile" on Meshtastic).
+		 * VERIFY(hardware): whether GPIO21 has an external pull-up. */
+		button1: button_1 {
+			gpios = <&gpio0 21 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "AUX Key";
+			zephyr,code = <INPUT_KEY_1>;
+		};
+	};
+
+	/*
+	 * Battery sense: plain resistor divider on GPIO7 (ADC1 ch6). No fuel-gauge
+	 * IC. The divider is gated by ADC_CTRL (GPIO46, active-high) — same 100k/390k
+	 * (ratio 4.9) as the other Heltecs (Meshtastic multiplier 4.9*1.03).
+	 */
+	vbatt: vbatt {
+		compatible = "voltage-divider";
+		io-channels = <&adc1 6>;
+		output-ohms = <100000>;
+		full-ohms = <(100000 + 390000)>;
+		power-domains = <&adc_ctrl>;
+	};
+
+	adc_ctrl: adc_ctrl {
+		compatible = "power-domain-gpio";
+		enable-gpios = <&gpio1 14 GPIO_ACTIVE_HIGH>;	/* GPIO46, ADC_CTRL_ENABLED=HIGH */
+		#power-domain-cells = <0>;
+		label = "ADC Control";
+	};
+
+	/*
+	 * Vext (GPIO18, active-HIGH — note: the OPPOSITE polarity to V3/V4, which are
+	 * active-low). Powers the E-Ink panel and the 3.3 V QuickLink sensor rail. The
+	 * power-domain-gpio driver drives it to its active level at init, so the panel
+	 * is powered at boot without an app write (needs CONFIG_POWER_DOMAIN[_GPIO],
+	 * forced on in Kconfig.defconfig). Do NOT trust the vendor wiki FAQ's
+	 * "GPIO21 active-low" note — that is a generic ESP32 page, wrong for the E290.
+	 */
+	vext_ctrl: vext_ctrl {
+		compatible = "power-domain-gpio";
+		enable-gpios = <&gpio0 18 GPIO_ACTIVE_HIGH>;	/* GPIO18, VEXT_ON_VALUE=HIGH */
+		#power-domain-cells = <0>;
+		label = "Vext Control";
+	};
+
+	chosen {
+		zephyr,sram = &sram1;
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,bt-hci = &esp32_bt_hci;
+		zephyr,display = &e290_eink;
+	};
+
+	/*
+	 * E-Ink is on SPI3 through a MIPI-DBI shim (the Zephyr ssd16xx driver is a
+	 * MIPI-DBI device). The DEPG0290BNS800 panel is an SSD1680-class controller;
+	 * its full-refresh waveform comes from the controller's OTP, so no manual LUT
+	 * is needed (empty `full`/`partial` profiles — `partial` present so partial
+	 * refresh is enabled using the OTP defaults).
+	 */
+	mipi_dbi_eink: mipi-dbi {
+		compatible = "zephyr,mipi-dbi-spi";
+		spi-dev = <&spi3>;
+		dc-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;		/* PIN_EINK_DC = GPIO4 */
+		reset-gpios = <&gpio0 5 GPIO_ACTIVE_LOW>;	/* PIN_EINK_RES = GPIO5 */
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		e290_eink: ssd16xxfb@0 {
+			compatible = "solomon,ssd1680";
+			mipi-max-frequency = <6000000>;
+			reg = <0>;
+			/*
+			 * Native panel geometry is 128(W) x 296(H) portrait. The board is
+			 * used landscape (296x128); rotation is applied here.
+			 * VERIFY(hardware): orientation and the 1-byte X RAM offset the
+			 * Meshtastic driver applies (DEPG0290BNS800: bufferOffsetX=1) — an
+			 * 8-px horizontal shift is the symptom if it is needed and missing.
+			 */
+			width = <128>;
+			height = <296>;
+			rotation = <90>;
+			busy-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;	/* PIN_EINK_BUSY = GPIO6, active-high */
+			power-domains = <&vext_ctrl>;
+
+			full {
+			};
+
+			partial {
+			};
+		};
+	};
+};
+
+&adc1 {
+	status = "okay";
+};
+
+/* Native USB console/shell (no CP2102 on this board). */
+&usb_serial {
+	status = "okay";
+};
+
+/* Header-pin UART (console goes over native USB above). */
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+/* QuickLink SH2.0-4P sensor connector (powered by Vext). No sensors by default. */
+&i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
+};
+
+/* LoRa SX1262 — bare radio, no FEM. Identical digital wiring to the V3/V4. */
+&spi2 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	pinctrl-0 = <&spim2_default>;
+	pinctrl-names = "default";
+
+	cs-gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
+
+	lora0: modem@0 {
+		compatible = "semtech,sx1262";
+		reg = <0>;
+		reset-gpios = <&gpio0 12 (GPIO_OPEN_DRAIN | GPIO_ACTIVE_LOW)>;
+		busy-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
+		dio1-gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
+		dio2-tx-enable;
+		dio3-tcxo-voltage = <SX126X_DIO3_TCXO_1V8>;
+		tcxo-power-startup-delay-ms = <5>;
+		spi-max-frequency = <4000000>;
+		rx-boosted;
+	};
+};
+
+/* E-Ink SPI bus (SPI3). CS is the panel select; the MIPI-DBI shim above drives it. */
+&spi3 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	pinctrl-0 = <&spim3_default>;
+	pinctrl-names = "default";
+
+	cs-gpios = <&gpio0 3 GPIO_ACTIVE_LOW>;			/* PIN_EINK_CS = GPIO3 */
+};
+
+/*
+ * Power management: make the board CAPABLE of light sleep (same pattern as the
+ * V4). Inert unless the application sets CONFIG_PM. The rtc_timer is the wake
+ * clock Zephyr's PM path requires; gpio0 carries both buttons (GPIO0/GPIO21) and
+ * the SX1262 DIO1 (GPIO14); lora0 stays powered so the node keeps hearing the
+ * mesh across a sleep. See ~/lab/meshprojects/ZEPHYR-POWER-PRIMER.md.
+ */
+&rtc_timer {
+	status = "okay";
+	wakeup-source;
+};
+
+&gpio0 {
+	wakeup-source;
+};
+
+&lora0 {
+	wakeup-source;
+};
+
+&timer0 {
+	status = "okay";
+};
+
+&timer1 {
+	status = "okay";
+};
+
+&wdt0 {
+	status = "okay";
+};
+
+&trng0 {
+	status = "okay";
+};
+
+&coretemp {
+	status = "okay";
+};
+
+&esp32_bt_hci {
+	status = "okay";
+};
+
+&wifi {
+	status = "okay";
+};
