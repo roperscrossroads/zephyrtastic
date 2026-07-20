@@ -5,8 +5,12 @@ built on Zephyr's Character Framebuffer (CFB). It is pure C, needs no phone
 app, shell, C++, or extra west modules, and renders entirely from the existing
 Meshtastic C getters. Off by default — headless builds are unaffected.
 
-This is an early **prototype**: it auto-cycles a few pages on a timer (no button
-input yet) and has only been built, not yet verified on hardware.
+It is **navigable with the board's user button** (the PRG/USER key, wired as the
+`sw0` alias): a launcher menu lists the pages, and a single button drives it —
+**short press = next** (the highlight cycles in a loop), **long press = confirm**.
+On a page, a `‹Back  Next›` footer lets you return to the launcher or flip to the
+next page. On a board with no `sw0` alias — or with `CONFIG_MESHTASTIC_DISPLAY_BUTTON=n`
+— it falls back to auto-cycling the pages on a timer.
 
 ## Enabling / building
 
@@ -22,17 +26,39 @@ west build -b heltec_wifi_lora32_v4/esp32s3/procpu samples/meshtastic \
 ```
 
 `MESHTASTIC_DISPLAY` `select`s `DISPLAY` + `CHARACTER_FRAMEBUFFER`; the SSD1306
-driver (`CONFIG_SSD1306`) auto-enables from the devicetree node. Tunables:
-`MESHTASTIC_DISPLAY_REFRESH_MS` (1000), `…_PAGE_SECONDS` (4), `…_STACK_SIZE`
-(2048), `…_PRIORITY` (10).
+driver (`CONFIG_SSD1306`) auto-enables from the devicetree node.
+`MESHTASTIC_DISPLAY_BUTTON` (default y) `select`s `INPUT`; the gpio-keys driver
+auto-enables from the `sw0` node. Tunables: `MESHTASTIC_DISPLAY_REFRESH_MS`
+(1000), `…_LONGPRESS_MS` (600), `…_TIMEOUT_SECONDS` (30, 0 = never blank),
+`…_PAGE_SECONDS` (4, fallback only), `…_STACK_SIZE` (2048), `…_PRIORITY` (10).
+
+## Navigation
+
+One button, two gestures:
+
+- **short press → next.** Moves the highlight to the next item, cycling in a
+  loop — the next launcher entry, or the other footer choice on a page.
+- **long press → confirm.** Selects the highlighted item. It fires at the
+  `LONGPRESS_MS` threshold while the button is still held (immediate feedback).
+
+The UI has two levels. The **launcher** is a list of pages with a `>` cursor;
+long-press opens the highlighted page. A **page** shows its data plus a
+`‹Back  Next›` footer: long-press on **Back** returns to the launcher,
+long-press on **Next** advances to the following page.
+
+The panel **blanks after `TIMEOUT_SECONDS`** of no button activity to save power;
+the next press wakes it *without* also navigating.
 
 ## How it works
 
 - `src/meshtastic_display.c` gets `DEVICE_DT_GET(DT_CHOSEN(zephyr_display))`,
   initialises CFB, picks the **smallest registered font** that fits, reads the
   panel geometry, and starts a dedicated refresh thread.
-- The thread redraws the current page every `REFRESH_MS` and advances to the
-  next page every `PAGE_SECONDS`.
+- An `INPUT_CALLBACK_DEFINE` handler turns `sw0` press/release into short/long
+  events (a `k_timer` fires the long press at the threshold) and posts them to
+  the thread over a `k_msgq`. The thread waits on that queue with a `REFRESH_MS`
+  timeout, so it reacts to a press immediately but still redraws live counters
+  (TX/RX, RSSI, uptime) on each timeout tick.
 - `meshtastic_display_init()` is called **last** in `meshtastic_init()` (after
   NodeDB/NodeInfo), guarded by `CONFIG_MESHTASTIC_DISPLAY`. A missing/failed
   panel is **non-fatal** — the mesh stack keeps running headless.
@@ -41,14 +67,15 @@ Pages (all read-only):
 
 | Page | Shows | Source |
 |---|---|---|
-| Device | short name · `ID xxxxxxxx` · `F <MHz>` · `CH <name> H<hop>` | `meshtastic_short_name()`, `meshtastic_get_node_id()`, `meshtastic_runtime_frequency/channel_name/hop_limit()` |
+| Device | `<short> H<hop>` · `ID xxxxxxxx` · `F<MHz> <chan>` | `meshtastic_short_name()`, `meshtastic_get_node_id()`, `meshtastic_runtime_frequency/channel_name/hop_limit()` |
 | Nodes | count, then `<short> <±snr>dB h<hops>` per node | `meshtastic_nodedb_count()` / `…_get_by_index()` |
 | Status | `TX` · `RX` · `RSSI` · uptime + `BLE` flag | `meshtastic_get_status()`, `k_uptime_get()` |
 
 ## Constraints & runtime caveats
 
 - **Font/rows.** Zephyr's built-in CFB fonts start at 10×16, so a 128×64 panel
-  gives **12×4 characters** — enough for the prototype's abbreviated fields. A
+  gives **12×4 characters**. With button nav one row is the `‹Back  Next›`
+  footer, leaving **3 content rows** — enough for the abbreviated fields. A
   smaller custom ~6×8 font would give 8 rows later.
 - **No bitmaps.** CFB draws text + vector primitives only (no arbitrary image
   blit). Icons/logos are a reason to move to LVGL later, not CFB.

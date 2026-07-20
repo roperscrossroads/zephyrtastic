@@ -16,11 +16,27 @@ menuconfig MESHTASTIC_DISPLAY
 	  and friends) auto-enables from that devicetree node. Intended for small
 	  monochrome panels such as 128x64 and 160x80.
 
-	  This is an early prototype: it auto-cycles through a few read-only pages
-	  (device info, node list, stack status). Button input and richer screens
-	  are not implemented yet.
+	  A read-only status UI: a launcher menu plus a few pages (device info,
+	  node list, stack status). With a board button (alias sw0) it is
+	  navigable; without one it falls back to auto-cycling the pages on a
+	  timer.
 
 if MESHTASTIC_DISPLAY
+
+config MESHTASTIC_DISPLAY_BUTTON
+	bool "Navigate with the board button (sw0)"
+	default y
+	select INPUT
+	help
+	  Drive the UI from the board's user button, wired via a gpio-keys node
+	  aliased as sw0 (the PRG/USER key on the Heltec V4). A short press moves
+	  to the next item (the highlight cycles in a loop); a long press
+	  confirms the highlighted choice. In a page, the footer offers Back
+	  (return to the launcher) and Next (advance to the next page).
+
+	  Selects the input subsystem; the gpio-keys driver auto-enables from the
+	  devicetree node. If the board has no sw0 alias, or this is disabled, the
+	  UI auto-cycles its pages on a timer instead.
 
 config MESHTASTIC_DISPLAY_REFRESH_MS
 	int "Screen refresh interval (ms)"
@@ -28,15 +44,37 @@ config MESHTASTIC_DISPLAY_REFRESH_MS
 	range 100 10000
 	help
 	  How often the current page is redrawn. Live counters (TX/RX, RSSI,
-	  uptime) update at this cadence.
+	  uptime) update at this cadence. Button presses are handled immediately,
+	  independent of this interval.
+
+config MESHTASTIC_DISPLAY_LONGPRESS_MS
+	int "Long-press threshold (ms)"
+	default 600
+	range 200 3000
+	depends on MESHTASTIC_DISPLAY_BUTTON
+	help
+	  How long the button must be held to count as a long press (confirm)
+	  rather than a short press (next). The long press fires at this threshold
+	  while the button is still held, for immediate feedback.
+
+config MESHTASTIC_DISPLAY_TIMEOUT_SECONDS
+	int "Blank the screen after N seconds idle (0 = never)"
+	default 30
+	range 0 3600
+	depends on MESHTASTIC_DISPLAY_BUTTON
+	help
+	  With no button activity for this long, the panel is blanked to save
+	  power. The next button press wakes it without also navigating. Set 0 to
+	  keep the screen on permanently.
 
 config MESHTASTIC_DISPLAY_PAGE_SECONDS
-	int "Seconds per page before auto-advancing"
+	int "Seconds per page before auto-advancing (no-button fallback)"
 	default 4
 	range 1 60
 	help
-	  With no button input yet, the UI cycles through its pages on a timer.
-	  This sets how long each page stays on screen.
+	  When no button is available (MESHTASTIC_DISPLAY_BUTTON=n or the board
+	  has no sw0 alias), the UI cycles through its pages on a timer. This sets
+	  how long each page stays on screen.
 
 config MESHTASTIC_DISPLAY_STACK_SIZE
 	int "Display thread stack size"

@@ -3,9 +3,18 @@
  * SPDX-License-Identifier: GPL-3.0
  *
  * On-device screen UI on a small monochrome panel using Zephyr's Character
- * Framebuffer (CFB). This is a first prototype: it renders a few status pages
- * from the existing Meshtastic C getters and auto-cycles between them (there is
- * no button input yet). No phone app or shell is required.
+ * Framebuffer (CFB). It renders a few read-only status pages from the existing
+ * Meshtastic C getters. No phone app or shell is required.
+ *
+ * Navigation (when the board exposes a button via the sw0 alias):
+ *   - short press  -> next: the highlight moves to the next item, cycling in a
+ *                     loop (menu entry, or the Back/Next footer of a page).
+ *   - long  press  -> confirm the highlighted choice (open a page; Back to the
+ *                     launcher; Next to the following page).
+ *   - idle         -> the panel blanks after a timeout; the next press wakes it
+ *                     without also navigating.
+ * With no button (no sw0 alias, or CONFIG_MESHTASTIC_DISPLAY_BUTTON=n) the UI
+ * falls back to auto-cycling the pages on a timer.
  *
  * The panel is whatever the board selects as `chosen { zephyr,display }` — the
  * 128x64 SSD1306 OLED on the Heltec WiFi LoRa 32 V4. The renderer reads the
@@ -28,6 +37,16 @@
 
 LOG_MODULE_REGISTER(meshtastic_display, CONFIG_MESHTASTIC_LOG_LEVEL);
 
+/* Button navigation is compiled in only when it is both enabled and the board
+ * actually wires a user button as the sw0 alias. */
+#define HAS_BUTTON \
+	(IS_ENABLED(CONFIG_MESHTASTIC_DISPLAY_BUTTON) && DT_NODE_EXISTS(DT_ALIAS(sw0)))
+
+#if HAS_BUTTON
+#include <zephyr/input/input.h>
+#include <zephyr/sys/atomic.h>
+#endif
+
 int meshtastic_display_init(void);
 
 #if !DT_HAS_CHOSEN(zephyr_display)
@@ -47,6 +66,7 @@ static uint8_t font_idx;
 static uint8_t font_w, font_h;
 static uint16_t disp_w, disp_h;
 static uint8_t rows, cols;
+static uint8_t content_rows; /* rows available to page content (footer excluded) */
 
 static K_THREAD_STACK_DEFINE(disp_stack, CONFIG_MESHTASTIC_DISPLAY_STACK_SIZE);
 static struct k_thread disp_thread;
@@ -80,10 +100,11 @@ static void page_device(void)
 	const char *ch = meshtastic_runtime_channel_name();
 	uint32_t freq = meshtastic_runtime_frequency();
 
-	draw_row(0, "%s", (sn && sn[0]) ? sn : "Meshtastic");
+	draw_row(0, "%s H%u", (sn && sn[0]) ? sn : "Meshtastic",
+		 meshtastic_runtime_hop_limit());
 	draw_row(1, "ID %08X", meshtastic_get_node_id());
-	draw_row(2, "F %u.%u MHz", freq / 1000000U, (freq % 1000000U) / 100000U);
-	draw_row(3, "CH %s H%u", (ch && ch[0]) ? ch : "-", meshtastic_runtime_hop_limit());
+	draw_row(2, "F%u.%u %s", freq / 1000000U, (freq % 1000000U) / 100000U,
+		 (ch && ch[0]) ? ch : "-");
 }
 
 static void page_nodes(void)
@@ -97,7 +118,7 @@ static void page_nodes(void)
 		return;
 	}
 
-	for (uint8_t r = 1; r < rows && (size_t)(r - 1) < n; r++) {
+	for (uint8_t r = 1; r < content_rows && (size_t)(r - 1) < n; r++) {
 		struct meshtastic_nodedb_node node;
 
 		if (meshtastic_nodedb_get_by_index((size_t)(r - 1), &node) != 0) {
@@ -123,10 +144,9 @@ static void page_status(void)
 		return;
 	}
 
-	draw_row(0, "TX %u", st.tx_packets);
-	draw_row(1, "RX %u", st.rx_packets);
-	draw_row(2, "RSSI %d", st.last_rssi);
-	draw_row(3, "Up %us %s", (unsigned int)(k_uptime_get() / 1000),
+	draw_row(0, "TX%u RX%u", st.tx_packets, st.rx_packets);
+	draw_row(1, "RSSI %d", st.last_rssi);
+	draw_row(2, "Up%us %s", (unsigned int)(k_uptime_get() / 1000),
 		 st.ble_connected ? "BLE" : "");
 }
 
@@ -137,6 +157,184 @@ static const page_fn pages[] = {
 	page_nodes,
 	page_status,
 };
+
+static const char *const page_names[] = {
+	"Device",
+	"Nodes",
+	"Status",
+};
+
+BUILD_ASSERT(ARRAY_SIZE(pages) == ARRAY_SIZE(page_names),
+	     "pages[] and page_names[] must stay in step");
+
+#define NUM_PAGES ARRAY_SIZE(pages)
+
+/* --- navigation ---------------------------------------------------------- */
+
+#if HAS_BUTTON
+
+/* Footer choices on a page, cycled by short press. */
+enum page_focus { FOCUS_BACK = 0, FOCUS_NEXT, FOCUS_COUNT };
+
+/* Top-level UI state: the launcher menu, or an open page. */
+static enum { UI_MENU, UI_PAGE } ui_state = UI_MENU;
+static uint8_t menu_cursor;              /* highlighted launcher entry */
+static uint8_t cur_page;                 /* page shown in UI_PAGE */
+static uint8_t page_focus = FOCUS_BACK;  /* highlighted footer choice */
+
+/* Draw the launcher: a windowed list of pages with a '>' cursor. */
+static void render_menu(void)
+{
+	uint8_t first = 0;
+
+	if (rows > 0 && menu_cursor >= rows) {
+		first = (uint8_t)(menu_cursor - (rows - 1));
+	}
+
+	for (uint8_t r = 0; r < rows && (size_t)(first + r) < NUM_PAGES; r++) {
+		uint8_t item = (uint8_t)(first + r);
+
+		draw_row(r, "%c%s", item == menu_cursor ? '>' : ' ', page_names[item]);
+	}
+}
+
+/* Draw the Back/Next footer, highlighting the focused choice. */
+static void render_footer(void)
+{
+	draw_row((uint8_t)(rows - 1), "%cBack  %cNext",
+		 page_focus == FOCUS_BACK ? '>' : ' ',
+		 page_focus == FOCUS_NEXT ? '>' : ' ');
+}
+
+static void nav_short(void)
+{
+	if (ui_state == UI_MENU) {
+		menu_cursor = (uint8_t)((menu_cursor + 1U) % NUM_PAGES);
+	} else {
+		page_focus = (uint8_t)((page_focus + 1U) % FOCUS_COUNT);
+	}
+}
+
+static void nav_long(void)
+{
+	if (ui_state == UI_MENU) {
+		cur_page = menu_cursor;
+		page_focus = FOCUS_BACK;
+		ui_state = UI_PAGE;
+	} else if (page_focus == FOCUS_BACK) {
+		ui_state = UI_MENU;
+	} else { /* FOCUS_NEXT */
+		cur_page = (uint8_t)((cur_page + 1U) % NUM_PAGES);
+	}
+}
+
+static void render_current(void)
+{
+	cfb_framebuffer_clear(disp, false);
+
+	if (ui_state == UI_MENU) {
+		render_menu();
+	} else {
+		pages[cur_page]();
+		render_footer();
+	}
+
+	cfb_framebuffer_finalize(disp);
+}
+
+/* --- button input -------------------------------------------------------- */
+
+enum ui_ev { UI_EV_SHORT = 1, UI_EV_LONG };
+
+K_MSGQ_DEFINE(ui_evq, sizeof(uint8_t), 8, 1);
+
+static atomic_t btn_held;  /* button currently pressed */
+static atomic_t long_sent; /* long press already emitted for this hold */
+
+static void longpress_expiry(struct k_timer *t)
+{
+	ARG_UNUSED(t);
+
+	if (atomic_get(&btn_held)) {
+		uint8_t ev = UI_EV_LONG;
+
+		atomic_set(&long_sent, 1);
+		(void)k_msgq_put(&ui_evq, &ev, K_NO_WAIT);
+	}
+}
+
+K_TIMER_DEFINE(longpress_timer, longpress_expiry, NULL);
+
+static void ui_input_cb(struct input_event *evt, void *user_data)
+{
+	ARG_UNUSED(user_data);
+
+	if (evt->type != INPUT_EV_KEY || evt->code != INPUT_KEY_0) {
+		return;
+	}
+
+	if (evt->value) { /* press */
+		atomic_set(&btn_held, 1);
+		atomic_set(&long_sent, 0);
+		k_timer_start(&longpress_timer,
+			      K_MSEC(CONFIG_MESHTASTIC_DISPLAY_LONGPRESS_MS), K_NO_WAIT);
+	} else { /* release */
+		atomic_set(&btn_held, 0);
+		k_timer_stop(&longpress_timer);
+		if (!atomic_get(&long_sent)) {
+			uint8_t ev = UI_EV_SHORT;
+
+			(void)k_msgq_put(&ui_evq, &ev, K_NO_WAIT);
+		}
+	}
+}
+
+INPUT_CALLBACK_DEFINE(NULL, ui_input_cb, NULL);
+
+static void display_loop(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	const int64_t timeout_ms =
+		(int64_t)CONFIG_MESHTASTIC_DISPLAY_TIMEOUT_SECONDS * 1000;
+	int64_t last_activity = k_uptime_get();
+	bool blanked = false;
+
+	render_current();
+
+	while (1) {
+		uint8_t ev;
+
+		if (k_msgq_get(&ui_evq, &ev, K_MSEC(CONFIG_MESHTASTIC_DISPLAY_REFRESH_MS)) ==
+		    0) {
+			/* A button event: wake a blanked screen (swallowing the
+			 * navigation), otherwise apply it. */
+			if (blanked) {
+				(void)display_blanking_off(disp);
+				blanked = false;
+			} else if (ev == UI_EV_SHORT) {
+				nav_short();
+			} else if (ev == UI_EV_LONG) {
+				nav_long();
+			}
+			last_activity = k_uptime_get();
+		}
+
+		if (!blanked && timeout_ms > 0 &&
+		    k_uptime_get() - last_activity >= timeout_ms) {
+			(void)display_blanking_on(disp);
+			blanked = true;
+		}
+
+		if (!blanked) {
+			render_current();
+		}
+	}
+}
+
+#else /* !HAS_BUTTON: auto-cycle the pages on a timer */
 
 static void render(uint8_t page)
 {
@@ -160,11 +358,13 @@ static void display_loop(void *a, void *b, void *c)
 		k_sleep(K_MSEC(CONFIG_MESHTASTIC_DISPLAY_REFRESH_MS));
 
 		if (k_uptime_get() - page_since >= page_ms) {
-			page = (uint8_t)((page + 1U) % ARRAY_SIZE(pages));
+			page = (uint8_t)((page + 1U) % NUM_PAGES);
 			page_since = k_uptime_get();
 		}
 	}
 }
+
+#endif /* HAS_BUTTON */
 
 /* --- setup --------------------------------------------------------------- */
 
@@ -226,11 +426,16 @@ int meshtastic_display_init(void)
 	cols = (font_w > 0) ? (uint8_t)(disp_w / font_w) : 0;
 	rows = (font_h > 0) ? (uint8_t)(disp_h / font_h) : 0;
 
+	/* A page reserves the bottom row for the Back/Next footer when the button
+	 * navigation is compiled in; otherwise all rows carry content. */
+	content_rows = HAS_BUTTON ? (uint8_t)((rows > 0) ? rows - 1 : 0) : rows;
+
 	cfb_framebuffer_clear(disp, true);
 	(void)display_blanking_off(disp);
 
-	LOG_INF("display UI up: %s %ux%u, font %ux%u -> %ux%u chars", disp->name, disp_w,
-		disp_h, font_w, font_h, cols, rows);
+	LOG_INF("display UI up: %s %ux%u, font %ux%u -> %ux%u chars, %s", disp->name,
+		disp_w, disp_h, font_w, font_h, cols, rows,
+		HAS_BUTTON ? "button nav" : "auto-cycle");
 
 	k_thread_create(&disp_thread, disp_stack, K_THREAD_STACK_SIZEOF(disp_stack),
 			display_loop, NULL, NULL, NULL, CONFIG_MESHTASTIC_DISPLAY_PRIORITY, 0,
