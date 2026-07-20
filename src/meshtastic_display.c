@@ -34,6 +34,12 @@
 
 #include <zephyr/meshtastic/nodedb.h>
 #include "meshtastic_core.h" /* public getters + internal name/freq/chan/hop getters */
+#include "meshtastic_airtime.h"  /* channel/tx utilisation (CONFIG_MESHTASTIC_AIRTIME) */
+#include "meshtastic_clock.h"    /* epoch time (compiled unconditionally) */
+#include "meshtastic_position.h" /* fix lat/lon/alt (CONFIG_MESHTASTIC_POSITION) */
+#if defined(CONFIG_MESHTASTIC_MQTT)
+#include "meshtastic_mqtt.h"
+#endif
 
 LOG_MODULE_REGISTER(meshtastic_display, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -120,19 +126,113 @@ static void page_nodes(void)
 
 	for (uint8_t r = 1; r < content_rows && (size_t)(r - 1) < n; r++) {
 		struct meshtastic_nodedb_node node;
+		char fav;
 
 		if (meshtastic_nodedb_get_by_index((size_t)(r - 1), &node) != 0) {
 			break;
 		}
 
+		/* '*' marks a favourite node (upstream device-ui sorts these first). */
+		fav = node.is_favorite ? '*' : ' ';
+
 		/* SNR is a float; format as whole dB to avoid pulling in FP printf. */
 		if (node.has_hops_away) {
-			draw_row(r, "%-4s %+ddB h%u", node.short_name, (int)node.snr,
+			draw_row(r, "%c%-4s%+3d h%u", fav, node.short_name, (int)node.snr,
 				 node.hops_away);
 		} else {
-			draw_row(r, "%-4s %+ddB", node.short_name, (int)node.snr);
+			draw_row(r, "%c%-4s%+3d", fav, node.short_name, (int)node.snr);
 		}
 	}
+}
+
+static void page_radio(void)
+{
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+	/* Utilisation getters return float percentages; show whole percent to
+	 * avoid pulling in floating-point printf. */
+	draw_row(0, "ChUtil %d%%", (int)meshtastic_airtime_channel_util_percent());
+	draw_row(1, "TxUtil %d%%", (int)meshtastic_airtime_tx_util_percent());
+#else
+	draw_row(0, "airtime off");
+#endif
+
+#if defined(CONFIG_MESHTASTIC_MQTT)
+	draw_row(2, "MQTT %s", meshtastic_mqtt_is_connected() ? "up" : "--");
+#else
+	{
+		uint32_t freq = meshtastic_runtime_frequency();
+
+		draw_row(2, "F%u.%u MHz", freq / 1000000U, (freq % 1000000U) / 100000U);
+	}
+#endif
+}
+
+static void page_gps(void)
+{
+#if defined(CONFIG_MESHTASTIC_POSITION)
+	meshtastic_Position pos;
+
+	if (meshtastic_position_get_current(&pos) != 0 ||
+	    !pos.has_latitude_i || !pos.has_longitude_i) {
+		draw_row(0, "No GPS fix");
+		draw_row(1, "Sats %u", pos.sats_in_view);
+		return;
+	}
+
+	/* latitude_i/longitude_i are degrees * 1e7. Print sign, whole degrees and
+	 * four decimals (~11 m) as integers — no FP. Sign is tracked separately so
+	 * coordinates in (-1, 0) degrees keep their minus. */
+	{
+		int32_t la = pos.latitude_i, lo = pos.longitude_i;
+		uint32_t lam = (uint32_t)(la < 0 ? -(int64_t)la : la);
+		uint32_t lom = (uint32_t)(lo < 0 ? -(int64_t)lo : lo);
+
+		draw_row(0, "Lat %s%u.%04u", la < 0 ? "-" : "", lam / 10000000U,
+			 (lam % 10000000U) / 1000U);
+		draw_row(1, "Lon %s%u.%04u", lo < 0 ? "-" : "", lom / 10000000U,
+			 (lom % 10000000U) / 1000U);
+		draw_row(2, "Alt %dm S%u", pos.has_altitude ? pos.altitude : 0,
+			 pos.sats_in_view);
+	}
+#else
+	draw_row(0, "GPS off");
+#endif
+}
+
+/* Days since 1970-01-01 -> civil Y/M/D (proleptic Gregorian), no libc/time.h.
+ * Howard Hinnant's algorithm. Valid for the full uint32 epoch range. */
+static void civil_from_days(uint32_t days, uint32_t *y, uint32_t *m, uint32_t *d)
+{
+	uint32_t z = days + 719468U;
+	uint32_t era = z / 146097U;
+	uint32_t doe = z - era * 146097U;                              /* [0, 146096] */
+	uint32_t yoe = (doe - doe / 1460U + doe / 36524U - doe / 146096U) / 365U;
+	uint32_t doy = doe - (365U * yoe + yoe / 4U - yoe / 100U);     /* [0, 365] */
+	uint32_t mp = (5U * doy + 2U) / 153U;                          /* [0, 11] */
+
+	*d = doy - (153U * mp + 2U) / 5U + 1U;                         /* [1, 31] */
+	*m = mp < 10U ? mp + 3U : mp - 9U;                             /* [1, 12] */
+	*y = yoe + era * 400U + (*m <= 2U);
+}
+
+static void page_time(void)
+{
+	uint32_t epoch, days, secs, y, mo, d;
+
+	if (!meshtastic_clock_valid()) {
+		draw_row(0, "Clock unset");
+		draw_row(1, "Up %us", (unsigned int)(k_uptime_get() / 1000));
+		return;
+	}
+
+	epoch = meshtastic_clock_now_epoch();
+	days = epoch / 86400U;
+	secs = epoch % 86400U;
+	civil_from_days(days, &y, &mo, &d);
+
+	draw_row(0, "%04u-%02u-%02u", y, mo, d);
+	draw_row(1, "%02u:%02u:%02u UTC", secs / 3600U, (secs % 3600U) / 60U, secs % 60U);
+	draw_row(2, "Up %us", (unsigned int)(k_uptime_get() / 1000));
 }
 
 static void page_status(void)
@@ -156,12 +256,18 @@ static const page_fn pages[] = {
 	page_device,
 	page_nodes,
 	page_status,
+	page_radio,
+	page_gps,
+	page_time,
 };
 
 static const char *const page_names[] = {
 	"Device",
 	"Nodes",
 	"Status",
+	"Radio",
+	"GPS",
+	"Time",
 };
 
 BUILD_ASSERT(ARRAY_SIZE(pages) == ARRAY_SIZE(page_names),

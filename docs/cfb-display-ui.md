@@ -68,8 +68,18 @@ Pages (all read-only):
 | Page | Shows | Source |
 |---|---|---|
 | Device | `<short> H<hop>` · `ID xxxxxxxx` · `F<MHz> <chan>` | `meshtastic_short_name()`, `meshtastic_get_node_id()`, `meshtastic_runtime_frequency/channel_name/hop_limit()` |
-| Nodes | count, then `<short> <±snr>dB h<hops>` per node | `meshtastic_nodedb_count()` / `…_get_by_index()` |
+| Nodes | count, then `<*fav><short> <±snr> h<hops>` per node | `meshtastic_nodedb_count()` / `…_get_by_index()` |
 | Status | `TX` · `RX` · `RSSI` · uptime + `BLE` flag | `meshtastic_get_status()`, `k_uptime_get()` |
+| Radio | channel util % · TX util % · MQTT (or `F<MHz>`) | `meshtastic_airtime_channel_util_percent()` / `…_tx_util_percent()`, `meshtastic_mqtt_is_connected()` |
+| GPS | `Lat`/`Lon` (4 dp) · `Alt`m · sats — or "No GPS fix" | `meshtastic_position_get_current()` |
+| Time | `YYYY-MM-DD` · `HH:MM:SS UTC` · uptime — or "Clock unset" | `meshtastic_clock_valid()` / `…_now_epoch()` |
+
+The `*` before a node name marks a **favourite**. The **Radio**, **GPS** and
+**Time** pages read from optional subsystems: they are compile-guarded, so a
+build with `CONFIG_MESHTASTIC_AIRTIME`, `…_POSITION` or MQTT off shows a short
+"off"/fallback line instead of a link error (`AIRTIME`/`POSITION` default y;
+the clock is always compiled). Epoch→date uses an integer civil-from-days
+conversion — no `time.h`, no floating point.
 
 ## Constraints & runtime caveats
 
