@@ -154,6 +154,8 @@ static void log_wire_tx(const uint8_t *pkt, uint32_t pkt_len)
 	LOG_DBG("LoRa TX %08x->%08x id=%08x ch=0x%02x len=%u",
 		(unsigned int)sys_le32_to_cpu(hdr->src), (unsigned int)sys_le32_to_cpu(hdr->dest),
 		(unsigned int)sys_le32_to_cpu(hdr->id), hdr->channel, (unsigned int)pkt_len);
+	/* Deep log-stack formatter (~256 B) — gated + off by default; see the
+	 * stack-overflow warning on CONFIG_MESHTASTIC_PACKET_HEXDUMP. */
 	LOG_HEXDUMP_DBG(pkt, pkt_len, "LoRa TX");
 }
 #endif /* CONFIG_MESHTASTIC_PACKET_HEXDUMP */

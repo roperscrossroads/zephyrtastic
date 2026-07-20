@@ -67,11 +67,21 @@ config MESHTASTIC_OUTBOUND_STACK_SIZE
 
 config MESHTASTIC_PACKET_HEXDUMP
 	bool "Hex dump LoRa wire packets at DBG log level"
-	default MESHTASTIC_LOG_LEVEL_DBG
+	default n
 	help
 	  When enabled and the meshtastic log level is DBG, log a hex dump of
 	  each Meshtastic wire packet (16-byte header plus encrypted payload)
 	  on transmit and receive.
+
+	  WARNING: off by default because it is expensive on the log stack. It
+	  dumps up to the full packet (~256 bytes) on every TX and RX, and
+	  formatting a dump that large is deep on the stack of whichever thread
+	  runs the log backend — the log-processing thread in deferred mode, or the
+	  emitting thread (e.g. the SMP/UDP transport) in immediate mode. With a
+	  tight CONFIG_LOG_PROCESS_THREAD_STACK_SIZE this can overflow that thread's
+	  stack and fault the system (observed at network-up on the Heltec V3).
+	  Enable only for wire-level debugging, and raise
+	  CONFIG_LOG_PROCESS_THREAD_STACK_SIZE if you turn it on.
 
 config MESHTASTIC_DEFAULT_HOP_LIMIT
 	int "Default hop limit for outgoing packets"
