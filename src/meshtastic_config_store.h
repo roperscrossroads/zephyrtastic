@@ -37,6 +37,19 @@ int meshtastic_config_store_set_config(const meshtastic_Config *config);
  * position). Persists via the coalesced save. */
 int meshtastic_config_store_set_position_fixed(bool fixed);
 
+/**
+ * Persist the admin-set fixed position *coordinates* so they survive a reboot.
+ * The position config's fixed_position flag (above) records that a fixed
+ * position is in use; these carry the actual latitude/longitude/altitude.
+ *
+ * set stores @p pos; clear marks that no fixed position is set; get copies the
+ * stored coordinates out, returning -ENOENT when none is set. All persist via
+ * the coalesced save.
+ */
+int meshtastic_config_store_set_fixed_position(const meshtastic_Position *pos);
+int meshtastic_config_store_clear_fixed_position(void);
+int meshtastic_config_store_get_fixed_position(meshtastic_Position *pos);
+
 int meshtastic_config_store_get_module(pb_size_t tag, meshtastic_ModuleConfig *module);
 int meshtastic_config_store_set_module(const meshtastic_ModuleConfig *module);
 

@@ -470,3 +470,56 @@ ZTEST(admin_pki, test_unknown_key_nodeinfo_request_is_throttled)
 		     "produced %u transmissions",
 		     tx_after);
 }
+
+/* ---- Persistence: admin-set fixed position survives a save/reload ---------- */
+
+/* The fixed-position coordinates persist through the same NVS record path the
+ * settings backend uses (setting_get to save, setting_set to load). Round-trip
+ * through those two entry points, wiping the in-RAM copy between, to prove the
+ * record encodes and restores the coordinates — and that "no fixed position"
+ * round-trips as absent rather than as a (0,0) fix. */
+ZTEST(admin_pki, test_fixed_position_record_roundtrip)
+{
+	uint8_t buf[MESHTASTIC_STORE_VALUE_MAX];
+	meshtastic_Position pos = meshtastic_Position_init_zero;
+	meshtastic_Position got = meshtastic_Position_init_zero;
+	int len;
+
+	pos.has_latitude_i = true;
+	pos.latitude_i = 375000000;    /* 37.5000000 deg */
+	pos.has_longitude_i = true;
+	pos.longitude_i = -1223000000; /* -122.3000000 deg */
+	pos.has_altitude = true;
+	pos.altitude = 42;
+	pos.precision_bits = 16U;
+
+	zassert_ok(meshtastic_config_store_set_fixed_position(&pos));
+
+	len = meshtastic_config_store_setting_get("position_fixed", buf, sizeof(buf));
+	zassert_true(len > 0, "encoding the fixed-position record failed (%d)", len);
+
+	/* Wipe the in-RAM copy, as a reboot would. */
+	zassert_ok(meshtastic_config_store_clear_fixed_position());
+	zassert_equal(meshtastic_config_store_get_fixed_position(&got), -ENOENT,
+		      "fixed position should be gone after clear");
+
+	/* Reload from the encoded record. */
+	zassert_ok(meshtastic_config_store_setting_set("position_fixed", buf, (size_t)len));
+
+	zassert_ok(meshtastic_config_store_get_fixed_position(&got),
+		   "fixed position should be restored from its record");
+	zassert_true(got.has_latitude_i && got.has_longitude_i && got.has_altitude,
+		     "restored position should keep its has-flags");
+	zassert_equal(got.latitude_i, pos.latitude_i, "latitude not restored");
+	zassert_equal(got.longitude_i, pos.longitude_i, "longitude not restored");
+	zassert_equal(got.altitude, pos.altitude, "altitude not restored");
+	zassert_equal(got.precision_bits, pos.precision_bits, "precision not restored");
+
+	/* "No fixed position" must round-trip as absent, not as a (0,0) fix. */
+	zassert_ok(meshtastic_config_store_clear_fixed_position());
+	len = meshtastic_config_store_setting_get("position_fixed", buf, sizeof(buf));
+	zassert_true(len > 0, "encoding the cleared record failed (%d)", len);
+	zassert_ok(meshtastic_config_store_setting_set("position_fixed", buf, (size_t)len));
+	zassert_equal(meshtastic_config_store_get_fixed_position(&got), -ENOENT,
+		      "cleared fixed position must not resurrect as a (0,0) fix");
+}

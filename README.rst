@@ -97,7 +97,7 @@ Legend: ✅ Full · 🟡 Partial · ❌ Not yet
      - ✅
      - Integration with Zephyr GNSS subsystem, periodic position broadcast; the
        Position module also runs GNSS-less to advertise an admin-set fixed
-       position
+       position, which persists across reboot
    * - NodeInfo
      - ✅
      - Periodic identity broadcast + node discovery

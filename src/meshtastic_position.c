@@ -21,6 +21,7 @@
 #include <pb_encode.h>
 
 #include "meshtastic_clock.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_modules.h"
 #include "meshtastic_position.h"
 
@@ -194,6 +195,9 @@ void meshtastic_position_set_fixed(const meshtastic_Position *position)
 		pos.has_latitude_i ? pos.latitude_i : 0,
 		pos.has_longitude_i ? pos.longitude_i : 0, pos.has_altitude ? pos.altitude : 0);
 
+	/* Persist the coordinates so the fixed position survives a reboot. */
+	(void)meshtastic_config_store_set_fixed_position(&pos);
+
 	/* Announce immediately, then let the work re-arm the periodic beacon. */
 	k_work_reschedule(&fixed_broadcast_work, K_NO_WAIT);
 }
@@ -206,8 +210,36 @@ void meshtastic_position_clear_fixed(void)
 	k_mutex_unlock(&pos_lock);
 
 	(void)k_work_cancel_delayable(&fixed_broadcast_work);
+	(void)meshtastic_config_store_clear_fixed_position();
 	LOG_INF("Position fixed cleared");
 }
+
+/* Restore a persisted fixed position after settings load. This hook runs before
+ * the radio is up, so the first beacon is scheduled at the normal interval
+ * rather than sent immediately. No-op when nothing is persisted. */
+static int position_restore_fixed(void)
+{
+	meshtastic_Position pos;
+
+	if (meshtastic_config_store_get_fixed_position(&pos) < 0) {
+		return 0;
+	}
+
+	k_mutex_lock(&pos_lock, K_FOREVER);
+	pos_state.fixed = pos;
+	pos_state.fixed_valid = true;
+	k_mutex_unlock(&pos_lock);
+
+	LOG_INF("Restored fixed position lat=%d lon=%d alt=%d",
+		pos.has_latitude_i ? pos.latitude_i : 0,
+		pos.has_longitude_i ? pos.longitude_i : 0, pos.has_altitude ? pos.altitude : 0);
+
+	k_work_reschedule(&fixed_broadcast_work,
+			  K_SECONDS(CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC));
+	return 0;
+}
+
+MESHTASTIC_SETTINGS_APPLY_DEFINE(position_fixed, position_restore_fixed);
 
 static bool packet_decode_position(const struct meshtastic_packet *packet,
 				   meshtastic_Position *position)

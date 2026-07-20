@@ -41,6 +41,22 @@ struct store_owner_record {
  * appended — used to accept older blobs without the trailing flags. */
 #define STORE_OWNER_RECORD_V1_LEN offsetof(struct store_owner_record, is_licensed)
 
+/* Persisted admin-set fixed position. A flat record (like the owner record)
+ * rather than an encoded Position: only the handful of fields a fixed location
+ * needs, plus an explicit valid byte so "no fixed position" round-trips without
+ * relying on a sentinel coordinate. */
+struct store_position_fixed_record {
+	uint8_t version;
+	uint8_t valid; /* 0 == no fixed position set */
+	uint8_t has_latitude_i;
+	uint8_t has_longitude_i;
+	uint8_t has_altitude;
+	uint8_t precision_bits;
+	int32_t latitude_i;
+	int32_t longitude_i;
+	int32_t altitude;
+} __packed;
+
 struct named_config {
 	const char *name;
 	pb_size_t tag;
@@ -89,6 +105,8 @@ static struct {
 	meshtastic_Channel channels[MESHTASTIC_MAX_CHANNELS];
 	meshtastic_Config configs[ARRAY_SIZE(config_names)];
 	meshtastic_ModuleConfig modules[ARRAY_SIZE(module_names)];
+	bool has_fixed_position;
+	meshtastic_Position fixed_position;
 } store;
 
 static void store_lock(void)
@@ -768,6 +786,50 @@ int meshtastic_config_store_set_position_fixed(bool fixed)
 	return 0;
 }
 
+int meshtastic_config_store_set_fixed_position(const meshtastic_Position *pos)
+{
+	if (pos == NULL) {
+		return -EINVAL;
+	}
+
+	store_lock();
+	store.fixed_position = *pos;
+	store.has_fixed_position = true;
+	store_unlock();
+
+	store_schedule_save();
+	return 0;
+}
+
+int meshtastic_config_store_clear_fixed_position(void)
+{
+	store_lock();
+	store.fixed_position = (meshtastic_Position)meshtastic_Position_init_zero;
+	store.has_fixed_position = false;
+	store_unlock();
+
+	store_schedule_save();
+	return 0;
+}
+
+int meshtastic_config_store_get_fixed_position(meshtastic_Position *pos)
+{
+	int ret = -ENOENT;
+
+	if (pos == NULL) {
+		return -EINVAL;
+	}
+
+	store_lock();
+	if (store.has_fixed_position) {
+		*pos = store.fixed_position;
+		ret = 0;
+	}
+	store_unlock();
+
+	return ret;
+}
+
 int meshtastic_config_store_get_module(pb_size_t tag, meshtastic_ModuleConfig *module)
 {
 	int idx = index_for_module_tag(tag);
@@ -884,6 +946,59 @@ void meshtastic_config_store_get_owner_flags(bool *is_licensed, bool *is_unmessa
 	store_unlock();
 }
 
+static int setting_get_fixed_position(void *buf, size_t buf_len)
+{
+	struct store_position_fixed_record rec = {.version = STORE_RECORD_VERSION};
+
+	if (buf_len < sizeof(rec)) {
+		return -ENOMEM;
+	}
+
+	store_lock();
+	if (store.has_fixed_position) {
+		rec.valid = 1U;
+		rec.has_latitude_i = store.fixed_position.has_latitude_i ? 1U : 0U;
+		rec.has_longitude_i = store.fixed_position.has_longitude_i ? 1U : 0U;
+		rec.has_altitude = store.fixed_position.has_altitude ? 1U : 0U;
+		rec.precision_bits = (uint8_t)store.fixed_position.precision_bits;
+		rec.latitude_i = store.fixed_position.latitude_i;
+		rec.longitude_i = store.fixed_position.longitude_i;
+		rec.altitude = store.fixed_position.altitude;
+	}
+	store_unlock();
+
+	memcpy(buf, &rec, sizeof(rec));
+	return sizeof(rec);
+}
+
+static int setting_set_fixed_position(const void *buf, size_t len)
+{
+	const struct store_position_fixed_record *rec = buf;
+
+	if (len < sizeof(*rec) || rec->version != STORE_RECORD_VERSION) {
+		return -EINVAL;
+	}
+
+	store_lock();
+	store.fixed_position = (meshtastic_Position)meshtastic_Position_init_zero;
+	if (rec->valid) {
+		store.fixed_position.has_latitude_i = (rec->has_latitude_i != 0U);
+		store.fixed_position.latitude_i = rec->latitude_i;
+		store.fixed_position.has_longitude_i = (rec->has_longitude_i != 0U);
+		store.fixed_position.longitude_i = rec->longitude_i;
+		store.fixed_position.has_altitude = (rec->has_altitude != 0U);
+		store.fixed_position.altitude = rec->altitude;
+		store.fixed_position.precision_bits = rec->precision_bits;
+		store.fixed_position.location_source = meshtastic_Position_LocSource_LOC_MANUAL;
+		store.has_fixed_position = true;
+	} else {
+		store.has_fixed_position = false;
+	}
+	store_unlock();
+
+	return 0;
+}
+
 static int setting_get_owner(void *buf, size_t buf_len)
 {
 	struct store_owner_record owner = {.version = STORE_RECORD_VERSION};
@@ -944,6 +1059,10 @@ int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_l
 		return setting_get_owner(buf, buf_len);
 	}
 
+	if (strcmp(key, "position_fixed") == 0) {
+		return setting_get_fixed_position(buf, buf_len);
+	}
+
 	if (strncmp(key, "channel/", strlen("channel/")) == 0) {
 		ret = parse_channel_index(key + strlen("channel/"), &index);
 		if (ret < 0) {
@@ -1000,6 +1119,10 @@ int meshtastic_config_store_setting_set(const char *key, const void *buf, size_t
 
 	if (strcmp(key, "owner") == 0) {
 		return setting_set_owner(buf, len);
+	}
+
+	if (strcmp(key, "position_fixed") == 0) {
+		return setting_set_fixed_position(buf, len);
 	}
 
 	if (strncmp(key, "channel/", strlen("channel/")) == 0) {
@@ -1084,6 +1207,11 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 	}
 
 	ret = export_one(export_func, "owner");
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = export_one(export_func, "position_fixed");
 	if (ret < 0) {
 		return ret;
 	}
