@@ -121,6 +121,17 @@ page. The read path mirrors the upstream firmware
 Boards without a `vbatt` node compile the feature out and the Status page keeps
 its `RSSI` line.
 
+Every constant above (divider resistors, ADC pin, ADC_CTRL gate, calibration
+factor, OCV curve) is sourced and cross-checked against the Heltec **V4 rev 4.2**
+schematic, the Heltec Arduino examples, and the upstream firmware in
+[`battery-provenance.md`](battery-provenance.md) — including an honest split of
+which facts are independently corroborated versus single-source upstream tuning.
+That provenance is scoped to **rev 4.2** (shared with 4.3); the **V4-R8** (no
+ADC_CTRL gate, ×1.035) and **V3** (inverted ADC_CTRL polarity) differ and are
+tabulated there for when we port them. Note the board charges its cell in
+**hardware** (a dedicated charge IC); this UI only reads and displays, so a wrong
+number is cosmetic, never a safety issue.
+
 ## Constraints & runtime caveats
 
 - **Font/rows.** Zephyr's built-in CFB fonts start at 10×16, so a 128×64 panel
