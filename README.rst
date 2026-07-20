@@ -103,7 +103,8 @@ Legend: ✅ Full · 🟡 Partial · ❌ Not yet
      - Periodic identity broadcast + node discovery
    * - NodeDB
      - 🟡
-     - In-RAM node cache only (not persisted to flash)
+     - In-RAM node cache; peer public keys persist to flash. Other node data is
+       re-learned from the mesh after a reboot
    * - Device telemetry
      - ✅
      - Uptime, optional battery / fuel-gauge metrics, airtime/channel utilization metrics
@@ -122,8 +123,9 @@ Legend: ✅ Full · 🟡 Partial · ❌ Not yet
      -
      -
    * - Local config persistence
-     - 🟡
-     - Zephyr settings subsystem backed by NVS flash (channels configuration only)
+     - ✅
+     - Zephyr settings subsystem backed by NVS flash — device / module config,
+       owner, and channels all persist across reboot
 
 Shell commands
 **************
