@@ -35,8 +35,12 @@
  *
  * VERIFY(hardware): confirm on the bench that (a) the OLED still powers up
  * (correct Vext polarity) and (b) the hog runs before the SX1262 needs power
- * (GPIO-hog init priority 41). If CONFIG_POWER_DOMAIN is ever enabled, remove
- * this hog — it would then contend with vext_ctrl for GPIO36.
+ * (GPIO-hog init priority 41). NOTE on vext_ctrl contention: POWER_DOMAIN /
+ * POWER_DOMAIN_GPIO are ALREADY =y in every shipping V3 build and the hog
+ * coexists fine — the conflict only appears once PM_DEVICE_POWER_DOMAIN=y lets
+ * vext_ctrl runtime-suspend GPIO36, so a PM build must pin PM_DEVICE_POWER_DOMAIN=n
+ * (overlay-pm-v3.conf does). See the fuller note by the PM hooks below. (An earlier
+ * version of this comment wrongly blamed CONFIG_POWER_DOMAIN — corrected 2026-07-20.)
  */
 
 #include <zephyr/dt-bindings/gpio/gpio.h>
