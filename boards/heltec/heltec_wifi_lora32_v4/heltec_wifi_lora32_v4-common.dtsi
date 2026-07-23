@@ -34,7 +34,6 @@
 #include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/lora/sx126x.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
-#include <zephyr/dt-bindings/adc/adc.h>
 
 / {
 	aliases {
@@ -130,25 +129,6 @@
 
 &adc1 {
 	status = "okay";
-	#address-cells = <1>;
-	#size-cells = <0>;
-
-	/*
-	 * VBAT divider channel (see the vbatt voltage-divider node above). The
-	 * upstream firmware reads GPIO1/ADC1_CH0 at 12 dB attenuation
-	 * (firmware/src/Power.cpp:100, ADC_ATTEN_DB_12) — that maps to Zephyr's
-	 * ADC_GAIN_1_4. The esp32 ADC driver requires ADC_REF_INTERNAL. The extra
-	 * empirical calibration factor upstream applies on top of the 4.9 divider
-	 * ratio (ADC_MULTIPLIER = 4.9 * 1.045) is not expressible here; it is
-	 * applied in software (CONFIG_MESHTASTIC_DISPLAY_BATTERY_CAL_PERMILLE).
-	 */
-	channel@0 {
-		reg = <0>;
-		zephyr,gain = "ADC_GAIN_1_4";
-		zephyr,reference = "ADC_REF_INTERNAL";
-		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
-		zephyr,resolution = <12>;
-	};
 };
 
 &uart0 {

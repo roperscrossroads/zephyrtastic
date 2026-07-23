@@ -29,10 +29,8 @@ west build -b heltec_wifi_lora32_v4/esp32s3/procpu samples/meshtastic \
 `MESHTASTIC_DISPLAY` `select`s `DISPLAY` + `CHARACTER_FRAMEBUFFER`; the SSD1306
 driver (`CONFIG_SSD1306`) auto-enables from the devicetree node.
 `MESHTASTIC_DISPLAY_BUTTON` (default y) `select`s `INPUT`; the gpio-keys driver
-auto-enables from the `sw0` node. `MESHTASTIC_DISPLAY_BATTERY` (default y)
-`select`s `ADC`; the SoC ADC driver auto-enables from the `vbatt` node.
-Tunables: `MESHTASTIC_DISPLAY_REFRESH_MS` (1000), `…_LONGPRESS_MS` (600),
-`…_TIMEOUT_SECONDS` (30, 0 = never blank), `…_BATTERY_CAL_PERMILLE` (1045),
+auto-enables from the `sw0` node. Tunables: `MESHTASTIC_DISPLAY_REFRESH_MS`
+(1000), `…_LONGPRESS_MS` (600), `…_TIMEOUT_SECONDS` (30, 0 = never blank),
 `…_PAGE_SECONDS` (4, fallback only), `…_STACK_SIZE` (2048), `…_PRIORITY` (10).
 
 ## Navigation
@@ -81,7 +79,7 @@ Pages (all read-only):
 | Device | `<short> H<hop>` · `ID xxxxxxxx` · `F<MHz> <chan>` | `meshtastic_short_name()`, `meshtastic_get_node_id()`, `meshtastic_runtime_frequency/channel_name/hop_limit()` |
 | Nodes | count, then `<cursor><*fav><short> <±snr>` per node; long-press for detail | `meshtastic_nodedb_count()` / `…_get_by_index()` |
 | ↳ node detail | long name · `<id> <role>` · `<±snr> h<hops> M K` | `meshtastic_nodedb_get_by_index()` (long_name, num, role, snr, hops, via_mqtt, public_key) |
-| Status | battery `V`/`%` (or `RSSI` if no `vbatt`) · `TX` · `RX` · uptime + `BLE` | `meshtastic_get_status()`, ADC `vbatt`, `k_uptime_get()` |
+| Status | `TX` · `RX` · `RSSI` · uptime + `BLE` flag | `meshtastic_get_status()`, `k_uptime_get()` |
 | Radio | channel util % · TX util % · MQTT (or `F<MHz>`) | `meshtastic_airtime_channel_util_percent()` / `…_tx_util_percent()`, `meshtastic_mqtt_is_connected()` |
 | GPS | `Lat`/`Lon` (4 dp) · `Alt`m · sats — or "No GPS fix" | `meshtastic_position_get_current()` |
 | Time | `YYYY-MM-DD` · `HH:MM:SS UTC` · uptime — or "Clock unset" | `meshtastic_clock_valid()` / `…_now_epoch()` |
@@ -95,43 +93,15 @@ conversion — no `time.h`, no floating point.
 
 ## Battery
 
-`MESHTASTIC_DISPLAY_BATTERY` reads the board's `vbatt` voltage-divider
-(ADC1 ch0 / GPIO1 on the V4) and shows voltage + estimated charge on the Status
-page. The read path mirrors the upstream firmware
-(`firmware/src/Power.{h,cpp}`, `variants/esp32s3/heltec_v4/variant.h`):
-
-- **ADC.** `channel@0` is added to `&adc1` at `ADC_GAIN_1_4` (12 dB attenuation,
-  matching upstream `ADC_ATTEN_DB_12`) with `ADC_REF_INTERNAL` (the esp32 driver
-  requires it) and 12-bit resolution. The esp32 driver stores a calibrated
-  pseudo-raw, so `adc_raw_to_millivolts_dt()` returns true pin millivolts.
-- **Scaling.** `voltage_divider_scale_dt()` applies the devicetree ratio
-  (490 kΩ / 100 kΩ = 4.9), then `…_BATTERY_CAL_PERMILLE` applies the empirical
-  factor upstream folds into `ADC_MULTIPLIER` (V4 = 4.9 × **1.045** → 1045;
-  V4-R8 = 1035). **VERIFY(hardware):** confirm against a known voltage.
-- **ADC_CTRL gate.** The V4 divider sits behind ADC_CTRL (GPIO37, active-high);
-  the UI drives it high only around each sample. Absent on the V4-R8 (always
-  connected). The `adc_ctrl` power-domain is inert without `PM_DEVICE`, so the
-  UI drives the pin directly.
-- **Charge %.** An open-circuit-voltage lookup (single-cell LiPo curve
-  `4190…3100 mV`, integer interpolation) identical to upstream; below 2600 mV it
-  reports "no batt".
-- **Sampling.** Cached 5 s, so button traffic doesn't re-sample (or re-toggle
-  ADC_CTRL) on every redraw. Any read failure shows `Bat: n/a` and the mesh
-  stack is unaffected.
-
-Boards without a `vbatt` node compile the feature out and the Status page keeps
-its `RSSI` line.
-
-Every constant above (divider resistors, ADC pin, ADC_CTRL gate, calibration
-factor, OCV curve) is sourced and cross-checked against the Heltec **V4 rev 4.2**
-schematic, the Heltec Arduino examples, and the upstream firmware in
-[`battery-provenance.md`](battery-provenance.md) — including an honest split of
-which facts are independently corroborated versus single-source upstream tuning.
-That provenance is scoped to **rev 4.2** (shared with 4.3); the **V4-R8** (no
-ADC_CTRL gate, ×1.035) and **V3** (inverted ADC_CTRL polarity) differ and are
-tabulated there for when we port them. Note the board charges its cell in
-**hardware** (a dedicated charge IC); this UI only reads and displays, so a wrong
-number is cosmetic, never a safety issue.
+**Deferred — the Status page shows a `Bat -` placeholder; nothing is read yet.**
+Reading the V4's `vbatt` divider (ADC1 ch0 / GPIO1, gated by ADC_CTRL/GPIO37)
+needs the esp32 ADC channel-setup, which on this SoC routes GPIO1 to analog in a
+way that disturbs the neighbouring SX1262 **DIO1** interrupt (GPIO14) on the
+shared RTC-IO controller — killing the radio's TX/RX-done IRQ — and the SAR
+additionally under-reads the high-impedance (~80 kΩ) divider. Re-enabling it
+correctly (route the ADC pin to analog *before* the radio attaches DIO1, then
+fix the read) is future work; the divider constants and provenance are preserved
+in the git history of this feature for when it returns.
 
 ## Constraints & runtime caveats
 
