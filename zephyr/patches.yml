@@ -1,0 +1,31 @@
+# Local patches carried on top of the upstream Zephyr tree.
+#
+# `west update` restores each project to its manifest revision, discarding
+# in-tree edits. Re-apply these afterwards with:
+#
+#     west patch apply           # apply all patches below
+#     west patch clean           # revert projects to pristine
+#     west patch list            # show carried patches
+#
+# Patch files live in main/zephyr/patches/ (patch-base). Paths in each .patch
+# are relative to the target module's root (module: zephyr).
+patches:
+  - path: 0001-adc-esp32-skip-disruptive-gpio-disconnect.patch
+    sha256sum: e24b20667f9fabe9fd1988d614e4429ea5093bf8896407f9dc5b595c6a51fe25
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-07-20"
+    upstreamable: true
+    comments: |
+      adc_esp32 channel-setup: drop the gpio_pin_configure_dt(GPIO_DISCONNECTED)
+      call. On the ESP32-S3 it runs rtcio_hal_function_select() + interrupt-config
+      touches on the shared gpio0/RTC-IO controller, which silently knocks out an
+      unrelated *digital* GPIO interrupt on a neighbouring RTC-capable pin on the
+      same controller. On the Heltec V4 that neighbour is the SX1262 DIO1 (GPIO14,
+      next to the ADC1_CH0 battery pin GPIO1): the first battery ADC channel-setup
+      killed the radio's TX-done/RX-done IRQ (both TX and RX dead). Upstream
+      ESP-IDF adc_oneshot never touches the GPIO here; the SAR ADC reads the
+      undriven analog input without it. Confirmed on hardware: with the call
+      dropped, the Heltec V4 display+battery UI and the LoRa radio coexist
+      (tx ok / rx decoding with the full UI enabled).

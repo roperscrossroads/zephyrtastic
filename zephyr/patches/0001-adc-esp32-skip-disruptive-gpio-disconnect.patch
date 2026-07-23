@@ -1,0 +1,34 @@
+diff --git a/drivers/adc/adc_esp32.c b/drivers/adc/adc_esp32.c
+index 9941acf53d..315a61214b 100644
+--- a/drivers/adc/adc_esp32.c
++++ b/drivers/adc/adc_esp32.c
+@@ -325,18 +325,17 @@ static int adc_esp32_channel_setup(const struct device *dev, const struct adc_ch
+ 		return -ENOTSUP;
+ 	}
+ 
+-	struct gpio_dt_spec gpio = {
+-		.port = conf->gpio_port,
+-		.dt_flags = 0,
+-		.pin = io_num,
+-	};
+-
+-	err = gpio_pin_configure_dt(&gpio, GPIO_DISCONNECTED);
+-
+-	if (err) {
+-		LOG_ERR("Error disconnecting io (%d)", io_num);
+-		return err;
+-	}
++	/* Do NOT reconfigure the analog pin through the generic GPIO driver here.
++	 * gpio_pin_configure_dt({gpio0, io_num}, GPIO_DISCONNECTED) runs
++	 * rtcio_hal_function_select() + interrupt-config touches on the shared gpio0 /
++	 * RTC-IO controller, which knocks out an unrelated *digital* GPIO interrupt on
++	 * a neighbouring RTC-capable pin on the same controller. On the Heltec V4 that
++	 * pin is the SX1262 DIO1 (GPIO14, adjacent to the ADC1_CH0 battery pin GPIO1):
++	 * the first ADC channel-setup silently kills the radio's TX-done/RX-done IRQ.
++	 * Upstream ESP-IDF adc_oneshot does not touch the GPIO here; the SAR ADC reads
++	 * the (undriven) analog input without it. Dropping the call lets the ADC and a
++	 * neighbouring digital-interrupt peripheral coexist. */
++	ARG_UNUSED(err);
+ 
+ 	return 0;
+ }
