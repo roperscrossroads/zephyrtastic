@@ -430,6 +430,12 @@ static void deliver_packet(const struct meshtastic_packet *packet)
 
 	meshtastic_emit_event(MESHTASTIC_EVENT_PACKET_RECEIVED, 0, packet);
 	meshtastic_phoneapi_on_packet(packet);
+
+	/* Light-sleep governor: a packet delivered to us is activity, so refresh the
+	 * min_wake_secs wake window. This is the single delivery choke point; it counts
+	 * delivered broadcasts too (the intended min_wake_secs meaning). Narrow to
+	 * (packet->to == mt.node_id) here if only direct traffic should hold us awake. */
+	meshtastic_power_note_activity();
 }
 
 void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *hdr,

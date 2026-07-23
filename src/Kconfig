@@ -96,6 +96,8 @@ rsource "Kconfig.sntp"
 rsource "Kconfig.pki"
 rsource "Kconfig.ota"
 rsource "Kconfig.display"
+rsource "Kconfig.powermon"
+rsource "Kconfig.power"
 
 menu "LoRa transmit retry"
 

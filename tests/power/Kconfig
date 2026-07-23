@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-3.0
+#
+# native_sim has no SoC to `select HAS_PM`, so CONFIG_PM — which
+# `depends on SYS_CLOCK_EXISTS && HAS_PM` — is silently rejected without this,
+# and the whole governor (compiled `ifdef CONFIG_PM`) drops out. Mirrors
+# zephyr/tests/subsys/pm/policy_api/Kconfig: force HAS_PM on so the pm_policy
+# STANDBY lock the governor drives is real under test. The test also supplies the
+# pm_state_set/_exit_post_ops hooks native_sim otherwise lacks (src/main.c).
+
+menu "Zephyr"
+source "Kconfig.zephyr"
+endmenu
+
+config TEST_PROVIDE_PM_HOOKS
+	bool "Provide PM hooks for test purposes"
+	default y
+	select HAS_PM

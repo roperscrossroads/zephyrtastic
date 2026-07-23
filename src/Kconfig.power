@@ -1,0 +1,17 @@
+# Meshtastic power policy — PowerConfig.is_power_saving wiring
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_POWER_SAVE_DEFAULT
+	bool "Default is_power_saving when no PowerConfig is stored"
+	depends on PM
+	default n
+	help
+	  Fallback for PowerConfig.is_power_saving before the phone / NVS provides
+	  one. is_power_saving gates whether the SoC may enter light sleep
+	  (PM_STATE_STANDBY): OFF holds a pm_policy lock blocking standby (stay
+	  responsive — upstream's default for a mains/WiFi node); ON releases it.
+
+	  Set y in a PM build (e.g. via overlay-pm.conf) so light sleep is exercised
+	  out of the box; the phone's stored is_power_saving still overrides on the
+	  next boot. Only meaningful with CONFIG_PM (the power-policy hook,
+	  meshtastic_power.c, compiles only then).

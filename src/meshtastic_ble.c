@@ -333,6 +333,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	k_mutex_unlock(&ble.lock);
 
 	meshtastic_set_ble_connected(true);
+	meshtastic_power_note_phone_connected();
 	meshtastic_emit_event(MESHTASTIC_EVENT_BLE_CONNECTED, 0, NULL);
 
 	/*
@@ -357,6 +358,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	(void)k_work_cancel(&ble.fromradio_work);
 
 	meshtastic_set_ble_connected(false);
+	meshtastic_power_note_phone_disconnected();
 	meshtastic_emit_event(MESHTASTIC_EVENT_BLE_DISCONNECTED, 0, NULL);
 	LOG_INF("BLE disconnected: 0x%02x", reason);
 }

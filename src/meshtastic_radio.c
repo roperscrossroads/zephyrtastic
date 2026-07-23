@@ -21,6 +21,7 @@
 #include "meshtastic_packet.h"
 #include "meshtastic_router.h"
 #include "meshtastic_airtime.h"
+#include "meshtastic_powermon.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -167,9 +168,11 @@ static int mt_radio_arm_rx(void)
 	if (ret < 0) {
 		mt.radio_rx_armed = false;
 		mt.status.rx_rearm_failures++;
+		meshtastic_powermon_clear(MESHTASTIC_PM_LORA_RX);
 		LOG_ERR("lora_recv_async arm failed (%d)", ret);
 	} else {
 		mt.radio_rx_armed = true;
+		meshtastic_powermon_set(MESHTASTIC_PM_LORA_RX);
 	}
 
 	return ret;
@@ -215,6 +218,8 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	 */
 	(void)lora_recv_async(mt.lora_dev, NULL, NULL);
 	mt.radio_rx_armed = false;
+	meshtastic_powermon_clear(MESHTASTIC_PM_LORA_RX);
+	meshtastic_powermon_set(MESHTASTIC_PM_LORA_TX);
 
 	k_mutex_lock(&mt.lock, K_FOREVER);
 
@@ -253,6 +258,7 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	k_mutex_unlock(&mt.lock);
 
 	(void)mt_radio_arm_rx();
+	meshtastic_powermon_clear(MESHTASTIC_PM_LORA_TX);
 
 	(void)k_sem_give(&mt_radio_sem);
 
@@ -316,7 +322,20 @@ static void mt_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	while (true) {
-		ret = k_msgq_get(&mt_rx_msgq, &slot, K_MSEC(CONFIG_MESHTASTIC_RX_REARM_RETRY_MS));
+		/*
+		 * Block long while RX is armed so the SoC can idle between
+		 * frames — the wait is a liveness backstop, not a poll, and a
+		 * frame arrival wakes this immediately via mt_rx_msgq.  Drop to
+		 * the fast retry cadence only while the radio is un-armed, so a
+		 * failed post-TX re-arm is still recovered promptly.  (A pure
+		 * K_FOREVER would be wrong here: a deaf radio receives nothing,
+		 * so nothing would wake the thread to notice the failed re-arm.)
+		 */
+		k_timeout_t wait = mt.radio_rx_armed
+					   ? K_MSEC(CONFIG_MESHTASTIC_RX_IDLE_RECHECK_MS)
+					   : K_MSEC(CONFIG_MESHTASTIC_RX_REARM_RETRY_MS);
+
+		ret = k_msgq_get(&mt_rx_msgq, &slot, wait);
 		if (ret == 0) {
 			meshtastic_router_process_lora_rx(slot.buf, slot.len, slot.rssi, slot.snr);
 			continue;

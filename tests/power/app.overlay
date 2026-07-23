@@ -1,0 +1,36 @@
+/* SPDX-License-Identifier: GPL-3.0
+ *
+ * Give native_sim a light-sleep (STANDBY) power state so the light-sleep
+ * governor's pm_policy STANDBY lock is real under test.
+ *
+ * The whole pm_policy_state_lock_* machinery is gated on
+ * DT_HAS_COMPAT_STATUS_OKAY(zephyr_power_state) (subsys/pm/policy/policy_state_lock.c):
+ * with no zephyr,power-state node it compiles out and every lock get/put is a
+ * no-op while pm_policy_state_lock_is_active() always returns false — so the
+ * governor asserts would test nothing. This node makes PM_STATE_STANDBY (derived
+ * from power-state-name = "standby") a real, lockable state.
+ *
+ * Modeled on zephyr/tests/subsys/pm/policy_api/app.overlay.
+ */
+
+/ {
+	power-states {
+		standby: standby {
+			compatible = "zephyr,power-state";
+			power-state-name = "standby";
+			/* Deliberately huge (~4000 s) so native_sim's idle never actually
+			 * *selects* STANDBY during the sub-3 s k_sleeps these tests use. The
+			 * empty pm_state_set hook (src/main.c) doesn't advance the simulated
+			 * clock, so an entered STANDBY would stall time and hang the run. The
+			 * governor's contract under test is the pm_policy STANDBY *lock*
+			 * (pm_policy_state_lock_is_active), which is real regardless of whether
+			 * the idle ever enters the state — so suppressing entry costs nothing. */
+			min-residency-us = <4000000000>;
+			exit-latency-us = <10000>;
+		};
+	};
+};
+
+&cpu0 {
+	cpu-power-states = <&standby>;
+};

@@ -37,7 +37,22 @@ config MESHTASTIC_RX_REARM_RETRY_MS
 	help
 	  If re-arming continuous receive after a transmit fails, the radio
 	  is left deaf.  The processing thread retries the re-arm at this
-	  interval until it succeeds.
+	  (short) interval until it succeeds.
+
+config MESHTASTIC_RX_IDLE_RECHECK_MS
+	int "Receive-thread armed idle re-check interval (ms)"
+	default 30000
+	help
+	  While continuous receive is armed (the normal case), the packet-
+	  processing thread blocks up to this long for a frame before waking
+	  merely to re-confirm the radio is still armed.  It is a liveness
+	  backstop, not a poll: an incoming frame wakes the thread immediately
+	  regardless.  Keep it well above the ESP32-S3 tickless idle ceiling
+	  (~18 s) so this thread does not floor system idle, yet finite so a
+	  rare post-transmit re-arm failure is still detected within this bound
+	  (after which the thread retries at MESHTASTIC_RX_REARM_RETRY_MS until
+	  re-arm succeeds).  Raising RX_REARM_RETRY_MS above ~18 s would blunt
+	  recovery; this separate, longer bound is why the two are distinct.
 
 config MESHTASTIC_OUTBOUND_QUEUE_MAX
 	int "Outbound LoRa transmit queue capacity (frames)"

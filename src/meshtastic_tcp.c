@@ -227,6 +227,7 @@ static void tcp_close_client(void)
 	zsock_close(tcp.client_fd);
 	tcp.client_fd = -1;
 	meshtastic_phoneapi_reset(&tcp.api);
+	meshtastic_power_note_phone_disconnected();
 	LOG_INF("Meshtastic TCP PhoneAPI client disconnected");
 }
 
@@ -254,6 +255,7 @@ static void tcp_accept_client(int lfd)
 	meshtastic_phoneapi_enqueue_rebooted(&tcp.api);
 	(void)tcp_drain_tx();
 
+	meshtastic_power_note_phone_connected();
 	LOG_INF("Meshtastic TCP PhoneAPI client connected");
 }
 

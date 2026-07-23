@@ -138,6 +138,37 @@ struct meshtastic_settings_apply {
 
 int meshtastic_settings_apply_all(void);
 
+/* Re-read the persisted PowerConfig and apply it to the PM subsystem
+ * (is_power_saving -> light-sleep pm_policy lock). Called from the settings-apply
+ * hook at boot and from the admin config-write path for a live phone toggle.
+ * A no-op without CONFIG_PM (there is no light sleep to gate; see
+ * meshtastic_power.c). */
+#if defined(CONFIG_PM)
+void meshtastic_power_config_apply(void);
+
+/* Light-sleep governor activity signals (see meshtastic_power.c). Called directly
+ * from the RX, BLE, TCP and input contexts (ISR-safe). The phone notes ref-count
+ * the STANDBY inhibitor across BLE + TCP clients; the activity note refreshes the
+ * min_wake_secs wake window. No-ops without CONFIG_PM, so every hook site (and a
+ * disabled CONFIG_MESHTASTIC_BLE/_TCP) compiles away. */
+void meshtastic_power_note_phone_connected(void);
+void meshtastic_power_note_phone_disconnected(void);
+void meshtastic_power_note_activity(void);
+#else
+static inline void meshtastic_power_config_apply(void)
+{
+}
+static inline void meshtastic_power_note_phone_connected(void)
+{
+}
+static inline void meshtastic_power_note_phone_disconnected(void)
+{
+}
+static inline void meshtastic_power_note_activity(void)
+{
+}
+#endif
+
 #ifdef __cplusplus
 }
 #endif

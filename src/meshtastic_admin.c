@@ -614,12 +614,16 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 			LOG_WRN("admin: set_config failed (%d)", ret);
 			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
 		} else {
-			/* apply_core applies device/lora core fields live; every other
-			 * section is persisted and applied on reboot. */
+			/* apply_core applies device/lora core fields live; the power
+			 * policy (PowerConfig.is_power_saving -> light-sleep lock) is
+			 * re-applied live here too under CONFIG_PM; every other section is
+			 * persisted and applied on reboot. */
 			pb_size_t which = admin_req.payload_variant.set_config.which_payload_variant;
 
-			if (which != meshtastic_Config_device_tag &&
-			    which != meshtastic_Config_lora_tag) {
+			if (IS_ENABLED(CONFIG_PM) && which == meshtastic_Config_power_tag) {
+				meshtastic_power_config_apply();
+			} else if (which != meshtastic_Config_device_tag &&
+				   which != meshtastic_Config_lora_tag) {
 				reboot_pending = true;
 			}
 		}

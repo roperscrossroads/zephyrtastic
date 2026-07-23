@@ -1,0 +1,20 @@
+# Meshtastic PowerMon — power-state activity instrumentation
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_POWERMON
+	bool "Power-state activity monitor (PowerMon)"
+	default n
+	help
+	  Track power-relevant subsystem activity (LoRa RX/TX, wifi, light sleep,
+	  Vext, GNSS, ...) as an atomic bitmask, logged on change at INF level and
+	  readable over the shell ("powermon"). Intended for bench power
+	  characterisation: correlate a measured current draw with what the node is
+	  actually doing.
+
+	  Zero cost when disabled — the instrumentation calls compile to no-ops, so
+	  the radio/wifi/PM call sites carry no #ifdef. With CONFIG_PM, a PM notifier
+	  additionally tracks the ESP32-S3 light-sleep state (atomically, no logging
+	  from that constrained context).
+
+	  Raise just this module's verbosity at the bench with
+	  "log level dbg meshtastic_powermon" (state changes log at INF by default).

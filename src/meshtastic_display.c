@@ -542,6 +542,7 @@ static void ui_input_cb(struct input_event *evt, void *user_data)
 	}
 
 	if (evt->value) { /* press */
+		meshtastic_power_note_activity();
 		atomic_set(&btn_held, 1);
 		atomic_set(&long_sent, 0);
 		k_timer_start(&longpress_timer,
