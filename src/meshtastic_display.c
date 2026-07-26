@@ -35,6 +35,7 @@
 #include <zephyr/meshtastic/nodedb.h>
 #include "meshtastic_core.h" /* public getters + internal name/freq/chan/hop getters */
 #include "meshtastic_airtime.h"  /* channel/tx utilisation (CONFIG_MESHTASTIC_AIRTIME) */
+#include "meshtastic_build.h"    /* build id for the device page */
 #include "meshtastic_clock.h"    /* epoch time (compiled unconditionally) */
 #include "meshtastic_position.h" /* fix lat/lon/alt (CONFIG_MESHTASTIC_POSITION) */
 #include "meshtastic_powermon.h" /* light-sleep count for the PM page (CONFIG_PM) */
@@ -131,6 +132,10 @@ static void page_device(void)
 	draw_row(1, "ID %08X", meshtastic_get_node_id());
 	draw_row(2, "F%u.%u %s", freq / 1000000U, (freq % 1000000U) / 100000U,
 		 (ch && ch[0]) ? ch : "-");
+	/* Build id (git describe + "-dirty") so the running image is identifiable at a
+	 * glance — the recurring "old or new firmware?" question. Truncated to the
+	 * panel width by draw_row. */
+	draw_row(3, "b:%s", meshtastic_build_id());
 }
 
 static void page_nodes(void)

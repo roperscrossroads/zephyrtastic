@@ -23,6 +23,7 @@
 #include <zephyr/meshtastic/nodeinfo.h>
 #include <zephyr/meshtastic/telemetry.h>
 
+#include "meshtastic_build.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
@@ -356,6 +357,12 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 {
 	psa_status_t psa_st;
 	int ret;
+
+	/* Banner: the build id (git describe + "-dirty") + build time, so a boot-log
+	 * capture identifies the running image — separate from the phone-protocol
+	 * firmware_version. */
+	LOG_INF("meshtastic build %s (built %s UTC)", meshtastic_build_id(),
+		meshtastic_build_time());
 
 	if (cfg == NULL) {
 		return -EINVAL;

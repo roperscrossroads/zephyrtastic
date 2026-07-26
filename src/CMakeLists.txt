@@ -32,8 +32,23 @@ if(CONFIG_MESHTASTIC)
   endif()
   zephyr_nanopb_sources(meshtastic ${MESHTASTIC_NANOPB_PROTOS})
 
+  # Build identity (git describe + build time) regenerated on every build into a
+  # header, isolated in meshtastic_build.c. See cmake/gen_build_id.cmake.
+  set(MT_BUILD_ID_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+  set(MT_BUILD_ID_H ${MT_BUILD_ID_DIR}/meshtastic_build_id.h)
+  add_custom_target(meshtastic_build_id_gen
+    BYPRODUCTS ${MT_BUILD_ID_H}
+    COMMAND ${CMAKE_COMMAND}
+      -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+      -DOUT=${MT_BUILD_ID_H}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_build_id.cmake
+    COMMENT "meshtastic: capturing build id"
+    VERBATIM)
+  add_dependencies(meshtastic meshtastic_build_id_gen)
+
   target_include_directories(meshtastic PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/proto
+    ${MT_BUILD_ID_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
   )
 
@@ -41,6 +56,7 @@ if(CONFIG_MESHTASTIC)
 
   zephyr_library_sources(
     meshtastic.c
+    meshtastic_build.c
     meshtastic_channels.c
     meshtastic_clock.c
     meshtastic_config_store.c

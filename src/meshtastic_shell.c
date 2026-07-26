@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
+#include <zephyr/version.h>
 #if defined(CONFIG_PM)
 #include <zephyr/pm/pm.h>
 #include <zephyr/pm/policy.h>
@@ -27,6 +28,7 @@
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #endif
+#include "meshtastic_build.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
@@ -259,6 +261,20 @@ static uint32_t scaled_fraction(int32_t scaled, int32_t divisor)
 
 static const char *shell_device_role_name(meshtastic_Config_DeviceConfig_Role role);
 static const char *shell_rebroadcast_mode_name(meshtastic_Config_DeviceConfig_RebroadcastMode mode);
+
+static int cmd_version(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	/* Developer build identity — distinct from the "2.7.4.zephyr" phone-protocol
+	 * version. Answers "old or new image?" at the console. */
+	shell_print(sh, "build:  %s (built %s UTC)", meshtastic_build_id(),
+		    meshtastic_build_time());
+	shell_print(sh, "board:  %s", CONFIG_BOARD);
+	shell_print(sh, "zephyr: %s", KERNEL_VERSION_STRING);
+	return 0;
+}
 
 static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1655,6 +1671,8 @@ static int cmd_power(const struct shell *sh, size_t argc, char **argv)
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
+	SHELL_CMD(version, NULL, SHELL_HELP("Show build id / firmware version.", NULL),
+		  cmd_version),
 #if defined(CONFIG_NETWORKING)
 	SHELL_CMD(netpause, NULL,
 		  SHELL_HELP("Take the network down for N seconds, then restore it. "
