@@ -10,6 +10,13 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
+#if defined(CONFIG_PM)
+#include <zephyr/pm/pm.h>
+#include <zephyr/pm/policy.h>
+#endif
+#if defined(CONFIG_NETWORKING)
+#include <zephyr/net/net_if.h>
+#endif
 
 #include <zephyr/meshtastic/gnss.h>
 #include <zephyr/meshtastic/meshtastic.h>
@@ -22,6 +29,8 @@
 #endif
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
+#include "meshtastic_core.h"
+#include "meshtastic_powermon.h"
 #include "meshtastic_sched.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -1465,9 +1474,199 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  cmd_sched_defaults),
 	SHELL_SUBCMD_SET_END);
 
+
+#if defined(CONFIG_NETWORKING)
+/*
+ * netpause <secs> — take the network fully down for a bounded window, then bring it back
+ * up unattended.
+ *
+ * This exists because every network-based way of observing light sleep perturbs it: a
+ * telnet query is WiFi traffic, and WiFi traffic makes the esp_pm "wifi" lock (and the
+ * whole net/MQTT/syslog stack) wake the SoC. Residency read while connected therefore
+ * measures the measurement. Here the shell thread sleeps (so the CPU may idle), the
+ * network is genuinely off, and because the PM residency counters are cumulative you can
+ * read them afterwards for an UNPERTURBED figure.
+ *
+ * Best driven over the USB/serial console: the session survives the network going down.
+ * Over telnet it still works, but the session drops and you reconnect after `secs`.
+ */
+static int cmd_net_pause(const struct shell *sh, size_t argc, char **argv)
+{
+	struct net_if *iface = net_if_get_default();
+	uint32_t secs;
+	char *end;
+
+	if (argc < 2U) {
+		shell_error(sh, "usage: meshtastic netpause <secs>");
+		return -EINVAL;
+	}
+
+	secs = (uint32_t)strtoul(argv[1], &end, 10);
+	if (*end != '\0' || secs == 0U || secs > 600U) {
+		shell_error(sh, "secs must be 1..600");
+		return -EINVAL;
+	}
+
+	if (iface == NULL) {
+		shell_error(sh, "no default network interface");
+		return -ENODEV;
+	}
+
+	shell_print(sh, "network DOWN for %u s (telnet sessions will drop)...", secs);
+	(void)net_if_down(iface);
+
+	k_sleep(K_SECONDS(secs));
+
+	(void)net_if_up(iface);
+	shell_print(sh, "network back UP; read residency with `stats list`");
+
+	return 0;
+}
+#endif /* CONFIG_NETWORKING */
+
+#if defined(CONFIG_PM)
+/*
+ * power [on|off] — inspect or set the light-sleep power-saving policy.
+ *
+ * No argument prints the governor's live state: the stored PowerConfig fields
+ * (is_power_saving / min_wake_secs / wait_bluetooth_secs), the live inhibitor mask
+ * (STANDBY is blocked while any bit is set — an empty mask means the node is free to
+ * sleep), and the cumulative light-sleep entry count. That last pair is the answer
+ * to "why isn't it sleeping": a WiFi node shows [WIFI] while it holds a lease, and a
+ * saving=off node shows [POLICY].
+ *
+ * `on` / `off` writes is_power_saving into the config store and applies it live via
+ * the same meshtastic_power_config_apply() the admin PhoneAPI PowerConfig write
+ * calls — no reboot. This is the only way to toggle saving on a BLE-only node with
+ * no phone paired, and it persists across reboots.
+ */
+static int cmd_power_show(const struct shell *sh)
+{
+	meshtastic_Config config;
+	bool saving = IS_ENABLED(CONFIG_MESHTASTIC_POWER_SAVE_DEFAULT);
+	uint32_t min_wake = 0U;
+	uint32_t wait_bt = 0U;
+	bool stored = false;
+	uint32_t inh;
+	bool locked;
+	char inhbuf[64];
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_power_tag, &config) == 0 &&
+	    config.which_payload_variant == meshtastic_Config_power_tag) {
+		saving = config.payload_variant.power.is_power_saving;
+		min_wake = config.payload_variant.power.min_wake_secs;
+		wait_bt = config.payload_variant.power.wait_bluetooth_secs;
+		stored = true;
+	}
+
+	inh = meshtastic_power_inhibitors();
+	meshtastic_power_inhibitors_str(inh, inhbuf, sizeof(inhbuf));
+	/* Ground truth: is PM_STATE_STANDBY actually locked by ANYONE? This catches the
+	 * esp-idf radio-controller locks (WiFi APB / BLE controller) that route through
+	 * the HAL's pm_policy_state_all_lock_get() and are INVISIBLE to the governor
+	 * mask above -- the reason a BLE node reads inhibitors 0x00 yet never sleeps. */
+	locked = pm_policy_state_lock_is_active(PM_STATE_STANDBY, PM_ALL_SUBSTATES);
+
+	shell_print(sh, "power saving:        %s%s", saving ? "on" : "off",
+		    stored ? "" : " (compiled default; no PowerConfig stored)");
+	shell_print(sh, "min_wake_secs:       %u%s", min_wake,
+		    min_wake == 0U ? "  (activity wake window disabled)" : "");
+	shell_print(sh, "wait_bluetooth_secs: %u%s", wait_bt,
+		    wait_bt == 0U ? "  (boot pairing window disabled)" : "");
+	shell_print(sh, "governor inhibitors: 0x%02x [%s]", inh, inhbuf);
+	if (!locked) {
+		shell_print(sh, "STANDBY lock:        clear -- SoC free to light-sleep");
+	} else if (inh != 0U) {
+		shell_print(sh, "STANDBY lock:        held (governor inhibiting; see mask above)");
+	} else {
+		shell_print(sh, "STANDBY lock:        held by esp-idf radio controller "
+				"(WiFi/BLE), NOT the governor");
+	}
+	shell_print(sh, "light-sleep entries: %u", meshtastic_powermon_sleep_count());
+	return 0;
+}
+
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+static int cmd_power_set(const struct shell *sh, bool on)
+{
+	meshtastic_Config config;
+	int ret;
+
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+
+	ret = meshtastic_config_store_get_config(meshtastic_Config_power_tag, &config);
+	if (ret < 0) {
+		shell_error(sh, "power get failed: %d", ret);
+		return ret;
+	}
+
+	/* get_config returns the slot with which_payload_variant already set to the
+	 * power tag; touch only the field we own and write the whole PowerConfig back,
+	 * exactly as the admin set_config path does. */
+	config.which_payload_variant = meshtastic_Config_power_tag;
+	config.payload_variant.power.is_power_saving = on;
+
+	ret = meshtastic_config_store_set_config(&config);
+	if (ret < 0) {
+		shell_error(sh, "power set failed: %d", ret);
+		return ret;
+	}
+
+	/* Apply live -- the same call the admin PowerConfig write makes, so the POLICY
+	 * inhibitor flips now, no reboot. */
+	meshtastic_power_config_apply();
+
+	shell_print(sh, "power saving %s (applied live, persisted)", on ? "on" : "off");
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+
+static int cmd_power(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 1U) {
+		return cmd_power_show(sh);
+	}
+
+	if (argc != 2U) {
+		shell_error(sh, "usage: meshtastic power [on|off]");
+		return -EINVAL;
+	}
+
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	shell_error(sh, "refused: shell config writes are compiled out "
+			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
+	return -ENOTSUP;
+#else
+	if (strcmp(argv[1], "on") == 0) {
+		return cmd_power_set(sh, true);
+	}
+	if (strcmp(argv[1], "off") == 0) {
+		return cmd_power_set(sh, false);
+	}
+
+	shell_error(sh, "expected on or off, got %s", argv[1]);
+	return -EINVAL;
+#endif
+}
+#endif /* CONFIG_PM */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
+#if defined(CONFIG_NETWORKING)
+	SHELL_CMD(netpause, NULL,
+		  SHELL_HELP("Take the network down for N seconds, then restore it. "
+			     "Lets PM residency be measured without network traffic waking "
+			     "the SoC.", "<secs>"),
+		  cmd_net_pause),
+#endif
+#if defined(CONFIG_PM)
+	SHELL_CMD(power, NULL,
+		  SHELL_HELP("Show or set the light-sleep power-saving policy.", "[on|off]"),
+		  cmd_power),
+#endif
 	SHELL_CMD(sched, &meshtastic_sched_cmds,
 		  SHELL_HELP("Scheduler / QoS policy commands.", NULL), cmd_sched_show),
 	SHELL_CMD(channel, &meshtastic_channel_cmds, SHELL_HELP("Channel table commands.", NULL),

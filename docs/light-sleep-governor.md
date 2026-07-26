@@ -142,6 +142,40 @@ worth knowing before comparing against `firmware/src/PowerFSM.cpp`:
    (`EVENT_SERIAL_CONNECTED`); our `PHONE` inhibitor covers only BLE + TCP, not
    serial (a serial link implies USB power anyway).
 
+## The radio controllers block STANDBY independently of the governor
+
+The governor releasing its STANDBY lock is **necessary but not sufficient**: on a
+radio-active node the SoC still will not light-sleep, because the ESP-IDF radio
+controllers hold their own PM lock that the governor never sees.
+
+Both the WiFi driver (`esp_wifi/src/wifi_init.c` — an `ESP_PM_APB_FREQ_MAX` lock)
+and the BLE controller (`bt/controller/esp32c3/bt.c` — the S3 uses the C3-family
+BLE core) call `esp_pm_lock_acquire()` while active. The Zephyr HAL bridges that
+through a **coarse stub** (`modules/hal/espressif/.../pm_impl_zephyr.c`):
+`esp_pm_impl_switch_mode(MODE_LOCK)` → `pm_policy_state_all_lock_get()`, which
+locks **every** PM state, `STANDBY` included. (The stub's own comment flags it as a
+placeholder "until we port IDF pm_impl.") This lock is a separate
+`pm_policy_state_lock_get` from the governor's, so it does **not** appear in the
+governor's inhibitor mask.
+
+Consequences, both observed on the bench:
+
+- **A BLE node never light-sleeps while advertising/connectable.** With no
+  `CONFIG_BT_CTRL_MODEM_SLEEP`, the controller holds the lock continuously —
+  `is_power_saving=on`, governor mask `0x00`, yet `light-sleep entries` stays `0`.
+- **A WiFi node is doubly gated.** The governor's `WIFI` inhibitor and the WiFi
+  APB lock both drop together when the link goes down, which is why a `netpause`
+  makes an otherwise-pinned WiFi node light-sleep hundreds of times per second.
+
+Restoring true battery savings on a radio-up node is a HAL/controller bring-up
+job, not a governor change — enable the controller's modem-sleep (`BT_CTRL_MODEM_SLEEP`
++ a low-power clock; note the Heltec V4 has no 32.768 kHz crystal) **and** refine
+the coarse `pm_impl_zephyr` stub so a modem-sleep-capable controller does not take
+an all-states lock. A scoped follow-on. The `meshtastic power` shell command
+reports both the governor mask **and** the true `pm_policy_state_lock_is_active(STANDBY)`
+so this distinction is visible at the console (`STANDBY lock: held by esp-idf radio
+controller … NOT the governor`).
+
 ## Scope — light sleep only
 
 Deep sleep is explicitly **out**. `sds_secs` / `ls_secs` escalation and
