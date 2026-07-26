@@ -28,6 +28,13 @@ LOG_MODULE_REGISTER(meshtastic_powermon, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 static atomic_t pm_state = ATOMIC_INIT(0);
 
+/* Count of light-sleep (PM_STATE_STANDBY) entries — a monotonically increasing
+ * "sleep is happening" tally. Incremented from the PM notifier (below); read by the
+ * shell and the on-device UI's PM page. A count that climbs is the proof the SoC is
+ * actually light-sleeping, visible even when the console is dead (the USJ console
+ * dies in light sleep, so the OLED is the only channel that survives). */
+static atomic_t pm_sleep_count = ATOMIC_INIT(0);
+
 static const struct {
 	uint32_t bit;
 	const char *name;
@@ -95,6 +102,11 @@ uint32_t meshtastic_powermon_state(void)
 	return (uint32_t)atomic_get(&pm_state);
 }
 
+uint32_t meshtastic_powermon_sleep_count(void)
+{
+	return (uint32_t)atomic_get(&pm_sleep_count);
+}
+
 #if defined(CONFIG_PM)
 #include <zephyr/pm/pm.h>
 
@@ -107,6 +119,7 @@ static void pm_note_entry(enum pm_state state)
 {
 	if (state == PM_STATE_STANDBY) {
 		(void)atomic_or(&pm_state, (atomic_val_t)MESHTASTIC_PM_CPU_LIGHT_SLEEP);
+		(void)atomic_inc(&pm_sleep_count);
 	}
 }
 
@@ -143,7 +156,8 @@ static int cmd_powermon(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	pm_decode(s, buf, sizeof(buf));
-	shell_print(sh, "powermon state=0x%03x [%s]", s, buf);
+	shell_print(sh, "powermon state=0x%03x [%s] sleeps=%u", s, buf,
+		    (unsigned int)atomic_get(&pm_sleep_count));
 	return 0;
 }
 

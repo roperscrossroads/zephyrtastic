@@ -44,6 +44,10 @@ void meshtastic_powermon_clear(uint32_t bits);
 /** Current activity bitmask. */
 uint32_t meshtastic_powermon_state(void);
 
+/** Number of light-sleep (PM_STATE_STANDBY) entries since boot. A rising count is
+ *  live proof the SoC is light-sleeping. 0 without CONFIG_PM (nothing to count). */
+uint32_t meshtastic_powermon_sleep_count(void);
+
 #else /* !CONFIG_MESHTASTIC_POWERMON — compile the instrumentation away. */
 
 static inline void meshtastic_powermon_set(uint32_t bits)
@@ -57,6 +61,11 @@ static inline void meshtastic_powermon_clear(uint32_t bits)
 }
 
 static inline uint32_t meshtastic_powermon_state(void)
+{
+	return 0U;
+}
+
+static inline uint32_t meshtastic_powermon_sleep_count(void)
 {
 	return 0U;
 }

@@ -37,6 +37,7 @@
 #include "meshtastic_airtime.h"  /* channel/tx utilisation (CONFIG_MESHTASTIC_AIRTIME) */
 #include "meshtastic_clock.h"    /* epoch time (compiled unconditionally) */
 #include "meshtastic_position.h" /* fix lat/lon/alt (CONFIG_MESHTASTIC_POSITION) */
+#include "meshtastic_powermon.h" /* light-sleep count for the PM page (CONFIG_PM) */
 #if defined(CONFIG_MESHTASTIC_MQTT)
 #include "meshtastic_mqtt.h"
 #endif
@@ -109,6 +110,9 @@ enum {
 	PAGE_RADIO,
 	PAGE_GPS,
 	PAGE_TIME,
+#if defined(CONFIG_PM)
+	PAGE_PM,
+#endif
 };
 
 /* When the Nodes page is being browsed, report which node index is highlighted
@@ -273,6 +277,28 @@ static void page_status(void)
 		 st.ble_connected ? "BLE" : "");
 }
 
+#if defined(CONFIG_PM)
+/* PM / light-sleep debug page. The headline is a live "is it sleeping right now"
+ * indicator: the sleep-entry count is compared against its value at the previous
+ * refresh, so a climbing count (the SoC light-slept in the last refresh window)
+ * shows "OK", a static one shows "idle" (e.g. a BLE phone is connected, holding the
+ * PHONE inhibitor). This is the channel that survives light sleep — the USB console
+ * does not. Row 2 also shows uptime + the raw powermon state bitmask for context. */
+static void page_pm(void)
+{
+	static uint32_t last_count;
+	uint32_t sleeps = meshtastic_powermon_sleep_count();
+	bool active = (sleeps != last_count);
+
+	last_count = sleeps;
+
+	draw_row(0, "Sleep %s", active ? "OK" : "idle");
+	draw_row(1, "count %u", sleeps);
+	draw_row(2, "up%us st%03x", (unsigned int)(k_uptime_get() / 1000),
+		 meshtastic_powermon_state());
+}
+#endif /* CONFIG_PM */
+
 typedef void (*page_fn)(void);
 
 static const page_fn pages[] = {
@@ -282,6 +308,9 @@ static const page_fn pages[] = {
 	page_radio,
 	page_gps,
 	page_time,
+#if defined(CONFIG_PM)
+	page_pm,
+#endif
 };
 
 static const char *const page_names[] = {
@@ -291,6 +320,9 @@ static const char *const page_names[] = {
 	"Radio",
 	"GPS",
 	"Time",
+#if defined(CONFIG_PM)
+	"PM",
+#endif
 };
 
 BUILD_ASSERT(ARRAY_SIZE(pages) == ARRAY_SIZE(page_names),
