@@ -17,6 +17,11 @@
  *   PHONE     — a BLE or TCP PhoneAPI client is connected (ref-counted).
  *   ACTIVITY  — within min_wake_secs of the last RX-for-us or button press.
  *   BOOT_WAIT — within wait_bluetooth_secs of boot (a window to pair a phone).
+ *   WIFI      — the network link is up (an IPv4 lease is held). Reproduces
+ *               upstream's !isWifiAvailable() light-sleep gate: the Zephyr esp32
+ *               WiFi path has no DTIM/beacon-wakeup coordination, so a CPU-domain-
+ *               down light sleep would drop the association (the AP deauths on the
+ *               missed keepalives). Driven from IPv4 addr add/del below.
  *
  * STANDBY (light sleep) is blocked while any inhibitor is set; the SoC
  * light-sleeps only when the whole mask clears. This consumes is_power_saving +
@@ -36,6 +41,7 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/spinlock.h>
@@ -43,6 +49,12 @@
 #include <zephyr/pm/policy.h>
 
 #include <zephyr/logging/log.h>
+
+#if defined(CONFIG_NETWORKING)
+#include <zephyr/init.h>
+#include <zephyr/net/net_mgmt.h>
+#include <zephyr/net/net_event.h>
+#endif
 
 #include "meshtastic/config.pb.h"
 #include "meshtastic_config_store.h"
@@ -54,7 +66,9 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define INH_PHONE     BIT(1) /* a BLE or TCP PhoneAPI client is connected */
 #define INH_ACTIVITY  BIT(2) /* within min_wake_secs of the last activity */
 #define INH_BOOT_WAIT BIT(3) /* within wait_bluetooth_secs of boot */
-#define INH_ALL       (INH_POLICY | INH_PHONE | INH_ACTIVITY | INH_BOOT_WAIT)
+#define INH_WIFI      BIT(4) /* the network link is up (IPv4 lease held) */
+#define INH_ALL                                                                                    \
+	(INH_POLICY | INH_PHONE | INH_ACTIVITY | INH_BOOT_WAIT | INH_WIFI)
 
 /* Everything below is guarded by gov_lock. The bitmask read-modify-write AND the
  * paired pm_policy get/put happen together inside one region so the lock toggles
@@ -171,6 +185,26 @@ void meshtastic_power_note_activity(void)
 	(void)k_work_reschedule(&activity_work, K_SECONDS(secs));
 }
 
+/* Network link up/down. Not ref-counted: a single interface has one link state,
+ * and inhibit_update_locked() is idempotent on a set bit — so a duplicate up (e.g.
+ * a re-lease firing IPV4_ADDR_ADD again) or an unmatched down is a safe no-op, never
+ * a lost or double pm_policy put. */
+void meshtastic_power_note_wifi_up(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&gov_lock);
+
+	inhibit_update_locked(INH_WIFI, true);
+	k_spin_unlock(&gov_lock, key);
+}
+
+void meshtastic_power_note_wifi_down(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&gov_lock);
+
+	inhibit_update_locked(INH_WIFI, false);
+	k_spin_unlock(&gov_lock, key);
+}
+
 void meshtastic_power_config_apply(void)
 {
 	meshtastic_Config config;
@@ -206,6 +240,48 @@ void meshtastic_power_config_apply(void)
 	LOG_INF("power governor: saving=%d min_wake=%us wait_bt=%us", saving, min_wake, wait_bt);
 }
 
+/* Bench diagnostic: the live inhibitor mask, and a decode of the set bits. Lets a
+ * console answer "why isn't the SoC light-sleeping right now" — STANDBY is blocked
+ * while any bit is set, so an empty decode means the node is free to sleep. Read
+ * under the same spinlock the notes use so the snapshot is coherent. */
+uint32_t meshtastic_power_inhibitors(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&gov_lock);
+	uint32_t v = inhibitors;
+
+	k_spin_unlock(&gov_lock, key);
+	return v;
+}
+
+void meshtastic_power_inhibitors_str(uint32_t mask, char *buf, size_t n)
+{
+	static const struct {
+		uint32_t bit;
+		const char *name;
+	} names[] = {
+		{INH_POLICY, "POLICY"},       {INH_PHONE, "PHONE"}, {INH_ACTIVITY, "ACTIVITY"},
+		{INH_BOOT_WAIT, "BOOT_WAIT"}, {INH_WIFI, "WIFI"},
+	};
+	size_t off = 0;
+
+	if (n > 0U) {
+		buf[0] = '\0';
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+		if ((mask & names[i].bit) == 0U) {
+			continue;
+		}
+
+		int w = snprintf(buf + off, n - off, "%s%s", (off > 0U) ? " " : "", names[i].name);
+
+		if (w < 0 || (size_t)w >= n - off) {
+			break;
+		}
+		off += (size_t)w;
+	}
+}
+
 /* Return the governor to its power-on state. Its only caller is the native_sim
  * ztest suite, which needs it because the file-static state persists across test
  * cases in one binary. It is compiled unconditionally rather than behind
@@ -237,3 +313,37 @@ static int power_apply(void)
 }
 
 MESHTASTIC_SETTINGS_APPLY_DEFINE(power_saving, power_apply);
+
+#if defined(CONFIG_NETWORKING)
+/* Hold the WIFI inhibitor whenever the interface has an IPv4 lease. An IPv4 address
+ * is the proxy for a usable (associated + addressed) link; a bare L2 association with
+ * no address carries no traffic worth staying awake for, and DHCP re-tries on the
+ * next wake. This is a second consumer of the IPv4 addr events alongside the MQTT and
+ * SNTP callbacks — net_mgmt fans one event out to every registered callback. */
+static struct net_mgmt_event_callback power_net_cb;
+
+static void power_net_event(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
+			    struct net_if *iface)
+{
+	ARG_UNUSED(cb);
+	ARG_UNUSED(iface);
+
+	if (mgmt_event == NET_EVENT_IPV4_ADDR_ADD) {
+		meshtastic_power_note_wifi_up();
+	} else if (mgmt_event == NET_EVENT_IPV4_ADDR_DEL) {
+		meshtastic_power_note_wifi_down();
+	}
+}
+
+static int power_net_init(void)
+{
+	net_mgmt_init_event_callback(&power_net_cb, power_net_event,
+				     NET_EVENT_IPV4_ADDR_ADD | NET_EVENT_IPV4_ADDR_DEL);
+	net_mgmt_add_event_callback(&power_net_cb);
+	return 0;
+}
+
+/* APPLICATION phase: the net stack is up but no IPv4 lease exists yet (DHCP runs
+ * after WiFi associates), so no ADD event is missed by registering here. */
+SYS_INIT(power_net_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+#endif /* CONFIG_NETWORKING */

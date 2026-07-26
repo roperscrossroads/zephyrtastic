@@ -154,6 +154,25 @@ void meshtastic_power_config_apply(void);
 void meshtastic_power_note_phone_connected(void);
 void meshtastic_power_note_phone_disconnected(void);
 void meshtastic_power_note_activity(void);
+
+/* Network-link (WiFi) up/down signal. While the link is up the governor holds the
+ * STANDBY inhibitor so the SoC does not light-sleep out from under an associated
+ * WiFi station: the Zephyr esp32 WiFi path has no DTIM/beacon-wakeup coordination,
+ * so a CPU-domain-down light sleep drops the association (the AP deauths on the
+ * missed keepalives). This reproduces upstream's !isWifiAvailable() light-sleep
+ * gate. Driven from the IPv4 addr add/del net_mgmt events inside meshtastic_power.c
+ * (an IPv4 lease is the proxy for a usable link); idempotent, so duplicate events
+ * are safe. No-ops without CONFIG_PM. */
+void meshtastic_power_note_wifi_up(void);
+void meshtastic_power_note_wifi_down(void);
+
+/* Bench diagnostic accessors for the light-sleep inhibitor mask (see
+ * meshtastic_power.c). meshtastic_power_inhibitors() returns the live mask; STANDBY
+ * is blocked while it is nonzero, so 0 means the node is free to light-sleep. The
+ * _str() helper decodes the set bits into a space-separated name list. Used by the
+ * "meshtastic power" shell command to report why the SoC is (not) sleeping. */
+uint32_t meshtastic_power_inhibitors(void);
+void meshtastic_power_inhibitors_str(uint32_t mask, char *buf, size_t n);
 #else
 static inline void meshtastic_power_config_apply(void)
 {
@@ -166,6 +185,23 @@ static inline void meshtastic_power_note_phone_disconnected(void)
 }
 static inline void meshtastic_power_note_activity(void)
 {
+}
+static inline void meshtastic_power_note_wifi_up(void)
+{
+}
+static inline void meshtastic_power_note_wifi_down(void)
+{
+}
+static inline uint32_t meshtastic_power_inhibitors(void)
+{
+	return 0U;
+}
+static inline void meshtastic_power_inhibitors_str(uint32_t mask, char *buf, size_t n)
+{
+	(void)mask;
+	if (n > 0U) {
+		buf[0] = '\0';
+	}
 }
 #endif
 

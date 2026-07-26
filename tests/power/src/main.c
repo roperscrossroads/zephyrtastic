@@ -152,6 +152,46 @@ ZTEST(power, test_activity_coalesces)
 	zassert_false(standby_locked(), "STANDBY allowed once activity stops");
 }
 
+/* WIFI inhibitor: an up note blocks STANDBY (so light sleep can't drop an
+ * associated WiFi link); a down note releases it. Not ref-counted, so duplicate
+ * up/down events must be idempotent — with CONFIG_ASSERT=y an unbalanced pm_policy
+ * put would abort, so a passing run proves the idempotency. is_power_saving = true
+ * keeps POLICY clear so WIFI is observed alone. */
+ZTEST(power, test_wifi_inhibits)
+{
+	apply_power_config(true, 0U, 0U);
+	zassert_false(standby_locked(), "idle with power saving on -> unlocked");
+
+	meshtastic_power_note_wifi_up();
+	zassert_true(standby_locked(), "WiFi link up must block STANDBY");
+
+	/* Duplicate up (e.g. a re-lease firing IPV4_ADDR_ADD again) stays locked. */
+	meshtastic_power_note_wifi_up();
+	zassert_true(standby_locked(), "duplicate WiFi up holds the same lock");
+
+	meshtastic_power_note_wifi_down();
+	zassert_false(standby_locked(), "WiFi link down releases STANDBY");
+
+	/* Unmatched down must be a guarded no-op, not an underflow. */
+	meshtastic_power_note_wifi_down();
+	zassert_false(standby_locked(), "duplicate WiFi down stays unlocked");
+}
+
+/* WIFI composes with the other inhibitors: STANDBY stays blocked until BOTH the
+ * WiFi link is down AND power saving is on (no single inhibitor clears it alone). */
+ZTEST(power, test_wifi_composes_with_policy)
+{
+	apply_power_config(false, 0U, 0U); /* POLICY set (power saving off) */
+	meshtastic_power_note_wifi_up();   /* WIFI set too */
+	zassert_true(standby_locked(), "both inhibitors set -> locked");
+
+	apply_power_config(true, 0U, 0U); /* clear POLICY; WIFI still held */
+	zassert_true(standby_locked(), "WiFi alone still blocks STANDBY");
+
+	meshtastic_power_note_wifi_down(); /* clear WIFI; now nothing is set */
+	zassert_false(standby_locked(), "last inhibitor gone -> STANDBY allowed");
+}
+
 /* BOOT_WAIT inhibitor: armed once per boot for wait_bluetooth_secs; a live
  * re-apply must not re-arm it, and it clears when the window elapses. */
 ZTEST(power, test_boot_wait_arms_once)

@@ -30,6 +30,18 @@ SoC light-sleeps only when every bit clears.
 | `PHONE` | a BLE **or** TCP PhoneAPI client connects (ref-counted) | last client disconnects |
 | `ACTIVITY` | RX-for-us or button press | `min_wake_secs` after the last activity |
 | `BOOT_WAIT` | at boot (armed once) | `wait_bluetooth_secs` after boot |
+| `WIFI` | the interface gains an IPv4 lease (`NET_EVENT_IPV4_ADDR_ADD`) | the lease is lost (`NET_EVENT_IPV4_ADDR_DEL`) |
+
+`WIFI` is the light-sleep-vs-WiFi gate (see parity point 4): the Zephyr esp32 WiFi
+path has **no** DTIM/beacon-wakeup coordination, so a CPU-domain-down light sleep
+drops an associated station (the AP deauths on the missed keepalives). Holding the
+inhibitor while an IPv4 lease exists reproduces upstream's `!isWifiAvailable()` gate
+— a net node stays up while it has connectivity, and only light-sleeps once the link
+is genuinely down. It is driven from the IPv4 add/del `net_mgmt` events (the same
+signal `meshtastic_mqtt.c` / `meshtastic_sntp.c` already watch), is **not**
+ref-counted (a single interface has one link state; `inhibit_update_locked()` is
+idempotent, so duplicate add/del events are safe no-ops), and compiles out entirely
+without `CONFIG_NETWORKING`.
 
 `POLICY` is the only always-considered inhibitor and reproduces upstream's default
 (power saving OFF → stay responsive, the right choice for a mains/WiFi node). When
@@ -68,9 +80,9 @@ would trip the underflow `__ASSERT` in `zephyr/subsys/pm/policy/policy_state_loc
 
 ## Signals and hook sites
 
-Four sites, one call each, all compiling away when `!CONFIG_PM` via the no-op
+Five sites, one call each, all compiling away when `!CONFIG_PM` via the no-op
 `static inline` stubs in [`src/meshtastic_core.h`](../src/meshtastic_core.h) (which
-also covers `CONFIG_MESHTASTIC_BLE`/`_TCP` being off):
+also covers `CONFIG_MESHTASTIC_BLE`/`_TCP`/`NETWORKING` being off):
 
 | Signal | Site | Note |
 |---|---|---|
@@ -78,6 +90,7 @@ also covers `CONFIG_MESHTASTIC_BLE`/`_TCP` being off):
 | TCP connect / disconnect | `meshtastic_tcp.c` `tcp_accept_client()` / `tcp_close_client()` | **new** hooks — TCP emitted nothing before |
 | RX-for-us | `meshtastic_router.c` `deliver_packet()` | the single delivery choke point |
 | Button press | `meshtastic_display.c` `ui_input_cb()` | press branch only |
+| WiFi link up / down | `meshtastic_power.c` `power_net_event()` (IPv4 add/del) | self-contained `net_mgmt` callback (`CONFIG_NETWORKING` only) |
 
 `PHONE` is ref-counted across BLE + TCP, toggling the inhibitor only on the
 0↔nonzero edge; an unmatched disconnect is a guarded no-op. The TCP "newest wins"
@@ -114,15 +127,20 @@ worth knowing before comparing against `firmware/src/PowerFSM.cpp`:
    screen-dark, not just boot. We arm `BOOT_WAIT` once — the port has no clean
    "screen went dark" edge to re-arm on, and the boot pairing window is the
    primary intent.
-4. **No WiFi/role gate.** Upstream only installs the light-sleep transitions when
-   `!isWifiAvailable() && !isTrackerOrSensor && (isRouter || is_power_saving)`
-   (`PowerFSM.cpp:442`). We rely entirely on `is_power_saving` (`POLICY`). On a
-   WiFi node with `is_power_saving == true`, this governor *will* light-sleep
-   between phone connections where upstream would not — arguably a feature, but it
-   changes WiFi timing (see the standing "land PM separately from the wedge
-   investigation" caution). Related: upstream treats a **serial** API connection
-   as a stay-awake state (`EVENT_SERIAL_CONNECTED`); our `PHONE` inhibitor covers
-   only BLE + TCP, not serial (a serial link implies USB power anyway).
+4. **WiFi gate — now reproduced (`WIFI` inhibitor).** Upstream only installs the
+   light-sleep transitions when `!isWifiAvailable() && !isTrackerOrSensor &&
+   (isRouter || is_power_saving)` (`PowerFSM.cpp:442`). An earlier revision of this
+   port relied *only* on `is_power_saving` and dropped the WiFi gate — which broke
+   connectivity: this tree's esp32 WiFi path has no DTIM/beacon-wakeup coordination,
+   so light-sleeping with a station associated made the AP deauth it. The `WIFI`
+   inhibitor restores the gate: while the interface holds an IPv4 lease the governor
+   blocks STANDBY, so a net node behaves like upstream (no light sleep while WiFi is
+   up) and only sleeps once the link is down. Restoring true battery savings *with*
+   WiFi up would need modem-sleep/DTIM coordination at the SoC/HAL layer (esp-idf's
+   enhanced-light-sleep), which is not wired into this tree — a separate follow-on.
+   Related: upstream treats a **serial** API connection as a stay-awake state
+   (`EVENT_SERIAL_CONNECTED`); our `PHONE` inhibitor covers only BLE + TCP, not
+   serial (a serial link implies USB power anyway).
 
 ## Scope — light sleep only
 
@@ -141,11 +159,13 @@ the S3's ~18 s tickless / deep-sleep limits. A follow-on, not this governor. The
 (`DT_HAS_COMPAT_STATUS_OKAY(zephyr_power_state)` gate) — get/put become no-ops and
 `is_active()` always returns false, so the asserts would test nothing. `prj.conf`
 adds `CONFIG_PM=y` + `CONFIG_ASSERT=y` (so an unbalanced put aborts, making the
-ref-count test meaningful). Six suites: phone ref-count (incl. a guarded unmatched
-disconnect), policy toggle, activity expiry, activity-disabled-when-zero, activity
-coalesce (exercises the deadline recheck), boot-wait arm-once. No
-`meshtastic_init()` — the governor is driven directly; `PowerConfig`s are seeded
-via the real `meshtastic_config_store_set_config()` path (safe standalone).
+ref-count/idempotency tests meaningful). Eight suites: phone ref-count (incl. a
+guarded unmatched disconnect), policy toggle, activity expiry,
+activity-disabled-when-zero, activity coalesce (exercises the deadline recheck),
+boot-wait arm-once, WiFi inhibit (incl. idempotent duplicate up/down), and WiFi
+composing with POLICY. No `meshtastic_init()` — the governor is driven directly;
+`PowerConfig`s are seeded via the real `meshtastic_config_store_set_config()` path
+(safe standalone).
 
 ## Building / running the tests
 
