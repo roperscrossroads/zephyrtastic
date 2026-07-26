@@ -150,6 +150,58 @@ the S3's ~18 s tickless / deep-sleep limits. A follow-on, not this governor. The
 `MESHTASTIC_POWER_GOVERNOR` escape-hatch Kconfig from the design was skipped —
 `CONFIG_PM` is the only gate.
 
+## Wake sources on the ESP32-S3 (what actually wakes the CPU)
+
+The governor decides *when the SoC may sleep*; this is *what brings it back*. From
+`PM_STATE_STANDBY` (`esp_light_sleep_start()`, CPU domain powered down) two things
+wake the ESP32-S3:
+
+1. **The RTC timer — always.** Zephyr arms `esp_sleep_enable_timer_wakeup()` for the
+   next scheduled timeout before every light sleep (`soc/espressif/common/power.c`);
+   if it can't, sleep is *skipped* (logged), so a true never-wake hang is not
+   reachable. This bounds worst-case latency for anything time-driven.
+2. **LoRa RX on DIO1 — armed via the board DT.** The SX1262's DIO1 goes HIGH on
+   RX/TX-done. `GPIO_INT_WAKEUP` on the board's `dio1-gpios` cell (V4 dtsi; V3
+   overlay override) makes the sx126x driver's own `gpio_pin_configure_dt(dio1,
+   GPIO_INPUT)` arm an **EXT1** level-HIGH wake on GPIO14. Without this the CPU
+   would only ever wake on the timer, so a sleeping node adds up to a whole
+   `MESHTASTIC_RX_IDLE_RECHECK_MS` (~30 s) of RX latency — enough to fall off the
+   mesh. On WiFi builds the `WIFI` inhibitor means the node rarely sleeps at all;
+   this matters for battery / non-WiFi nodes.
+
+   **Read-on-wake caveat.** EXT1 *wakes* the CPU but the DIO1 edge was missed while
+   the GPIO peripheral was powered down, so `dio1_isr()` does not fire — the frame
+   would sit unread. A PM wake hook (`mt_radio_pm_exit`, a `pm_notifier .state_exit`
+   in `meshtastic_radio.c`) polls DIO1 on every wake and, if still HIGH, submits the
+   driver work via `sx126x_poll_dio1()` — a carried Zephyr patch
+   (`zephyr/patches/0002-*`, **load-bearing**: PM builds won't link without it). The
+   work handler then reads the frame over SPI as usual.
+
+   **Button is not a wake source.** The S3's EXT1 has no per-pin trigger polarity, so
+   it can't mix DIO1 (wake-on-HIGH) with the active-low USER button (wake-on-LOW);
+   RX wins. Waking on the button would need a different arrangement.
+
+   **Shutdown interaction.** EXT1 is shared with deep sleep, and `GPIO_INT_WAKEUP`
+   arms it whenever `CONFIG_PM || CONFIG_POWEROFF`. So the admin shutdown path
+   (`sys_poweroff()` → deep sleep) calls `meshtastic_radio_disarm_dio1_wake()` first,
+   reconfiguring DIO1 to plain input to clear the EXT1 arming — a shut-down node
+   still wakes only on reset, as `canShutdown` advertises.
+
+### The console dies during light sleep (a "hang" that isn't)
+
+On the **V4** the console/shell is the ESP32-S3 **USB-Serial-JTAG** (`usb_serial`),
+not a UART. The S3 does not keep USB-Serial-JTAG alive across light sleep (the HAL
+disables its PHY on every entry) and the driver holds no PM lock, so once the node
+starts sleeping the CDC-ACM port drops and the console looks **hung** even though the
+CPU is waking normally on the timer. This is expected, not a fault. There is **no
+clean runtime "USB host connected" signal** on the S3 USJ to gate sleep on (only a
+flaky SOF heartbeat), so it is left as a documented limitation rather than an
+unreliable inhibitor. To observe residency, use the `overlay-pm-quiet.conf` rig + the
+`meshtastic netpause <secs>` shell command (drive/read over serial while the network —
+and the sleeps it would perturb — is genuinely quiet). The **V3** console is `uart0`
+(real UART, via the CP2102), whose driver *does* hold a PM lock while TX is pending, so
+it flushes before sleep and does not show this symptom.
+
 ## Tests
 
 [`tests/power/`](../tests/power/) — a native_sim `ztest` suite (mirrors

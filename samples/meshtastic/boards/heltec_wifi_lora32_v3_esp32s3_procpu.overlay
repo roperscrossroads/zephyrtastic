@@ -83,8 +83,10 @@
  *
  * `wakeup-source` means one thing here: under CONFIG_PM_DEVICE_SYSTEM_MANAGED these
  * devices are skipped by the suspend-everything loop, so they stay powered across a
- * system low-power state. It does NOT configure a pin, interrupt, or the SoC wake
- * matrix — the application still arms the actual wake source.
+ * system low-power state. It does NOT by itself configure a pin, interrupt, or the SoC
+ * wake matrix. The actual DIO1 wake IS armed below via GPIO_INT_WAKEUP on the dio1-gpios
+ * cell (see the &lora0 override); the button is deliberately not a wake source (the S3
+ * cannot mix EXT1 high-trigger DIO1 with low-trigger GPIO0).
  *
  * NOTE the Vext gpio-hog above drives GPIO36, the SAME pin as vext_ctrl's enable-gpio.
  * POWER_DOMAIN / POWER_DOMAIN_GPIO are already =y in every shipping non-PM V3 build
@@ -114,7 +116,16 @@
  * Keep the radio powered across light sleep — a node that suspends its transceiver
  * on every idle window stops hearing the mesh (matches the reference firmware's LS
  * state, which keeps LoRa on; only deep sleep powers the radio down).
+ *
+ * Also arm GPIO14 (DIO1) as a light-sleep wake source. V3's dio1-gpios is defined in
+ * the upstream board DTS (GPIO_ACTIVE_HIGH); re-declare it here to OR in
+ * GPIO_INT_WAKEUP so an incoming frame wakes the SoC from light sleep. Same mechanism,
+ * consequences and cross-references as the V4 (heltec_wifi_lora32_v4-common.dtsi dio1
+ * note): rides the sx126x driver's config call to arm EXT1 level-HIGH, disarmed before
+ * sys_poweroff() by meshtastic_radio_disarm_dio1_wake(), and the frame is read on wake
+ * by the PM hook in meshtastic_radio.c.
  */
 &lora0 {
 	wakeup-source;
+	dio1-gpios = <&gpio0 14 (GPIO_ACTIVE_HIGH | GPIO_INT_WAKEUP)>;
 };

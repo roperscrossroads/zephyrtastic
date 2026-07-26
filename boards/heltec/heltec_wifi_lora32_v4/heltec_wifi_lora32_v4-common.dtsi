@@ -235,7 +235,27 @@
 		reg = <0>;
 		reset-gpios = <&gpio0 12 (GPIO_OPEN_DRAIN | GPIO_ACTIVE_LOW)>;
 		busy-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
-		dio1-gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
+		/*
+		 * GPIO_INT_WAKEUP arms GPIO14 as a light-sleep wake source so an
+		 * incoming frame (DIO1 goes HIGH on RX-done and stays HIGH until the
+		 * driver clears it over SPI) wakes the SoC from PM_STATE_STANDBY instead
+		 * of waiting for the next RTC-timer tick. The flag rides the sx126x
+		 * driver's own gpio_pin_configure_dt(dio1, GPIO_INPUT) call at init, which
+		 * on the ESP32-S3 arms EXT1 (RTC controller, level-HIGH) on GPIO14 — a
+		 * valid EXT1 pin (<= GPIO21). It coexists with the driver's normal edge
+		 * IRQ (separate GPIO-matrix interrupt; the esp32 gpio driver strips the
+		 * WAKEUP bit from interrupt-config, so the two never clobber each other).
+		 *
+		 * Two consequences handled elsewhere:
+		 *  - EXT1 arming is compiled in whenever CONFIG_PM *or* CONFIG_POWEROFF, so
+		 *    it also arms for deep sleep. The admin shutdown path disarms it before
+		 *    sys_poweroff() (meshtastic_radio_disarm_dio1_wake()), so a powered-off
+		 *    node still wakes only on reset — as canShutdown advertises.
+		 *  - EXT1 wakes the CPU but the edge was missed while asleep, so the frame
+		 *    is not auto-read; the PM wake hook (meshtastic_radio.c) polls DIO1 on
+		 *    wake and submits the driver work. See docs/light-sleep-governor.md.
+		 */
+		dio1-gpios = <&gpio0 14 (GPIO_ACTIVE_HIGH | GPIO_INT_WAKEUP)>;
 		dio2-tx-enable;
 		dio3-tcxo-voltage = <SX126X_DIO3_TCXO_1V8>;
 		tcxo-power-startup-delay-ms = <5>;

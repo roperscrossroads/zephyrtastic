@@ -55,3 +55,29 @@ LoRa radio coexist (`tx ok` / `rx decoding`, full UI enabled).
 
 Full diagnosis: `~/notes/local/infra/runbooks/friction-log.md`
 (2026-07-20) and `TMP-BAT-FIX-OPTIONS.md` at the workspace root.
+
+### 0002-sx126x-poll-dio1-on-light-sleep-wake.patch
+
+Adds `void sx126x_poll_dio1(const struct device *dev)` to the **native** sx126x
+driver (`drivers/lora/native/sx126x/sx126x.c`): if DIO1 is asserted, submit the
+same work the edge ISR would have.
+
+**Why:** DIO1 is an **edge** interrupt, but ESP32-S3 `PM_STATE_STANDBY` powers the
+GPIO peripheral down, so a frame received while asleep leaves DIO1 latched **HIGH
+with no fresh edge** — `dio1_isr()` never fires and the frame is never read. The
+board DT arms an EXT1 level-HIGH wake on DIO1 (`GPIO_INT_WAKEUP` on the
+`dio1-gpios` cell), so the SoC *wakes*; this helper lets it *read* the pending
+frame. The app calls it from a PM wake hook (`pm_notifier .state_exit` in
+`meshtastic_radio.c`, gated on `CONFIG_PM` + `CONFIG_LORA_SX126X`) with
+`mt.lora_dev`. Idempotent; the work handler reads+clears the IRQ over SPI
+regardless of the missed edge. See `docs/light-sleep-governor.md`.
+
+> **LOAD-BEARING for PM builds.** Unlike 0001 (dormant until the battery ADC
+> returns), this symbol is *referenced* by `meshtastic_radio.c` in any
+> `CONFIG_PM` + `CONFIG_LORA_SX126X` build. Skip `west patch apply` after a
+> `west update` and such a build fails to **link** (`undefined reference to
+> sx126x_poll_dio1`). Non-PM builds and native_sim are unaffected (the reference
+> is `#if`-compiled out).
+
+`upstreamable: true` — a generic light-sleep-safety helper for the edge-IRQ
+radio, no board coupling in the driver.

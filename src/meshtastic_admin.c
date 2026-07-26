@@ -143,6 +143,10 @@ static void admin_shutdown_work_fn(struct k_work *work)
 	meshtastic_settings_flush();
 #endif
 	LOG_WRN("admin: powering off now");
+	/* Clear the SX1262 DIO1 EXT1 wake so an incoming frame can't wake a shut-down
+	 * node — it must wake only on reset, as canShutdown advertises. No-op on builds
+	 * without that radio / without the DIO1 GPIO_INT_WAKEUP arming. */
+	meshtastic_radio_disarm_dio1_wake();
 	sys_poweroff();
 }
 static K_WORK_DELAYABLE_DEFINE(admin_shutdown_work, admin_shutdown_work_fn);

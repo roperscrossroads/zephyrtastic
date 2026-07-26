@@ -355,6 +355,59 @@ static void mt_thread_fn(void *p1, void *p2, void *p3)
 	}
 }
 
+#if defined(CONFIG_LORA_SX126X)
+#include <zephyr/drivers/gpio.h>
+
+/*
+ * DIO1 light-sleep wake support (ESP32-S3). The board DT arms EXT1 on the DIO1 pin
+ * via GPIO_INT_WAKEUP on its dio1-gpios cell, so a frame wakes the SoC from
+ * PM_STATE_STANDBY. Two app-side pieces make that correct and useful; see
+ * docs/light-sleep-governor.md and the board-DT dio1 note.
+ */
+static const struct gpio_dt_spec mt_dio1 = GPIO_DT_SPEC_GET(DT_NODELABEL(lora0), dio1_gpios);
+
+/* Carried in zephyr/patches/0002-*: submit the driver's DIO1 work if DIO1 is asserted.
+ * Takes the radio device because the native sx126x driver builds for two compatibles. */
+extern void sx126x_poll_dio1(const struct device *dev);
+
+/*
+ * Disarm the DIO1 EXT1 wake before deep sleep. GPIO_INT_WAKEUP arms EXT1 whenever
+ * CONFIG_PM || CONFIG_POWEROFF, so without this an incoming frame would also wake a
+ * node the user has admin-shut-down; reconfiguring DIO1 as plain input (no WAKEUP)
+ * clears the EXT1 arming (the esp32 gpio driver's wakeup_disable path) so shutdown
+ * wakes only on reset — as canShutdown advertises. Called from the shutdown path
+ * (meshtastic_admin.c) just before sys_poweroff(). Safe on non-esp targets (a plain
+ * input reconfigure). Compiled whenever the SX126x radio is present, independent of
+ * CONFIG_PM, because CONFIG_POWEROFF alone is enough to arm the wake.
+ */
+void meshtastic_radio_disarm_dio1_wake(void)
+{
+	(void)gpio_pin_configure_dt(&mt_dio1, GPIO_INPUT);
+}
+
+#if defined(CONFIG_PM)
+#include <zephyr/pm/pm.h>
+
+/*
+ * On every wake from light sleep, poll DIO1. A frame that arrived while asleep left
+ * DIO1 latched HIGH but produced no edge for the (powered-down) GPIO peripheral to
+ * catch, so nothing else will read it. Runs in the PM-exit context (IRQs locked): it
+ * does only a register read + k_work_submit (both safe there) — the SPI read happens
+ * later in the driver's work handler on the system workqueue.
+ */
+static void mt_radio_pm_exit(enum pm_state state)
+{
+	if (state == PM_STATE_STANDBY) {
+		sx126x_poll_dio1(mt.lora_dev);
+	}
+}
+
+static struct pm_notifier mt_radio_pm_note = {
+	.state_exit = mt_radio_pm_exit,
+};
+#endif /* CONFIG_PM */
+#endif /* CONFIG_LORA_SX126X */
+
 int meshtastic_radio_init(void)
 {
 	int ret;
@@ -378,6 +431,12 @@ int meshtastic_radio_init(void)
 	k_thread_create(&mt_thread, mt_stack, K_THREAD_STACK_SIZEOF(mt_stack), mt_thread_fn, NULL,
 			NULL, NULL, CONFIG_MESHTASTIC_THREAD_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(&mt_thread, "meshtastic");
+
+#if defined(CONFIG_PM) && defined(CONFIG_LORA_SX126X)
+	/* Read a frame that arrived during light sleep as soon as the SoC wakes (the
+	 * DIO1 edge is missed while the GPIO peripheral is powered down). */
+	pm_notifier_register(&mt_radio_pm_note);
+#endif
 
 	/*
 	 * Arm continuous async RX.  A failure here is non-fatal: TX still

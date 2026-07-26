@@ -104,6 +104,19 @@ void meshtastic_set_ble_connected(bool connected);
 
 int meshtastic_radio_init(void);
 
+/* Disarm the SX1262 DIO1 EXT1 light-sleep/deep-sleep wake before sys_poweroff(), so an
+ * incoming frame does not wake an admin-shut-down node (it wakes only on reset, as
+ * canShutdown advertises). The DIO1 wake is armed via GPIO_INT_WAKEUP on the board's
+ * dio1-gpios cell, which the ESP32-S3 honours whenever CONFIG_PM || CONFIG_POWEROFF.
+ * No-op without an SX126x radio (see meshtastic_radio.c). Call from the shutdown path. */
+#if defined(CONFIG_LORA_SX126X)
+void meshtastic_radio_disarm_dio1_wake(void);
+#else
+static inline void meshtastic_radio_disarm_dio1_wake(void)
+{
+}
+#endif
+
 /**
  * @brief Convert a bandwidth in Hz to the LoRa driver's bandwidth code.
  *

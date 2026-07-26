@@ -29,3 +29,27 @@ patches:
       undriven analog input without it. Confirmed on hardware: with the call
       dropped, the Heltec V4 display+battery UI and the LoRa radio coexist
       (tx ok / rx decoding with the full UI enabled).
+  - path: 0002-sx126x-poll-dio1-on-light-sleep-wake.patch
+    sha256sum: 71cab4cc1a40f2a2eb9aefe59922670bd983848c2c202b59e5fcb73d25410252
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-07-25"
+    upstreamable: true
+    comments: |
+      drivers/lora/native/sx126x: add sx126x_poll_dio1(dev), a public entry that
+      submits the driver's DIO1 work if DIO1 is currently asserted. Needed for
+      ESP32-S3 light sleep: DIO1 is an EDGE interrupt (dio1_isr), but
+      PM_STATE_STANDBY powers the GPIO peripheral down, so the RX/TX-done rising
+      edge is MISSED — on wake DIO1 is a static HIGH with no fresh edge, dio1_isr()
+      never fires, and the frame sits unread. The app's PM wake hook (a
+      pm_notifier .state_exit in meshtastic_radio.c, gated on CONFIG_PM +
+      CONFIG_LORA_SX126X) calls this on every wake with mt.lora_dev; if DIO1 is
+      high it submits the same work the edge ISR would have, and
+      sx126x_irq_work_handler() reads+clears the SX126x IRQ status over SPI
+      regardless of the missed edge. Idempotent (k_work_submit coalesces). Takes
+      the device explicitly because this driver instantiates for two compatibles
+      (sx1261 / sx1262), so there is no single DEVICE_DT_INST_GET. Without this the
+      EXT1 DIO1 wake (armed via GPIO_INT_WAKEUP on the board dio1-gpios cell) wakes
+      the CPU but never reads the packet. Upstreamable: a generic light-sleep
+      helper for the edge-IRQ radio, no board coupling in the driver.
