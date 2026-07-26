@@ -78,10 +78,13 @@ config MESHTASTIC_DISPLAY_PAGE_SECONDS
 
 config MESHTASTIC_DISPLAY_STACK_SIZE
 	int "Display thread stack size"
-	default 2048
+	default 4096
 	help
-	  Stack for the dedicated screen-refresh thread. It only calls CFB and the
-	  Meshtastic getters, so a couple of KB is plenty.
+	  Stack for the dedicated screen-refresh thread. It calls CFB (which does a
+	  full-framebuffer vsnprintf/print path) and the Meshtastic getters; the GPS
+	  page in particular puts a ~100 B meshtastic_Position on the stack on top of
+	  vsnprintf. 2 KB proved too tight (only STACK_SENTINEL guards it, no MPU on
+	  Xtensa), so this defaults to 4 KB.
 
 config MESHTASTIC_DISPLAY_PRIORITY
 	int "Display thread priority"

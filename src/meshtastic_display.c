@@ -193,7 +193,10 @@ static void page_radio(void)
 static void page_gps(void)
 {
 #if defined(CONFIG_MESHTASTIC_POSITION)
-	meshtastic_Position pos;
+	/* Zero-init: get_current() leaves pos untouched when it returns non-zero
+	 * (no fix / -ENODATA), so the "No GPS fix" path below would otherwise read
+	 * pos.sats_in_view uninitialized. */
+	meshtastic_Position pos = meshtastic_Position_init_zero;
 
 	if (meshtastic_position_get_current(&pos) != 0 ||
 	    !pos.has_latitude_i || !pos.has_longitude_i) {
