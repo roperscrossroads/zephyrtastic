@@ -57,7 +57,17 @@ system drops by *position* (newest/oldest), never by *priority*.
    never-expiring ring.
 6. **RX hand-off depth 4** — fine for LoRa's arrival rate unless the processing
    thread (decrypt + module dispatch + phone fan-out + MQTT, all inline) stalls.
-   → open.
+   → **reassessed 2026-07-27: effectively closed.** The "all inline" framing
+   overstated the risk — the two network-facing steps do **not** block the RX
+   thread. Phone fan-out (`phoneapi_on_packet` → `enqueue_fromradio`) and MQTT
+   (`mqtt_on_rx` → `mqtt_queue_uplink`, `meshtastic_mqtt.c:798` `mqtt_drop_oldest_locked`
+   when the publish queue is full) are both **async, drop-oldest** enqueues; the
+   blocking broker I/O runs on the dedicated MQTT thread. Decrypt + module dispatch
+   are CPU-bounded (module handlers enqueue their replies to the async outbound
+   queue). So the RX thread never blocks on I/O and the depth-4 hand-off is ample
+   for LoRa's seconds-per-frame arrival rate. Bumping the depth would be a
+   speculative band-aid; a real decouple would be churn for no benefit. Revisit
+   only if on-air telemetry ever shows actual `mt_rx_msgq` drops.
 
 ## The fix vehicle: `meshtastic sched`
 
