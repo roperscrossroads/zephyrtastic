@@ -319,6 +319,32 @@ BT_GATT_SERVICE_DEFINE(meshtastic_svc, BT_GATT_PRIMARY_SERVICE(&meshtastic_servi
 					      MT_GATT_PERM_READ, read_logradio, NULL, NULL),
 		       BT_GATT_CCC(logradio_ccc_changed, MT_GATT_PERM_READ | MT_GATT_PERM_WRITE));
 
+/*
+ * Connectable advertising (BT_LE_ADV_CONN_FAST_1) stops the instant a central
+ * connects, and this Zephyr (4.4.99) does NOT auto-resume it on disconnect — so
+ * without an explicit restart the node becomes undiscoverable after the first
+ * disconnect until reboot. disconnected() re-arms it via this work item:
+ * bt_le_adv_start() must not run inside the BT disconnected-callback context, and
+ * deferring also avoids racing the connection teardown.
+ */
+static int start_advertising(void);
+
+static void adv_restart_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (!IS_ENABLED(CONFIG_MESHTASTIC_BLE_ADV)) {
+		return;
+	}
+
+	int ret = start_advertising();
+
+	if (ret != 0 && ret != -EALREADY) {
+		LOG_ERR("BLE re-advertise after disconnect failed (%d)", ret);
+	}
+}
+static K_WORK_DEFINE(adv_restart_work, adv_restart_fn);
+
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	if (err != 0U) {
@@ -361,6 +387,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	meshtastic_power_note_phone_disconnected();
 	meshtastic_emit_event(MESHTASTIC_EVENT_BLE_DISCONNECTED, 0, NULL);
 	LOG_INF("BLE disconnected: 0x%02x", reason);
+
+	/* Re-arm connectable advertising so the phone can reconnect without a reboot
+	 * (see adv_restart_fn). Deferred off the BT callback context. */
+	(void)k_work_submit_to_queue(&ble.work_q, &adv_restart_work);
 }
 
 #if defined(CONFIG_BT_SMP)
