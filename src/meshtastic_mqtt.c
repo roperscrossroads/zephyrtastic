@@ -38,6 +38,7 @@
 #include <pb_encode.h>
 
 #include "meshtastic_channels.h"
+#include "meshtastic_core.h"
 #include "meshtastic_position.h"
 #include "meshtastic_mqtt.h"
 #include "meshtastic_packet.h"
@@ -585,8 +586,7 @@ static void mqtt_build_map_report(meshtastic_MapReport *report, const meshtastic
 
 	report->role = meshtastic_device_role();
 	report->hw_model = meshtastic_hw_model();
-	// TODO report a more sensible firmware version than Zephyr version :)
-	strncpy(report->firmware_version, KERNEL_VERSION_STRING,
+	strncpy(report->firmware_version, MESHTASTIC_FIRMWARE_VERSION,
 		sizeof(report->firmware_version) - 1U);
 	report->region = mqtt_lora_region();
 	report->modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;

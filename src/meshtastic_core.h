@@ -31,6 +31,12 @@ extern "C" {
 #define MESHTASTIC_HDR_LEN     16U
 #define MESHTASTIC_PAYLOAD_MAX (MESHTASTIC_PKT_MAX - MESHTASTIC_HDR_LEN)
 
+/* The phone-protocol firmware version this port advertises — parses as 2.7.4 so
+ * the app stays above its minimum-version gate. Single source of truth for the
+ * DeviceMetadata field AND the MQTT map-report. Distinct from meshtastic_build_id()
+ * (the git-describe build tag). */
+#define MESHTASTIC_FIRMWARE_VERSION "2.7.4.zephyr"
+
 struct meshtastic_dup_entry {
 	uint32_t src;
 	uint32_t id;

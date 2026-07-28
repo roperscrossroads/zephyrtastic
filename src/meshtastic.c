@@ -285,8 +285,8 @@ void meshtastic_fill_user(meshtastic_User *user)
 void meshtastic_fill_device_metadata(meshtastic_DeviceMetadata *md)
 {
 	*md = (meshtastic_DeviceMetadata)meshtastic_DeviceMetadata_init_zero;
-	/* Parses as 2.7.4 — keeps the app above its minimum-version gate. */
-	strncpy(md->firmware_version, "2.7.4.zephyr", sizeof(md->firmware_version) - 1U);
+	strncpy(md->firmware_version, MESHTASTIC_FIRMWARE_VERSION,
+		sizeof(md->firmware_version) - 1U);
 	md->hasBluetooth = IS_ENABLED(CONFIG_MESHTASTIC_BLE);
 	md->hasWifi = IS_ENABLED(CONFIG_WIFI);
 	md->hasEthernet = IS_ENABLED(CONFIG_NET_L2_ETHERNET);
