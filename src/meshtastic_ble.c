@@ -15,6 +15,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include "meshtastic_ext_ram.h"
 #include "meshtastic_phoneapi.h"
 
 #include <zephyr/logging/log.h>
@@ -42,9 +43,16 @@ static struct bt_uuid_128 logradio_uuid = BT_UUID_INIT_128(BT_UUID_MESHTASTIC_LO
 
 extern const struct bt_gatt_attr attr_meshtastic_svc[];
 
+/* PSRAM on V4 (no-op on V3): the FromRadio staging queue (~4 KB) off internal
+ * DRAM. Pulled OUT of the ble struct so its kernel objects (mutex, work-queue,
+ * work items) stay in internal RAM — only the plain frame buffers relocate. Safe
+ * per meshtastic_ext_ram.h: CPU-only, work-queue-serialised, and copied out before
+ * bt_gatt_notify, so it is never a DMA/flash source. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR
+	struct meshtastic_phoneapi_frame ble_queue[CONFIG_MESHTASTIC_BLE_FROMRADIO_QUEUE_SIZE];
+
 static struct {
 	struct meshtastic_phoneapi api;
-	struct meshtastic_phoneapi_frame queue[CONFIG_MESHTASTIC_BLE_FROMRADIO_QUEUE_SIZE];
 	struct k_mutex lock;
 	bool fromnum_notify_enabled;
 	bool log_notify_enabled;
@@ -56,6 +64,11 @@ static struct {
 	struct k_work fromradio_work;
 } ble;
 
+/* Statically reserved. NB: this stack must NOT be heap-allocated at bring-up: the
+ * ESP32 BT controller allocates from the same system heap (CONFIG_ESP_BT_HEAP_SYSTEM),
+ * and a k_malloc here starves it into an OOM abort — a hard fault, before the UI
+ * draws — in the unified BLE+WiFi image. (Cost the whole first unified bring-up on
+ * hardware; see git history / docs/KNOWN-ISSUES.md.) Internal RAM only. */
 static K_THREAD_STACK_DEFINE(ble_work_stack, CONFIG_MESHTASTIC_BLE_WORK_STACK_SIZE);
 
 static struct meshtastic_phoneapi_frame fromradio_staged;
@@ -553,11 +566,12 @@ int meshtastic_ble_init(void)
 	int ret;
 
 	k_mutex_init(&ble.lock);
-	meshtastic_phoneapi_init(&ble.api, "ble", ble.queue, ARRAY_SIZE(ble.queue), ble_data_ready,
+
+	meshtastic_phoneapi_init(&ble.api, "ble", ble_queue, ARRAY_SIZE(ble_queue), ble_data_ready,
 				 ble_disconnect, ble_invalidate_delivery, NULL);
 	meshtastic_phoneapi_register(&ble.api);
 
-	k_work_queue_start(&ble.work_q, ble_work_stack, K_THREAD_STACK_SIZEOF(ble_work_stack),
+	k_work_queue_start(&ble.work_q, ble_work_stack, CONFIG_MESHTASTIC_BLE_WORK_STACK_SIZE,
 			   CONFIG_MESHTASTIC_BLE_WORK_PRIORITY, NULL);
 	k_work_init(&ble.to_radio_work, to_radio_work_handler);
 	k_work_init(&ble.fromradio_work, fromradio_work_handler);

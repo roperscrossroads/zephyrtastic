@@ -23,6 +23,7 @@
 #include <zephyr/net/socket.h>
 #include <zephyr/zvfs/eventfd.h>
 
+#include "meshtastic_ext_ram.h"
 #include "meshtastic_phoneapi.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -48,9 +49,16 @@ enum tcp_rx_state {
 	TCP_RX_PAYLOAD,
 };
 
+/* PSRAM on V4 (no-op on V3): the FromRadio staging queue (~4 KB) off internal
+ * DRAM. Pulled OUT of the tcp struct on purpose so the struct's kernel state
+ * stays in internal RAM — only the plain frame buffers relocate. Safe per
+ * meshtastic_ext_ram.h: CPU-only, thread-guarded, and copied into a local wire
+ * buffer before zsock_send, so it is never a DMA/flash source. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR
+	struct meshtastic_phoneapi_frame tcp_queue[CONFIG_MESHTASTIC_TCP_FROMRADIO_QUEUE_SIZE];
+
 static struct {
 	struct meshtastic_phoneapi api;
-	struct meshtastic_phoneapi_frame queue[CONFIG_MESHTASTIC_TCP_FROMRADIO_QUEUE_SIZE];
 	int client_fd;
 	enum tcp_rx_state rx_state;
 	uint16_t rx_len;
@@ -60,7 +68,18 @@ static struct {
 	.client_fd = -1,
 };
 
+#if defined(CONFIG_MESHTASTIC_TCP_DYNAMIC_STACK)
+/* Heap-allocated at WiFi bring-up (see meshtastic_tcp_init) rather than statically
+ * reserved, so a unified BLE+WiFi image pays this thread's large, overflow-hardened
+ * stack only when WiFi is the active transport — in BLE mode, where TCP never
+ * inits, the internal DRAM is left free. Kept in internal RAM: a PSRAM stack is
+ * unsafe (the flash-write cache-disable window makes PSRAM momentarily unreadable;
+ * see meshtastic_ext_ram.h). Off by default — single-transport net images keep the
+ * proven static stack. */
+static k_thread_stack_t *tcp_thread_stack;
+#else
 K_THREAD_STACK_DEFINE(tcp_thread_stack, CONFIG_MESHTASTIC_TCP_THREAD_STACK_SIZE);
+#endif
 static struct k_thread tcp_thread_data;
 
 /* Wake the TCP thread's blocking poll() from another thread. The thread parks
@@ -431,7 +450,7 @@ static void tcp_thread(void *p1, void *p2, void *p3)
 
 int meshtastic_tcp_init(void)
 {
-	meshtastic_phoneapi_init(&tcp.api, "tcp", tcp.queue, ARRAY_SIZE(tcp.queue),
+	meshtastic_phoneapi_init(&tcp.api, "tcp", tcp_queue, ARRAY_SIZE(tcp_queue),
 				 tcp_data_ready, tcp_disconnect, NULL, NULL);
 
 	/* Wake eventfd for the thread's blocking poll (queued FromRadio frames).
@@ -446,8 +465,21 @@ int meshtastic_tcp_init(void)
 
 	meshtastic_phoneapi_register(&tcp.api);
 
+#if defined(CONFIG_MESHTASTIC_TCP_DYNAMIC_STACK)
+	/* Reserve the serve-thread stack from the heap now, at WiFi bring-up. Failure
+	 * is non-crashing: TCP just doesn't start (the node stays up on the mesh, and
+	 * BLE if that transport is also active). Validate the WiFi-mode heap has room
+	 * on the bench (`kernel heap` / `kernel stacks`). */
+	tcp_thread_stack = k_thread_stack_alloc(CONFIG_MESHTASTIC_TCP_THREAD_STACK_SIZE, 0);
+	if (tcp_thread_stack == NULL) {
+		LOG_ERR("TCP serve-thread stack alloc failed (%d B) — TCP PhoneAPI disabled",
+			CONFIG_MESHTASTIC_TCP_THREAD_STACK_SIZE);
+		return -ENOMEM;
+	}
+#endif
+
 	k_thread_create(&tcp_thread_data, tcp_thread_stack,
-			K_THREAD_STACK_SIZEOF(tcp_thread_stack), tcp_thread, NULL, NULL, NULL,
+			CONFIG_MESHTASTIC_TCP_THREAD_STACK_SIZE, tcp_thread, NULL, NULL, NULL,
 			CONFIG_MESHTASTIC_TCP_THREAD_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(&tcp_thread_data, "meshtastic_tcp");
 

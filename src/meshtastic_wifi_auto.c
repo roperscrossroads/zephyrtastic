@@ -14,6 +14,8 @@
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/net/net_mgmt.h>
 
+#include "meshtastic_core.h"
+
 LOG_MODULE_REGISTER(meshtastic_wifi_auto, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 #define AUTO_DELAY   K_SECONDS(CONFIG_MESHTASTIC_WIFI_AUTOCONNECT_DELAY_SEC)
@@ -26,6 +28,17 @@ static void wifi_auto_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	struct net_if *iface = NULL;
+
+	/*
+	 * In a unified image the persisted config may select BLE as the phone
+	 * transport; do not bring WiFi up in that case (keeping the radio + its
+	 * ~25 KB runtime heap idle, and letting a BLE node light-sleep). A
+	 * net-only image always prefers WiFi, so this is a no-op there.
+	 */
+	if (!meshtastic_transport_prefer_wifi()) {
+		LOG_INF("WiFi auto-connect skipped (BLE transport selected)");
+		return;
+	}
 
 	/* Let the WiFi driver bring up the STA interface first. */
 	k_sleep(AUTO_DELAY);

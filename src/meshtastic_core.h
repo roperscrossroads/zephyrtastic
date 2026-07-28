@@ -108,6 +108,17 @@ const uint8_t *meshtastic_runtime_psk(size_t *psk_len);
 uint8_t meshtastic_runtime_hop_limit(void);
 void meshtastic_set_ble_connected(bool connected);
 
+/*
+ * Which phone transport to bring up at boot. In a unified image (both
+ * CONFIG_MESHTASTIC_BLE and CONFIG_MESHTASTIC_TCP compiled) this honors the
+ * persisted network.wifi_enabled (default false = BLE, matching upstream). In a
+ * single-transport image the compiled-in transport always wins, ignoring the
+ * flag. Read at init and by the WiFi auto-connect thread so both agree; switching
+ * transport is a config write + reboot (the admin path already reboots on a
+ * network-config change).
+ */
+bool meshtastic_transport_prefer_wifi(void);
+
 int meshtastic_radio_init(void);
 
 /* Disarm the SX1262 DIO1 EXT1 light-sleep/deep-sleep wake before sys_poweroff(), so an

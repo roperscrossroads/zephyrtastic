@@ -353,6 +353,29 @@ void meshtastic_emit_event(enum meshtastic_event_type type, int err,
 	}
 }
 
+bool meshtastic_transport_prefer_wifi(void)
+{
+#if defined(CONFIG_MESHTASTIC_BLE) && defined(CONFIG_MESHTASTIC_TCP)
+	/*
+	 * Unified image: both transports are compiled in, so the persisted
+	 * network config picks which one boots. Mirrors upstream, where the phone
+	 * app's "WiFi enabled" toggle drives NetworkConfig.wifi_enabled.
+	 */
+	meshtastic_Config config;
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_network_tag, &config) == 0 &&
+	    config.which_payload_variant == meshtastic_Config_network_tag) {
+		return config.payload_variant.network.wifi_enabled;
+	}
+
+	return false; /* fresh device / no network config persisted: default to BLE */
+#elif defined(CONFIG_MESHTASTIC_TCP)
+	return true;  /* net-only image: WiFi/net is the only phone transport */
+#else
+	return false; /* BLE-only image (or no phone transport built) */
+#endif
+}
+
 int meshtastic_init(const struct meshtastic_config *cfg)
 {
 	psa_status_t psa_st;
@@ -539,10 +562,30 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	}
 #endif
 
+	/*
+	 * Phone transport selection. In a unified image (BLE + WiFi/net both
+	 * compiled) exactly one is brought up per boot, chosen by the persisted
+	 * network.wifi_enabled; switching is a config write + reboot. Bringing up
+	 * only one means only that stack's radio + runtime heap goes live, so the
+	 * two never contend for the ESP32 radio (no BT/WiFi coexistence needed). In
+	 * a single-transport image the sole transport always wins.
+	 */
+#if defined(CONFIG_MESHTASTIC_BLE) || defined(CONFIG_MESHTASTIC_TCP) ||                             \
+	defined(CONFIG_MESHTASTIC_MQTT)
+	const bool use_wifi = meshtastic_transport_prefer_wifi();
+
+	LOG_INF("phone transport: %s", use_wifi ? "WiFi/net" : "BLE");
+#endif
+
 #if defined(CONFIG_MESHTASTIC_BLE)
-	ret = meshtastic_ble_init();
-	if (ret < 0) {
-		return ret;
+	if (!use_wifi) {
+		ret = meshtastic_ble_init();
+		if (ret < 0) {
+			/* Non-fatal, symmetric to TCP: keep the node on the mesh rather
+			 * than failing boot — e.g. if the (optionally dynamic) work-thread
+			 * stack can't allocate, or bt_enable fails. */
+			LOG_WRN("BLE PhoneAPI init failed (%d); continuing without it", ret);
+		}
 	}
 #endif
 
@@ -554,16 +597,24 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 #endif
 
 #if defined(CONFIG_MESHTASTIC_TCP)
-	ret = meshtastic_tcp_init();
-	if (ret < 0) {
-		return ret;
+	if (use_wifi) {
+		ret = meshtastic_tcp_init();
+		if (ret < 0) {
+			/* Non-fatal: keep the node on the mesh (and BLE, if also active)
+			 * rather than failing boot. The notable case is the dynamic
+			 * serve-thread stack failing to allocate under heap pressure — a
+			 * lost WiFi PhoneAPI beats a node that won't come up. */
+			LOG_WRN("TCP PhoneAPI init failed (%d); continuing without it", ret);
+		}
 	}
 #endif
 
 #if defined(CONFIG_MESHTASTIC_MQTT)
-	ret = meshtastic_mqtt_init();
-	if (ret < 0) {
-		return ret;
+	if (use_wifi) {
+		ret = meshtastic_mqtt_init();
+		if (ret < 0) {
+			return ret;
+		}
 	}
 #endif
 

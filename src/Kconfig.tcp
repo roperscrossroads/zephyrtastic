@@ -34,6 +34,24 @@ config MESHTASTIC_TCP_THREAD_STACK_SIZE
 	int "TCP PhoneAPI thread stack size"
 	default 4096
 
+config MESHTASTIC_TCP_DYNAMIC_STACK
+	bool "Heap-allocate the TCP PhoneAPI thread stack at bring-up"
+	depends on MESHTASTIC_TCP
+	select DYNAMIC_THREAD
+	select DYNAMIC_THREAD_ALLOC
+	help
+	  Allocate the (large, overflow-hardened) TCP serve-thread stack from the
+	  heap in meshtastic_tcp_init() instead of reserving it statically. Intended
+	  for a unified BLE+WiFi image: it removes the stack from the static image
+	  and, because the TCP transport only inits when WiFi is the active
+	  transport, leaves that internal DRAM free in BLE mode. The stack stays in
+	  internal RAM (a PSRAM stack is unsafe across flash-write cache windows).
+	  Needs the WiFi-mode heap to have room; on alloc failure the TCP PhoneAPI is
+	  skipped (non-fatal). Leave OFF for single-transport net images, which
+	  always run TCP and would only trade a proven static stack for a runtime
+	  heap dependency. Pair with DYNAMIC_THREAD_PREFER_ALLOC=y and
+	  DYNAMIC_THREAD_POOL_SIZE=0 so the stack is heap-backed, not from a static pool.
+
 config MESHTASTIC_TCP_THREAD_PRIORITY
 	int "TCP PhoneAPI thread priority"
 	default 8

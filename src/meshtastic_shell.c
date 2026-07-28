@@ -34,6 +34,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_powermon.h"
 #include "meshtastic_sched.h"
+#include "meshtastic_settings.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -1668,6 +1669,100 @@ static int cmd_power(const struct shell *sh, size_t argc, char **argv)
 }
 #endif /* CONFIG_PM */
 
+#if defined(CONFIG_MESHTASTIC_BLE) && defined(CONFIG_MESHTASTIC_TCP)
+/*
+ * `meshtastic transport [ble|wifi]` — only meaningful in a unified image, where
+ * both transports are compiled and the persisted network.wifi_enabled picks the
+ * one that boots. The switch takes effect on reboot (only one radio stack comes
+ * up per boot, so it cannot flip live). Bench counterpart to the phone app's
+ * "WiFi enabled" toggle, for a serial/telnet console with no phone attached.
+ */
+static int cmd_transport_show(const struct shell *sh)
+{
+	meshtastic_Config config;
+	bool wifi = meshtastic_transport_prefer_wifi();
+	bool stored = (meshtastic_config_store_get_config(meshtastic_Config_network_tag, &config) ==
+			       0 &&
+		       config.which_payload_variant == meshtastic_Config_network_tag);
+
+	shell_print(sh, "phone transport:  %s%s", wifi ? "wifi" : "ble",
+		    stored ? "" : "  (default; no NetworkConfig stored)");
+	shell_print(sh, "active this boot: %s  (a change applies on reboot)",
+		    wifi ? "wifi/net" : "ble");
+	return 0;
+}
+
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+static int cmd_transport_set(const struct shell *sh, bool wifi)
+{
+	meshtastic_Config config;
+	int ret;
+
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+
+	ret = meshtastic_config_store_get_config(meshtastic_Config_network_tag, &config);
+	if (ret < 0) {
+		shell_error(sh, "network get failed: %d", ret);
+		return ret;
+	}
+
+	/* Touch only the field we own and write the whole NetworkConfig back, as the
+	 * admin set_config path does; get_config leaves the slot tagged network. */
+	config.which_payload_variant = meshtastic_Config_network_tag;
+	config.payload_variant.network.wifi_enabled = wifi;
+
+	ret = meshtastic_config_store_set_config(&config);
+	if (ret < 0) {
+		shell_error(sh, "network set failed: %d", ret);
+		return ret;
+	}
+
+	/* set_config only schedules the save; flush so the choice survives the reboot
+	 * that applies it. */
+	ret = meshtastic_settings_flush();
+	if (ret < 0) {
+		shell_error(sh, "flush failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "phone transport -> %s (persisted); reboot to apply "
+			"(`kernel reboot cold`)",
+		    wifi ? "wifi" : "ble");
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+
+static int cmd_transport(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 1U) {
+		return cmd_transport_show(sh);
+	}
+
+	if (argc != 2U) {
+		shell_error(sh, "usage: meshtastic transport [ble|wifi]");
+		return -EINVAL;
+	}
+
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	shell_error(sh, "refused: shell config writes are compiled out "
+			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
+	return -ENOTSUP;
+#else
+	if (strcmp(argv[1], "wifi") == 0) {
+		return cmd_transport_set(sh, true);
+	}
+	if (strcmp(argv[1], "ble") == 0) {
+		return cmd_transport_set(sh, false);
+	}
+
+	shell_error(sh, "expected ble or wifi, got %s", argv[1]);
+	return -EINVAL;
+#endif
+}
+#endif /* CONFIG_MESHTASTIC_BLE && CONFIG_MESHTASTIC_TCP */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
@@ -1684,6 +1779,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(power, NULL,
 		  SHELL_HELP("Show or set the light-sleep power-saving policy.", "[on|off]"),
 		  cmd_power),
+#endif
+#if defined(CONFIG_MESHTASTIC_BLE) && defined(CONFIG_MESHTASTIC_TCP)
+	SHELL_CMD(transport, NULL,
+		  SHELL_HELP("Show or set the phone transport, reboot to apply (unified image).",
+			     "[ble|wifi]"),
+		  cmd_transport),
 #endif
 	SHELL_CMD(sched, &meshtastic_sched_cmds,
 		  SHELL_HELP("Scheduler / QoS policy commands.", NULL), cmd_sched_show),
