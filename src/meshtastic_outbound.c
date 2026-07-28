@@ -17,6 +17,7 @@
 
 #include "meshtastic_packet.h"
 
+#include "meshtastic_ext_ram.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_sched.h"
 
@@ -50,7 +51,11 @@ static inline bool ob_eligible(const struct ob_item *it, uint32_t now)
 	return it->send_after == 0U || (int32_t)(now - it->send_after) >= 0;
 }
 
-static struct ob_item ob_items[OB_MAX];
+/* PSRAM on V4 (no-op on V3): ~4.5 KB of staged TX frames off scarce internal
+ * DRAM. Safe per meshtastic_ext_ram.h — CPU-only, mutex-guarded (no ISR access),
+ * and never a DMA/flash source: the worker copies the chosen item to a stack
+ * local (`cur`) before the LoRa send, so the radio never reads this array. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR struct ob_item ob_items[OB_MAX];
 static uint8_t ob_count;
 
 static K_MUTEX_DEFINE(ob_lock);
