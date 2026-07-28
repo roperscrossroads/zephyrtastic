@@ -18,6 +18,7 @@
 #include "meshtastic_admin_session.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
+#include "meshtastic_phoneapi.h"
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
@@ -2969,6 +2970,227 @@ ZTEST(protocol_stack, test_region_preset_map_matches_reference)
 		zassert_true(pb_encode(&os, meshtastic_FromRadio_fields, &from),
 			     "region preset FromRadio must fit the 512 B frame buffer");
 	}
+}
+
+/* Custom (non-preset) LoRa modem params: honored when valid for this radio, and
+ * fall back to the preset when a field is out of range or the bandwidth "code" is
+ * one the SX126x driver cannot configure. (config_store lora.use_preset=false) */
+ZTEST(protocol_stack, test_lora_custom_modem_params)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	struct meshtastic_modem_params preset;
+
+	cfg.which_payload_variant = meshtastic_Config_lora_tag;
+	cfg.payload_variant.lora.region = meshtastic_Config_LoRaConfig_RegionCode_US;
+	cfg.payload_variant.lora.use_preset = false;
+
+	/* Valid custom: 250 kHz / SF9 / CR 4/6 -> applied verbatim. */
+	cfg.payload_variant.lora.bandwidth = 250U;
+	cfg.payload_variant.lora.spread_factor = 9U;
+	cfg.payload_variant.lora.coding_rate = 6U;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora set_config failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "apply_core failed");
+	zassert_equal(mt.modem.bandwidth_hz, 250000U, "custom BW not applied");
+	zassert_equal(mt.modem.spread_factor, 9U, "custom SF not applied");
+	zassert_equal(mt.modem.coding_rate, 6U, "custom CR not applied");
+
+	/* A fractional bandwidth this radio CAN drive: code 62 -> 62.5 kHz. */
+	cfg.payload_variant.lora.bandwidth = 62U;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora set_config failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "apply_core failed");
+	zassert_equal(mt.modem.bandwidth_hz, 62500U, "62.5 kHz code not decoded");
+
+	/* Invalid: bandwidth code 31 (31.25 kHz) is not drivable -> fall back to preset. */
+	(void)meshtastic_preset_to_params(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					  false, &preset);
+	cfg.payload_variant.lora.bandwidth = 31U;
+	cfg.payload_variant.lora.spread_factor = 9U;
+	cfg.payload_variant.lora.coding_rate = 6U;
+	cfg.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora set_config failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "apply_core failed");
+	zassert_equal(mt.modem.bandwidth_hz, preset.bandwidth_hz, "bad BW must fall back to preset");
+	zassert_equal(mt.modem.spread_factor, preset.spread_factor, "bad custom must use preset SF");
+
+	/* Invalid: SF out of range (13) with a valid BW -> still fall back to preset. */
+	cfg.payload_variant.lora.bandwidth = 250U;
+	cfg.payload_variant.lora.spread_factor = 13U;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora set_config failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "apply_core failed");
+	zassert_equal(mt.modem.spread_factor, preset.spread_factor,
+		      "out-of-range SF must fall back to preset");
+}
+
+/* --- PhoneAPI config-sync handshake (want_config_id) -------------------------
+ * meshtastic_phoneapi_config.c drives the FromRadio sequence the official apps
+ * expect after a want_config_id nonce. These pump the state machine to
+ * completion and assert the sequence invariants for a full dump vs. the
+ * ONLY_NODES special nonce. */
+#define PHONEAPI_NONCE_ONLY_NODES 69421U
+
+/* Decode a config frame's FromRadio variant tag; captures config_complete_id. */
+static pb_size_t phone_frame_variant(const struct meshtastic_phoneapi_frame *f,
+				     uint32_t *complete_id)
+{
+	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+	pb_istream_t s = pb_istream_from_buffer(f->data, f->len);
+
+	if (!pb_decode(&s, meshtastic_FromRadio_fields, &from)) {
+		return 0U;
+	}
+	if (complete_id != NULL &&
+	    from.which_payload_variant == meshtastic_FromRadio_config_complete_id_tag) {
+		*complete_id = from.config_complete_id;
+	}
+	return from.which_payload_variant;
+}
+
+ZTEST(protocol_stack, test_phone_config_handshake_full)
+{
+	static struct meshtastic_phoneapi_frame q[4];
+	struct meshtastic_phoneapi api;
+	struct meshtastic_phoneapi_frame frame;
+	const uint32_t nonce = 0x1234ABCDU; /* not a special nonce -> full dump */
+	pb_size_t first = 0U, last = 0U;
+	uint32_t complete_id = 0U;
+	bool saw_metadata = false, saw_region = false, saw_channel = false, saw_complete = false;
+	int frames = 0;
+
+	meshtastic_phoneapi_init(&api, "cfgtest", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL);
+	meshtastic_phoneapi_enqueue_phone_config(&api, nonce);
+
+	while (meshtastic_phoneapi_next_config_frame(&api, &frame) == 0) {
+		pb_size_t v = phone_frame_variant(&frame, &complete_id);
+
+		if (frames == 0) {
+			first = v;
+		}
+		last = v;
+		saw_metadata |= (v == meshtastic_FromRadio_metadata_tag);
+		saw_region |= (v == meshtastic_FromRadio_region_presets_tag);
+		saw_channel |= (v == meshtastic_FromRadio_channel_tag);
+		saw_complete |= (v == meshtastic_FromRadio_config_complete_id_tag);
+		zassert_true(++frames < 256, "config handshake did not terminate");
+	}
+
+	zassert_equal(first, meshtastic_FromRadio_my_info_tag,
+		      "full handshake must start with my_info");
+	zassert_true(saw_metadata, "handshake must include device metadata");
+	zassert_true(saw_region, "handshake must include region_presets (apps stall without it)");
+	zassert_true(saw_channel, "handshake must stream channels");
+	zassert_true(saw_complete, "handshake must emit config_complete_id");
+	zassert_equal(last, meshtastic_FromRadio_config_complete_id_tag,
+		      "config_complete_id must be the final frame");
+	zassert_equal(complete_id, nonce, "config_complete_id must echo the request nonce");
+	zassert_equal(api.config_state, MESHTASTIC_PHONEAPI_CONFIG_IDLE,
+		      "state machine returns to IDLE after complete");
+}
+
+ZTEST(protocol_stack, test_phone_config_handshake_only_nodes)
+{
+	static struct meshtastic_phoneapi_frame q[4];
+	struct meshtastic_phoneapi api;
+	struct meshtastic_phoneapi_frame frame;
+	pb_size_t first = 0U, last = 0U;
+	uint32_t complete_id = 0U;
+	bool saw_metadata = false, saw_config = false, saw_complete = false;
+	int frames = 0;
+
+	meshtastic_phoneapi_init(&api, "cfgtest", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL);
+	meshtastic_phoneapi_enqueue_phone_config(&api, PHONEAPI_NONCE_ONLY_NODES);
+
+	while (meshtastic_phoneapi_next_config_frame(&api, &frame) == 0) {
+		pb_size_t v = phone_frame_variant(&frame, &complete_id);
+
+		if (frames == 0) {
+			first = v;
+		}
+		last = v;
+		saw_metadata |= (v == meshtastic_FromRadio_metadata_tag);
+		saw_config |= (v == meshtastic_FromRadio_config_tag);
+		saw_complete |= (v == meshtastic_FromRadio_config_complete_id_tag);
+		zassert_true(++frames < 256, "config handshake did not terminate");
+	}
+
+	/* ONLY_NODES starts at our own node_info and skips metadata + config, going
+	 * node DB -> complete (mirrors firmware SPECIAL_NONCE_ONLY_NODES). */
+	zassert_equal(first, meshtastic_FromRadio_node_info_tag,
+		      "ONLY_NODES must start at own node_info, not my_info");
+	zassert_false(saw_metadata, "ONLY_NODES must skip device metadata");
+	zassert_false(saw_config, "ONLY_NODES must skip config sections");
+	zassert_true(saw_complete, "ONLY_NODES must still emit config_complete_id");
+	zassert_equal(last, meshtastic_FromRadio_config_complete_id_tag,
+		      "config_complete_id must be the final frame");
+	zassert_equal(complete_id, PHONEAPI_NONCE_ONLY_NODES,
+		      "config_complete_id must echo the request nonce");
+}
+
+/* --- Message addressing + DM privacy on the wire -----------------------------
+ * Reproduces the reported "DMs get broadcast / aren't private" and
+ * "LongFast doesn't work" symptoms by inspecting the actual TX wire header for a
+ * broadcast, a channel-fallback DM, and a phone-PKI DM. */
+
+/* A broadcast on the primary channel carries dest=BROADCAST and the primary
+ * channel hash — the LongFast path. */
+ZTEST(protocol_stack, test_broadcast_addressing_primary_channel)
+{
+	struct meshtastic_wire_header hdr;
+	uint8_t primary_hash = meshtastic_channels_get_hash(meshtastic_channels_primary_index());
+
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "hello-all"),
+		   "broadcast send failed");
+	copy_last_tx_header(&hdr);
+
+	zassert_equal(sys_le32_to_cpu(hdr.dest), MESHTASTIC_NODE_BROADCAST,
+		      "a broadcast must be addressed to NODE_BROADCAST");
+	zassert_equal(hdr.channel, primary_hash,
+		      "a primary-channel broadcast must carry the primary channel hash");
+}
+
+/* On a build WITHOUT PKI (this suite: CONFIG_MESHTASTIC_PKI off), a DM has no PKC
+ * path, so it is channel-encrypted to the peer — dest is the peer (never
+ * broadcast), wire hash is the primary channel hash (not the 0x00 PKC marker).
+ * The PKI-on behavior (PKC or refuse) is covered in the admin_pki suite. */
+ZTEST(protocol_stack, test_dm_addressing_no_pki_build)
+{
+	struct meshtastic_wire_header hdr;
+	uint8_t primary_hash = meshtastic_channels_get_hash(meshtastic_channels_primary_index());
+
+	zassert_ok(meshtastic_send_text(0x0A0B0C0DU, "hello-peer"), "dm send failed");
+	copy_last_tx_header(&hdr);
+
+	zassert_equal(sys_le32_to_cpu(hdr.dest), 0x0A0B0C0DU,
+		      "a DM must be addressed to the peer, NOT broadcast");
+	zassert_equal(hdr.channel, primary_hash,
+		      "with PKI off a DM is channel-encrypted (primary hash)");
+}
+
+/* A phone-PKI-encrypted DM (the modern app flow: pre-encrypted payload,
+ * pki_encrypted set, unicast to a peer) MUST carry wire channel-hash 0x00 — the
+ * PKC marker peers use to route it to the PKI decrypt path. If it instead carries
+ * a real channel hash, other nodes try channel decryption and the DM is neither
+ * private nor reliably delivered. */
+ZTEST(protocol_stack, test_pki_dm_wire_channel_is_pkc_marker)
+{
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	struct meshtastic_wire_header hdr;
+
+	mesh.which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
+	mesh.to = 0x11223344U; /* a specific peer, NOT broadcast */
+	mesh.from = meshtastic_get_node_id();
+	mesh.id = 0x555U;
+	mesh.channel = 0U;
+	mesh.pki_encrypted = true;
+	mesh.encrypted.size = 16U;
+	memset(mesh.encrypted.bytes, 0xAB, sizeof(uint8_t) * 16U);
+
+	zassert_ok(meshtastic_send_mesh_pb(&mesh), "pki dm send failed");
+	copy_last_tx_header(&hdr);
+
+	zassert_equal(sys_le32_to_cpu(hdr.dest), 0x11223344U,
+		      "a PKI DM must be addressed to the peer, NOT broadcast");
+	zassert_equal(hdr.channel, 0x00U,
+		      "a PKI-encrypted DM must carry the 0x00 PKC wire marker, not a channel hash");
 }
 
 /* Verifies duplicate foreign packets do not trigger additional relay transmissions. */

@@ -542,6 +542,36 @@ int meshtastic_config_store_seed(const struct meshtastic_config *cfg)
 	return 0;
 }
 
+/* Meshtastic's LoRaConfig.bandwidth uses "special" small codes for fractional
+ * bandwidths (upstream bwCodeToKHz in MeshRadio.h); plain values are kHz. Map the
+ * codes to the Hz values this port's SX126x driver can actually configure
+ * (meshtastic_radio_bw_hz_to_code), and reject anything else — the 7.8/10.4/20.8/
+ * 31.25/41.7/203.125 kHz bandwidths are not among the eight this radio drives.
+ * Returns Hz on success, -EINVAL for an unsupported code. */
+static int lora_bw_code_to_hz(uint32_t code)
+{
+	switch (code) {
+	case 16U:
+		return 15600; /* 15.6 kHz */
+	case 62U:
+		return 62500; /* 62.5 kHz */
+	case 125U:
+		return 125000;
+	case 250U:
+		return 250000;
+	case 400U:
+		return 406250; /* 406.25 kHz */
+	case 500U:
+		return 500000;
+	case 800U:
+		return 812500; /* 812.5 kHz */
+	case 1600U:
+		return 1625000; /* 1625 kHz */
+	default:
+		return -EINVAL;
+	}
+}
+
 int meshtastic_config_store_apply_core(void)
 {
 	meshtastic_Config_DeviceConfig device;
@@ -621,14 +651,27 @@ int meshtastic_config_store_apply_core(void)
 	if (lora.use_preset) {
 		(void)meshtastic_preset_to_params(lora.modem_preset, false, &mt.modem);
 	} else {
-		/* Custom SF/BW/CR is not honoured yet: the bandwidth field carries
-		 * "special" codes needing the reference's bwCodeToKHz decode, which
-		 * is not ported. Say so rather than silently running the preset
-		 * config while the app displays custom values.
-		 */
-		LOG_WRN("lora.use_preset=false is not supported; keeping preset %d",
-			(int)lora.modem_preset);
-		(void)meshtastic_preset_to_params(lora.modem_preset, false, &mt.modem);
+		/* Custom SF/BW/CR. bandwidth is a Meshtastic "special" code (see
+		 * lora_bw_code_to_hz); spread_factor is 5..12; coding_rate is 5..8
+		 * (4/5..4/8). Apply only when all three are valid for this radio —
+		 * otherwise fall back to the preset rather than run a modem config the
+		 * app doesn't display. */
+		int bw_hz = lora_bw_code_to_hz(lora.bandwidth);
+
+		if (bw_hz > 0 && lora.spread_factor >= 5U && lora.spread_factor <= 12U &&
+		    lora.coding_rate >= 5U && lora.coding_rate <= 8U) {
+			mt.modem.bandwidth_hz = (uint32_t)bw_hz;
+			mt.modem.spread_factor = (uint8_t)lora.spread_factor;
+			mt.modem.coding_rate = (uint8_t)lora.coding_rate;
+			LOG_INF("LoRa custom modem: BW=%u Hz SF=%u CR=4/%u",
+				(unsigned int)bw_hz, (unsigned int)lora.spread_factor,
+				(unsigned int)lora.coding_rate);
+		} else {
+			LOG_WRN("Invalid custom LoRa (bw=%u sf=%u cr=%u); using preset %d",
+				(unsigned int)lora.bandwidth, (unsigned int)lora.spread_factor,
+				(unsigned int)lora.coding_rate, (int)lora.modem_preset);
+			(void)meshtastic_preset_to_params(lora.modem_preset, false, &mt.modem);
+		}
 	}
 
 	if (lora.override_frequency > 0.0f) {
