@@ -25,6 +25,7 @@
 #include "meshtastic_router.h"
 #include "meshtastic_mqtt.h"
 #if defined(CONFIG_MESHTASTIC_PKI)
+#include "meshtastic_config_store.h"
 #include "meshtastic_pki.h"
 #include <zephyr/meshtastic/nodedb.h>
 #if defined(CONFIG_MESHTASTIC_NODEINFO)
@@ -379,33 +380,42 @@ int meshtastic_mesh_pb_try_decode(meshtastic_MeshPacket *mesh)
 
 	{
 		uint8_t ch_index = MESHTASTIC_CHANNEL_INDEX_INVALID;
-		uint8_t wire_hash = (mesh->channel != 0U) ? (uint8_t)mesh->channel : mt.ch_hash;
+		uint8_t wire_hash = (uint8_t)mesh->channel;
 
+#if defined(CONFIG_MESHTASTIC_PKI)
+		/* PKC FIRST (parity with upstream Router::perhapsDecode): a frame carrying
+		 * the PKC marker (wire channel-hash 0) addressed to us is X25519+AES-CCM.
+		 * CCM authenticates, so a wrong key is cleanly rejected — try it BEFORE the
+		 * unauthenticated channel (AES-CTR) path, so a private DM is never first
+		 * mis-decrypted against a channel key (the RX mirror of the 0x00 TX marker).
+		 * If this is not a PKC-marked frame to us, or PKC decrypt fails, fall through
+		 * to channel decryption below. */
+		if (wire_hash == 0U && mesh->to == mt.node_id &&
+		    mesh->to != MESHTASTIC_NODE_BROADCAST && meshtastic_pki_have_key() &&
+		    try_decrypt_pki(mesh->from, mesh->id, mesh->encrypted.bytes, enc_len, &data) == 0) {
+			struct meshtastic_nodedb_node node;
+
+			mesh->decoded = data;
+			mesh->which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+			mesh->channel = 0U;
+			mesh->pki_encrypted = true;
+
+			if (meshtastic_nodedb_get(mesh->from, &node) == 0 &&
+			    node.public_key_len == MESHTASTIC_PKI_KEY_LEN) {
+				memcpy(mesh->public_key.bytes, node.public_key, MESHTASTIC_PKI_KEY_LEN);
+				mesh->public_key.size = MESHTASTIC_PKI_KEY_LEN;
+			}
+			return 0;
+		}
+#endif
+
+		/* Channel decryption: match the wire hash against configured channels. A
+		 * wire byte of 0 that was not PKC (a PKC frame not addressed to us, or a
+		 * channel whose hash is 0) is matched literally against the channel hashes,
+		 * mirroring upstream's decryptForHash loop. */
 		ret = try_decrypt_wire_hash(wire_hash, mesh->from, mesh->id, mesh->encrypted.bytes,
 					    enc_len, &data, &ch_index);
 		if (ret < 0) {
-#if defined(CONFIG_MESHTASTIC_PKI)
-			/* PSK decode failed. A DM to us with no matching channel is
-			 * likely PKC — try X25519+AES-CCM with the sender's pubkey. */
-			if (mesh->to == mt.node_id && meshtastic_pki_have_key() &&
-			    try_decrypt_pki(mesh->from, mesh->id, mesh->encrypted.bytes, enc_len,
-					    &data) == 0) {
-				struct meshtastic_nodedb_node node;
-
-				mesh->decoded = data;
-				mesh->which_payload_variant = meshtastic_MeshPacket_decoded_tag;
-				mesh->channel = 0U;
-				mesh->pki_encrypted = true;
-
-				if (meshtastic_nodedb_get(mesh->from, &node) == 0 &&
-				    node.public_key_len == MESHTASTIC_PKI_KEY_LEN) {
-					memcpy(mesh->public_key.bytes, node.public_key,
-					       MESHTASTIC_PKI_KEY_LEN);
-					mesh->public_key.size = MESHTASTIC_PKI_KEY_LEN;
-				}
-				return 0;
-			}
-#endif
 			return ret;
 		}
 
@@ -547,55 +557,65 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 		return 0;
 	}
 
-	ret = try_decrypt_wire_hash(hdr->channel, packet->from, packet->id,
-				    buf + MESHTASTIC_HDR_LEN,
-				    (size_t)(len - (int)MESHTASTIC_HDR_LEN), &data, &channel_index);
-	if (ret < 0) {
-		/* PSK decode failed: no channel/PSK we hold matched. If a PKC retry
-		 * below succeeds this is cleared; otherwise the router NAKs a want_ack
-		 * unicast to us with this reason instead of dropping it silently. */
-		if (fail_reason != NULL) {
-			*fail_reason = MESHTASTIC_DECODE_FAIL_NO_CHANNEL;
-		}
+	{
+		uint8_t wire_hash = hdr->channel;
+		bool pkc_done = false;
 #if defined(CONFIG_MESHTASTIC_PKI)
-		/* PSK decode failed. A DM to us with no matching channel is likely
-		 * PKC — try X25519+AES-CCM with the sender's public key. */
 		int pret = -EBADMSG;
 
-		if (packet->to == mt.node_id && meshtastic_pki_have_key()) {
+		/* PKC FIRST (parity with upstream Router::perhapsDecode and with the
+		 * pb-decode entry meshtastic_mesh_pb_try_decode): a frame carrying the
+		 * PKC marker (wire channel-hash 0) addressed to us is X25519+AES-CCM.
+		 * CCM authenticates, so a channel frame or a wrong key is cleanly
+		 * rejected — try PKC BEFORE the unauthenticated channel (AES-CTR) loop,
+		 * so a private DM is never first mis-decrypted against a channel whose
+		 * hash is also 0 (the RX mirror of the 0x00 TX marker). If this is not a
+		 * PKC-marked frame to us, or PKC decrypt fails, fall through to the
+		 * channel loop below. */
+		if (wire_hash == 0U && packet->to == mt.node_id &&
+		    packet->to != MESHTASTIC_NODE_BROADCAST && meshtastic_pki_have_key()) {
 			pret = try_decrypt_pki(packet->from, packet->id, buf + MESHTASTIC_HDR_LEN,
 					       (size_t)(len - (int)MESHTASTIC_HDR_LEN), &data);
-			if (pret == -ENOENT) {
-				/* We hold no public key for the sender yet — request
-				 * their NodeInfo so the next DM decodes. Report the more
-				 * specific PKI_UNKNOWN_PUBKEY reason only for the PKC
-				 * marker channel (wire hash byte 0), exactly as the
-				 * reference ReliableRouter does (channel==0 && no key);
-				 * any other unknown channel stays NO_CHANNEL. */
-				if (fail_reason != NULL && hdr->channel == 0U) {
-					*fail_reason = MESHTASTIC_DECODE_FAIL_PKI_UNKNOWN_PUBKEY;
-				}
-#if defined(CONFIG_MESHTASTIC_NODEINFO)
-				/* Throttled + K_NO_WAIT: this runs on the RX
-				 * thread and the sender id is attacker-chosen,
-				 * so it must not amplify or block. */
-				(void)meshtastic_nodeinfo_request(packet->from);
-#endif
+			if (pret == 0) {
+				channel_index = 0U;           /* PKC pseudo-channel */
+				packet->pki_encrypted = true; /* authenticated to sender's key */
+				pkc_done = true;
 			}
 		}
-
-		if (pret != 0) {
-			return 0;
-		}
-
-		if (fail_reason != NULL) {
-			*fail_reason = MESHTASTIC_DECODE_FAIL_NONE; /* PKC succeeded */
-		}
-		channel_index = 0U;           /* PKC pseudo-channel */
-		packet->pki_encrypted = true; /* authenticated to the sender's key */
-#else
-		return 0;
 #endif
+
+		if (!pkc_done) {
+			ret = try_decrypt_wire_hash(wire_hash, packet->from, packet->id,
+						    buf + MESHTASTIC_HDR_LEN,
+						    (size_t)(len - (int)MESHTASTIC_HDR_LEN), &data,
+						    &channel_index);
+			if (ret < 0) {
+				/* Neither PKC (tried first, above) nor any channel/PSK we hold
+				 * decoded this. Report NO_CHANNEL so the router NAKs a want_ack
+				 * unicast to us with a reason instead of dropping it silently. */
+				if (fail_reason != NULL) {
+					*fail_reason = MESHTASTIC_DECODE_FAIL_NO_CHANNEL;
+				}
+#if defined(CONFIG_MESHTASTIC_PKI)
+				/* A PKC-marker DM to us that failed only because we hold no
+				 * public key for the sender (-ENOENT): request their NodeInfo
+				 * so the next DM decodes, and report the more specific reason.
+				 * Matches the reference ReliableRouter (channel==0 && no key).
+				 * Throttled + K_NO_WAIT — this runs on the RX thread and the
+				 * sender id is attacker-chosen, so it must not amplify or block. */
+				if (pret == -ENOENT) {
+					if (fail_reason != NULL && wire_hash == 0U) {
+						*fail_reason =
+							MESHTASTIC_DECODE_FAIL_PKI_UNKNOWN_PUBKEY;
+					}
+#if defined(CONFIG_MESHTASTIC_NODEINFO)
+					(void)meshtastic_nodeinfo_request(packet->from);
+#endif
+				}
+#endif
+				return 0;
+			}
+		}
 	}
 
 	ret = copy_data_payload(&data, payload, payload_len, &packet_payload);
@@ -676,23 +696,49 @@ int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t
 	payload_len = encoded_len;
 
 #if defined(CONFIG_MESHTASTIC_PKI)
-	/* Prefer PKC for a directed DM when we hold the peer's public key:
-	 * AES key = SHA256(X25519(our_priv, peer_pub)); the wire channel-hash
-	 * byte is 0x00 (the PKC marker the reference firmware uses). Falls back
-	 * to the PSK channel path when we have no key for the peer (-ENOENT) or
-	 * the packet is a broadcast. Guarded so ct||tag||extra (+12) still fits
-	 * the wire buffer. */
-	if (packet->to != MESHTASTIC_NODE_BROADCAST && packet->to != 0U &&
-	    meshtastic_pki_have_key() &&
-	    (MESHTASTIC_HDR_LEN + encoded_len + MESHTASTIC_PKI_OVERHEAD) <= MESHTASTIC_PKT_MAX) {
-		size_t pki_len;
-		int pret = meshtastic_pki_encrypt(packet->to, packet->from, packet->id,
-						  mt_ws.pb_buf, encoded_len, mt_ws.enc_buf,
-						  sizeof(mt_ws.enc_buf), &pki_len);
-		if (pret == 0) {
-			wire_hash = 0x00U;
-			payload_len = pki_len;
-			pki_done = true;
+	/* PKC-vs-channel decision, parity with upstream Router::perhapsEncode. A
+	 * directed DM is PKC-encrypted (AES key = SHA256(X25519(our_priv, peer_pub)),
+	 * wire channel-hash byte 0x00) when: we hold a private key, the peer is not the
+	 * broadcast address, we are not in licensed/Ham mode, and the portnum is not one
+	 * upstream keeps on the channel (traceroute/nodeinfo/routing/position are
+	 * broadcast-oriented). If PKC is chosen but we lack the peer's public key we
+	 * REFUSE — a DM must never be silently downgraded to channel encryption, which
+	 * would leak it to every node on the channel (upstream returns
+	 * PKI_SEND_FAIL_PUBLIC_KEY). */
+	{
+		bool is_licensed = false;
+		bool is_unmessagable = false;
+
+		meshtastic_config_store_get_owner_flags(&is_licensed, &is_unmessagable);
+
+		if (packet->to != MESHTASTIC_NODE_BROADCAST && packet->to != 0U &&
+		    meshtastic_pki_have_key() && !is_licensed &&
+		    packet->portnum != (uint32_t)meshtastic_PortNum_TRACEROUTE_APP &&
+		    packet->portnum != (uint32_t)meshtastic_PortNum_NODEINFO_APP &&
+		    packet->portnum != (uint32_t)meshtastic_PortNum_ROUTING_APP &&
+		    packet->portnum != (uint32_t)meshtastic_PortNum_POSITION_APP) {
+			size_t pki_len;
+			int pret;
+
+			if (MESHTASTIC_HDR_LEN + encoded_len + MESHTASTIC_PKI_OVERHEAD >
+			    MESHTASTIC_PKT_MAX) {
+				return -EMSGSIZE; /* too large for PKC — refuse (parity: TOO_LARGE) */
+			}
+
+			pret = meshtastic_pki_encrypt(packet->to, packet->from, packet->id,
+						      mt_ws.pb_buf, encoded_len, mt_ws.enc_buf,
+						      sizeof(mt_ws.enc_buf), &pki_len);
+			if (pret == 0) {
+				wire_hash = 0x00U;
+				payload_len = pki_len;
+				pki_done = true;
+			} else {
+				LOG_WRN("No public key for 0x%08x; refusing to send DM as channel "
+					"traffic", (unsigned int)packet->to);
+				/* EACCES, not ENOKEY: the latter is a Linux errno extension
+				 * absent from the xtensa/picolibc target libc. */
+				return -EACCES;
+			}
 		}
 	}
 #endif
@@ -798,7 +844,15 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 	if (mesh->via_mqtt) {
 		hdr->flags |= MESHTASTIC_FLAGS_VIA_MQTT;
 	}
-	if (mesh->channel < MESHTASTIC_MAX_CHANNELS) {
+	if (mesh->pki_encrypted) {
+		/* PKC-encrypted DM (the phone did the X25519+AES): the wire channel-hash
+		 * byte is the 0x00 PKC marker so peers route it to PKI decryption, not
+		 * channel decryption. Without this a private DM goes out stamped with the
+		 * primary channel hash (e.g. LongFast) — peers try the channel key, it is
+		 * neither private nor reliably delivered, and interop breaks. Matches the
+		 * decoded-path PKI branch in meshtastic_build_wire_packet. */
+		hdr->channel = 0x00U;
+	} else if (mesh->channel < MESHTASTIC_MAX_CHANNELS) {
 		hdr->channel = meshtastic_channels_get_hash((uint8_t)mesh->channel);
 	} else {
 		hdr->channel = (mesh->channel != 0U) ? (uint8_t)mesh->channel : mt.ch_hash;

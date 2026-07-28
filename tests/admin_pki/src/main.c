@@ -312,6 +312,184 @@ static void admin_pki_before(void *fixture)
 
 ZTEST_SUITE(admin_pki, NULL, admin_pki_setup, admin_pki_before, NULL, NULL);
 
+/* --- DM encryption parity with upstream (build_wire_packet PKC decision) ------
+ * PKI is enabled in this suite, so these exercise the real PKC-vs-channel path. */
+
+/* A DM to a peer whose public key we don't have is REFUSED, not silently
+ * channel-encrypted (parity: upstream PKI_SEND_FAIL_PUBLIC_KEY) — a private
+ * message must never leak to every node on the channel. 0x0BADF00D is never
+ * seeded into the NodeDB, so we hold no key for it regardless of test order. */
+ZTEST(admin_pki, test_dm_without_peer_key_refused)
+{
+	zassert_true(meshtastic_pki_have_key(), "our X25519 key must be ready");
+	zassert_true(meshtastic_send_text(0x0BADF00DU, "secret") < 0,
+		     "a DM to a keyless peer must be refused, not channel-encrypted");
+}
+
+/* A DM to a peer whose public key we DO hold is PKC-encrypted: dest is the peer,
+ * and the wire channel-hash byte is the 0x00 PKC marker (not a channel hash). */
+ZTEST(admin_pki, test_pkc_dm_uses_zero_wire_marker)
+{
+	uint8_t pub[MESHTASTIC_PKI_KEY_LEN];
+	const struct meshtastic_wire_header *hdr =
+		(const struct meshtastic_wire_header *)mock_lora.last_tx;
+
+	gen_x25519_pubkey(pub);
+	seed_peer_pubkey(pub);
+
+	zassert_ok(meshtastic_send_text(PEER_NODE_ID, "hi peer"), "pkc dm send failed");
+
+	zassert_equal(sys_le32_to_cpu(hdr->dest), PEER_NODE_ID, "PKC DM dest must be the peer");
+	zassert_equal(hdr->channel, 0x00U,
+		      "a PKC DM must carry the 0x00 PKC wire marker, not a channel hash");
+}
+
+/* A DIRECTED position — a portnum upstream excludes from PKC — stays on the
+ * channel even when we hold the peer's key (parity with perhapsEncode's portnum
+ * carve-outs). Wire byte is the primary channel hash, not the 0x00 PKC marker. */
+ZTEST(admin_pki, test_directed_position_stays_on_channel)
+{
+	uint8_t pub[MESHTASTIC_PKI_KEY_LEN];
+	uint8_t payload[8] = {0};
+	uint8_t primary_hash = meshtastic_channels_get_hash(meshtastic_channels_primary_index());
+	const struct meshtastic_wire_header *hdr =
+		(const struct meshtastic_wire_header *)mock_lora.last_tx;
+
+	gen_x25519_pubkey(pub);
+	seed_peer_pubkey(pub);
+
+	zassert_ok(meshtastic_send_data(PEER_NODE_ID, MESHTASTIC_PORT_POSITION, payload,
+					sizeof(payload), K_FOREVER),
+		   "directed position send failed");
+
+	zassert_equal(hdr->channel, primary_hash,
+		      "a directed POSITION must stay channel-encrypted (excluded from PKC)");
+}
+
+/* On-air RX PKC-first (change-pointer 7, docs/parity/crypto-channels.md): the
+ * decode entry meshtastic_try_decode_wire_packet tries PKC before the channel
+ * loop, so a PKC DM to us is never shadowed by a channel whose hash also lands
+ * on the 0x00 PKC marker — and, symmetrically, a genuine channel frame on that
+ * colliding channel still decodes as channel traffic because the PKC attempt
+ * fails CCM authentication and falls through. Both directions are asserted with
+ * a SECONDARY channel deliberately provisioned to hash to 0x00. */
+ZTEST(admin_pki, test_rx_pkc_first_beats_colliding_channel)
+{
+	uint8_t pub[MESHTASTIC_PKI_KEY_LEN];
+	uint8_t plain[MESHTASTIC_MAX_PAYLOAD_LEN];
+	size_t plain_len = 0;
+	uint8_t enc[MESHTASTIC_MAX_PAYLOAD_LEN + MESHTASTIC_PKI_OVERHEAD];
+	size_t enc_len = 0;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	struct meshtastic_wire_header *hdr = (struct meshtastic_wire_header *)wire;
+	struct meshtastic_packet pkt = {0};
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	bool decoded = false;
+	enum meshtastic_decode_fail fail = MESHTASTIC_DECODE_FAIL_NONE;
+	int ret;
+
+	gen_x25519_pubkey(pub);
+	seed_peer_pubkey(pub);
+
+	/* Provision a SECONDARY at index 1 that hashes to the 0x00 PKC marker.
+	 * hash = xorHash(name) ^ xorHash(key); "aa" folds to 0 and a 16-byte key of
+	 * {0xAB,0xAB,0,...} folds to 0 while staying non-zero (a real key), so the
+	 * hash is 0 ^ 0 = 0x00. The assert both validates the arithmetic and guards
+	 * against secondary-PSK inheritance silently replacing our key. */
+	{
+		meshtastic_Channel ch = meshtastic_Channel_init_zero;
+
+		ch.role = meshtastic_Channel_Role_SECONDARY;
+		ch.has_settings = true;
+		strncpy(ch.settings.name, "aa", sizeof(ch.settings.name) - 1U);
+		ch.settings.psk.size = 16U;
+		ch.settings.psk.bytes[0] = 0xABU;
+		ch.settings.psk.bytes[1] = 0xABU;
+		zassert_ok(meshtastic_channels_set_slot(1U, &ch), "colliding channel set failed");
+		zassert_equal(meshtastic_channels_get_hash(1U), 0x00U,
+			      "test setup: channel 1 must hash to the 0x00 PKC marker");
+	}
+
+	/* Case 1 — a genuine PKC DM (wire byte 0x00, to us). Must decode as PKC and
+	 * NOT be captured by the colliding channel. Uses the same ECDH-symmetry
+	 * forge as inject_pkc_admin (encrypt "to PEER" so our decrypt "from PEER"
+	 * reproduces the shared secret). */
+	zassert_ok(meshtastic_encode_data(MESHTASTIC_PORT_TEXT_MESSAGE, (const uint8_t *)"hi", 2U,
+					  plain, sizeof(plain), &plain_len),
+		   "Data encode failed");
+	zassert_ok(meshtastic_pki_encrypt(PEER_NODE_ID, PEER_NODE_ID, 0x0C0FFEE1U, plain, plain_len,
+					  enc, sizeof(enc), &enc_len),
+		   "PKC encrypt failed");
+
+	memset(hdr, 0, MESHTASTIC_HDR_LEN);
+	hdr->dest = sys_cpu_to_le32(TEST_NODE_ID);
+	hdr->src = sys_cpu_to_le32(PEER_NODE_ID);
+	hdr->id = sys_cpu_to_le32(0x0C0FFEE1U);
+	hdr->flags = 3U | (3U << MESHTASTIC_FLAGS_HOP_START_SHIFT);
+	hdr->channel = 0x00U; /* PKC marker — also the colliding channel's hash */
+	memcpy(wire + MESHTASTIC_HDR_LEN, enc, enc_len);
+
+	ret = meshtastic_try_decode_wire_packet(wire, (int)(MESHTASTIC_HDR_LEN + enc_len), -20, 4,
+						&pkt, payload, sizeof(payload), &decoded, &fail);
+	zassert_ok(ret, "PKC DM decode returned %d", ret);
+	zassert_true(decoded, "PKC DM must decode");
+	zassert_true(pkt.pki_encrypted,
+		     "PKC DM must be flagged pki_encrypted, not captured by the 0x00 channel");
+	zassert_equal(pkt.channel_index, 0U, "PKC DM must land on the PKC pseudo-channel 0");
+	zassert_equal(pkt.portnum, (uint32_t)MESHTASTIC_PORT_TEXT_MESSAGE, "wrong portnum");
+	zassert_equal(pkt.payload_len, 2U, "wrong PKC payload len");
+	zassert_mem_equal(pkt.payload, "hi", 2U, "PKC DM payload mismatch");
+
+	/* Case 2 — a real channel frame on the colliding channel, addressed to us
+	 * (wire byte 0x00). The PKC-first attempt must fail CCM auth cleanly and
+	 * fall through to channel decode. Built as a broadcast on channel 1 (so the
+	 * TX PKC decision is skipped), then re-addressed to us; the AES-CTR nonce is
+	 * id+from, so re-addressing does not affect decryptability. */
+	{
+		struct meshtastic_packet tx = {
+			.from = PEER_NODE_ID,
+			.to = MESHTASTIC_NODE_BROADCAST,
+			.id = 0x0C0FFEE2U,
+			.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+			.payload = (const uint8_t *)"ch",
+			.payload_len = 2U,
+			.channel_index = 1U,
+		};
+		uint8_t built[MESHTASTIC_PKT_MAX];
+		uint32_t built_len = 0;
+		struct meshtastic_wire_header *bh = (struct meshtastic_wire_header *)built;
+		struct meshtastic_packet cpkt = {0};
+
+		zassert_ok(meshtastic_build_wire_packet(&tx, built, &built_len),
+			   "colliding channel frame build failed");
+		zassert_equal(bh->channel, 0x00U,
+			      "the colliding channel frame must carry wire byte 0x00");
+		bh->dest = sys_cpu_to_le32(TEST_NODE_ID); /* re-address to us */
+
+		decoded = false;
+		fail = MESHTASTIC_DECODE_FAIL_NONE;
+		ret = meshtastic_try_decode_wire_packet(built, (int)built_len, -20, 4, &cpkt, payload,
+							sizeof(payload), &decoded, &fail);
+		zassert_ok(ret, "channel-frame decode returned %d", ret);
+		zassert_true(decoded, "channel frame on the colliding channel must decode");
+		zassert_false(cpkt.pki_encrypted,
+			      "a channel frame must NOT be flagged pki_encrypted");
+		zassert_equal(cpkt.channel_index, 1U, "channel frame must land on channel 1");
+		zassert_equal(cpkt.payload_len, 2U, "wrong channel payload len");
+		zassert_mem_equal(cpkt.payload, "ch", 2U, "channel frame payload mismatch");
+	}
+
+	/* Tear down: disable channel 1 so later tests in the suite see a clean table
+	 * (there is no per-test channel reset). */
+	{
+		meshtastic_Channel off = meshtastic_Channel_init_zero;
+
+		off.role = meshtastic_Channel_Role_DISABLED;
+		off.has_settings = true;
+		zassert_ok(meshtastic_channels_set_slot(1U, &off), "colliding channel teardown failed");
+	}
+}
+
 /* A real PKC admin whose sender key is configured in admin_key[] is authorized;
  * with a valid session passkey the mutating op applies. */
 ZTEST(admin_pki, test_pkc_admin_key_authorized_applies)
