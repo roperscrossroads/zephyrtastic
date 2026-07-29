@@ -13,8 +13,20 @@ config for one target. Built via the workspace justfile:
 PROFILE=v4-net just dist    # Heltec V4: WiFi/net + OTA + netlog + display + PM, MQTT off  (deploy / rzr1)
 PROFILE=v4-ble just dist    # Heltec V4: BLE PhoneAPI + display + PM                        (bench / rzr2)
 PROFILE=v3-net just dist    # Heltec V3: WiFi/net + OTA + netlog + PM, no display/PSRAM
+PROFILE=v4-unified just dist # Heltec V4: BLE + WiFi/net in ONE image, runtime toggle       (see below)
 PROFILE=v4-netserial …      # Heltec V4: serial PhoneAPI test — BLOCKED (see below)
 ```
+
+## v4-unified — one image, runtime BLE ⇄ WiFi toggle
+
+`overlay-v4-unified.conf` carries **both** phone transports; the running one is
+chosen at boot from persisted `network.wifi_enabled` (default BLE), switchable
+with `meshtastic transport [ble|wifi]` + reboot, or from the phone app. It is the
+`v4-net` config plus the BLE stack, minus the unused TLS data path / GNSS and
+with right-sized net buffers so both stacks fit internal DRAM (**98.30 %, ~6.3 KB
+headroom**; the measurement-hardened 16 KB StreamAPI thread stack is kept — see
+the doc). Full design, feasibility measurements, and the on-hardware test plan:
+[`unified-transport.md`](unified-transport.md).
 
 `PROFILE` presets the board + the config knobs; an unknown/empty `PROFILE` errors
 with the valid list. Explicit env vars still override a preset (e.g.
