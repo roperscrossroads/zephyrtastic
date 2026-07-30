@@ -18,10 +18,12 @@ config MESHTASTIC_DEVICE_METRICS_AUTO_SEND
 
 config MESHTASTIC_DEVICE_METRICS_INTERVAL_SEC
 	int "Device metrics send interval in seconds"
-	default 900
+	default 3600
 	range 30 86400
 	help
 	  Interval between automatic device metrics Telemetry packets.
+	  Defaults to 3600 s to match the reference client cadence
+	  (default_telemetry_broadcast_interval_secs); 900 s was ~4x chattier.
 
 config MESHTASTIC_FUEL_GAUGE
 	bool "Include battery metrics from fuel_gauge0"

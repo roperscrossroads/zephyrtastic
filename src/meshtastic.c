@@ -26,6 +26,7 @@
 #include "meshtastic_build.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
+#include "meshtastic_contention.h"
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
@@ -737,7 +738,25 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 #endif
 
 	if (K_TIMEOUT_EQ(wait, K_NO_WAIT)) {
-		ret = meshtastic_radio_send_wire_prio(wire, pkt_len, tier);
+		/* OWN-CW: stagger our own fire-and-forget broadcasts with the CSMA
+		 * contention window (reference setTransmitDelay/getTxDelayMsec), so
+		 * simultaneous beacons/telemetry across nearby nodes don't key up in
+		 * lockstep. delay_ms of 0 (window disabled, or the draw landing on slot 0)
+		 * is identical to the immediate path. Directed unicasts keep immediate
+		 * timing; the relay path has its own (weighted) jitter. */
+		if (local.to == MESHTASTIC_NODE_BROADCAST) {
+			struct meshtastic_contention_plan plan;
+			uint8_t util = 0U;
+
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+			util = (uint8_t)meshtastic_airtime_channel_util_percent();
+#endif
+			meshtastic_contention_plan_own(util, mt.modem.spread_factor,
+						       mt.modem.bandwidth_hz, false, &plan);
+			ret = meshtastic_radio_send_wire_after(wire, pkt_len, tier, plan.delay_ms);
+		} else {
+			ret = meshtastic_radio_send_wire_prio(wire, pkt_len, tier);
+		}
 	} else {
 		ret = meshtastic_radio_send_wire_wait_prio(wire, pkt_len, tier, wait);
 	}
@@ -854,6 +873,11 @@ int meshtastic_send_position(uint32_t dest)
 {
 	ARG_UNUSED(dest);
 
+	return -ENOTSUP;
+}
+
+int meshtastic_send_position_periodic(void)
+{
 	return -ENOTSUP;
 }
 #endif

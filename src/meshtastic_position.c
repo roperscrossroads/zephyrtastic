@@ -116,6 +116,16 @@ int meshtastic_send_position(uint32_t dest)
 	return position_send(dest, K_FOREVER);
 }
 
+int meshtastic_send_position_periodic(void)
+{
+	/* G-5: a periodic auto-broadcast is a background beacon — fire-and-forget
+	 * (K_NO_WAIT) so the airtime/channel-util gate can drop it under congestion,
+	 * matching the fixed-beacon path and the reference PositionModule's BG cadence.
+	 * A manual meshtastic_send_position() stays K_FOREVER/ungated: the user (or
+	 * shell) asked for it explicitly. */
+	return position_send(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
+}
+
 int meshtastic_position_get_current(meshtastic_Position *position)
 {
 	bool ok;

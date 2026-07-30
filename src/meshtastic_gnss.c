@@ -100,7 +100,9 @@ static void position_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
-	ret = meshtastic_send_position(MESHTASTIC_NODE_BROADCAST);
+	/* G-5: periodic auto-broadcast goes out fire-and-forget so the airtime gate
+	 * can throttle it under congestion (a manual send stays blocking/ungated). */
+	ret = meshtastic_send_position_periodic();
 	if (ret == -ENODATA) {
 		return;
 	}

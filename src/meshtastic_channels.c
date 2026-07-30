@@ -155,16 +155,16 @@ static void demote_other_primary(uint8_t index)
 	}
 }
 
-int meshtastic_channels_init_defaults(void)
+/* Overwrite @p index with the default LongFast PRIMARY channel (name, default
+ * PSK, precision) and re-derive its hash. Mirrors the reference initDefaultChannel(0);
+ * used to seed slot 0 at init and to restore a primary when a config edit leaves
+ * none (C-4). */
+static void seed_default_primary(uint8_t index)
 {
-	meshtastic_Channel *ch;
+	meshtastic_Channel *ch = &channel_slots[index];
 
-	memset(channel_slots, 0, sizeof(channel_slots));
-	memset(channel_hashes, 0, sizeof(channel_hashes));
-	primary_index = 0U;
-
-	ch = &channel_slots[0];
 	*ch = (meshtastic_Channel)meshtastic_Channel_init_zero;
+	ch->index = index;
 	ch->role = meshtastic_Channel_Role_PRIMARY;
 	ch->has_settings = true;
 	strncpy(ch->settings.name, MESHTASTIC_CHANNEL_LONGFAST, sizeof(ch->settings.name) - 1U);
@@ -175,14 +175,54 @@ int meshtastic_channels_init_defaults(void)
 	ch->settings.has_module_settings = true;
 	ch->settings.module_settings.position_precision = 13;
 
+	channel_fixup(index);
+}
+
+/* C-4: guarantee primary_index references a slot whose role is PRIMARY. A config
+ * edit can demote or disable the current primary, which would strand primary_index
+ * on a non-primary/disabled/cleartext slot (wrong key/hash on TX). Mirrors
+ * Channels::onConfigChanged: re-scan for a PRIMARY; if none, snap the stale slot
+ * back to PRIMARY when it is SECONDARY (keep its key material), else a DISABLED
+ * slot would become a plaintext primary, so restore the default at slot 0. */
+static void enforce_primary_invariant(void)
+{
+	bool has_primary = false;
+
+	for (uint8_t i = 0; i < MESHTASTIC_MAX_CHANNELS; i++) {
+		if (channel_slots[i].role == meshtastic_Channel_Role_PRIMARY) {
+			primary_index = i;
+			has_primary = true;
+		}
+	}
+	if (has_primary) {
+		return;
+	}
+
+	if (channel_slots[primary_index].role == meshtastic_Channel_Role_SECONDARY) {
+		channel_slots[primary_index].role = meshtastic_Channel_Role_PRIMARY;
+		channel_fixup(primary_index);
+		LOG_WRN("channels: no PRIMARY left, promoted slot %u", primary_index);
+	} else {
+		seed_default_primary(0U);
+		primary_index = 0U;
+		LOG_WRN("channels: no PRIMARY left, restored default at slot 0");
+	}
+}
+
+int meshtastic_channels_init_defaults(void)
+{
+	memset(channel_slots, 0, sizeof(channel_slots));
+	memset(channel_hashes, 0, sizeof(channel_hashes));
+	primary_index = 0U;
+
+	seed_default_primary(0U);
+
 	for (uint8_t i = 1; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		channel_slots[i] = (meshtastic_Channel)meshtastic_Channel_init_zero;
 		channel_slots[i].role = meshtastic_Channel_Role_DISABLED;
 		channel_slots[i].has_settings = true;
 		channel_fixup(i);
 	}
-
-	channel_fixup(0);
 
 	return 0;
 }
@@ -248,7 +288,13 @@ int meshtastic_channels_set_slot(uint8_t index, const meshtastic_Channel *channe
 
 	channel_fixup(index);
 
-	if (index == primary_index) {
+	/* Re-validate the "exactly one PRIMARY" invariant — this edit may have
+	 * demoted or disabled the current primary. May move primary_index. */
+	enforce_primary_invariant();
+
+	/* Refresh the cached primary key/hash/name off the (possibly relocated)
+	 * primary so TX keeps using the right channel. */
+	{
 		struct meshtastic_channel_key key;
 
 		if (meshtastic_channels_primary_key(&key) == 0) {

@@ -29,6 +29,20 @@ extern "C" {
  */
 int meshtastic_send_position(uint32_t dest);
 
+/**
+ * @brief Broadcast the latest position as a background beacon (G-5).
+ *
+ * Like @ref meshtastic_send_position to @ref MESHTASTIC_NODE_BROADCAST, but
+ * fire-and-forget (K_NO_WAIT) so it is subject to the airtime/channel-util gate.
+ * Intended for the periodic auto-send timer; a manual/user-initiated send should
+ * use @ref meshtastic_send_position (blocking, ungated).
+ *
+ * @retval 0        Success (or gate-suppressed under congestion).
+ * @retval -ENODATA No GNSS fix / position is available yet.
+ * @retval <0       Encode or transmit failure.
+ */
+int meshtastic_send_position_periodic(void);
+
 #ifdef __cplusplus
 }
 #endif

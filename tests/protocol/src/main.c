@@ -2860,6 +2860,81 @@ ZTEST(protocol_stack, test_mqtt_borne_admin_refused_on_legacy_admin_channel)
 	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 }
 
+/* --- C-4: a config edit must never leave the node without a PRIMARY --------- */
+
+static meshtastic_Channel make_channel(meshtastic_Channel_Role role, const char *name)
+{
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
+
+	ch.role = role;
+	ch.has_settings = true;
+	if (name != NULL) {
+		strncpy(ch.settings.name, name, sizeof(ch.settings.name) - 1U);
+	}
+	/* A non-cleartext channel needs key material; reuse the default PSK. */
+	memcpy(ch.settings.psk.bytes, meshtastic_default_psk, sizeof(meshtastic_default_psk));
+	ch.settings.psk.size = (pb_size_t)sizeof(meshtastic_default_psk);
+	return ch;
+}
+
+static bool primary_slot_is_valid_primary(void)
+{
+	uint8_t pi = meshtastic_channels_primary_index();
+	const meshtastic_Channel *ch = meshtastic_channels_get(pi);
+
+	return ch != NULL && ch->role == meshtastic_Channel_Role_PRIMARY;
+}
+
+ZTEST(protocol_stack, test_channel_edit_preserves_primary)
+{
+	meshtastic_Channel saved = *meshtastic_channels_get(0);
+
+	zassert_true(primary_slot_is_valid_primary(), "baseline: slot 0 is PRIMARY");
+
+	/* Demoting the sole primary to SECONDARY must snap a primary back, never
+	 * leave the node primary-less on a non-primary slot. */
+	{
+		meshtastic_Channel demote =
+			make_channel(meshtastic_Channel_Role_SECONDARY, "LongFast");
+
+		zassert_ok(meshtastic_channels_set_slot(0U, &demote), "set_slot failed");
+		zassert_true(primary_slot_is_valid_primary(),
+			     "demoting the only primary must restore one");
+	}
+
+	/* Disabling the sole primary must restore the default primary at slot 0 —
+	 * promoting a zeroed/disabled slot would make a plaintext primary. */
+	{
+		meshtastic_Channel off = make_channel(meshtastic_Channel_Role_DISABLED, NULL);
+
+		zassert_ok(meshtastic_channels_set_slot(0U, &off), "set_slot failed");
+		zassert_equal(meshtastic_channels_primary_index(), 0U,
+			      "disabling the primary must restore default at slot 0");
+		zassert_true(primary_slot_is_valid_primary(), "restored slot 0 must be PRIMARY");
+	}
+
+	/* Relocate the primary to slot 2, then disable it: the invariant must fall
+	 * back to a default primary at slot 0, not strand primary_index on slot 2. */
+	{
+		meshtastic_Channel prim =
+			make_channel(meshtastic_Channel_Role_PRIMARY, "Relocated");
+		meshtastic_Channel off = make_channel(meshtastic_Channel_Role_DISABLED, NULL);
+
+		zassert_ok(meshtastic_channels_set_slot(2U, &prim), "set_slot failed");
+		zassert_equal(meshtastic_channels_primary_index(), 2U,
+			      "primary should move to slot 2");
+
+		zassert_ok(meshtastic_channels_set_slot(2U, &off), "set_slot failed");
+		zassert_true(primary_slot_is_valid_primary(),
+			     "disabling a relocated primary must restore one");
+		zassert_equal(meshtastic_channels_primary_index(), 0U,
+			      "fallback primary lands at slot 0");
+	}
+
+	/* Restore the original table so later tests see a clean primary at slot 0. */
+	zassert_ok(meshtastic_channels_set_slot(0U, &saved), "primary restore failed");
+}
+
 /* The rejection must be specific to ADMIN_APP — ordinary downlink traffic is
  * the whole point of the feature and has to keep working. */
 ZTEST(protocol_stack, test_mqtt_downlink_non_admin_still_delivered)
