@@ -12,11 +12,34 @@
 #include <stdint.h>
 
 /**
- * Seed the wall clock from a known Unix epoch (seconds). Callable from any
- * source (GNSS UTC, phone set_time_only). Values below a sanity floor are
- * ignored (unfixed GNSS / uninitialised time). Last valid seed wins.
+ * @brief Trust level of a wall-clock time source; higher wins (T-A).
+ *
+ * Mirrors the reference RTCQuality ladder. A lower-quality source must never
+ * overwrite the clock a higher-quality one already set — e.g. a phone
+ * set_time_only / SNTP (NTP) cannot clobber a live GPS fix — so a spoofed or
+ * low-trust time can't silently rewind every epoch-stamped field.
  */
-void meshtastic_clock_set_epoch(uint32_t epoch_now);
+enum meshtastic_clock_quality {
+	MESHTASTIC_CLOCK_QUALITY_NONE = 0,   /**< No time set yet. */
+	MESHTASTIC_CLOCK_QUALITY_DEVICE = 1, /**< Onboard peripheral / battery-backed RTC. */
+	MESHTASTIC_CLOCK_QUALITY_NET = 2,    /**< Time relayed from another mesh node. */
+	MESHTASTIC_CLOCK_QUALITY_NTP = 3,    /**< NTP/SNTP, or a phone set_time_only. */
+	MESHTASTIC_CLOCK_QUALITY_GPS = 4,    /**< Our own GPS UTC. */
+};
+
+/**
+ * Seed the wall clock from a known Unix epoch (seconds) tagged with the trust
+ * level of its source. Callable from any source (GNSS UTC, SNTP, phone
+ * set_time_only). Values outside the sane [2020, ~2060] window are ignored, and
+ * a write is accepted only when @p quality clears the source-quality ladder:
+ * strictly higher than the current source, GPS (which always re-applies), or an
+ * NTP-class source past a 30-minute drift window. Otherwise the current time is
+ * kept.
+ */
+void meshtastic_clock_set_epoch(uint32_t epoch_now, enum meshtastic_clock_quality quality);
+
+/** Trust level of the source that last set the clock (NONE if never set). */
+enum meshtastic_clock_quality meshtastic_clock_get_quality(void);
 
 /** True once a valid epoch has been seeded. */
 bool meshtastic_clock_valid(void);

@@ -825,7 +825,10 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	case meshtastic_AdminMessage_set_time_only_tag:
 		LOG_INF("admin: set_time_only epoch=%u",
 			admin_req.payload_variant.set_time_only);
-		meshtastic_clock_set_epoch(admin_req.payload_variant.set_time_only);
+		/* Phone time is NTP-class (mirrors AdminModule perhapsSetRTC(RTCQualityNTP)):
+		 * it may seed or drift-correct the clock but must not clobber a live GPS fix. */
+		meshtastic_clock_set_epoch(admin_req.payload_variant.set_time_only,
+					   MESHTASTIC_CLOCK_QUALITY_NTP);
 		break;
 
 	/* Reset ops. The ACK below goes out first; the reset-reboot fires 7 s later

@@ -147,7 +147,8 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 		int64_t epoch = timeutil_timegm64(&gnss_tm);
 
 		if (epoch > 0) {
-			meshtastic_clock_set_epoch((uint32_t)epoch);
+			meshtastic_clock_set_epoch((uint32_t)epoch,
+						  MESHTASTIC_CLOCK_QUALITY_GPS);
 		}
 	}
 

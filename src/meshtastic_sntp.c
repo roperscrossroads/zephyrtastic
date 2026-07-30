@@ -45,7 +45,7 @@ static void sntp_do_sync(struct k_work *work)
 	int rc = sntp_simple(SNTP_SERVER, SNTP_TIMEOUT_MS, &ts);
 
 	if (rc == 0 && ts.seconds != 0U) {
-		meshtastic_clock_set_epoch((uint32_t)ts.seconds);
+		meshtastic_clock_set_epoch((uint32_t)ts.seconds, MESHTASTIC_CLOCK_QUALITY_NTP);
 		LOG_INF("SNTP sync ok: epoch=%u", (uint32_t)ts.seconds);
 #if CONFIG_MESHTASTIC_SNTP_RESYNC_HOURS > 0
 		k_work_schedule_for_queue(&sntp_wq, &resync_work,

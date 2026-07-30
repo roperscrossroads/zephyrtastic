@@ -17,6 +17,7 @@
 #include "meshtastic_admin.h"
 #include "meshtastic_admin_session.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_clock.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_core.h"
@@ -3027,6 +3028,65 @@ ZTEST(protocol_stack, test_channel_edit_preserves_primary)
 
 	/* Restore the original table so later tests see a clean primary at slot 0. */
 	zassert_ok(meshtastic_channels_set_slot(0U, &saved), "primary restore failed");
+}
+
+/* --- T-D: reject epochs outside the sane [2020, ~2060] window -------------- */
+
+ZTEST(protocol_stack, test_clock_rejects_out_of_range_epoch)
+{
+	const uint32_t good = 1700000000U; /* 2023-11-14, inside the window */
+
+	/* GPS is the top of the quality ladder, so it always (re)applies regardless of
+	 * whatever a prior test left the clock at — keeps this test order-independent. */
+	meshtastic_clock_set_epoch(good, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_true(meshtastic_clock_valid(), "an in-window epoch must seed the clock");
+	zassert_within(meshtastic_clock_now_epoch(), good, 5U, "clock should read ~ the seed");
+
+	/* A far-future epoch (past the ~2060 ceiling — GPS week-rollover garbage) must
+	 * be refused, leaving the clock on its previous value rather than the bogus one. */
+	meshtastic_clock_set_epoch(4000000000U, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_within(meshtastic_clock_now_epoch(), good, 5U,
+		       "far-future epoch must be rejected, clock unchanged");
+
+	/* A pre-2020 epoch is likewise refused (existing floor). */
+	meshtastic_clock_set_epoch(1000000000U, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_within(meshtastic_clock_now_epoch(), good, 5U,
+		       "pre-floor epoch must be rejected, clock unchanged");
+}
+
+/* --- T-A: source-quality ladder gates clock writes ------------------------ */
+
+/* A lower-trust time source (SNTP / phone set_time = NTP) must not overwrite the
+ * clock a higher-trust source (live GPS) already set; GPS always re-applies. This
+ * establishes a GPS baseline first so it is independent of any prior test's clock
+ * state (GPS is the top of the ladder and always wins). */
+ZTEST(protocol_stack, test_clock_quality_ladder_blocks_downgrade)
+{
+	const uint32_t gps_epoch = 1700000000U;  /* 2023-11-14 */
+	const uint32_t other_epoch = 1600000000U; /* 2020-09-13 — clearly different, in range */
+	const uint32_t gps_epoch2 = 1750000000U; /* 2025-06-15 */
+
+	meshtastic_clock_set_epoch(gps_epoch, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_GPS,
+		      "GPS must set the clock quality");
+	zassert_within(meshtastic_clock_now_epoch(), gps_epoch, 5U, "GPS time must seed the clock");
+
+	/* NTP (phone/SNTP) is below GPS and the drift window has not elapsed → ignored. */
+	meshtastic_clock_set_epoch(other_epoch, MESHTASTIC_CLOCK_QUALITY_NTP);
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_GPS,
+		      "an NTP write must not downgrade the clock quality from GPS");
+	zassert_within(meshtastic_clock_now_epoch(), gps_epoch, 5U,
+		       "a lower-trust NTP time must not clobber a live GPS fix");
+
+	/* Device (lowest) is likewise refused. */
+	meshtastic_clock_set_epoch(other_epoch, MESHTASTIC_CLOCK_QUALITY_DEVICE);
+	zassert_within(meshtastic_clock_now_epoch(), gps_epoch, 5U,
+		       "a Device-quality time must not clobber a GPS fix");
+
+	/* GPS always re-applies (top of the ladder), so a fresh fix updates the clock. */
+	meshtastic_clock_set_epoch(gps_epoch2, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_within(meshtastic_clock_now_epoch(), gps_epoch2, 5U,
+		       "a fresh GPS fix must re-apply and update the clock");
 }
 
 /* The rejection must be specific to ADMIN_APP — ordinary downlink traffic is
