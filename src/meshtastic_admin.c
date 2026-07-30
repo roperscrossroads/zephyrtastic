@@ -400,6 +400,59 @@ static bool handle_get_device_connection_status(void)
 	return true;
 }
 
+/* Ringtone (RTTTL) and canned-message text are ExternalNotification / CannedMessage
+ * module state this port does not implement — both modules are excluded (see
+ * meshtastic.c getDeviceMetadata / ExcludedModules) and there is no RTTTLConfig /
+ * CannedMessageModuleConfig backing store. Upstream copies rtttlConfig.ringtone /
+ * cannedMessageModuleConfig.messages, which are the empty string when unset; with
+ * no store, the port replies with that same empty string. The point of A-4a is to
+ * *answer at all*: without a matching *_response the app's ringtone / canned-message
+ * screens spin forever — the ROUTING ACK the default arm used to emit does not
+ * satisfy them. get_ringtone_response is an inline char[], so the init_zero above
+ * already made it "". */
+static bool handle_get_ringtone(void)
+{
+	admin_resp = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	admin_resp.which_payload_variant = meshtastic_AdminMessage_get_ringtone_response_tag;
+	admin_emit_reply(&admin_resp);
+	return true;
+}
+
+static bool handle_get_canned_messages(void)
+{
+	admin_resp = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	admin_resp.which_payload_variant =
+		meshtastic_AdminMessage_get_canned_message_module_messages_response_tag;
+	admin_emit_reply(&admin_resp);
+	return true;
+}
+
+/* Device-UI config the port *does* persist (Config.device_ui). Reply with the
+ * stored value; if it is somehow absent the init_zero leaves a valid, all-default
+ * DeviceUIConfig the app accepts — still better than hanging. */
+static bool handle_get_ui_config(void)
+{
+	admin_resp = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	admin_resp.which_payload_variant = meshtastic_AdminMessage_get_ui_config_response_tag;
+	(void)meshtastic_config_store_get_device_ui(
+		&admin_resp.payload_variant.get_ui_config_response);
+	admin_emit_reply(&admin_resp);
+	return true;
+}
+
+/* Remote-hardware GPIO pins: the port has no RemoteHardware module (metadata
+ * advertises hasRemoteHardware = false), so there are no node pins to report —
+ * reply with an empty NodeRemoteHardwarePinsResponse (count 0), the honest and
+ * non-hanging answer. */
+static bool handle_get_node_remote_hardware_pins(void)
+{
+	admin_resp = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	admin_resp.which_payload_variant =
+		meshtastic_AdminMessage_get_node_remote_hardware_pins_response_tag;
+	admin_emit_reply(&admin_resp);
+	return true;
+}
+
 /* True if name is non-empty but contains only whitespace (rejected for owner). */
 static bool owner_name_all_whitespace(const char *name)
 {
@@ -609,6 +662,22 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		break;
 	case meshtastic_AdminMessage_get_device_connection_status_request_tag:
 		response_sent = handle_get_device_connection_status();
+		break;
+	/* A-4a: passkey-exempt getters for modules the port does not implement.
+	 * Answer with the matching (empty-default) *_response so the app's ringtone /
+	 * canned-message / device-UI / remote-hardware screens don't hang waiting on a
+	 * response that never comes — the reference sends only the response, not an ACK. */
+	case meshtastic_AdminMessage_get_ringtone_request_tag:
+		response_sent = handle_get_ringtone();
+		break;
+	case meshtastic_AdminMessage_get_canned_message_module_messages_request_tag:
+		response_sent = handle_get_canned_messages();
+		break;
+	case meshtastic_AdminMessage_get_ui_config_request_tag:
+		response_sent = handle_get_ui_config();
+		break;
+	case meshtastic_AdminMessage_get_node_remote_hardware_pins_request_tag:
+		response_sent = handle_get_node_remote_hardware_pins();
 		break;
 
 	/* Setters — apply + persist (persistence deferred if a txn is open). */

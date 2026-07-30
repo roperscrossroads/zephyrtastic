@@ -2860,6 +2860,99 @@ ZTEST(protocol_stack, test_mqtt_borne_admin_refused_on_legacy_admin_channel)
 	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 }
 
+/* --- A-4a: passkey-exempt getters must actually respond -------------------- */
+
+/* A capture PhoneAPI transport: locally-emitted admin responses fan out through
+ * meshtastic_phoneapi_on_packet() to every registered transport, so registering
+ * one lets the test read the FromRadio the getter produced. File-static so the
+ * registration (there is no unregister) never dangles across tests. */
+static struct meshtastic_phoneapi_frame getcap_q[8];
+static struct meshtastic_phoneapi getcap_api;
+static bool getcap_registered;
+
+static void getcap_reset(void)
+{
+	if (!getcap_registered) {
+		meshtastic_phoneapi_init(&getcap_api, "getcap", getcap_q, ARRAY_SIZE(getcap_q), NULL,
+					 NULL, NULL, NULL);
+		meshtastic_phoneapi_register(&getcap_api);
+		getcap_registered = true;
+	}
+	meshtastic_phoneapi_reset(&getcap_api);
+}
+
+/* Drive a local (directly-connected app) admin get-request through the dispatcher
+ * and assert it emits the matching *_response — not the bare ROUTING ACK the
+ * default arm used to send, which left the app spinning (A-4a). */
+static void assert_local_getter_responds(pb_size_t request_tag, pb_size_t expected_response_tag)
+{
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	struct meshtastic_phoneapi_frame frame;
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os;
+	bool got = false;
+
+	getcap_reset();
+
+	am.which_payload_variant = request_tag;
+	os = pb_ostream_from_buffer(mesh.decoded.payload.bytes, sizeof(mesh.decoded.payload.bytes));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin get encode failed");
+
+	mesh.from = TEST_NODE_ID; /* local: from == self */
+	mesh.to = TEST_NODE_ID;
+	mesh.id = 0x0A4A0000U | (uint32_t)request_tag;
+	mesh.want_ack = true; /* the app asks for an ACK — the getter must supersede it */
+	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh.decoded.portnum = (meshtastic_PortNum)MESHTASTIC_PORT_ADMIN;
+	mesh.decoded.payload.size = (pb_size_t)os.bytes_written;
+
+	zassert_true(meshtastic_admin_handle_local(&mesh), "handle_local must consume admin");
+
+	/* Find the ADMIN_APP FromRadio the getter emitted and decode its AdminMessage.
+	 * A regression to the old behavior emits only a ROUTING_APP ACK, so no such
+	 * frame exists and `got` stays false. */
+	while (meshtastic_phoneapi_pop_frame(&getcap_api, &frame)) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t is = pb_istream_from_buffer(frame.data, frame.len);
+
+		if (!pb_decode(&is, meshtastic_FromRadio_fields, &from) ||
+		    from.which_payload_variant != meshtastic_FromRadio_packet_tag ||
+		    from.packet.decoded.portnum != (meshtastic_PortNum)MESHTASTIC_PORT_ADMIN) {
+			continue;
+		}
+		is = pb_istream_from_buffer(from.packet.decoded.payload.bytes,
+					   from.packet.decoded.payload.size);
+		zassert_true(pb_decode(&is, meshtastic_AdminMessage_fields, &resp),
+			     "admin response decode failed");
+		got = true;
+		break;
+	}
+
+	zassert_true(got, "getter tag %u emitted no admin response (A-4a regression: app hangs)",
+		     (unsigned int)request_tag);
+	zassert_equal(resp.which_payload_variant, expected_response_tag,
+		      "getter tag %u: wrong response variant %u", (unsigned int)request_tag,
+		      (unsigned int)resp.which_payload_variant);
+}
+
+/* All four passkey-exempt getters that used to fall through the dispatcher's
+ * default arm — ringtone, canned messages, device-UI config, remote-hardware
+ * pins — must now each answer with their matching *_response. */
+ZTEST(protocol_stack, test_passkey_exempt_getters_respond)
+{
+	assert_local_getter_responds(meshtastic_AdminMessage_get_ringtone_request_tag,
+				     meshtastic_AdminMessage_get_ringtone_response_tag);
+	assert_local_getter_responds(
+		meshtastic_AdminMessage_get_canned_message_module_messages_request_tag,
+		meshtastic_AdminMessage_get_canned_message_module_messages_response_tag);
+	assert_local_getter_responds(meshtastic_AdminMessage_get_ui_config_request_tag,
+				     meshtastic_AdminMessage_get_ui_config_response_tag);
+	assert_local_getter_responds(
+		meshtastic_AdminMessage_get_node_remote_hardware_pins_request_tag,
+		meshtastic_AdminMessage_get_node_remote_hardware_pins_response_tag);
+}
+
 /* --- C-4: a config edit must never leave the node without a PRIMARY --------- */
 
 static meshtastic_Channel make_channel(meshtastic_Channel_Role role, const char *name)
