@@ -8,7 +8,6 @@ common:
   build_only: true
   integration_platforms:
     - twatch_s3/esp32s3/procpu
-    - heltec_wifi_lora32_v3/esp32s3/procpu
     - heltec_wifi_lora32_v4/esp32s3/procpu
     - arduino_giga_r1/stm32h747xx/m7
 tests:
@@ -18,7 +17,6 @@ tests:
       - meshtastic
     platform_allow:
       - twatch_s3/esp32s3/procpu
-      - heltec_wifi_lora32_v3/esp32s3/procpu
       - heltec_wifi_lora32_v4/esp32s3/procpu
       - heltec_wifi_lora32_v4_r8/esp32s3/procpu
       - arduino_giga_r1/stm32h747xx/m7
@@ -31,25 +29,25 @@ tests:
       - settings
     platform_allow:
       - twatch_s3/esp32s3/procpu
-      - heltec_wifi_lora32_v3/esp32s3/procpu
       - arduino_giga_r1/stm32h747xx/m7
     # The settings config (CONFIG_MESHTASTIC_SETTINGS / NVS / FLASH_MAP) is now a
     # default in prj.conf, so no overlay is needed — this stays as an explicit
     # settings-tagged build.
     extra_args:
       - platform:arduino_giga_r1/stm32h747xx/m7:SHIELD=semtech_sx1262mb2das
-  sample.meshtastic.net:
-    # WiFi/Net variant: telnet shell-over-IP, MQTT-over-TLS bridge, WiFi boot
-    # auto-connect, and the TCP:4403 PhoneAPI transport. Uses the canonical
-    # overlay-v3-net.conf profile (no site-specific broker/SSID) so the target
-    # is publishable/upstreamable. WiFi-only, so heltec (esp32s3) alone.
+  sample.meshtastic.unified:
+    # The shipping unified image: BLE + WiFi PhoneAPI in one build, telnet
+    # shell-over-IP, MQTT-over-TLS bridge, WiFi boot auto-connect, and the
+    # TCP:4403 PhoneAPI transport. No site-specific broker/SSID, so the target
+    # is publishable/upstreamable. Heltec V4 (esp32s3).
     tags:
       - lora
       - meshtastic
       - net
       - wifi
+      - ble
       - mqtt
     platform_allow:
-      - heltec_wifi_lora32_v3/esp32s3/procpu
+      - heltec_wifi_lora32_v4/esp32s3/procpu
     extra_args:
-      - "EXTRA_CONF_FILE=overlay-v3-net.conf"
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf"

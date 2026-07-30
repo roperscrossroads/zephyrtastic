@@ -81,6 +81,19 @@ meshtastic transport ble        # persist wifi_enabled=false, then: kernel reboo
 …or from the **phone app**: toggle *WiFi enabled* → the admin path persists it
 and schedules the reboot automatically.
 
+**Local infra + diagnostic overlays.** The build layers two optional overlays on
+top of `overlay-v4-unified.conf`:
+
+- `overlay-net-local.conf` (**gitignored**) — the real broker/collector/NTP IPs,
+  layered last for local builds (`LOCAL=1`, default). A public build (`LOCAL=0`)
+  uses the sanitized `192.0.2.x` placeholders baked into the profile.
+- Diagnostics via `EXTRAS` — layer `overlay-threadanalyzer.conf` (per-thread stack
+  high-water logging), `overlay-pm-quiet.conf` (quiet PM-residency rig), or
+  `overlay-uitest.conf` (DRAM-slimming for display-without-PSRAM):
+  ```
+  EXTRAS="overlay-threadanalyzer.conf" just dist
+  ```
+
 ## What was trimmed to fit (and why it's safe)
 
 The net side inherited MQTT-over-TLS buffer sizing it does not need in this
@@ -170,7 +183,7 @@ more CPU-only data to PSRAM) are available if a future feature needs them.
   BLE + `meshtastic version` build id → `wifi cred add` → `meshtastic transport
   wifi` → `kernel reboot cold` → verify telnet/OTA on WiFi → `meshtastic
   transport ble` → reboot → back on BLE.
-- **Latent bug found (not this feature):** the tracked `overlay-v4-net.conf`
-  sets GNSS on→off→on across its flattened sections and resolves to **on** at its
-  last occurrence (lines ~490/491) despite a middle `=n` section clearly meaning
-  to disable it. Worth reconciling in a separate change.
+- **Latent bug found (not this feature):** `overlay-v4-unified.conf` sets GNSS
+  across several flattened sections (on→off→on→off) rather than once. It happens to
+  resolve to **off** at the last occurrence, but the flip-flopping is confusing and
+  worth reconciling to a single decision in a separate change.

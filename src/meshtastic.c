@@ -84,8 +84,6 @@ int meshtastic_display_init(void);
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V4_R8
 #elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V4)
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V4
-#elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V3)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V3
 #elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V2)
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V2_1
 #elif defined(CONFIG_BOARD_HELTEC_WIRELESS_TRACKER)

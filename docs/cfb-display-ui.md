@@ -23,7 +23,7 @@ checklist are in [`heltec-v4-hardware.md`](heltec-v4-hardware.md)):
 ./wt manifest ui-test          # if building from a worktree — REQUIRED
 cd ui-test
 west build -b heltec_wifi_lora32_v4/esp32s3/procpu samples/meshtastic \
-    -- -DEXTRA_CONF_FILE=overlay-v4-net.conf
+    -- -DEXTRA_CONF_FILE=overlay-v4-unified.conf
 ```
 
 `MESHTASTIC_DISPLAY` `select`s `DISPLAY` + `CHARACTER_FRAMEBUFFER`; the SSD1306
@@ -142,7 +142,7 @@ UI) and brings it back to ~89 %:
 ```
 ./wt manifest ui-test
 west build -p always --sysbuild -b heltec_wifi_lora32_v4/esp32s3/procpu \
-    samples/meshtastic -- -DEXTRA_CONF_FILE="overlay-v4-net.conf;overlay-uitest.conf"
+    samples/meshtastic -- -DEXTRA_CONF_FILE="overlay-v4-unified.conf;overlay-uitest.conf"
 # then: mcumgr image upload zephyr.signed.bin -> image test <hash> -> reset -> image confirm <hash>
 ```
 
