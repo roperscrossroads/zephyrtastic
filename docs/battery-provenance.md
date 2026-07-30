@@ -12,8 +12,8 @@ one and cross-checks it against independent references.
 > this Zephyr port apply as **one image to both rev 4.2 and rev 4.3** (the FEM is
 > auto-detected; the digital wiring is shared). Only rev 4.2's schematic was
 > verified here; rev 4.3 is *expected* to use the identical battery circuit but
-> is not independently confirmed in this document. The **V4-R8** and **V3**
-> boards differ materially (different gate, different calibration) — see
+> is not independently confirmed in this document. The **V4-R8** board differs
+> materially (different gate, different calibration) — see
 > [Other Heltec variants](#other-heltec-variants) before assuming any number
 > here carries over.
 
@@ -102,9 +102,8 @@ Do not assume rev 4.2's constants carry over.
 | **V4 rev 4.2** ✅ | 390k/100k (4.9) | GPIO37, **HIGH** | 4.9 × **1.045** | 2 MB quad | — (this document) |
 | **V4 rev 4.3** | same *(expected)* | GPIO37, HIGH *(expected)* | 4.9 × 1.045 | 2 MB quad | Same Zephyr image as 4.2; wiring shared, only the FEM differs. Confirm against a 4.3 schematic if one is published. |
 | **V4-R8** | same | **none** — divider always connected | 4.9 × **1.035** | 8 MB octal | `heltec_v4_r8` defines **no** `ADC_CTRL`. Our code already skips the gate when the `adc_ctrl` node is absent; set `…_BATTERY_CAL_PERMILLE=1035`. |
-| **V3** | same | GPIO37, **LOW** ⚠️ | 4.9 × 1.045 | none | Upstream `heltec_v3` uses `ADC_CTRL_ENABLED **LOW**` — the *opposite* polarity from V4, and the pin is historically disputed (Heltec wiki said "pull up"). Older SoC/no PSRAM. Verify polarity on hardware before trusting a reading. |
 
-Source for the non-4.2 rows: `firmware/variants/esp32s3/heltec_v{3,4,4_r8}/variant.h`.
+Source for the non-4.2 rows: `firmware/variants/esp32s3/heltec_v{4,4_r8}/variant.h`.
 When you port one of these, re-run the
 [bench checklist](#bench-verification-checklist-verifyhardware) and replace its
 row's *(expected)* / firmware-only entries with a schematic citation for that

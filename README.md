@@ -1,6 +1,6 @@
 # Zephyrtastic
 
-A Zephyr RTOS port of the [Meshtastic](https://meshtastic.org) mesh networking stack, with a focus on getting Heltec v3 and Heltec v4 boards working.
+A Zephyr RTOS port of the [Meshtastic](https://meshtastic.org) mesh networking stack, with a focus on getting Heltec V4 boards working.
 
 > **Disclaimer:** This project is not affiliated with or endorsed by
 > Meshtastic LLC. Meshtastic® is a registered trademark of Meshtastic LLC.
@@ -11,7 +11,7 @@ A Zephyr RTOS port of the [Meshtastic](https://meshtastic.org) mesh networking s
 - Experiment with different ways to configure individual nodes and groups of nodes.
 - Experiment with different ways to perform firmware updates.
 
-Initial targets are the **Heltec V3** and **Heltec V4 rev 4.2**. Other Heltec V4  variants share the same architecture and *should* work, but are currently untested. See [`docs/heltec-boards.md`](docs/heltec-boards.md) for per-board specs (MCU, PSRAM, flash layout, FEM, and pin mapping).
+The target is the **Heltec V4 rev 4.2**. Other Heltec V4 variants share the same architecture and *should* work, but are currently untested. See [`docs/heltec-boards.md`](docs/heltec-boards.md) for per-board specs (MCU, PSRAM, flash layout, FEM, and pin mapping).
 
 This is early-stage, actively-developed work. Expect gaps and breaking changes.
 

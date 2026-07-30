@@ -135,7 +135,7 @@ when rendering to a colour TFT, where its mature 320×240 UI lives.
 
 Confirmed rendering on a bench Heltec V4, flashed via mcumgr OTA. One wrinkle
 when PSRAM is left disabled (this build omits the PSRAM config): the display
-adds ~4 KB internal DRAM, which pushes the full **net** variant (WiFi +
+adds ~4 KB internal DRAM, which pushes the full **unified** image (BLE + WiFi +
 MQTT-over-TLS + OTA) to ~98 % — too tight to trust on a remote node. `overlay-uitest.conf` drops MQTT/TLS/GNSS (none needed to see the
 UI) and brings it back to ~89 %:
 

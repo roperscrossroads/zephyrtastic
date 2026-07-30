@@ -42,7 +42,7 @@ Boot-time selection lives in **`meshtastic_transport_prefer_wifi()`**
   compiled): returns persisted `network.wifi_enabled` (default **false = BLE**
   when no NetworkConfig is stored).
 - Single-transport image: the compiled-in transport always wins (the flag is
-  ignored), so `v4-ble` / `v4-net` behaviour is unchanged.
+  ignored), so a BLE-only or WiFi-only build's behaviour is unchanged.
 
 Wired at three sites:
 
@@ -117,7 +117,7 @@ there is **no TLS data path**. Baked into `overlay-v4-unified.conf`:
   measured stack-hardening rounds (commits `0dd0004`, `a5b7a26`): the WiFi
   PhoneAPI serve thread — which decodes each framed `ToRadio` protobuf and
   dispatches it into the mesh — ran **86 % used at 4096** and still **≥70 % at
-  8192** on live V3+V4 boards, so it was doubled to 16384 to reach ≤34 %. That
+  8192** on live V4 boards, so it was doubled to 16384 to reach ≤34 %. That
   decode+dispatch chain is unchanged here, so a static cut re-introduces the
   overflow risk. The correct way to reclaim its 16 KB is a **dynamic
   (heap-allocated) stack created in `meshtastic_tcp_init()`**, which only runs

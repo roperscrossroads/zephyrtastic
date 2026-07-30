@@ -7,8 +7,8 @@ Heltec Arduino library (`Heltec_ESP32`), and the upstream Meshtastic firmware
 (`firmware/variants/esp32s3/heltec_v4`). Where they disagree, it is called out.
 
 > **Scope: plain WiFi LoRa 32 V4, revision 4.2** (ESP32-S3R2, GC1109 FEM). Rev
-> 4.3 shares the digital wiring (different FEM); the **V4-R8** and **V3** differ
-> in several places — see [Variant differences](#variant-differences). Battery
+> 4.3 shares the digital wiring (different FEM); the **V4-R8** differs in
+> several places — see [Variant differences](#variant-differences). Battery
 > specifics have their own sourced writeup in
 > [`battery-provenance.md`](battery-provenance.md).
 
@@ -24,7 +24,7 @@ Heltec Arduino library (`Heltec_ESP32`), and the upstream Meshtastic firmware
 | LED | 35 | `led0` | `pins_arduino.h` `LED = 35` |
 | Battery sense ADC | 1 (ADC1 ch0) | `vbatt` `io-channels` | lib `analogRead(1)`; schematic `ADC_IN` |
 | ADC_CTRL (battery-divider gate) | **37, active-HIGH** | `adc_ctrl` power-domain | lib `digitalWrite(37, HIGH)`; schematic `ADC_Ctrl` pin 37 |
-| LoRa NSS / SCK / MOSI / MISO | 8 / 9 / 10 / 11 | `spi2` + `lora0` | lib `board-config.h` (identical V3↔V4) |
+| LoRa NSS / SCK / MOSI / MISO | 8 / 9 / 10 / 11 | `spi2` + `lora0` | lib `board-config.h` |
 | LoRa RST / BUSY / DIO1 | 12 / 13 / 14 | `lora0` | lib `board-config.h` |
 | FEM power / CSD / TX-mode (4.2 = GC1109) | 7 / 2 / 46 | board C init (`…_v4_fem.c`) | lib `USE_GC1109_PA`: 7 / 2 / 46 |
 | GNSS UART (to the connector) | uart1 (RX 39 / TX 38) | `uart1` + `gnss` | lib GPS `Serial1`, RX39/TX38 |
@@ -84,14 +84,14 @@ only for a first flash over USB/esptool; subsequent updates go over mcumgr OTA.
 
 Only rev 4.2 is verified here. Do not assume these carry across the family.
 
-| | V4 rev 4.2 ✅ | V4 rev 4.3 | V4-R8 | V3 |
-|---|---|---|---|---|
-| Vext | GPIO36, active-low | GPIO36, active-low | **GPIO40** | GPIO21 |
-| ADC_CTRL | GPIO37, **HIGH** | GPIO37, HIGH | **removed** (always on) | GPIO37, **LOW** ⚠️ |
-| Battery multiplier | 4.9 × **1.045** | 4.9 × 1.045 | 4.9 × **1.035** | 4.9 × 1.045 |
-| FEM | GC1109 | KCT8103L (ctrl GPIO5) | KCT8103L | none (bare SX1262) |
-| PSRAM | 2 MB quad | 2 MB quad | 8 MB octal | none |
-| LED | GPIO35 | GPIO35 | **GPIO46** | GPIO35 |
+| | V4 rev 4.2 ✅ | V4 rev 4.3 | V4-R8 |
+|---|---|---|---|
+| Vext | GPIO36, active-low | GPIO36, active-low | **GPIO40** |
+| ADC_CTRL | GPIO37, **HIGH** | GPIO37, HIGH | **removed** (always on) |
+| Battery multiplier | 4.9 × **1.045** | 4.9 × 1.045 | 4.9 × **1.035** |
+| FEM | GC1109 | KCT8103L (ctrl GPIO5) | KCT8103L |
+| PSRAM | 2 MB quad | 2 MB quad | 8 MB octal |
+| LED | GPIO35 | GPIO35 | **GPIO46** |
 
 Battery per-variant detail: [`battery-provenance.md` → Other Heltec variants](battery-provenance.md#other-heltec-variants).
 

@@ -12,8 +12,7 @@ it is **not** a drop-in substitute (see "PSRAM rules" below).
 
 Unified image current fit: **338,960 / 380,672 B = 89.04 %** (~40.7 KB headroom),
 after the diagnostic trim, the two dynamic transport stacks, and moving
-`ob_items` + the PhoneAPI queues to PSRAM. Single-transport profiles are far
-looser (v4-net 80%, v4-ble 68%).
+`ob_items` + the PhoneAPI queues to PSRAM.
 
 ### Static vs runtime — two different budgets
 
@@ -63,8 +62,8 @@ IP protocol features (IPv6 is already off).
   2026-07-28: dynamic = hang, static = clean boot). The option was removed; the BLE stack
   stays static. Only the TCP stack is dynamic (WiFi mode has no BT controller competing
   for the heap). Net: this lever saves ~16 KB (TCP), not ~22 KB.
-- **`ob_items` + PhoneAPI queues → PSRAM** (+12.4 KB static on unified; +8.4 KB on
-  v4-net/v4-ble): see lever #2 below.
+- **`ob_items` + PhoneAPI queues → PSRAM** (+12.4 KB static on unified): see
+  lever #2 below.
 - **NOT trimmed:** `MESHTASTIC_TCP_THREAD_STACK_SIZE` (16384) — two measured
   stack-hardening rounds (`0dd0004`, `a5b7a26`); do not cut. Same discipline for
   any hardened stack.
@@ -104,7 +103,7 @@ largely mitigated). Symmetrically, BLE mode never allocates the WiFi runtime mem
 Not pursued.
 
 ### 2. More CPU-only data → PSRAM — DONE  *(static)*
-Moved via `MESHTASTIC_EXT_RAM_BSS_ATTR` (board-gated, no-op on V3):
+Moved via `MESHTASTIC_EXT_RAM_BSS_ATTR` (board-gated; PSRAM boards only):
 - `ob_items` (outbound staged TX frames, ~4.5 KB) — safe: the worker copies the
   chosen item to a stack local (`cur`) before `lora_send`, so the array is never a
   DMA source; mutex-guarded, never flash-read.
@@ -114,10 +113,7 @@ Moved via `MESHTASTIC_EXT_RAM_BSS_ATTR` (board-gated, no-op on V3):
   buffer before `zsock_send` / `bt_gatt_notify`, so never a DMA source.
 
 **Measured reclaim (internal DRAM):** v4-unified −12.4 KB (92.39 % → **89.04 %**,
-~40.7 KB headroom); v4-net −8.4 KB (→ 80.09 %); v4-ble −8.4 KB (→ 68.44 %) — the
-board-gated attribute benefits every V4 profile. v3-net unchanged (no-op verified —
-the arrays stay internal, no `.ext_ram` link failure). Symbols confirmed at
-`0x3c0…` (PSRAM) on V4, `0x3fc…` (internal) on V3.
+~40.7 KB headroom). Symbols confirmed at `0x3c0…` (PSRAM) on V4.
 
 ### 3. Shrink `CONFIG_HEAP_MEM_POOL_SIZE` after measuring per-mode peak  *(static)*
 The 55 KB heap is the biggest single item, auto-sized to the worst-case requester.

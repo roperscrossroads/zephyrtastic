@@ -18,7 +18,7 @@ The sample has been tested with the following boards:
 
 - Arduino GIGA R1 with a Semtech SX1262 shield
 - LilyGO T-Watch Ultra with a Semtech SX1262 shield
-- Heltec WiFi LoRa 32 (V3) (ESP32-S3, on-board Semtech SX1262)
+- Heltec WiFi LoRa 32 V4 (ESP32-S3, on-board Semtech SX1262)
 
 Building and Running
 ********************
@@ -35,10 +35,10 @@ ID instead, enable custom source and set the default:
 The sample can also be built for the LoRa radio emulator on ``native_sim``
 by adding the appropriate overlay.
 
-Shell commands (TBC)
+Shell commands
 ********************
 
-When ``CONFIG_MESHTASTIC_SHELL=y``), the following shell commands are available:
+When ``CONFIG_MESHTASTIC_SHELL=y``, the following shell commands are available:
 
 * ``meshtastic status`` — node counters, primary channel hash, device role, rebroadcast mode
 * ``meshtastic channel list`` / ``channel show <0-7>`` — channel table

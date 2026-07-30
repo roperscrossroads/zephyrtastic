@@ -196,8 +196,8 @@ wake the ESP32-S3:
    if it can't, sleep is *skipped* (logged), so a true never-wake hang is not
    reachable. This bounds worst-case latency for anything time-driven.
 2. **LoRa RX on DIO1 — armed via the board DT.** The SX1262's DIO1 goes HIGH on
-   RX/TX-done. `GPIO_INT_WAKEUP` on the board's `dio1-gpios` cell (V4 dtsi; V3
-   overlay override) makes the sx126x driver's own `gpio_pin_configure_dt(dio1,
+   RX/TX-done. `GPIO_INT_WAKEUP` on the board's `dio1-gpios` cell (the V4 board
+   DT) makes the sx126x driver's own `gpio_pin_configure_dt(dio1,
    GPIO_INPUT)` arm an **EXT1** level-HIGH wake on GPIO14. Without this the CPU
    would only ever wake on the timer, so a sleeping node adds up to a whole
    `MESHTASTIC_RX_IDLE_RECHECK_MS` (~30 s) of RX latency — enough to fall off the
@@ -233,9 +233,7 @@ clean runtime "USB host connected" signal** on the S3 USJ to gate sleep on (only
 flaky SOF heartbeat), so it is left as a documented limitation rather than an
 unreliable inhibitor. To observe residency, use the `overlay-pm-quiet.conf` rig + the
 `meshtastic netpause <secs>` shell command (drive/read over serial while the network —
-and the sleeps it would perturb — is genuinely quiet). The **V3** console is `uart0`
-(real UART, via the CP2102), whose driver *does* hold a PM lock while TX is pending, so
-it flushes before sleep and does not show this symptom.
+and the sleeps it would perturb — is genuinely quiet).
 
 ## Tests
 
