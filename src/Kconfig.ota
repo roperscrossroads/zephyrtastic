@@ -19,7 +19,7 @@ config MESHTASTIC_OTA
 	  confirm), with automatic MCUboot revert if a swapped image is never
 	  confirmed. The UDP transport self-starts, so no application code is
 	  required for the core update path. Requires the MCUboot A/B build
-	  (sysbuild); opt-in per variant via overlay-ota.conf. Only the net (WiFi)
+	  (sysbuild); opt-in per variant (the net profiles enable it). Only the net (WiFi)
 	  variant can carry it — netserial does not build and ble has no IP stack.
 
 if MESHTASTIC_OTA

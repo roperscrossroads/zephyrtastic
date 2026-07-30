@@ -24,7 +24,7 @@
  *
  * ONLY for CPU-accessed data — never WiFi/driver allocators or DMA/net-packet buffers (those
  * need internal DMA-capable RAM; routing the WiFi heap to PSRAM breaks esp_wifi_init(), see
- * samples/meshtastic/overlay-psram.conf's notebook), and never data a flash write reads
+ * the PSRAM notes in the v4 profile overlays), and never data a flash write reads
  * directly (the flash-write cache-disable window makes PSRAM momentarily unreadable). The
  * NodeDB, the MQTT client context, and the config store all qualify — the config store
  * pb_encodes each record into a local internal-RAM buffer before any NVS write, so the flash

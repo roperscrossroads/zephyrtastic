@@ -71,7 +71,7 @@ Not relevant to the display, but it owns GPIO7/2/46 on 4.2.
 
 ### PSRAM
 Plain V4 = **ESP32-S3R2 → 2 MB quad (QSPI)** PSRAM. It is **not enabled by
-default** in this port; `overlay-psram.conf` (opt-in) turns it on. See the PSRAM
+default** in this port; the PSRAM config (opt-in) turns it on. See the PSRAM
 note in [`cfb-display-ui.md`](cfb-display-ui.md). (The V4-R8 is 8 MB **octal**.)
 
 ### USB / flashing
