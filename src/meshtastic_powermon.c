@@ -35,6 +35,12 @@ static atomic_t pm_state = ATOMIC_INIT(0);
  * dies in light sleep, so the OLED is the only channel that survives). */
 static atomic_t pm_sleep_count = ATOMIC_INIT(0);
 
+/* Uptime (ms) of the most recent PM_STATE_STANDBY exit, stamped by the PM notifier
+ * on wake. Paired with pm_sleep_count so a diagnostic can place an event (e.g. a
+ * radio BUSY timeout — agents-qnpp) relative to the last light-sleep wake without
+ * needing wall-clock time. See meshtastic_powermon_ms_since_wake(). */
+static uint32_t pm_last_wake_ms;
+
 static const struct {
 	uint32_t bit;
 	const char *name;
@@ -107,6 +113,14 @@ uint32_t meshtastic_powermon_sleep_count(void)
 	return (uint32_t)atomic_get(&pm_sleep_count);
 }
 
+uint32_t meshtastic_powermon_ms_since_wake(void)
+{
+	if (atomic_get(&pm_sleep_count) == 0) {
+		return UINT32_MAX; /* never light-slept — no wake to measure from */
+	}
+	return k_uptime_get_32() - pm_last_wake_ms;
+}
+
 #if defined(CONFIG_PM)
 #include <zephyr/pm/pm.h>
 
@@ -127,6 +141,10 @@ static void pm_note_exit(enum pm_state state)
 {
 	if (state == PM_STATE_STANDBY) {
 		(void)atomic_and(&pm_state, ~(atomic_val_t)MESHTASTIC_PM_CPU_LIGHT_SLEEP);
+		/* Stamp the wake. k_uptime_get_32() is a lock-minimal tick read — ISR-safe
+		 * and does not re-enter PM — so it honours the no-block/no-realloc rule
+		 * this callback runs under (unlike logging or allocation). */
+		pm_last_wake_ms = k_uptime_get_32();
 	}
 }
 

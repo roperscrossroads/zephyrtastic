@@ -81,3 +81,63 @@ regardless of the missed edge. See `docs/light-sleep-governor.md`.
 
 `upstreamable: true` — a generic light-sleep-safety helper for the edge-IRQ
 radio, no board coupling in the driver.
+
+### 0003-sx126x-busy-timeout-diagnostics.patch
+
+Diagnostics for the recurring BUSY timeout (`agents-qnpp` / `agents-3ujx`).
+`sx126x_hal_wait_busy()` gains three diagnostic tags so a timeout names exactly
+what stalled: an **`opcode`** (splits **TX-path** `SET_TX_PARAMS`/`WRITE_BUFFER`
+from **RX-path** `GET_IRQ_STATUS`/`READ_BUFFER` and config — also the `agents-la0m`
+CAD/LBT discriminator); a **pre/post phase** (`pre` = the wait *before* the SPI
+transfer, so a timeout means the *prior* op left BUSY high; `post` = after, so this
+command did not complete); and **`prev_opcode`** (the last command actually issued —
+on a `pre` timeout, the culprit that left BUSY high). The timeout `LOG_WRN` moves
+into a **`__weak`** `sx126x_hal_busy_timeout_report(dev, opcode, timeout_ms, post,
+prev_opcode)` (declared in `sx126x_hal.h`), so an application can override it with a
+strong symbol.
+
+**Why:** `meshtastic_radio.c` provides the strong override (PM builds), appending
+the light-sleep **wake sequence number + ms-since-wake** (from `powermon`) so a
+BUSY timeout can be placed relative to a `PM_STATE_STANDBY` wake **without
+wall-clock time** — the node's log timestamps read 1970 until SNTP/GNSS seeds the
+clock. If timeouts cluster in the first few ms after a wake, the stall is a
+light-sleep race rather than a chip/SPI fault. Pure diagnostics — no behavioural
+change to the radio.
+
+> **App-coupled, unlike 0001/0002.** The `__weak` symbol has a default in the
+> driver, so a build with no override (native_sim, non-PM) still links and logs the
+> opcode. The wake correlation only appears when `meshtastic_radio.c` is linked in
+> a `CONFIG_PM` build.
+
+`upstreamable: false` as-is — the weak-hook contract is app-specific. Revisit /
+trim once the root cause is known.
+
+### 0004-sx126x-busy-timeout-fix-and-recovery.patch
+
+Fix **and** recovery for the recurring 1 s BUSY timeout (`agents-3ujx`), pinned via the
+0003 diagnostics (`op=0x80 pre, prev=0x84/SET_SLEEP`). Two parts:
+
+**(1) The fix — `sx126x_set_standby()`.** With `CONFIG_LORA_SX126X_NATIVE_SLEEP` the chip
+rests in **sleep** between operations, holding BUSY **high** until an NSS-edge wake — but
+`SET_STANDBY`'s `write_cmd` waits for BUSY **low** before it can send, so any teardown/
+transition path reaching `set_standby` without an intervening wake stalls a full second.
+It now issues a raw NSS-edge wake first, gated on `state == SLEEP || sx126x_hal_is_busy()`.
+The **state** check also covers the sleep-*entry* window right after `SET_SLEEP` where BUSY
+reads transiently low (which `is_busy` alone missed — a residual `op=0x80 **post**`).
+Skipped (no extra SPI) when genuinely awake. Fixes every `set_standby` caller at once.
+
+**(2) The recovery (`agents-oieb`).** `sx126x_hal_wait_busy` keeps a module-scope count of
+**consecutive** BUSY timeouts (cleared on any success); `sx126x_lora_config()` resets the
+radio (`sx126x_chip_init`: RESET-pin pulse + re-init) once the streak crosses
+`SX126X_BUSY_RECOVERY_THRESHOLD`, then re-applies the full modem config — so a *wedged*
+radio (BUSY stuck) is bounded to a few seconds instead of hanging forever. The app re-runs
+`lora_config` every TX, so a wedge clears within a TX cycle.
+
+> **First attempt missed.** The fix initially targeted `sx126x_duty_cycle_stop()`, but the
+> app uses continuous RX (`.recv_async`), not the duty-cycle path — a dead target. The 0003
+> soak caught it (timeouts unchanged, same `prev=0x84`) before it was believed fixed; the
+> fix moved to `set_standby`, the common choke point.
+
+`upstreamable: true` — generic driver-correctness fixes, no board coupling.
+
+`upstreamable: true` — a generic driver-correctness fix, no board coupling.

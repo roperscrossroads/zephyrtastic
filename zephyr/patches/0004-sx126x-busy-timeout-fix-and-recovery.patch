@@ -1,0 +1,130 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+index aeec80d107..3c9a14f26c 100644
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -20,6 +20,14 @@ LOG_MODULE_REGISTER(sx126x, CONFIG_LORA_LOG_LEVEL);
+ 
+ #define SX126X_SF56_MIN_PREAMBLE_LEN	12
+ 
++/*
++ * agents-oieb: after this many CONSECUTIVE BUSY-wait timeouts the radio is treated
++ * as wedged and hardware-reset from sx126x_lora_config(). Set above any transient
++ * (a lone timeout is cleared by the next successful command), low enough to bound a
++ * real hang to a few seconds of retries.
++ */
++#define SX126X_BUSY_RECOVERY_THRESHOLD	4
++
+ static int bandwidth_to_reg(enum lora_signal_bandwidth bw, uint8_t *reg)
+ {
+ 	switch (bw) {
+@@ -130,6 +138,23 @@ static int sx126x_validate_config(const struct lora_modem_config *config)
+ 
+ static int sx126x_set_standby(const struct device *dev, uint8_t mode)
+ {
++	struct sx126x_data *data = dev->data;
++
++	/*
++	 * A sleeping SX126x holds BUSY HIGH until an NSS-edge wake, but SET_STANDBY's
++	 * write_cmd waits for BUSY LOW before it can send — so issuing SET_STANDBY on a
++	 * chip that a prior SET_SLEEP left asleep stalls the full 1 s busy timeout
++	 * (agents-3ujx). With NATIVE_SLEEP the chip rests in sleep between operations,
++	 * and several teardown/transition paths reach here without an intervening wake.
++	 * Wake it with a raw NSS edge first. Gate on state==SLEEP as WELL as the BUSY
++	 * pin: right after SET_SLEEP the chip is still entering sleep and BUSY reads
++	 * transiently LOW, so sx126x_hal_is_busy() alone misses that window (it left a
++	 * residual 'op=0x80 post, prev=0x84') — the driver's own SLEEP state catches it.
++	 * Skipped (no extra SPI) when the chip is genuinely awake.
++	 */
++	if (atomic_get(&data->state) == SX126X_STATE_SLEEP || sx126x_hal_is_busy(dev)) {
++		sx126x_hal_wakeup(dev);
++	}
+ 	return sx126x_hal_write_cmd(dev, SX126X_CMD_SET_STANDBY, &mode, 1);
+ }
+ 
+@@ -884,6 +909,22 @@ static int sx126x_lora_config(const struct device *dev,
+ 
+ 	k_mutex_lock(&data->lock, K_FOREVER);
+ 
++	/*
++	 * agents-oieb: if the radio has stacked up N consecutive BUSY timeouts it is
++	 * wedged (BUSY stuck) and every command keeps burning a full second — the only
++	 * bounded way out is a hardware reset. lora_config re-applies the whole modem
++	 * config immediately below, so recovering here leaves a properly configured
++	 * chip; the app re-runs lora_config on every TX, so a wedge clears within a TX
++	 * cycle. chip_init pulses the RESET pin, which is independent of the stuck
++	 * BUSY/SPI state. Serialized under data->lock.
++	 */
++	if (sx126x_hal_busy_timeout_streak() >= SX126X_BUSY_RECOVERY_THRESHOLD) {
++		LOG_WRN("radio wedged (%u consecutive BUSY timeouts) — resetting",
++			sx126x_hal_busy_timeout_streak());
++		(void)sx126x_chip_init(dev);
++		sx126x_hal_busy_timeout_streak_reset();
++	}
++
+ 	ret = sx126x_ensure_ready(dev);
+ 	if (ret < 0) {
+ 		k_mutex_unlock(&data->lock);
+diff --git a/drivers/lora/native/sx126x/sx126x_hal.h b/drivers/lora/native/sx126x/sx126x_hal.h
+index 006041c2d6..7da98b037d 100644
+--- a/drivers/lora/native/sx126x/sx126x_hal.h
++++ b/drivers/lora/native/sx126x/sx126x_hal.h
+@@ -71,6 +71,14 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
+ void sx126x_hal_busy_timeout_report(const struct device *dev, uint8_t opcode,
+ 				    uint32_t timeout_ms, bool post, uint8_t prev_opcode);
+ 
++/*
++ * Consecutive BUSY-wait timeouts (agents-oieb), cleared on any success. Lets the
++ * driver detect a wedged radio and reset it after a threshold of back-to-back
++ * timeouts. _reset() is called by the driver once it has reset the chip.
++ */
++uint32_t sx126x_hal_busy_timeout_streak(void);
++void sx126x_hal_busy_timeout_streak_reset(void);
++
+ bool sx126x_hal_is_busy(const struct device *dev);
+ 
+ int sx126x_hal_write_cmd(const struct device *dev, uint8_t opcode,
+diff --git a/drivers/lora/native/sx126x/sx126x_hal_common.c b/drivers/lora/native/sx126x/sx126x_hal_common.c
+index b6f5490092..47e0243021 100644
+--- a/drivers/lora/native/sx126x/sx126x_hal_common.c
++++ b/drivers/lora/native/sx126x/sx126x_hal_common.c
+@@ -25,6 +25,24 @@ LOG_MODULE_REGISTER(sx126x_hal_common, CONFIG_LORA_LOG_LEVEL);
+  */
+ static uint8_t sx126x_last_issued_opcode;
+ 
++/*
++ * agents-oieb: count of CONSECUTIVE BUSY-wait timeouts, cleared on any success. A
++ * wedged radio (BUSY stuck high) stacks these up; the driver triggers a chip reset
++ * when the streak crosses a threshold. Module-scope (single radio on the target),
++ * like sx126x_last_issued_opcode above.
++ */
++static uint32_t sx126x_busy_streak;
++
++uint32_t sx126x_hal_busy_timeout_streak(void)
++{
++	return sx126x_busy_streak;
++}
++
++void sx126x_hal_busy_timeout_streak_reset(void)
++{
++	sx126x_busy_streak = 0U;
++}
++
+ static int spi_transfer(const struct spi_dt_spec *spi,
+ 			const uint8_t *hdr, size_t hdr_len,
+ 			uint8_t *data, size_t data_len, bool read)
+@@ -73,6 +91,7 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
+ 	if (!WAIT_FOR(!sx126x_hal_is_busy(dev),
+ 		      timeout_ms * 1000,
+ 		      k_msleep(1))) {
++		sx126x_busy_streak++; /* agents-oieb: consecutive-timeout counter */
+ 		/* On a PRE timeout, sx126x_last_issued_opcode is the op that left BUSY
+ 		 * high (the culprit); on a POST timeout it is this same command. */
+ 		sx126x_hal_busy_timeout_report(dev, opcode, timeout_ms, post,
+@@ -80,6 +99,7 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
+ 		return -ETIMEDOUT;
+ 	}
+ 
++	sx126x_busy_streak = 0U; /* agents-oieb: any success ends the streak */
+ 	return 0;
+ }
+ 

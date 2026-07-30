@@ -405,6 +405,24 @@ static void mt_radio_pm_exit(enum pm_state state)
 static struct pm_notifier mt_radio_pm_note = {
 	.state_exit = mt_radio_pm_exit,
 };
+
+/*
+ * Strong override of the sx126x driver's __weak sx126x_hal_busy_timeout_report()
+ * (agents-qnpp). Enriches a BUSY timeout with the light-sleep correlation — the
+ * wake sequence number and ms since the last PM_STATE_STANDBY exit — so timeouts
+ * can be placed relative to wakes with NO wall-clock time (the node's clock may be
+ * unset; log timestamps read 1970). If timeouts cluster in the first few ms after
+ * a wake, the BUSY timeout is a light-sleep race, not a chip/SPI fault. PM-only:
+ * without CONFIG_PM the driver's weak default (opcode only) applies.
+ */
+void sx126x_hal_busy_timeout_report(const struct device *dev, uint8_t opcode, uint32_t timeout_ms,
+				    bool post, uint8_t prev_opcode)
+{
+	ARG_UNUSED(dev);
+	LOG_WRN("Busy timeout after %u ms (op=0x%02x %s, prev=0x%02x) wake=#%u +%ums", timeout_ms,
+		opcode, post ? "post" : "pre", prev_opcode, meshtastic_powermon_sleep_count(),
+		meshtastic_powermon_ms_since_wake());
+}
 #endif /* CONFIG_PM */
 #endif /* CONFIG_LORA_SX126X */
 

@@ -1,0 +1,206 @@
+diff --git a/drivers/lora/native/sx126x/sx126x_hal.c b/drivers/lora/native/sx126x/sx126x_hal.c
+index 34f7089584..ca6142749f 100644
+--- a/drivers/lora/native/sx126x/sx126x_hal.c
++++ b/drivers/lora/native/sx126x/sx126x_hal.c
+@@ -54,8 +54,8 @@ int sx126x_hal_reset(const struct device *dev)
+ 
+ 	k_msleep(SX126X_RESET_WAIT_MS);
+ 
+-	/* Wait for chip to be ready */
+-	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++	/* Wait for chip to be ready (0x00 = post-reset wait, no command opcode) */
++	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, 0x00, true);
+ 	if (ret < 0) {
+ 		return ret;
+ 	}
+diff --git a/drivers/lora/native/sx126x/sx126x_hal.h b/drivers/lora/native/sx126x/sx126x_hal.h
+index e4b26ba60b..006041c2d6 100644
+--- a/drivers/lora/native/sx126x/sx126x_hal.h
++++ b/drivers/lora/native/sx126x/sx126x_hal.h
+@@ -48,7 +48,28 @@ int sx126x_hal_init(const struct device *dev);
+ 
+ int sx126x_hal_reset(const struct device *dev);
+ 
+-int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms);
++/*
++ * Wait for BUSY to fall LOW, up to timeout_ms. @p opcode is the command being
++ * gated (0x00 for reset/init waits with no command). @p post is false for the
++ * wait BEFORE the SPI transfer (a timeout there means the PRIOR op left BUSY high)
++ * and true for the wait AFTER it (a timeout means THIS command did not complete);
++ * standalone readiness waits (reset/wakeup) pass true. Both only tag a timeout for
++ * diagnostics — see sx126x_hal_busy_timeout_report().
++ */
++int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t opcode,
++			 bool post);
++
++/*
++ * Called once by sx126x_hal_wait_busy() whenever a BUSY wait times out. @p
++ * prev_opcode is the last command actually issued over SPI — on a PRE timeout that
++ * is the op that left BUSY high (the culprit). The driver ships a __weak default
++ * that LOG_WRNs opcode + pre/post phase + prev_opcode; an application can override
++ * it (strong symbol) to add context it owns — e.g. correlating with the last
++ * light-sleep wake. Runs in the caller's context (thread or the driver workqueue),
++ * never an ISR.
++ */
++void sx126x_hal_busy_timeout_report(const struct device *dev, uint8_t opcode,
++				    uint32_t timeout_ms, bool post, uint8_t prev_opcode);
+ 
+ bool sx126x_hal_is_busy(const struct device *dev);
+ 
+diff --git a/drivers/lora/native/sx126x/sx126x_hal_common.c b/drivers/lora/native/sx126x/sx126x_hal_common.c
+index b2dfc0d75b..b6f5490092 100644
+--- a/drivers/lora/native/sx126x/sx126x_hal_common.c
++++ b/drivers/lora/native/sx126x/sx126x_hal_common.c
+@@ -16,6 +16,15 @@ LOG_MODULE_REGISTER(sx126x_hal_common, CONFIG_LORA_LOG_LEVEL);
+ 
+ #define SX126X_BUSY_DEFAULT_TIMEOUT 1000
+ 
++/*
++ * Diagnostics (agents-qnpp): opcode of the last command actually issued over SPI.
++ * A PRE-wait BUSY timeout means the PRIOR op left BUSY high; logging this names it.
++ * Module-scope (single radio on the target); a torn read across the TX thread and
++ * the RX workqueue at worst mislabels one diagnostic line. Set at every command
++ * header transfer (hdr[0] is the opcode) plus the wakeup path below.
++ */
++static uint8_t sx126x_last_issued_opcode;
++
+ static int spi_transfer(const struct spi_dt_spec *spi,
+ 			const uint8_t *hdr, size_t hdr_len,
+ 			uint8_t *data, size_t data_len, bool read)
+@@ -24,6 +33,10 @@ static int spi_transfer(const struct spi_dt_spec *spi,
+ 
+ 	__ASSERT_NO_MSG(hdr_len <= sizeof(rx_hdr));
+ 
++	if (hdr_len > 0) {
++		sx126x_last_issued_opcode = hdr[0];
++	}
++
+ 	struct spi_buf tx_bufs[] = {
+ 		{ .buf = (uint8_t *)hdr, .len = hdr_len },
+ 		{ .buf = read ? NULL : data, .len = data_len },
+@@ -39,12 +52,31 @@ static int spi_transfer(const struct spi_dt_spec *spi,
+ 	return spi_transceive_dt(spi, &tx_set, read ? &rx_set : NULL);
+ }
+ 
+-int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms)
++/*
++ * __weak default: on a BUSY timeout, log the opcode + pre/post phase. The opcode
++ * tells TX-path (SET_TX_PARAMS / WRITE_BUFFER) from RX-path (GET_IRQ_STATUS /
++ * READ_BUFFER) and config; the phase tells whether the PRIOR op left BUSY high
++ * (pre) or this command did not complete (post). An application may override this
++ * (strong symbol) to add more context — see the declaration in sx126x_hal.h.
++ */
++__weak void sx126x_hal_busy_timeout_report(const struct device *dev, uint8_t opcode,
++					   uint32_t timeout_ms, bool post, uint8_t prev_opcode)
++{
++	ARG_UNUSED(dev);
++	LOG_WRN("Busy timeout after %u ms (op=0x%02x %s, prev=0x%02x)", timeout_ms, opcode,
++		post ? "post" : "pre", prev_opcode);
++}
++
++int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t opcode,
++			 bool post)
+ {
+ 	if (!WAIT_FOR(!sx126x_hal_is_busy(dev),
+ 		      timeout_ms * 1000,
+ 		      k_msleep(1))) {
+-		LOG_WRN("Busy timeout after %u ms", timeout_ms);
++		/* On a PRE timeout, sx126x_last_issued_opcode is the op that left BUSY
++		 * high (the culprit); on a POST timeout it is this same command. */
++		sx126x_hal_busy_timeout_report(dev, opcode, timeout_ms, post,
++					       sx126x_last_issued_opcode);
+ 		return -ETIMEDOUT;
+ 	}
+ 
+@@ -121,8 +153,9 @@ int sx126x_hal_wakeup(const struct device *dev)
+ 		LOG_ERR("Wakeup SPI failed: %d", ret);
+ 		return ret;
+ 	}
++	sx126x_last_issued_opcode = SX126X_CMD_GET_STATUS;
+ 
+-	return sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++	return sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, SX126X_CMD_GET_STATUS, true);
+ }
+ 
+ int sx126x_hal_write_cmd(const struct device *dev, uint8_t opcode,
+@@ -132,7 +165,7 @@ int sx126x_hal_write_cmd(const struct device *dev, uint8_t opcode,
+ 	uint8_t hdr[1] = { opcode };
+ 	int ret;
+ 
+-	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, opcode, false);
+ 	if (ret < 0) {
+ 		return ret;
+ 	}
+@@ -144,7 +177,7 @@ int sx126x_hal_write_cmd(const struct device *dev, uint8_t opcode,
+ 	}
+ 
+ 	if (opcode != SX126X_CMD_SET_SLEEP) {
+-		ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++		ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, opcode, true);
+ 	} else {
+ 		/*
+ 		 * The chip needs time to fully enter sleep mode before the
+@@ -163,7 +196,7 @@ int sx126x_hal_read_cmd(const struct device *dev, uint8_t opcode,
+ 	uint8_t hdr[2] = { opcode, 0x00 };
+ 	int ret;
+ 
+-	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, opcode, false);
+ 	if (ret < 0) {
+ 		return ret;
+ 	}
+@@ -184,7 +217,7 @@ int sx126x_hal_write_regs(const struct device *dev, uint16_t address,
+ 	uint8_t hdr[3];
+ 	int ret;
+ 
+-	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, SX126X_CMD_WRITE_REGISTER, false);
+ 	if (ret < 0) {
+ 		return ret;
+ 	}
+@@ -198,7 +231,7 @@ int sx126x_hal_write_regs(const struct device *dev, uint16_t address,
+ 		return ret;
+ 	}
+ 
+-	return sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++	return sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, SX126X_CMD_WRITE_REGISTER, true);
+ }
+ 
+ int sx126x_hal_read_regs(const struct device *dev, uint16_t address,
+@@ -208,7 +241,7 @@ int sx126x_hal_read_regs(const struct device *dev, uint16_t address,
+ 	uint8_t hdr[4];
+ 	int ret;
+ 
+-	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, SX126X_CMD_READ_REGISTER, false);
+ 	if (ret < 0) {
+ 		return ret;
+ 	}
+@@ -233,7 +266,7 @@ int sx126x_hal_write_buffer(const struct device *dev, uint8_t offset,
+ 	uint8_t hdr[2] = { SX126X_CMD_WRITE_BUFFER, offset };
+ 	int ret;
+ 
+-	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, SX126X_CMD_WRITE_BUFFER, false);
+ 	if (ret < 0) {
+ 		return ret;
+ 	}
+@@ -244,7 +277,7 @@ int sx126x_hal_write_buffer(const struct device *dev, uint8_t offset,
+ 		return ret;
+ 	}
+ 
+-	return sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++	return sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, SX126X_CMD_WRITE_BUFFER, true);
+ }
+ 
+ int sx126x_hal_read_buffer(const struct device *dev, uint8_t offset,
+@@ -254,7 +287,7 @@ int sx126x_hal_read_buffer(const struct device *dev, uint8_t offset,
+ 	uint8_t hdr[3] = { SX126X_CMD_READ_BUFFER, offset, 0x00 };
+ 	int ret;
+ 
+-	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT);
++	ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, SX126X_CMD_READ_BUFFER, false);
+ 	if (ret < 0) {
+ 		return ret;
+ 	}
