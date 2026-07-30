@@ -556,17 +556,10 @@ static uint32_t mqtt_map_position_precision(void)
 static void mqtt_apply_map_position_precision(int32_t *latitude_i, int32_t *longitude_i,
 					      uint32_t precision)
 {
-	uint32_t mask;
-
-	if (precision >= 32U) {
-		return;
-	}
-
-	mask = UINT32_MAX << (32U - precision);
-	*latitude_i &= (int32_t)mask;
-	*longitude_i &= (int32_t)mask;
-	*latitude_i += (int32_t)(1U << (31U - precision));
-	*longitude_i += (int32_t)(1U << (31U - precision));
+	/* Shared with the mesh position path (G-1) so the truncation math has a
+	 * single source of truth. Map-report precision is always clamped to 12..15,
+	 * so the helper's 0/>=32 short-circuits never trigger here. */
+	meshtastic_position_truncate_latlon(latitude_i, longitude_i, precision);
 }
 
 static void mqtt_build_map_report(meshtastic_MapReport *report, const meshtastic_Position *pos)

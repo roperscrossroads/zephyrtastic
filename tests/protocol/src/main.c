@@ -22,6 +22,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
+#include "meshtastic_position.h"
 #include "meshtastic_region_presets.h"
 #include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
@@ -3313,6 +3314,132 @@ ZTEST(protocol_stack, test_broadcast_addressing_primary_channel)
 		      "a broadcast must be addressed to NODE_BROADCAST");
 	zassert_equal(hdr.channel, primary_hash,
 		      "a primary-channel broadcast must carry the primary channel hash");
+}
+
+/* G-1: reference truncation, computed independently of the production helper. */
+static int32_t g1_expect_trunc(int32_t v, uint32_t precision)
+{
+	uint32_t u = (uint32_t)v;
+
+	u &= (UINT32_MAX << (32U - precision));
+	u += (1U << (31U - precision));
+	return (int32_t)u;
+}
+
+/* Snapshot the primary channel into @p saved, then rewrite its position-precision
+ * module setting (or drop module settings entirely) so the masking policy can be
+ * exercised per channel. Restore with meshtastic_channels_set_slot(primary, saved). */
+static void g1_set_primary_precision(meshtastic_Channel *saved, uint32_t precision,
+				     bool has_module_settings)
+{
+	uint8_t primary = meshtastic_channels_primary_index();
+	meshtastic_Channel ch = *meshtastic_channels_get(primary);
+
+	*saved = ch;
+	ch.settings.has_module_settings = has_module_settings;
+	ch.settings.module_settings.position_precision = precision;
+	zassert_ok(meshtastic_channels_set_slot(primary, &ch), "set primary precision failed");
+}
+
+static meshtastic_Position g1_decode_sent_position(void)
+{
+	struct meshtastic_packet decoded;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_Position pos = meshtastic_Position_init_zero;
+	pb_istream_t is;
+
+	decode_last_tx(&decoded, payload, sizeof(payload));
+	zassert_equal(decoded.portnum, MESHTASTIC_PORT_POSITION, "expected a POSITION packet");
+	is = pb_istream_from_buffer(decoded.payload, decoded.payload_len);
+	zassert_true(pb_decode(&is, meshtastic_Position_fields, &pos), "position decode failed");
+	return pos;
+}
+
+/* G-1: a position broadcast must never carry a finer location than the channel it
+ * goes out on permits. The default primary (public LongFast) is configured for
+ * 13-bit precision, so the on-wire lat/lon must be truncated to 13 bits; raising a
+ * public channel past the ceiling clamps to 15; precision 0 or no module settings
+ * (sharing disabled / fail-closed, #10509) must emit no position at all. */
+ZTEST(protocol_stack, test_position_precision_masked_before_broadcast)
+{
+	/* Coordinates with their low bits set so the truncation is observable. */
+	const int32_t raw_lat = (int32_t)0x2ABCDEF1;
+	const int32_t raw_lon = (int32_t)0x7654321F;
+	meshtastic_Channel saved;
+	meshtastic_Position src = meshtastic_Position_init_zero;
+	meshtastic_Position sent;
+	uint8_t primary = meshtastic_channels_primary_index();
+	int ret;
+
+	/* Deterministic full-resolution source position; no fixed position in play. */
+	meshtastic_position_clear_fixed();
+	src.has_latitude_i = true;
+	src.latitude_i = raw_lat;
+	src.has_longitude_i = true;
+	src.longitude_i = raw_lon;
+	src.precision_bits = 32U;
+	meshtastic_position_set_current(&src);
+
+	/* Case A: default primary is public LongFast @ precision 13 -> truncate to 13. */
+	zassert_ok(meshtastic_send_position(MESHTASTIC_NODE_BROADCAST), "send failed");
+	sent = g1_decode_sent_position();
+	zassert_equal(sent.precision_bits, 13U, "precision_bits must reflect the applied 13");
+	zassert_equal(sent.latitude_i, g1_expect_trunc(raw_lat, 13U), "lat not truncated to 13");
+	zassert_equal(sent.longitude_i, g1_expect_trunc(raw_lon, 13U), "lon not truncated to 13");
+	zassert_not_equal(sent.latitude_i, raw_lat, "full-resolution latitude leaked on public chan");
+
+	/* Case B: raise the public channel past the ceiling -> clamp to 15. */
+	g1_set_primary_precision(&saved, 32U, true);
+	reset_mock_lora();
+	zassert_ok(meshtastic_send_position(MESHTASTIC_NODE_BROADCAST), "send failed");
+	sent = g1_decode_sent_position();
+	zassert_equal(sent.precision_bits, MESHTASTIC_MAX_POSITION_PRECISION_PUBLIC_KEY,
+		      "public channel precision must clamp to 15");
+	zassert_equal(sent.latitude_i, g1_expect_trunc(raw_lat, 15U), "lat not clamped to 15");
+	zassert_ok(meshtastic_channels_set_slot(primary, &saved), "restore (B) failed");
+
+	/* Case C: precision 0 (sharing disabled) -> nothing may be emitted. */
+	g1_set_primary_precision(&saved, 0U, true);
+	reset_mock_lora();
+	ret = meshtastic_send_position(MESHTASTIC_NODE_BROADCAST);
+	zassert_equal(ret, -ENODATA, "sharing-disabled channel must emit no position (%d)", ret);
+	assert_mock_send_count(0U);
+	zassert_ok(meshtastic_channels_set_slot(primary, &saved), "restore (C) failed");
+
+	/* Case D: no module settings -> fail closed, emit nothing (#10509). */
+	g1_set_primary_precision(&saved, 13U, false);
+	reset_mock_lora();
+	ret = meshtastic_send_position(MESHTASTIC_NODE_BROADCAST);
+	zassert_equal(ret, -ENODATA, "channel without module settings must fail closed (%d)", ret);
+	assert_mock_send_count(0U);
+	zassert_ok(meshtastic_channels_set_slot(primary, &saved), "restore (D) failed");
+
+	/* Case E: a PRIVATE channel (custom, non-default key) is NOT clamped — a
+	 * precision above the public ceiling is honored. Proves the 15-bit clamp is
+	 * gated on channel_uses_public_key() rather than applied blanket, and covers
+	 * the public-key-check FALSE branch that cases A-D never reach. */
+	{
+		meshtastic_Channel ch = *meshtastic_channels_get(primary);
+
+		saved = ch;
+		ch.has_settings = true;
+		ch.settings.has_module_settings = true;
+		ch.settings.module_settings.position_precision = 20U;
+		/* A non-default 16-byte PSK makes the channel private (not the public
+		 * defaultpsk family), so the public-key clamp must not fire. */
+		ch.settings.psk.size = 16U;
+		memset(ch.settings.psk.bytes, 0xA5, 16U);
+		zassert_ok(meshtastic_channels_set_slot(primary, &ch), "set private channel failed");
+
+		reset_mock_lora();
+		zassert_ok(meshtastic_send_position(MESHTASTIC_NODE_BROADCAST), "send failed");
+		sent = g1_decode_sent_position();
+		zassert_equal(sent.precision_bits, 20U,
+			      "a private channel must NOT clamp precision to the public ceiling");
+		zassert_equal(sent.latitude_i, g1_expect_trunc(raw_lat, 20U),
+			      "private-channel lat must truncate to the configured 20 bits");
+		zassert_ok(meshtastic_channels_set_slot(primary, &saved), "restore (E) failed");
+	}
 }
 
 /* On a build WITHOUT PKI (this suite: CONFIG_MESHTASTIC_PKI off), a DM has no PKC

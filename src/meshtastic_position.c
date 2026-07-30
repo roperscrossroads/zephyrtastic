@@ -20,6 +20,7 @@
 #include <pb_decode.h>
 #include <pb_encode.h>
 
+#include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_modules.h"
@@ -54,6 +55,70 @@ static bool select_position_locked(meshtastic_Position *out)
 	return false;
 }
 
+/* G-1: mirror upstream getPositionPrecisionForChannel + channelFileUsesPublicKey
+ * so a broadcast never leaks a more precise location than the channel it goes out
+ * on permits.
+ *
+ * A channel is "publicly decryptable" when anyone can read it: no PSK, a single
+ * byte short-PSK alias (the well-known defaultpsk family), or the full 16-byte
+ * default PSK (whose last byte varies per default channel). A SECONDARY channel
+ * with no PSK inherits the PRIMARY key, so resolve it against the primary. */
+static bool channel_uses_public_key(uint8_t index)
+{
+	const meshtastic_Channel *ch = meshtastic_channels_get(index);
+
+	if (ch == NULL || !ch->has_settings ||
+	    ch->role == meshtastic_Channel_Role_DISABLED) {
+		return false;
+	}
+
+	if (ch->settings.psk.size == 0U) {
+		if (ch->role == meshtastic_Channel_Role_SECONDARY) {
+			uint8_t primary = meshtastic_channels_primary_index();
+
+			return (primary == index) ? true : channel_uses_public_key(primary);
+		}
+		/* PRIMARY with no PSK: cleartext — readable by anyone. */
+		return true;
+	}
+	if (ch->settings.psk.size == 1U) {
+		/* Short-PSK alias: 0 disables encryption, 1..255 select the public
+		 * defaultpsk family — either way, publicly decryptable. */
+		return true;
+	}
+	/* Full-length key: public only when it is the default-PSK family (its last
+	 * byte is bumped per default channel, so compare the leading bytes). */
+	return (ch->settings.psk.size == sizeof(meshtastic_default_psk)) &&
+	       (memcmp(ch->settings.psk.bytes, meshtastic_default_psk,
+		       sizeof(meshtastic_default_psk) - 1U) == 0);
+}
+
+/* On-wire position precision (bits) for a channel slot: the channel's configured
+ * precision, clamped to MESHTASTIC_MAX_POSITION_PRECISION_PUBLIC_KEY on a publicly
+ * decryptable channel, and 0 ("do not share") when the slot is disabled or carries
+ * no module settings. Fail-closed: a channel with no module_settings must not emit
+ * a precise position (upstream #10509). */
+static uint32_t position_precision_for_channel(uint8_t index)
+{
+	const meshtastic_Channel *ch = meshtastic_channels_get(index);
+	uint32_t precision;
+
+	if (ch == NULL || !ch->has_settings ||
+	    ch->role == meshtastic_Channel_Role_DISABLED ||
+	    !ch->settings.has_module_settings) {
+		return 0U;
+	}
+
+	precision = ch->settings.module_settings.position_precision;
+
+	if (precision > MESHTASTIC_MAX_POSITION_PRECISION_PUBLIC_KEY &&
+	    channel_uses_public_key(index)) {
+		precision = MESHTASTIC_MAX_POSITION_PRECISION_PUBLIC_KEY;
+	}
+
+	return precision;
+}
+
 static int position_build_packet(uint32_t dest, bool want_response, uint8_t channel,
 				 uint32_t response_to_id, uint8_t *payload,
 				 struct meshtastic_packet *packet)
@@ -61,6 +126,23 @@ static int position_build_packet(uint32_t dest, bool want_response, uint8_t chan
 	meshtastic_Position position;
 	pb_ostream_t stream;
 	uint32_t seq;
+	uint8_t send_index;
+	uint32_t precision;
+
+	/* G-1: clamp the position to the precision of the channel it will actually
+	 * be transmitted on. meshtastic_build_wire_packet resolves the send channel
+	 * from (to, channel_index, channel-hash); this packet carries channel_index 0,
+	 * so mirror that exact resolution here. Computed before touching pos_state so
+	 * a sharing-disabled channel neither burns a sequence number nor leaks. */
+	send_index = meshtastic_channels_resolve_send_index(dest, 0U, channel);
+	precision = position_precision_for_channel(send_index);
+	if (precision == 0U) {
+		/* Sharing disabled / fail-closed on this channel: emit no position. */
+		return -ENODATA;
+	}
+	if (precision > 32U) {
+		precision = 32U;
+	}
 
 	k_mutex_lock(&pos_lock, K_FOREVER);
 	if (!select_position_locked(&position)) {
@@ -75,6 +157,15 @@ static int position_build_packet(uint32_t dest, bool want_response, uint8_t chan
 	/* Refresh the timestamp on every emission so a static fixed position still
 	 * carries a current time (0 until the clock is seeded). */
 	position.time = meshtastic_clock_now_epoch();
+
+	/* Truncate the on-wire coordinates and stamp the precision actually applied
+	 * so peers/apps render the coarsened location correctly. The cached position
+	 * is untouched — only this outbound copy is masked. */
+	if (precision < 32U && position.has_latitude_i && position.has_longitude_i) {
+		meshtastic_position_truncate_latlon(&position.latitude_i,
+						    &position.longitude_i, precision);
+	}
+	position.precision_bits = precision;
 
 	stream = pb_ostream_from_buffer(payload, MESHTASTIC_MAX_PAYLOAD_LEN);
 	if (!pb_encode(&stream, meshtastic_Position_fields, &position)) {
