@@ -39,7 +39,7 @@
  * POWER_DOMAIN_GPIO are ALREADY =y in every shipping V3 build and the hog
  * coexists fine — the conflict only appears once PM_DEVICE_POWER_DOMAIN=y lets
  * vext_ctrl runtime-suspend GPIO36, so a PM build must pin PM_DEVICE_POWER_DOMAIN=n
- * (overlay-pm-v3.conf does). See the fuller note by the PM hooks below. (An earlier
+ * (the V3 PM overlay settings do). See the fuller note by the PM hooks below. (An earlier
  * version of this comment wrongly blamed CONFIG_POWER_DOMAIN — corrected 2026-07-20.)
  */
 
@@ -77,7 +77,7 @@
  * V4/E290 board DTs carry, but V3's board definition lives in *upstream* Zephyr
  * (boards/heltec/heltec_wifi_lora32_v3/), which we don't edit — so they go here in
  * the sample overlay instead. Everything below is INERT unless the application
- * sets CONFIG_PM (samples/meshtastic/overlay-pm.conf): with PM off, the counter
+ * sets CONFIG_PM (via the PM-enabled profile overlays): with PM off, the counter
  * driver isn't built and the wakeup-source flags have no consumer. This describes
  * hardware capability; it imposes no power policy.
  *
@@ -93,7 +93,7 @@
  * (upstream board Kconfig.defconfig + the enabled vext_ctrl/adc_ctrl DT nodes), and the
  * hog coexists fine because the domain is not runtime-suspended without CONFIG_PM_DEVICE.
  * A PM build adds PM_DEVICE_POWER_DOMAIN=y, which WOULD let vext_ctrl toggle GPIO36 and
- * fight the hog — so overlay-pm-v3.conf pins PM_DEVICE_POWER_DOMAIN=n to keep the domain
+ * fight the hog — so the V3 PM settings pin PM_DEVICE_POWER_DOMAIN=n to keep the domain
  * unmanaged (Vext hog-driven, as today). See that overlay's header for the full rationale.
  */
 

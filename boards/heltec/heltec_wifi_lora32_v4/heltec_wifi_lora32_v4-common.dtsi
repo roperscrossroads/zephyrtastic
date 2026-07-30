@@ -277,8 +277,8 @@
  * Everything below is INERT unless the application sets CONFIG_PM (and, for the
  * power domains above, CONFIG_PM_DEVICE): with PM off, the counter driver is not
  * built and the wakeup-source flags have no consumer. So this describes hardware
- * capability, it does not impose a power policy — see samples/meshtastic/overlay-pm.conf
- * for the opt-in switch.
+ * capability, it does not impose a power policy — the per-board profile overlays
+ * (samples/meshtastic/overlay-v4-*.conf) carry the PM opt-in.
  *
  * `wakeup-source` here means exactly one thing: under CONFIG_PM_DEVICE_SYSTEM_MANAGED,
  * these devices are skipped by the suspend-everything loop, so they stay powered

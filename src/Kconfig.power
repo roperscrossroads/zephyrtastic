@@ -11,7 +11,7 @@ config MESHTASTIC_POWER_SAVE_DEFAULT
 	  (PM_STATE_STANDBY): OFF holds a pm_policy lock blocking standby (stay
 	  responsive — upstream's default for a mains/WiFi node); ON releases it.
 
-	  Set y in a PM build (e.g. via overlay-pm.conf) so light sleep is exercised
+	  Set y in a PM build (e.g. via a PM-enabled profile overlay) so light sleep is exercised
 	  out of the box; the phone's stored is_power_saving still overrides on the
 	  next boot. Only meaningful with CONFIG_PM (the power-policy hook,
 	  meshtastic_power.c, compiles only then).

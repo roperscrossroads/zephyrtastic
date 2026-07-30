@@ -46,9 +46,10 @@ without `CONFIG_NETWORKING`.
 `POLICY` is the only always-considered inhibitor and reproduces upstream's default
 (power saving OFF → stay responsive, the right choice for a mains/WiFi node). When
 no `PowerConfig` is stored it comes from `CONFIG_MESHTASTIC_POWER_SAVE_DEFAULT`
-([`Kconfig.power`](../src/Kconfig.power)); `overlay-pm.conf` sets it `y` so a PM
-bench build sleeps out of the box, and the phone's stored value overrides on the
-next boot. Screen-timeout stays display-owned; BT is not dynamically toggled, so
+([`Kconfig.power`](../src/Kconfig.power)); the per-board profile overlays
+(`overlay-v4-unified.conf`, `overlay-v4-{net,ble}.conf`, `overlay-v3-net.conf`) set
+it `y` so a PM build sleeps out of the box, and the phone's stored value overrides
+on the next boot. Screen-timeout stays display-owned; BT is not dynamically toggled, so
 no ON/DARK/NB/LS state graph is needed.
 
 `meshtastic_power_config_apply()` re-reads the stored `PowerConfig` and drives
