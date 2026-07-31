@@ -407,8 +407,8 @@ static struct pm_notifier mt_radio_pm_note = {
 };
 
 /*
- * Strong override of the sx126x driver's __weak sx126x_hal_busy_timeout_report()
- * (agents-qnpp). Enriches a BUSY timeout with the light-sleep correlation — the
+ * Strong override of the sx126x driver's __weak sx126x_hal_busy_timeout_report().
+ * Enriches a BUSY timeout with the light-sleep correlation — the
  * wake sequence number and ms since the last PM_STATE_STANDBY exit — so timeouts
  * can be placed relative to wakes with NO wall-clock time (the node's clock may be
  * unset; log timestamps read 1970). If timeouts cluster in the first few ms after

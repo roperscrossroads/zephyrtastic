@@ -50,7 +50,7 @@ uint32_t meshtastic_powermon_sleep_count(void);
 
 /** Milliseconds since the most recent light-sleep (PM_STATE_STANDBY) wake, or
  *  UINT32_MAX if the SoC has not light-slept yet. Lets a diagnostic place an event
- *  relative to the last wake without wall-clock time (agents-qnpp). */
+ *  relative to the last wake without wall-clock time. */
 uint32_t meshtastic_powermon_ms_since_wake(void);
 
 #else /* !CONFIG_MESHTASTIC_POWERMON — compile the instrumentation away. */

@@ -37,7 +37,7 @@ static atomic_t pm_sleep_count = ATOMIC_INIT(0);
 
 /* Uptime (ms) of the most recent PM_STATE_STANDBY exit, stamped by the PM notifier
  * on wake. Paired with pm_sleep_count so a diagnostic can place an event (e.g. a
- * radio BUSY timeout — agents-qnpp) relative to the last light-sleep wake without
+ * radio BUSY timeout) relative to the last light-sleep wake without
  * needing wall-clock time. See meshtastic_powermon_ms_since_wake(). */
 static uint32_t pm_last_wake_ms;
 

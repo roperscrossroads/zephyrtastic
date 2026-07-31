@@ -10,10 +10,10 @@
  * ("GPS_TX 38 = bits toward the CPU") read backwards from how the reference code
  * actually wires it: firmware/src/gps/GPS.cpp sets rx_gpio=GPS_RX_PIN(39),
  * tx_gpio=GPS_TX_PIN(38) and calls Arduino begin(baud, 8N1, rxPin=39, txPin=38)
- * — i.e. ESP RX=39, ESP TX=38. Ground truth: stock Meshtastic on rzr2 logs
- * "Use GPIO39 for GPS RX / GPIO38 for GPS TX", detects the L76K and gets NMEA
- * time (2026-07-31). We originally trusted the comments (RX=38/TX=39) and got
- * total silence. VERIFY(hardware) on r8 — its GPS enable/standby pins move.
+ * — i.e. ESP RX=39, ESP TX=38. Ground truth: stock Meshtastic logs "Use GPIO39
+ * for GPS RX / GPIO38 for GPS TX", detects the L76K, and streams NMEA on these
+ * pins. Trusting the comments instead (RX=38/TX=39) gives total silence.
+ * VERIFY(hardware) on r8 — its GPS enable/standby pins move.
  */
 
 #include <zephyr/dt-bindings/pinctrl/esp32s3-pinctrl.h>
