@@ -15,6 +15,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gnss.h>
 #include <zephyr/kernel.h>
+#include <zephyr/pm/device.h>
 #include <zephyr/sys/timeutil.h>
 #include <zephyr/sys/util.h>
 
@@ -200,6 +201,18 @@ int meshtastic_gnss_init(void)
 	}
 
 	LOG_INF("Meshtastic position module using %s", gnss_dev->name);
+
+	/* The gnss-nmea-generic driver boots pm_device_init_suspended() and only opens
+	 * its UART pipe (i.e. starts reading NMEA) on RESUME. With CONFIG_PM_DEVICE=y and
+	 * neither runtime nor system-managed PM, nothing resumes it — so without this
+	 * explicit resume the module is never read at all (zero NMEA, no fix). */
+	if (IS_ENABLED(CONFIG_PM_DEVICE)) {
+		int rc = pm_device_action_run(gnss_dev, PM_DEVICE_ACTION_RESUME);
+
+		if (rc < 0 && rc != -EALREADY) {
+			LOG_ERR("GNSS resume failed (%d) — no NMEA will be read", rc);
+		}
+	}
 #else
 	LOG_WRN("CONFIG_MESHTASTIC_GNSS enabled but no ready gnss alias exists");
 #endif
