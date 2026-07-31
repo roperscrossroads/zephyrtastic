@@ -216,7 +216,7 @@ Source: `firmware/variants/esp32s3/heltec_v4/variant.h`. ESP32-S3 GPIO→bank:
 | Battery ADC | 1 | ADC1 ch0, divider |
 | ADC_CTRL (batt gate) | 37 | active-high (**absent on R8**) |
 | GPS RESET / EN / STANDBY / PPS | 42 / 34 / 40 / 41 | L76K (**R8 differs**) |
-| GPS UART TX→CPU / RX→GPS | 38 / 39 | uart1, 9600 8N1 |
+| GPS UART ESP-RX / ESP-TX | 39 / 38 | uart1, 9600 8N1 (module TX→GPIO39, module RX←GPIO38; matches stock, NOT variant.h's comments) |
 
 ---
 

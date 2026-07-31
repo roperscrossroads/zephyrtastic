@@ -4,10 +4,16 @@
  * Pin control for the Heltec WiFi LoRa 32 (V4). Radio SPI, OLED I2C, console
  * UART and the white PWM LED are pinned exactly as on the V3 (the V4 kept the
  * same map). The one addition is uart1 for the on-board L76K GNSS:
- *   GPS_TX -> GPIO38 (data toward the CPU  => ESP RX)
- *   GPS_RX -> GPIO39 (data toward the GPS  => ESP TX)
- * (firmware variants/esp32s3/heltec_v4/variant.h). VERIFY(hardware) on the r8
- * revision — its GPS enable/standby pins move, though TX/RX appear unchanged.
+ *   ESP RX <- GPIO39   (uart1 receives the module's NMEA here)
+ *   ESP TX -> GPIO38   (uart1 transmits $PCAS/config to the module here)
+ * NB: this is the OPPOSITE of what variant.h's *comments* imply. Those comments
+ * ("GPS_TX 38 = bits toward the CPU") read backwards from how the reference code
+ * actually wires it: firmware/src/gps/GPS.cpp sets rx_gpio=GPS_RX_PIN(39),
+ * tx_gpio=GPS_TX_PIN(38) and calls Arduino begin(baud, 8N1, rxPin=39, txPin=38)
+ * — i.e. ESP RX=39, ESP TX=38. Ground truth: stock Meshtastic on rzr2 logs
+ * "Use GPIO39 for GPS RX / GPIO38 for GPS TX", detects the L76K and gets NMEA
+ * time (2026-07-31). We originally trusted the comments (RX=38/TX=39) and got
+ * total silence. VERIFY(hardware) on r8 — its GPS enable/standby pins move.
  */
 
 #include <zephyr/dt-bindings/pinctrl/esp32s3-pinctrl.h>
@@ -27,12 +33,12 @@
 
 	uart1_default: uart1_default {
 		group1 {
-			pinmux = <UART1_TX_GPIO39>;
+			pinmux = <UART1_TX_GPIO38>;	/* ESP TX -> module RX (matches stock) */
 			output-high;
 		};
 
 		group2 {
-			pinmux = <UART1_RX_GPIO38>;
+			pinmux = <UART1_RX_GPIO39>;	/* ESP RX <- module TX (matches stock) */
 			bias-pull-up;
 		};
 	};
