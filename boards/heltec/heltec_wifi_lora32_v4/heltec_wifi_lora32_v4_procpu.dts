@@ -30,11 +30,12 @@
 };
 
 /*
- * L76K GNSS control lines (4.2/4.3 pin-out). Held at their run state with
- * gpio-hogs so the module powers up without firmware intervention:
- *   EN      GPIO34 (gpio1.2) active-low  -> assert (enable)
- *   STANDBY GPIO40 (gpio1.8) high = wake -> drive high (force wake)
- *   RESET   GPIO42 (gpio1.10) active-low -> deassert (release from reset)
+ * L76K GNSS control lines (4.2/4.3 pin-out). EN + STANDBY are held at their run
+ * state by gpio-hogs; RESET is pulsed at boot from heltec_wifi_lora32_v4_fem.c
+ * (mirroring firmware/src/gps/GPS.cpp, which resets the L76K at boot):
+ *   EN      GPIO34 (gpio1.2) active-low  -> assert (enable)              [hog]
+ *   STANDBY GPIO40 (gpio1.8) high = wake -> drive high (force wake)      [hog]
+ *   RESET   GPIO42 (gpio1.10) active-low -> pulse low >=100ms, release   [C init]
  * VERIFY(hardware): confirm polarities against the L76K datasheet before trusting.
  */
 &gpio1 {
@@ -48,11 +49,5 @@
 		gpio-hog;
 		gpios = <8 GPIO_ACTIVE_HIGH>;	/* GPIO40, high = force wake */
 		output-high;
-	};
-
-	gps_reset_hog {
-		gpio-hog;
-		gpios = <10 GPIO_ACTIVE_LOW>;	/* GPIO42, active-low reset */
-		output-low;
 	};
 };
