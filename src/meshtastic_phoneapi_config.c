@@ -83,9 +83,11 @@ static void fill_other_node_info(meshtastic_FromRadio *from,
 	ni->snr = node->snr;
 	ni->channel = node->channel;
 	ni->via_mqtt = node->via_mqtt;
-	/* Convert the stored uptime-relative last-heard to epoch (0 until the clock
-	 * is seeded from GNSS or the phone's set_time_only). */
-	ni->last_heard = meshtastic_clock_uptime_to_epoch(node->last_heard_uptime_sec);
+	/* Resolved last-heard epoch (0 until the clock is seeded from GNSS or the
+	 * phone's set_time_only, or if the node has never been heard). Uses the
+	 * snapshot's durable epoch so a node restored from NVS but not yet re-heard
+	 * this boot reports its real last-heard time, not the boot epoch. */
+	ni->last_heard = node->last_heard_epoch;
 	if (node->has_hops_away) {
 		ni->has_hops_away = true;
 		ni->hops_away = node->hops_away;

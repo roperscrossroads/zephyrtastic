@@ -50,6 +50,11 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 struct nodedb_entry {
 	bool used;
 	meshtastic_NodeInfoLite node;
+	/* Persisted last-heard epoch, carried across reboot for a restored node that
+	 * has not yet been re-heard this boot (node.last_heard is uptime-relative and
+	 * resets to 0 on restore). 0 for nodes heard this boot — their epoch derives
+	 * from node.last_heard via the clock. */
+	uint32_t last_heard_epoch;
 };
 
 static K_MUTEX_DEFINE(nodedb_lock);
@@ -940,6 +945,11 @@ static void fill_snapshot(const struct nodedb_entry *entry, struct meshtastic_no
 	*out = (struct meshtastic_nodedb_node){0};
 	out->num = node->num;
 	out->last_heard_uptime_sec = node->last_heard;
+	/* Resolve the durable epoch: heard this boot -> derive from uptime (0 if the
+	 * clock is unseeded); otherwise the value carried across reboot on restore. */
+	out->last_heard_epoch = (node->last_heard > 0U)
+					? meshtastic_clock_uptime_to_epoch(node->last_heard)
+					: entry->last_heard_epoch;
 	out->snr = node->snr;
 	out->channel = node->channel;
 	out->next_hop = node->next_hop;

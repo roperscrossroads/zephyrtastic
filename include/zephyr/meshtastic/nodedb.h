@@ -25,6 +25,12 @@ extern "C" {
 struct meshtastic_nodedb_node {
 	uint32_t num;
 	uint32_t last_heard_uptime_sec;
+	/* Durable wall-clock epoch (seconds) the node was last heard, resolved for
+	 * cross-reboot age: for a node heard this boot it derives from
+	 * last_heard_uptime_sec via the clock; for one restored from NVS but not yet
+	 * re-heard it is the persisted value. 0 when unknown (never heard, or no
+	 * clock has ever been seeded). */
+	uint32_t last_heard_epoch;
 	float snr;
 	uint8_t channel;
 	uint8_t next_hop;
