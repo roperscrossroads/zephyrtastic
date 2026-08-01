@@ -583,6 +583,61 @@ ZTEST(admin_pki, test_pkc_admin_key_authorized_after_hot_eviction)
 	set_admin_key(NULL, 0U);
 }
 
+/* B-5: a keyed peer dropped from the hot store keeps its role when re-admitted via a
+ * NON-NodeInfo packet — the fresh hot entry is seeded from the warm tier, not CLIENT.
+ * Uses the warm ring (this suite has MESHTASTIC_SETTINGS/PERSIST_KEYS on). */
+ZTEST(admin_pki, test_warm_tier_carries_role_on_readmit)
+{
+	const uint32_t router = 0x00B10000U;
+	struct meshtastic_nodedb_node snap;
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	uint8_t text[] = {'h', 'i'};
+	struct meshtastic_packet ni = {
+		.from = router,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.id = 0xE4000000U,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	struct meshtastic_packet txt = {
+		.from = router,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.id = 0xE4000001U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.channel_index = meshtastic_channels_primary_index(),
+		.payload = text,
+		.payload_len = sizeof(text),
+	};
+
+	/* Learn a keyed peer advertising the ROUTER role (warm ring records key + role). */
+	user.role = meshtastic_Config_DeviceConfig_Role_ROUTER;
+	user.public_key.size = MESHTASTIC_PKI_KEY_LEN;
+	memset(user.public_key.bytes, 0x5AU, MESHTASTIC_PKI_KEY_LEN);
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode failed");
+	ni.payload = buf;
+	ni.payload_len = os.bytes_written;
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+
+	zassert_ok(meshtastic_nodedb_get(router, &snap), "peer should be learned");
+	zassert_equal(snap.role, meshtastic_Config_DeviceConfig_Role_ROUTER, "role should be ROUTER");
+
+	/* Drop it from the hot store; the warm ring keeps its key + role. */
+	zassert_ok(meshtastic_nodedb_remove(router), "remove failed");
+	zassert_equal(meshtastic_nodedb_get(router, &snap), -ENOENT, "gone from hot store");
+
+	/* Re-hear via a TEXT packet (apply_user does NOT run): the fresh entry must take its role
+	 * from the warm tier rather than default to CLIENT. */
+	meshtastic_handle_inbound_packet(&txt, NULL, 0U, true);
+
+	zassert_ok(meshtastic_nodedb_get(router, &snap), "peer should be re-admitted");
+	zassert_equal(snap.role, meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "re-admitted peer must keep its ROUTER role from the warm tier (B-5)");
+
+	(void)meshtastic_nodedb_remove(router);
+}
+
 /* A real PKC admin decrypts (pki_encrypted set), but its sender key is NOT in
  * admin_key[] -> refused, config unchanged. */
 ZTEST(admin_pki, test_pkc_non_admin_key_refused)

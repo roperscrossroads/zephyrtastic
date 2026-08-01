@@ -71,8 +71,9 @@ static int64_t nodedb_last_sort_ms;
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
 static void nodekeys_schedule_save(void);
-static void warm_upsert_locked(uint32_t num, const uint8_t *pub);
+static void warm_upsert_locked(uint32_t num, const uint8_t *pub, uint8_t role);
 static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
+static bool warm_get_role_locked(uint32_t num, uint8_t *role);
 #endif
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
@@ -158,7 +159,7 @@ static void apply_user(struct nodedb_entry *entry, const meshtastic_User *user)
 		 * Caller (apply_user) holds nodedb_lock, as warm_upsert requires. */
 		if (key_changed && key_len == MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN &&
 		    node->num != meshtastic_get_node_id()) {
-			warm_upsert_locked(node->num, node->public_key.bytes);
+			warm_upsert_locked(node->num, node->public_key.bytes, (uint8_t)node->role);
 			nodekeys_schedule_save();
 		}
 #else
@@ -290,6 +291,18 @@ static struct nodedb_entry *get_or_create_entry_locked(uint32_t node_num)
 	entry->used = true;
 	entry->node = (meshtastic_NodeInfoLite)meshtastic_NodeInfoLite_init_zero;
 	entry->node.num = node_num;
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	{
+		/* B-5: a peer evicted to the warm tier and now re-admitted keeps its role
+		 * instead of dropping to CLIENT (a later NodeInfo still overwrites it with the
+		 * authoritative value). */
+		uint8_t warm_role;
+
+		if (warm_get_role_locked(node_num, &warm_role)) {
+			entry->node.role = warm_role;
+		}
+	}
+#endif
 
 	return entry;
 }
@@ -310,12 +323,15 @@ static struct nodedb_entry *get_or_create_entry_locked(uint32_t node_num)
 struct warm_key {
 	uint32_t num;       /* 0 == empty slot */
 	uint32_t last_seen; /* recency for LRU; wall-clock epoch once seeded (see warm_now) */
+	uint8_t role;       /* NodeInfoLite role — carried so an evicted->readmitted peer keeps it (B-5) */
 	uint8_t pub[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
 };
 
-/* Persisted record: last_seen (LE32) + public key. Restoring recency keeps warm
- * LRU meaningful across reboots. Legacy records are key-only (32 B) — see set. */
-#define MTNODE_REC_LEN (sizeof(uint32_t) + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN)
+/* Persisted record: last_seen (LE32) + role (u8) + public key. Restoring recency keeps warm
+ * LRU meaningful across reboots; role lets an evicted->readmitted peer keep it (B-5). Older
+ * records are accepted for back-compat: 36 B (last_seen + key, pre-role) and 32 B (key only). */
+#define MTNODE_REC_LEN    (sizeof(uint32_t) + 1U + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) /* 37 */
+#define MTNODE_REC_LEN_V1 (sizeof(uint32_t) + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN)      /* 36, pre-role */
 
 static MESHTASTIC_EXT_RAM_BSS_ATTR struct warm_key warm_keys[CONFIG_MESHTASTIC_NODEDB_WARM_KEYS];
 
@@ -344,6 +360,18 @@ static struct warm_key *warm_find_locked(uint32_t num)
 		}
 	}
 	return NULL;
+}
+
+/* B-5: copy a warm-tier peer's carried role, if present. Caller holds nodedb_lock. */
+static bool warm_get_role_locked(uint32_t num, uint8_t *role)
+{
+	struct warm_key *slot = warm_find_locked(num);
+
+	if (slot == NULL) {
+		return false;
+	}
+	*role = slot->role;
+	return true;
 }
 
 /* Slot to (re)write for @num: its existing slot, else an empty slot, else a
@@ -380,7 +408,7 @@ static struct warm_key *warm_slot_for_locked(uint32_t num)
 	return (victim != NULL) ? victim : fallback;
 }
 
-static void warm_place_locked(uint32_t num, const uint8_t *pub, uint32_t last_seen)
+static void warm_place_locked(uint32_t num, const uint8_t *pub, uint8_t role, uint32_t last_seen)
 {
 	struct warm_key *slot;
 
@@ -396,12 +424,13 @@ static void warm_place_locked(uint32_t num, const uint8_t *pub, uint32_t last_se
 	}
 	slot->num = num;
 	slot->last_seen = last_seen;
+	slot->role = role;
 	memcpy(slot->pub, pub, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
 }
 
-static void warm_upsert_locked(uint32_t num, const uint8_t *pub)
+static void warm_upsert_locked(uint32_t num, const uint8_t *pub, uint8_t role)
 {
-	warm_place_locked(num, pub, warm_now());
+	warm_place_locked(num, pub, role, warm_now());
 }
 
 static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
@@ -521,14 +550,24 @@ static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, v
 	uint8_t buf[MTNODE_REC_LEN];
 	uint32_t node_num;
 	uint32_t last_seen;
+	uint8_t role = 0U;
 	const uint8_t *pub;
 	char *endptr;
 	ssize_t read;
 
 	if (len == MTNODE_REC_LEN) {
-		/* Current format: last_seen (LE32) + public key. */
+		/* Current format: last_seen (LE32) + role (u8) + public key. */
 		read = read_cb(cb_arg, buf, MTNODE_REC_LEN);
 		if (read != (ssize_t)MTNODE_REC_LEN) {
+			return 0;
+		}
+		last_seen = sys_get_le32(buf);
+		role = buf[sizeof(uint32_t)];
+		pub = buf + sizeof(uint32_t) + 1U;
+	} else if (len == MTNODE_REC_LEN_V1) {
+		/* Pre-role format: last_seen (LE32) + public key. Role defaults to CLIENT (0). */
+		read = read_cb(cb_arg, buf, MTNODE_REC_LEN_V1);
+		if (read != (ssize_t)MTNODE_REC_LEN_V1) {
 			return 0;
 		}
 		last_seen = sys_get_le32(buf);
@@ -555,7 +594,7 @@ static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, v
 	/* Restore into the warm tier, not the hot store: keeps the key reachable
 	 * for PKC without occupying a hot record slot (avoids restore thrash). */
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
-	warm_place_locked(node_num, pub, last_seen);
+	warm_place_locked(node_num, pub, role, last_seen);
 	k_mutex_unlock(&nodedb_lock);
 
 	return 0;
@@ -576,7 +615,8 @@ static int nodekeys_export(int (*export_func)(const char *name, const void *val,
 		uint8_t rec[MTNODE_REC_LEN];
 
 		sys_put_le32(warm_keys[i].last_seen, rec);
-		memcpy(rec + sizeof(uint32_t), warm_keys[i].pub,
+		rec[sizeof(uint32_t)] = warm_keys[i].role;
+		memcpy(rec + sizeof(uint32_t) + 1U, warm_keys[i].pub,
 		       MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
 
 		(void)snprintk(name, sizeof(name), MTNODE_SUBTREE "/%08x", warm_keys[i].num);
