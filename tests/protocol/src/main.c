@@ -1980,6 +1980,46 @@ ZTEST(protocol_stack, test_zzz_nodedb_eviction_skips_ignored_node)
 	meshtastic_nodedb_reset(false);
 }
 
+/* B-8: the node list is ordered self -> favorites -> most-recently-heard first. */
+ZTEST(protocol_stack, test_zzz_nodedb_sort_orders_self_favorite_recency)
+{
+	struct meshtastic_nodedb_node snap;
+	const uint32_t old_node = 0x00A10000U;
+	const uint32_t fav_node = 0x00A20000U;
+	const uint32_t new_node = 0x00A30000U;
+	uint32_t self = meshtastic_get_node_id();
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE);
+	meshtastic_nodedb_reset(false);
+
+	/* Three peers with distinct last_heard, injected oldest -> newest. */
+	inject_keyless_peer(old_node, 0xE3000000U);
+	k_sleep(K_MSEC(1100));
+	inject_keyless_peer(fav_node, 0xE3010000U);
+	k_sleep(K_MSEC(1100));
+	inject_keyless_peer(new_node, 0xE3020000U);
+
+	/* Favorite the MIDDLE-recency node, so favorite-priority is distinguishable from
+	 * pure recency ordering. */
+	zassert_ok(meshtastic_nodedb_set_favorite(fav_node, true), "favorite set failed");
+
+	/* Expected order: [0] self, [1] fav_node, [2] new_node (recent non-fav),
+	 * [3] old_node (oldest non-fav). */
+	zassert_true(meshtastic_nodedb_count() >= 4U, "expected self + 3 peers");
+	zassert_ok(meshtastic_nodedb_get_by_index(0U, &snap), "index 0");
+	zassert_equal(snap.num, self, "self must sort first");
+	zassert_ok(meshtastic_nodedb_get_by_index(1U, &snap), "index 1");
+	zassert_equal(snap.num, fav_node, "favorite must sort ahead of non-favorites");
+	zassert_true(snap.is_favorite, "index 1 should be the favorite");
+	zassert_ok(meshtastic_nodedb_get_by_index(2U, &snap), "index 2");
+	zassert_equal(snap.num, new_node, "most-recent non-favorite comes next");
+	zassert_ok(meshtastic_nodedb_get_by_index(3U, &snap), "index 3");
+	zassert_equal(snap.num, old_node, "oldest non-favorite comes last");
+
+	(void)meshtastic_nodedb_set_favorite(fav_node, false);
+	meshtastic_nodedb_reset(false);
+}
+
 /* Favorites/ignored are capped at MAX-RESERVE so a saturated DB keeps a
  * couple of evictable slots and never wedges — new nodes still land. */
 ZTEST(protocol_stack, test_zzz_nodedb_protected_cap_keeps_learning)

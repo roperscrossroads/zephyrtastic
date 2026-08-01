@@ -19,6 +19,15 @@ config MESHTASTIC_NODEDB_MAX_NODES
 	  Maximum number of nodes kept in the in-RAM Meshtastic NodeDB,
 	  including the local node entry.
 
+config MESHTASTIC_NODEDB_SORT_THROTTLE_MS
+	int "Minimum interval (ms) between node-list re-sorts"
+	default 5000
+	help
+	  The node list is ordered self -> favorites -> most-recently-heard first,
+	  sorted lazily on read but at most this often, so a read burst (a phone
+	  config handshake or one display frame) sees a stable order and a busy mesh
+	  does not re-sort on every packet. Mirrors upstream sortMeshDB's throttle.
+
 config MESHTASTIC_NODEDB_PERSIST_KEYS
 	bool "Persist peer public keys across reboots"
 	depends on MESHTASTIC_SETTINGS

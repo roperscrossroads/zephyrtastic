@@ -63,6 +63,12 @@ static K_MUTEX_DEFINE(nodedb_lock);
 static MESHTASTIC_EXT_RAM_BSS_ATTR struct nodedb_entry nodedb_entries[CONFIG_MESHTASTIC_NODEDB_MAX_NODES];
 static size_t nodedb_entry_count;
 
+/* Node-list sort (B-8): the hot store is re-sorted lazily on read, throttled, and only when
+ * something that affects order changed — so a read burst (a phone config handshake or one
+ * display frame) sees a stable order, and a busy mesh doesn't sort on every packet. */
+static bool nodedb_dirty;
+static int64_t nodedb_last_sort_ms;
+
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
 static void nodekeys_schedule_save(void);
 static void warm_upsert_locked(uint32_t num, const uint8_t *pub);
@@ -936,6 +942,8 @@ static void apply_basic_packet(struct nodedb_entry *entry, const struct meshtast
 		entry->node.has_hops_away = true;
 		entry->node.hops_away = hops_away;
 	}
+
+	nodedb_dirty = true; /* last_heard (and any new node) changed the sort order */
 }
 
 static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *packet)
@@ -1312,6 +1320,65 @@ int meshtastic_nodedb_warm_get(size_t index, uint32_t *num, uint32_t *last_seen)
 #endif
 }
 
+/* B-8 node-list sort — mirrors upstream NodeDB::sortMeshDB: self first, then favorites, then
+ * most-recently-heard first. Nodes heard this boot (uptime last_heard > 0) rank above ones
+ * restored from NVS but not yet re-heard; each group is ordered by its own recency (uptime for
+ * this-boot, the durable epoch for restored). */
+static int nodedb_sort_cmp(const void *pa, const void *pb)
+{
+	const struct nodedb_entry *a = pa;
+	const struct nodedb_entry *b = pb;
+	uint32_t self = meshtastic_get_node_id();
+	bool af, bf, ab, bb;
+
+	if (a->used != b->used) {
+		return a->used ? -1 : 1; /* unused slots sink to the end (shouldn't occur in range) */
+	}
+	if (a->node.num == self) {
+		return -1;
+	}
+	if (b->node.num == self) {
+		return 1;
+	}
+	af = IS_BIT_SET(a->node.bitfield, NODEINFO_BITFIELD_IS_FAVORITE_BIT);
+	bf = IS_BIT_SET(b->node.bitfield, NODEINFO_BITFIELD_IS_FAVORITE_BIT);
+	if (af != bf) {
+		return af ? -1 : 1;
+	}
+	ab = (a->node.last_heard > 0U);
+	bb = (b->node.last_heard > 0U);
+	if (ab != bb) {
+		return ab ? -1 : 1; /* heard this boot ranks above restored-not-yet-reheard */
+	}
+	if (ab) {
+		if (a->node.last_heard != b->node.last_heard) {
+			return (a->node.last_heard > b->node.last_heard) ? -1 : 1;
+		}
+	} else if (a->last_heard_epoch != b->last_heard_epoch) {
+		return (a->last_heard_epoch > b->last_heard_epoch) ? -1 : 1;
+	}
+	return 0;
+}
+
+/* Throttled in-place sort (caller holds nodedb_lock). Re-sorts at most every
+ * CONFIG_MESHTASTIC_NODEDB_SORT_THROTTLE_MS and only when the order is dirty, so a read burst
+ * sees a stable order and a busy mesh doesn't sort on every packet. */
+static void nodedb_maybe_sort_locked(void)
+{
+	int64_t now = k_uptime_get();
+
+	if (!nodedb_dirty) {
+		return;
+	}
+	if (nodedb_last_sort_ms != 0 &&
+	    (now - nodedb_last_sort_ms) < CONFIG_MESHTASTIC_NODEDB_SORT_THROTTLE_MS) {
+		return;
+	}
+	qsort(nodedb_entries, nodedb_entry_count, sizeof(nodedb_entries[0]), nodedb_sort_cmp);
+	nodedb_dirty = false;
+	nodedb_last_sort_ms = now;
+}
+
 int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *out)
 {
 	if (out == NULL) {
@@ -1319,6 +1386,7 @@ int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *
 	}
 
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	nodedb_maybe_sort_locked();
 	if (index >= nodedb_entry_count || !nodedb_entries[index].used) {
 		k_mutex_unlock(&nodedb_lock);
 		return -ENOENT;
@@ -1355,6 +1423,7 @@ static int nodedb_set_bit(uint32_t node_num, int bit, bool value)
 	}
 
 	WRITE_BIT(entry->node.bitfield, bit, value);
+	nodedb_dirty = true; /* favorite/ignored change reorders the list */
 	k_mutex_unlock(&nodedb_lock);
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
@@ -1441,6 +1510,7 @@ int meshtastic_nodedb_remove(uint32_t node_num)
 		}
 		nodedb_entries[last] = (struct nodedb_entry){0};
 		nodedb_entry_count--;
+		nodedb_dirty = true; /* swap-into-hole broke sort order */
 		route_health_drop_locked(node_num);
 		k_mutex_unlock(&nodedb_lock);
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
@@ -1491,6 +1561,8 @@ void meshtastic_nodedb_reset(bool keep_favorites)
 	/* Route-health records are advisory and cheap to relearn; drop them all.
 	 * A kept favorite's route simply becomes untracked (still trusted). */
 	memset(route_health, 0, sizeof(route_health));
+	nodedb_dirty = true; /* the DB changed — force a re-sort on the next read */
+	nodedb_last_sort_ms = 0;
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
 	/* Warm keys are never favorites (self's key lives in config/security), so a
