@@ -45,17 +45,31 @@ config MESHTASTIC_NODEDB_WARM_KEYS
 	  the hot store. Evicts least-recently-seen when full.
 
 config MESHTASTIC_NODEDB_PERSIST_RECORDS
-	bool "Persist favorite/ignored node records across reboots"
+	bool "Persist the node list across reboots"
 	depends on MESHTASTIC_SETTINGS
 	default y
 	help
 	  Persist the full identity (name, hardware model, role, flags, public
-	  key) of nodes the operator has favorited or ignored, keyed by node id,
-	  to the settings/NVS store, and restore them into the hot NodeDB at
-	  boot. Favorites and ignored nodes are the curated set the operator has
-	  explicitly pinned or blocked; persisting them means a reboot no longer
-	  drops them until each re-announces its NodeInfo. Other nodes stay
-	  volatile and are re-learned from the mesh. The curated set is bounded
-	  by the eviction reserve, so this adds no boot-time hot-store churn.
+	  key) plus last-heard time of every node in the hot NodeDB, keyed by
+	  node id, to the settings/NVS store, and restore them at boot. Without
+	  this, a reboot drops the whole seen-node list until each node
+	  re-announces. NVS is kept equal to the hot store (records are pruned on
+	  eviction/removal), so it is bounded by MESHTASTIC_NODEDB_MAX_NODES.
+	  last-heard is stored as a wall-clock epoch so node recency survives a
+	  reboot (see MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC).
+
+config MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC
+	int "NodeDB last-heard snapshot interval (seconds, 0 = off)"
+	depends on MESHTASTIC_NODEDB_PERSIST_RECORDS
+	default 300
+	range 0 86400
+	help
+	  How often the full NodeDB is snapshotted to NVS so each node's
+	  last-heard time (and any newly seen node) survives a reboot. The
+	  settings backend skips unchanged records, so a snapshot only writes
+	  nodes actually heard since the previous one. Smaller = fresher
+	  last-heard after a reboot, at the cost of more flash writes. 0 disables
+	  periodic snapshots; records then persist only on identity change or
+	  favorite/ignore toggle (last-heard recency will not survive a reboot).
 
 endif # MESHTASTIC_NODEDB

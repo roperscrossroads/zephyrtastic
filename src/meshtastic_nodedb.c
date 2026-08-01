@@ -71,6 +71,7 @@ static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUB
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
 static void mtrec_schedule_save(void);
+static void mtrec_note_evicted(void);
 #endif
 
 static uint32_t uptime_seconds(void)
@@ -272,6 +273,11 @@ static struct nodedb_entry *get_or_create_entry_locked(uint32_t node_num)
 
 		entry = &nodedb_entries[index];
 		LOG_DBG("NodeDB evicting 0x%08x", entry->node.num);
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+		/* The evicted node's persisted record (if any) is now an orphan —
+		 * flag a reconcile so the next snapshot prunes it (NVS == hot store). */
+		mtrec_note_evicted();
+#endif
 	}
 
 	*entry = (struct nodedb_entry){0};
@@ -583,18 +589,22 @@ SETTINGS_STATIC_HANDLER_DEFINE(mtnode, MTNODE_SUBTREE, NULL, nodekeys_set, NULL,
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
 /*
- * Curated-record tier. Persists the full identity (name, hw model, role, flags,
- * public key) of nodes the operator has pinned (favorite) or blocked (ignored),
- * keyed "mtrec/<id>", and restores them into the hot store at boot. Distinct
- * from the warm-key tier above, which persists only public keys for PKC reach:
- * the curated set is the small, operator-chosen set that should outlive a reboot
- * intact, so each record is self-contained and carries the key too. The set is
- * bounded by the eviction reserve (NODEDB_PROTECTED_RESERVE), so restoring it
- * into the hot store causes no boot thrash. Volatile per-hearing fields (snr /
- * last_heard / channel / next_hop / hops / via-mqtt) are never persisted — they
- * are re-learned from the next packet, and excluding them keeps the record
- * stable so it is not rewritten to NVS on every heard frame. Guarded by
- * nodedb_lock like the rest of the store.
+ * Record tier. Persists the full identity (name, hw model, role, flags, public
+ * key) of every node in the hot store, keyed "mtrec/<id>", and restores them at
+ * boot so the seen-node list survives a reboot. Distinct from the warm-key tier
+ * above, which persists only public keys for PKC reach: a record here is
+ * self-contained and carries the key too. The set is bounded by the hot store
+ * (MESHTASTIC_NODEDB_MAX_NODES), and NVS is kept == the hot store by pruning a
+ * node's record when it is evicted or removed.
+ *
+ * Volatile per-hearing fields (snr / channel / next_hop / hops / via-mqtt) are
+ * NOT persisted — they are re-learned from the next packet. last_heard IS
+ * persisted, but as a durable wall-clock epoch (see mtrec_encode), not the
+ * volatile uptime, so a node's recency survives a reboot. Identity changes and
+ * favorite/ignore toggles persist promptly; last_heard is refreshed by a
+ * periodic snapshot (MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC) that only rewrites
+ * records whose epoch actually changed. Guarded by nodedb_lock like the rest of
+ * the store.
  */
 #define MTREC_SUBTREE         "mtrec"
 #define MTREC_RECORD_VERSION  1U
@@ -602,16 +612,23 @@ SETTINGS_STATIC_HANDLER_DEFINE(mtnode, MTNODE_SUBTREE, NULL, nodekeys_set, NULL,
 #define MTREC_RECONCILE_BATCH 32U
 #define MTREC_BUF_LEN         (meshtastic_NodeInfoLite_size + MTREC_HEADER_LEN)
 
-/* Set when a node leaves the curated set (un-favorited / un-ignored / removed /
- * reset), so the next save prunes its now-orphaned NVS record. */
+/* Set when a node leaves the hot store (evicted / removed / un-curated on reset),
+ * so the next persist pass prunes its now-orphaned NVS record. */
 static bool mtrec_reconcile;
 
-/* Copy @in, zeroing the volatile fields that must not be persisted. */
+/* Flag an eviction orphan for pruning. Called from the (locked) eviction path,
+ * so it only sets the flag; the next snapshot/save does the prune. */
+static void mtrec_note_evicted(void)
+{
+	mtrec_reconcile = true;
+}
+
+/* Copy @in, zeroing the volatile per-hearing fields that must not be persisted.
+ * last_heard is set separately by mtrec_encode, as a durable wall-clock epoch. */
 static void mtrec_durable_copy(const meshtastic_NodeInfoLite *in, meshtastic_NodeInfoLite *out)
 {
 	*out = *in;
 	out->snr = 0.0f;
-	out->last_heard = 0U;
 	out->channel = 0U;
 	out->next_hop = 0U;
 	out->has_hops_away = false;
@@ -619,7 +636,7 @@ static void mtrec_durable_copy(const meshtastic_NodeInfoLite *in, meshtastic_Nod
 	WRITE_BIT(out->bitfield, NODEINFO_BITFIELD_VIA_MQTT_BIT, 0);
 }
 
-static int mtrec_encode(const meshtastic_NodeInfoLite *node, uint8_t *buf, size_t buf_len)
+static int mtrec_encode(const struct nodedb_entry *e, uint8_t *buf, size_t buf_len)
 {
 	meshtastic_NodeInfoLite durable;
 	pb_ostream_t stream;
@@ -628,7 +645,13 @@ static int mtrec_encode(const meshtastic_NodeInfoLite *node, uint8_t *buf, size_
 		return -EINVAL;
 	}
 
-	mtrec_durable_copy(node, &durable);
+	mtrec_durable_copy(&e->node, &durable);
+	/* Persist last-heard as a durable wall-clock epoch, not the volatile uptime:
+	 * derive it from the uptime for a node heard this boot, else carry forward the
+	 * epoch restored at the last boot. 0 when no clock has ever been seeded. */
+	durable.last_heard = (e->node.last_heard > 0U)
+				     ? meshtastic_clock_uptime_to_epoch(e->node.last_heard)
+				     : e->last_heard_epoch;
 	stream = pb_ostream_from_buffer(buf + MTREC_HEADER_LEN, buf_len - MTREC_HEADER_LEN);
 	if (!pb_encode(&stream, meshtastic_NodeInfoLite_fields, &durable)) {
 		LOG_WRN("NodeDB record encode failed: %s", PB_GET_ERROR(&stream));
@@ -665,16 +688,15 @@ static int mtrec_decode(const uint8_t *buf, size_t len, meshtastic_NodeInfoLite 
 	return 0;
 }
 
-/* True if @num is still a curated node in the hot store — i.e. its NVS record
- * should be kept rather than pruned. Takes nodedb_lock. */
+/* True if @num is still in the hot store — i.e. its NVS record should be kept
+ * rather than pruned as an orphan (left by an eviction, removal, or reset).
+ * Takes nodedb_lock. */
 static bool mtrec_is_current(uint32_t num)
 {
-	struct nodedb_entry *e;
 	bool current;
 
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
-	e = find_entry_locked(num);
-	current = (e != NULL) && node_is_protected(&e->node);
+	current = (find_entry_locked(num) != NULL);
 	k_mutex_unlock(&nodedb_lock);
 
 	return current;
@@ -767,6 +789,25 @@ static void mtrec_schedule_save(void)
 				K_MSEC(CONFIG_MESHTASTIC_SETTINGS_SAVE_DELAY_MS));
 }
 
+#if CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC > 0
+/* Periodic full-store snapshot: refreshes each node's persisted last-heard epoch
+ * (and captures newly-seen nodes) so recency survives a reboot, and prunes any
+ * eviction orphans flagged since the last pass. The settings backend skips
+ * unchanged records, so a snapshot only writes nodes heard since the previous
+ * one. Self-reschedules. */
+static void mtrec_snapshot_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(mtrec_snapshot_work, mtrec_snapshot_work_handler);
+
+static void mtrec_snapshot_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	mtrec_do_persist();
+	(void)k_work_reschedule(&mtrec_snapshot_work,
+				K_SECONDS(CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC));
+}
+#endif /* CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC > 0 */
+
 static int mtrec_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	uint8_t buf[MTREC_BUF_LEN];
@@ -796,16 +837,16 @@ static int mtrec_set(const char *key, size_t len, settings_read_cb read_cb, void
 		return 0;
 	}
 
-	/* Only restore genuinely-curated records; a record whose flags are clear
-	 * would just occupy a hot slot for a node the operator no longer pins. */
-	if (!node_is_protected(&node)) {
-		return 0;
-	}
-
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
 	entry = get_or_create_entry_locked(num);
 	if (entry != NULL) {
 		node.num = num; /* the key is authoritative */
+		/* The persisted last_heard is a durable wall-clock epoch; move it to
+		 * the entry's epoch field and reset the uptime one — this node has not
+		 * been heard this boot, so its age resolves from the epoch until it is
+		 * re-heard. */
+		entry->last_heard_epoch = node.last_heard;
+		node.last_heard = 0U;
 		entry->node = node;
 		entry->used = true;
 	}
@@ -826,11 +867,11 @@ static int mtrec_export(int (*export_func)(const char *name, const void *val, si
 		struct nodedb_entry *e = &nodedb_entries[i];
 		int len;
 
-		if (!e->used || e->node.num == self || !node_is_protected(&e->node)) {
+		if (!e->used || e->node.num == self) {
 			continue;
 		}
 
-		len = mtrec_encode(&e->node, buf, sizeof(buf));
+		len = mtrec_encode(e, buf, sizeof(buf));
 		if (len < 0) {
 			continue; /* skip a record that will not encode, keep the rest */
 		}
@@ -1394,9 +1435,6 @@ int meshtastic_nodedb_remove(uint32_t node_num)
 		/* Preserve the "entries [0, count) are all used" invariant by
 		 * swapping the last entry into the hole, then shrinking. */
 		size_t last = nodedb_entry_count - 1U;
-#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
-		bool was_protected = node_is_protected(&nodedb_entries[i].node);
-#endif
 
 		if (i != last) {
 			nodedb_entries[i] = nodedb_entries[last];
@@ -1406,11 +1444,9 @@ int meshtastic_nodedb_remove(uint32_t node_num)
 		route_health_drop_locked(node_num);
 		k_mutex_unlock(&nodedb_lock);
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
-		if (was_protected) {
-			/* A curated node was removed — prune its persisted record. */
-			mtrec_reconcile = true;
-			mtrec_schedule_save();
-		}
+		/* Every node is persisted now — prune the removed node's record. */
+		mtrec_reconcile = true;
+		mtrec_schedule_save();
 #endif
 		LOG_DBG("NodeDB removed 0x%08x", node_num);
 		return 0;
@@ -1523,12 +1559,17 @@ int meshtastic_nodedb_init(void)
 #endif
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
-	/* Restore curated (favorite/ignored) node records into the hot store now the
-	 * settings subsystem is up. Then reconcile so any record whose node is no
-	 * longer curated (e.g. left by an older build) is pruned off the boot path. */
+	/* Restore persisted node records into the hot store now the settings
+	 * subsystem is up. Then reconcile so any record whose node no longer fits the
+	 * hot store (e.g. a shrunk MAX_NODES) is pruned off the boot path. */
 	(void)settings_load_subtree(MTREC_SUBTREE);
 	mtrec_reconcile = true;
 	mtrec_schedule_save();
+#if CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC > 0
+	/* Start the periodic last-heard snapshot so recency survives future reboots. */
+	(void)k_work_reschedule(&mtrec_snapshot_work,
+				K_SECONDS(CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC));
+#endif
 #endif
 
 	return (entry == NULL) ? -ENOMEM : 0;
