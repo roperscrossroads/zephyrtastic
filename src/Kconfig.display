@@ -76,6 +76,17 @@ config MESHTASTIC_DISPLAY_PAGE_SECONDS
 	  has no sw0 alias), the UI cycles through its pages on a timer. This sets
 	  how long each page stays on screen.
 
+config MESHTASTIC_DISPLAY_ONLINE_SECS
+	int "Node counts as online if heard within N seconds"
+	default 7200
+	range 60 604800
+	help
+	  On the Nodes screen a node is marked online ('+') and counted in the
+	  online/total header if it was last heard within this many seconds
+	  (default 2 hours, matching the phone app). Older nodes show their
+	  last-heard age and are treated as offline. A favourite node shows '*'
+	  regardless; its age still reflects recency.
+
 config MESHTASTIC_DISPLAY_STACK_SIZE
 	int "Display thread stack size"
 	default 4096

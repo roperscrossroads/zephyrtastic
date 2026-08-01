@@ -138,14 +138,63 @@ static void page_device(void)
 	draw_row(3, "b:%s", meshtastic_build_id());
 }
 
+/* Compact "age since last heard" for the node list: "now"/"5m"/"2h"/"3d", or
+ * "-" when unknown (never heard, or restored without a seeded clock). */
+static void fmt_age(char *buf, size_t len, int32_t age_sec)
+{
+	if (age_sec < 0) {
+		(void)snprintf(buf, len, "-");
+	} else if (age_sec < 60) {
+		(void)snprintf(buf, len, "now");
+	} else if (age_sec < 3600) {
+		(void)snprintf(buf, len, "%dm", (int)(age_sec / 60));
+	} else if (age_sec < 172800) { /* < 48h */
+		(void)snprintf(buf, len, "%dh", (int)(age_sec / 3600));
+	} else {
+		(void)snprintf(buf, len, "%dd", (int)(age_sec / 86400));
+	}
+}
+
+/* Seconds since a node was last heard, or -1 if unknown. Uses the uptime delta
+ * for a node heard this boot (works even with no wall clock); otherwise the
+ * durable epoch carried across reboot (needs a seeded clock). */
+static int32_t node_age_sec(const struct meshtastic_nodedb_node *node, uint32_t now_up,
+			    uint32_t now_ep)
+{
+	if (node->last_heard_uptime_sec > 0U) {
+		return (int32_t)(now_up - node->last_heard_uptime_sec);
+	}
+	if (node->last_heard_epoch > 0U && now_ep >= node->last_heard_epoch) {
+		return (int32_t)(now_ep - node->last_heard_epoch);
+	}
+	return -1;
+}
+
 static void page_nodes(void)
 {
 	size_t n = meshtastic_nodedb_count();
 	uint8_t list_rows = (content_rows > 1U) ? (uint8_t)(content_rows - 1U) : 0U;
 	uint8_t first = 0;
 	int sel = -1; /* index of the highlighted node row, or -1 for none */
+	uint32_t now_up = (uint32_t)(k_uptime_get() / MSEC_PER_SEC);
+	uint32_t now_ep = meshtastic_clock_now_epoch();
+	unsigned int online = 0U;
 
-	draw_row(0, "Nodes: %u", (unsigned int)n);
+	/* Online count spans the whole DB, not just the visible page. */
+	for (size_t i = 0U; i < n; i++) {
+		struct meshtastic_nodedb_node node;
+		int32_t age;
+
+		if (meshtastic_nodedb_get_by_index(i, &node) != 0) {
+			continue;
+		}
+		age = node_age_sec(&node, now_up, now_ep);
+		if (age >= 0 && age < CONFIG_MESHTASTIC_DISPLAY_ONLINE_SECS) {
+			online++;
+		}
+	}
+
+	draw_row(0, "Nodes %u/%u", online, (unsigned int)n);
 
 	if (n == 0) {
 		draw_row(1, "(none yet)");
@@ -156,20 +205,27 @@ static void page_nodes(void)
 
 	for (uint8_t i = 0; i < list_rows && (size_t)(first + i) < n; i++) {
 		struct meshtastic_nodedb_node node;
-		char fav, cur;
+		char mark, cur, agebuf[6];
+		int32_t age;
 
 		if (meshtastic_nodedb_get_by_index((size_t)(first + i), &node) != 0) {
 			break;
 		}
 
 		cur = ((int)(first + i) == sel) ? '>' : ' ';
-		/* '*' marks a favourite node (upstream device-ui sorts these first). */
-		fav = node.is_favorite ? '*' : ' ';
+		age = node_age_sec(&node, now_up, now_ep);
+		/* '*' favourite (operator-pinned), else '+' online (heard recently),
+		 * else ' ' offline/stale. */
+		mark = node.is_favorite ? '*'
+				: ((age >= 0 && age < CONFIG_MESHTASTIC_DISPLAY_ONLINE_SECS)
+					   ? '+'
+					   : ' ');
+		fmt_age(agebuf, sizeof(agebuf), age);
 
-		/* cursor + favourite + name + SNR (whole dB — hops move to the detail
-		 * view). SNR is a float, cast to int to avoid pulling in FP printf. */
-		draw_row((uint8_t)(1 + i), "%c%c%-4s%+4d", cur, fav, node.short_name,
-			 (int)node.snr);
+		/* cursor + status + name + last-heard age + SNR (whole dB; hops move to
+		 * the detail view). SNR is a float, cast to int to avoid FP printf. */
+		draw_row((uint8_t)(1 + i), "%c%c%-4s%4s%+3d", cur, mark, node.short_name,
+			 agebuf, (int)node.snr);
 	}
 }
 
