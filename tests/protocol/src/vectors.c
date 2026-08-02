@@ -249,6 +249,24 @@ ZTEST(wire_vectors, test_preset_change_rehashes_channels)
 		      (uint8_t)(mf ^ psk_h));
 }
 
+/* F-2 regression: the default primary is SEEDED unnamed. The tests above prove an
+ * unnamed primary tracks the preset (name -> byte hash -> frequency slot); this
+ * guards the SEED itself, because that whole chain only kicks in when a fresh /
+ * factory primary carries NO stored name. Seeding a literal name (the old bug)
+ * pinned name+hash+frequency to that name's hash, so the node silently landed on
+ * the wrong frequency and could not interoperate on any preset but LongFast.
+ * vectors_before() re-seeds the defaults before every test. */
+ZTEST(wire_vectors, test_default_primary_seed_is_unnamed)
+{
+	const meshtastic_Channel *prim =
+		meshtastic_channels_get(meshtastic_channels_primary_index());
+
+	zassert_not_null(prim, "primary channel missing after seed");
+	zassert_equal(prim->settings.name[0], '\0',
+		      "default primary must be seeded UNNAMED (F-2), got \"%s\"",
+		      prim->settings.name);
+}
+
 /* The frequency must follow the channel NAME, not just the region
  * (parity: radio D3).
  *

@@ -155,10 +155,17 @@ static void demote_other_primary(uint8_t index)
 	}
 }
 
-/* Overwrite @p index with the default LongFast PRIMARY channel (name, default
- * PSK, precision) and re-derive its hash. Mirrors the reference initDefaultChannel(0);
- * used to seed slot 0 at init and to restore a primary when a config edit leaves
- * none (C-4). */
+/* Overwrite @p index with the default PRIMARY channel (default PSK, precision) and
+ * re-derive its hash. Mirrors the reference initDefaultChannel(0); used to seed slot 0
+ * at init and to restore a primary when a config edit leaves none (C-4).
+ *
+ * The name is left EMPTY on purpose (F-2, closing the C-1 residual): a default channel
+ * carries no stored name, and meshtastic_channels_get_name resolves an empty name to the
+ * active preset's display name. So the channel name, its XOR byte-hash, and the djb2
+ * frequency slot all track the modem preset — exactly matching a stock node's default
+ * channel on EVERY preset. Seeding a literal name here (the old behavior) instead pinned
+ * the frequency+hash to that name's hash, so the node only interoperated on LongFast and
+ * silently landed on the wrong frequency on any other preset. */
 static void seed_default_primary(uint8_t index)
 {
 	meshtastic_Channel *ch = &channel_slots[index];
@@ -167,7 +174,7 @@ static void seed_default_primary(uint8_t index)
 	ch->index = index;
 	ch->role = meshtastic_Channel_Role_PRIMARY;
 	ch->has_settings = true;
-	strncpy(ch->settings.name, MESHTASTIC_CHANNEL_LONGFAST, sizeof(ch->settings.name) - 1U);
+	/* settings.name stays "" (init_zero) -> get_name() yields the preset display name */
 	memcpy(ch->settings.psk.bytes, meshtastic_default_psk, sizeof(meshtastic_default_psk));
 	ch->settings.psk.size = sizeof(meshtastic_default_psk);
 	ch->settings.uplink_enabled = true;
