@@ -161,6 +161,21 @@ static void admin_schedule_reboot(void)
 	reboot_pending = false;
 }
 
+/* Introspection: is a deferred config-change reboot currently scheduled? A LoRa
+ * write (F-1) and other non-live sections schedule one via admin_schedule_reboot;
+ * exposed so callers/tests can observe it without waiting out the timer. */
+bool meshtastic_admin_reboot_scheduled(void)
+{
+	return k_work_delayable_is_pending(&admin_reboot_work);
+}
+
+/* Cancel a scheduled config-change reboot. Used by tests so the sim is not
+ * actually rebooted when the deferred work fires. */
+void meshtastic_admin_cancel_reboot(void)
+{
+	(void)k_work_cancel_delayable(&admin_reboot_work);
+}
+
 /* ------------------------------------------------------------------------- */
 /* Emit helpers — both build a struct meshtastic_packet and hand it to        */
 /* meshtastic_phoneapi_on_packet(), which wraps it as a FromRadio.packet and  */
@@ -687,16 +702,19 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 			LOG_WRN("admin: set_config failed (%d)", ret);
 			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
 		} else {
-			/* apply_core applies device/lora core fields live; the power
-			 * policy (PowerConfig.is_power_saving -> light-sleep lock) is
-			 * re-applied live here too under CONFIG_PM; every other section is
-			 * persisted and applied on reboot. */
+			/* apply_core applies the DEVICE core fields (role, rebroadcast)
+			 * live, and the power policy (PowerConfig.is_power_saving ->
+			 * light-sleep lock) is re-applied live here under CONFIG_PM. A LoRa
+			 * change is persisted and its channel name/hash re-derived, but the
+			 * SX1262 is NOT reconfigured live (SF/BW/frequency are set at radio
+			 * init), so it needs a reboot to take effect on the air — matching
+			 * the reference, which reboots on any LoRaConfig change. Every other
+			 * section is likewise applied on reboot. (F-1) */
 			pb_size_t which = admin_req.payload_variant.set_config.which_payload_variant;
 
 			if (IS_ENABLED(CONFIG_PM) && which == meshtastic_Config_power_tag) {
 				meshtastic_power_config_apply();
-			} else if (which != meshtastic_Config_device_tag &&
-				   which != meshtastic_Config_lora_tag) {
+			} else if (which != meshtastic_Config_device_tag) {
 				reboot_pending = true;
 			}
 		}

@@ -48,4 +48,16 @@ void meshtastic_admin_reset(void);
  */
 bool meshtastic_admin_is_managed(void);
 
+/**
+ * @brief Whether a deferred config-change reboot is currently scheduled.
+ *
+ * A LoRa config write (F-1), a module-config write, and other sections that only
+ * take effect on restart schedule a reboot via the set_config path so the change
+ * is actually applied. Exposed for introspection and tests.
+ */
+bool meshtastic_admin_reboot_scheduled(void);
+
+/** Cancel a scheduled config-change reboot (used by tests to avoid rebooting). */
+void meshtastic_admin_cancel_reboot(void);
+
 #endif /* MESHTASTIC_ADMIN_H_ */

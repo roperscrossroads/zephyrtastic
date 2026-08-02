@@ -32,6 +32,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_region_presets.h"
 #include "meshtastic_powermon.h"
 #include "meshtastic_sched.h"
 #include "meshtastic_settings.h"
@@ -1763,6 +1764,115 @@ static int cmd_transport(const struct shell *sh, size_t argc, char **argv)
 }
 #endif /* CONFIG_MESHTASTIC_BLE && CONFIG_MESHTASTIC_TCP */
 
+/* --- LoRa modem preset ------------------------------------------------------
+ * Gives the shell parity with the phone app / Python CLI for changing the modem
+ * preset. `meshtastic lora` shows the current preset/region/primary hash;
+ * `meshtastic lora preset <name>` sets it. The write persists through the same
+ * config_store path, but the SX1262 is only (re)configured at radio init, so the
+ * change takes effect on the next boot (F-1) -- the app/CLI admin path reboots
+ * automatically; the shell prints the hint, matching `transport`. */
+static void cmd_lora_show(const struct shell *sh)
+{
+	meshtastic_Config cfg;
+	uint8_t pi = meshtastic_channels_primary_index();
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg) < 0) {
+		shell_error(sh, "lora get failed");
+		return;
+	}
+	shell_print(sh, "modem preset: %s%s",
+		    meshtastic_preset_display_name(cfg.payload_variant.lora.modem_preset,
+						  cfg.payload_variant.lora.use_preset),
+		    cfg.payload_variant.lora.use_preset ? "" : " (custom; use_preset=off)");
+	shell_print(sh, "region:       %d", (int)cfg.payload_variant.lora.region);
+	shell_print(sh, "primary chan: name=\"%s\" hash=0x%02x",
+		    meshtastic_channels_get_name(pi), meshtastic_channels_get_hash(pi));
+}
+
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+/* Match a preset display name (as reported by meshtastic_preset_display_name, so
+ * the accepted spellings always equal what `meshtastic lora` shows). */
+static int shell_parse_modem_preset(const char *s,
+				    meshtastic_Config_LoRaConfig_ModemPreset *out)
+{
+	static const meshtastic_Config_LoRaConfig_ModemPreset presets[] = {
+		meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+		meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW,
+		meshtastic_Config_LoRaConfig_ModemPreset_LONG_MODERATE,
+		meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_SLOW,
+		meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST,
+		meshtastic_Config_LoRaConfig_ModemPreset_SHORT_SLOW,
+		meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST,
+		meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
+	};
+
+	for (size_t i = 0U; i < ARRAY_SIZE(presets); i++) {
+		if (strcmp(s, meshtastic_preset_display_name(presets[i], true)) == 0) {
+			*out = presets[i];
+			return 0;
+		}
+	}
+	return -EINVAL;
+}
+
+static int cmd_lora_preset_set(const struct shell *sh, const char *name)
+{
+	meshtastic_Config cfg;
+	meshtastic_Config_LoRaConfig_ModemPreset preset;
+	int ret;
+
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+	if (shell_parse_modem_preset(name, &preset) < 0) {
+		shell_error(sh, "unknown preset '%s' (e.g. LongFast, MediumFast, ShortTurbo; "
+				"see `meshtastic lora`)", name);
+		return -EINVAL;
+	}
+
+	ret = meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg);
+	if (ret < 0) {
+		shell_error(sh, "lora get failed: %d", ret);
+		return ret;
+	}
+	cfg.which_payload_variant = meshtastic_Config_lora_tag;
+	cfg.payload_variant.lora.use_preset = true;
+	cfg.payload_variant.lora.modem_preset = preset;
+
+	ret = meshtastic_config_store_set_config(&cfg);
+	if (ret < 0) {
+		shell_error(sh, "lora set failed: %d", ret);
+		return ret;
+	}
+	/* set_config schedules the coalesced save (like `channel set`); it lands well
+	 * before a manual reboot, so no explicit flush is needed here. */
+
+	shell_print(sh, "modem preset -> %s (persisted); reboot to apply "
+			"(`kernel reboot cold`)",
+		    meshtastic_preset_display_name(preset, true));
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+
+static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 1U) {
+		cmd_lora_show(sh);
+		return 0;
+	}
+	if (argc != 3U || strcmp(argv[1], "preset") != 0) {
+		shell_error(sh, "usage: meshtastic lora [preset <name>]");
+		return -EINVAL;
+	}
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	shell_error(sh, "refused: shell config writes are compiled out "
+			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
+	return -ENOTSUP;
+#else
+	return cmd_lora_preset_set(sh, argv[2]);
+#endif
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
@@ -1792,6 +1902,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  NULL),
 	SHELL_CMD(device, &meshtastic_device_cmds,
 		  SHELL_HELP("Device role and rebroadcast commands.", NULL), NULL),
+	SHELL_CMD(lora, NULL,
+		  SHELL_HELP("Show or set the LoRa modem preset (reboot to apply).",
+			     "[preset <name>]"),
+		  cmd_lora),
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
 	SHELL_CMD(text, &meshtastic_text_cmds, SHELL_HELP("Text message commands.", NULL), NULL),
 #endif

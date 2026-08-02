@@ -248,6 +248,32 @@ static size_t encode_admin_set_role(meshtastic_Config_DeviceConfig_Role role,
 	return os.bytes_written;
 }
 
+/* Encode an AdminMessage set_config(lora) carrying the given passkey. Changing the
+ * modem preset is a LoRa change, which F-1 must schedule a reboot for (the SX1262
+ * is only reconfigured at radio init). */
+static size_t encode_admin_set_lora_preset(meshtastic_Config_LoRaConfig_ModemPreset preset,
+					   const uint8_t *passkey, size_t passkey_len, uint8_t *buf,
+					   size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+	meshtastic_Config_LoRaConfig *lora;
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
+	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_lora_tag;
+	lora = &am.payload_variant.set_config.payload_variant.lora;
+	lora->use_preset = true;
+	lora->modem_preset = preset;
+	lora->region = meshtastic_Config_LoRaConfig_RegionCode_US;
+	lora->hop_limit = 3;
+	if (passkey != NULL && passkey_len > 0U) {
+		am.session_passkey.size = (pb_size_t)passkey_len;
+		memcpy(am.session_passkey.bytes, passkey, passkey_len);
+	}
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
 /* Build a genuine PKC-encrypted ADMIN_APP wire frame "from PEER to us" and feed
  * it through the LoRa RX path. Uses the ECDH-symmetry trick described up top. */
 static void inject_pkc_admin(const uint8_t *admin_bytes, size_t admin_len, uint32_t id)
@@ -510,6 +536,58 @@ ZTEST(admin_pki, test_pkc_admin_key_authorized_applies)
 	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
 		      "authorized PKC admin must decrypt, authorize, and apply the config");
 
+	set_admin_key(NULL, 0U);
+}
+
+/* F-1: a LoRa config change over admin must SCHEDULE A REBOOT (the SX1262 is only
+ * reconfigured at radio init, so a live config write alone leaves the radio on the
+ * old preset/frequency), whereas a live-applied section (device role) must NOT.
+ * Upstream reboots on any LoRaConfig change; the port previously excluded lora and
+ * silently diverged. */
+ZTEST(admin_pki, test_lora_config_change_schedules_reboot)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	size_t len;
+
+	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
+
+	/* Device role applies live via apply_core -> must NOT schedule a reboot. */
+	meshtastic_admin_cancel_reboot();
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_CLIENT, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, 0x0AD1F001U);
+	k_sleep(K_MSEC(50));
+	zassert_false(meshtastic_admin_reboot_scheduled(),
+		      "device-role change applies live and must NOT schedule a reboot");
+
+	/* LoRa preset change needs a radio re-init -> must schedule a reboot (F-1). */
+	meshtastic_admin_cancel_reboot();
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_lora_preset(meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST, key,
+					   sizeof(key), buf, sizeof(buf));
+	inject_pkc_admin(buf, len, 0x0AD1F002U);
+	k_sleep(K_MSEC(50));
+	zassert_true(meshtastic_admin_reboot_scheduled(),
+		     "a LoRa config change must schedule a reboot (F-1)");
+
+	/* Cleanup: cancel the scheduled reboot (so the sim doesn't reboot) and restore
+	 * the default preset for any later test. */
+	meshtastic_admin_cancel_reboot();
+	{
+		meshtastic_Config lora = meshtastic_Config_init_zero;
+
+		lora.which_payload_variant = meshtastic_Config_lora_tag;
+		lora.payload_variant.lora.use_preset = true;
+		lora.payload_variant.lora.modem_preset =
+			meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+		lora.payload_variant.lora.region = meshtastic_Config_LoRaConfig_RegionCode_US;
+		lora.payload_variant.lora.hop_limit = 3;
+		(void)meshtastic_config_store_set_config(&lora);
+	}
 	set_admin_key(NULL, 0U);
 }
 
