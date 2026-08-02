@@ -105,14 +105,37 @@ int meshtastic_pki_init(void)
 	ret = meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg);
 	if (ret == 0 && cfg.which_payload_variant == meshtastic_Config_security_tag &&
 	    cfg.payload_variant.security.private_key.size == PKI_KEY_LEN) {
-		/* Reuse the persisted key — NEVER regenerate when one exists. */
+		/* Reuse the persisted PRIVATE key — never regenerate when one exists — but
+		 * ALWAYS re-derive the public key from it rather than trusting a stored
+		 * public_key. Upstream does the same (CryptoEngine::ensurePkiKeys ->
+		 * regeneratePublicKey on every load). A persisted public_key that has
+		 * desynced from the private key (a partial NVS write, or an admin
+		 * set_config that set one field without the other) would otherwise make
+		 * this node advertise a key that does not match its private key, so EVERY
+		 * peer's PKC DM to it decrypts to garbage and is NAKed NO_CHANNEL, forever.
+		 */
 		memcpy(g_priv, cfg.payload_variant.security.private_key.bytes, PKI_KEY_LEN);
-		if (cfg.payload_variant.security.public_key.size == PKI_KEY_LEN) {
-			memcpy(g_pub, cfg.payload_variant.security.public_key.bytes, PKI_KEY_LEN);
-		} else if (pki_derive_public(g_priv, g_pub) != 0) {
+		if (pki_derive_public(g_priv, g_pub) != 0) {
 			return -EIO;
 		}
 		g_have_key = true;
+
+		/* Self-heal a desynced NVS: if the stored public_key disagrees with the
+		 * one derived from the private key, correct it in the config store so the
+		 * SecurityConfig (and the advertised User key that reads from g_pub) match
+		 * the private key from here on, and peers re-learn the right key. */
+		if (cfg.payload_variant.security.public_key.size != PKI_KEY_LEN ||
+		    memcmp(cfg.payload_variant.security.public_key.bytes, g_pub, PKI_KEY_LEN) != 0) {
+			LOG_WRN("PKI stored public_key did not match the private key — "
+				"corrected (pub now %02x%02x%02x..)", g_pub[0], g_pub[1],
+				g_pub[2]);
+			cfg.payload_variant.security.public_key.size = PKI_KEY_LEN;
+			memcpy(cfg.payload_variant.security.public_key.bytes, g_pub, PKI_KEY_LEN);
+			if (meshtastic_config_store_set_config(&cfg) == 0) {
+				(void)meshtastic_settings_flush();
+			}
+		}
+
 		LOG_INF("PKI keypair loaded from NVS (pub %02x%02x%02x..)", g_pub[0], g_pub[1],
 			g_pub[2]);
 		return 0;

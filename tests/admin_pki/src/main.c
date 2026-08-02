@@ -352,6 +352,73 @@ ZTEST(admin_pki, test_dm_without_peer_key_refused)
 		     "a DM to a keyless peer must be refused, not channel-encrypted");
 }
 
+/* DM-2 regression: a persisted SecurityConfig whose public_key has desynced from
+ * its private_key (a partial NVS write, or an admin set_config that touched one
+ * field) is SELF-HEALED on pki_init — the advertised/stored pub is re-derived from
+ * the private key, not trusted from NVS. Without this the node advertises a key
+ * that does not match its private key, so every peer's PKC DM to it decrypts to
+ * garbage and is NAKed NO_CHANNEL forever. Mirrors upstream ensurePkiKeys(). */
+ZTEST(admin_pki, test_pki_init_rederives_public_key_from_private)
+{
+	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+	psa_key_id_t kid = PSA_KEY_ID_NULL;
+	uint8_t priv[MESHTASTIC_PKI_KEY_LEN];
+	uint8_t correct_pub[MESHTASTIC_PKI_KEY_LEN];
+	uint8_t wrong_pub[MESHTASTIC_PKI_KEY_LEN];
+	uint8_t got_pub[MESHTASTIC_PKI_KEY_LEN];
+	meshtastic_Config sec = meshtastic_Config_init_zero;
+	meshtastic_Config saved;
+	bool had_saved;
+	size_t olen = 0;
+
+	/* Preserve the suite's real keypair so this test is order-independent. */
+	had_saved = (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &saved) == 0);
+
+	/* A genuine keypair: we hold both the private scalar and its true public key. */
+	psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
+	psa_set_key_bits(&attr, 255);
+	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_DERIVE | PSA_KEY_USAGE_EXPORT);
+	psa_set_key_algorithm(&attr, PSA_ALG_ECDH);
+	zassert_equal(psa_generate_key(&attr, &kid), PSA_SUCCESS, "keygen failed");
+	zassert_equal(psa_export_key(kid, priv, sizeof(priv), &olen), PSA_SUCCESS, "priv export");
+	zassert_equal(psa_export_public_key(kid, correct_pub, sizeof(correct_pub), &olen),
+		      PSA_SUCCESS, "pub export");
+	(void)psa_destroy_key(kid);
+
+	/* A DIFFERENT valid pubkey stands in for the desynced/stored one. */
+	gen_x25519_pubkey(wrong_pub);
+	zassert_true(memcmp(wrong_pub, correct_pub, sizeof(correct_pub)) != 0, "keys collided");
+
+	/* Persist priv + WRONG pub, as a corrupted/partial NVS write would leave it. */
+	sec.which_payload_variant = meshtastic_Config_security_tag;
+	sec.payload_variant.security.private_key.size = MESHTASTIC_PKI_KEY_LEN;
+	memcpy(sec.payload_variant.security.private_key.bytes, priv, MESHTASTIC_PKI_KEY_LEN);
+	sec.payload_variant.security.public_key.size = MESHTASTIC_PKI_KEY_LEN;
+	memcpy(sec.payload_variant.security.public_key.bytes, wrong_pub, MESHTASTIC_PKI_KEY_LEN);
+	zassert_ok(meshtastic_config_store_set_config(&sec), "seed desynced security cfg");
+
+	/* Re-init: with the fix the pub is re-derived from priv, not trusted from NVS. */
+	zassert_ok(meshtastic_pki_init(), "pki_init failed");
+
+	/* The advertised key now matches the private key (the true derived pub). */
+	zassert_equal(meshtastic_pki_get_public_key(got_pub), (size_t)MESHTASTIC_PKI_KEY_LEN,
+		      "get pub len");
+	zassert_mem_equal(got_pub, correct_pub, MESHTASTIC_PKI_KEY_LEN,
+			  "advertised pub must be re-derived from the private key");
+
+	/* ...and the NVS was self-healed (stored pub corrected, not left wrong). */
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &sec),
+		   "reread sec");
+	zassert_mem_equal(sec.payload_variant.security.public_key.bytes, correct_pub,
+			  MESHTASTIC_PKI_KEY_LEN, "stored pub must be corrected in NVS");
+
+	/* Restore the suite's original keypair for any later test. */
+	if (had_saved) {
+		zassert_ok(meshtastic_config_store_set_config(&saved), "restore sec");
+		zassert_ok(meshtastic_pki_init(), "re-init restore");
+	}
+}
+
 /* A DM to a peer whose public key we DO hold is PKC-encrypted: dest is the peer,
  * and the wire channel-hash byte is the 0x00 PKC marker (not a channel hash). */
 ZTEST(admin_pki, test_pkc_dm_uses_zero_wire_marker)
