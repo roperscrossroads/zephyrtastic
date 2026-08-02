@@ -39,6 +39,20 @@ config MESHTASTIC_NODEDB_PERSIST_KEYS
 	  until each peer re-announces its NodeInfo. Only public keys are
 	  stored; names and other metadata stay in the hot store.
 
+config MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS
+	bool "Purge stale-format persisted node keys at boot (one-shot dev cleanup)"
+	depends on MESHTASTIC_NODEDB_PERSIST_KEYS
+	default n
+	help
+	  One-shot cleanup for a device upgraded across a persisted-key format
+	  change. At boot, delete any mtnode/<id> record whose size is not the
+	  current format before restoring the rest, so an older build's records
+	  are removed from NVS without a full storage-partition erase. Scoped
+	  strictly to the node-key subtree: the device private key and WiFi
+	  credentials are not touched. Pre-1.0 the policy is wipe-and-re-learn on
+	  a format bump, not a migration branch; build with this =y, flash once,
+	  then flash a normal (=n) build. Leave off for normal builds.
+
 config MESHTASTIC_NODEDB_WARM_KEYS
 	int "Warm key-tier size"
 	depends on MESHTASTIC_NODEDB_PERSIST_KEYS

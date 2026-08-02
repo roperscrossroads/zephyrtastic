@@ -328,10 +328,11 @@ struct warm_key {
 };
 
 /* Persisted record: last_seen (LE32) + role (u8) + public key. Restoring recency keeps warm
- * LRU meaningful across reboots; role lets an evicted->readmitted peer keep it (B-5). Older
- * records are accepted for back-compat: 36 B (last_seen + key, pre-role) and 32 B (key only). */
-#define MTNODE_REC_LEN    (sizeof(uint32_t) + 1U + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) /* 37 */
-#define MTNODE_REC_LEN_V1 (sizeof(uint32_t) + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN)      /* 36, pre-role */
+ * LRU meaningful across reboots; role lets an evicted->readmitted peer keep it (B-5). Only the
+ * current 37 B format is read; a differently-sized record is a stale format left by an older
+ * build. Pre-1.0 policy is wipe-and-re-learn, not a migration branch — the one-shot
+ * CONFIG_MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS deletes any such record from NVS. */
+#define MTNODE_REC_LEN (sizeof(uint32_t) + 1U + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) /* 37 */
 
 static MESHTASTIC_EXT_RAM_BSS_ATTR struct warm_key warm_keys[CONFIG_MESHTASTIC_NODEDB_WARM_KEYS];
 
@@ -545,46 +546,103 @@ static void nodekeys_schedule_save(void)
 				K_MSEC(CONFIG_MESHTASTIC_SETTINGS_SAVE_DELAY_MS));
 }
 
+#if defined(CONFIG_MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS)
+struct nodekeys_purge_ctx {
+	uint32_t ids[WARM_RECONCILE_BATCH];
+	size_t count;
+	bool more;
+};
+
+/* Direct-load callback over the mtnode subtree: collect ids whose record length is
+ * NOT the current MTNODE_REC_LEN (a stale pre-role/key-only format to purge). */
+static int nodekeys_purge_cb(const char *key, size_t len, settings_read_cb read_cb,
+			     void *cb_arg, void *param)
+{
+	struct nodekeys_purge_ctx *ctx = param;
+	const char *id = strrchr(key, '/');
+	uint32_t num;
+	char *endptr;
+
+	ARG_UNUSED(read_cb);
+	ARG_UNUSED(cb_arg);
+
+	if (len == MTNODE_REC_LEN) {
+		return 0; /* current format — keep */
+	}
+
+	id = (id != NULL) ? id + 1 : key;
+	num = (uint32_t)strtoul(id, &endptr, 16);
+	if (*endptr != '\0' || num == 0U) {
+		return 0;
+	}
+	if (ctx->count < ARRAY_SIZE(ctx->ids)) {
+		ctx->ids[ctx->count++] = num;
+	} else {
+		ctx->more = true;
+	}
+	return 0;
+}
+
+/* One-shot dev cleanup (temp build): delete every persisted mtnode/<id> record whose
+ * length is not the current 37 B format, so a device that ran an older build converges
+ * to a clean, single-format key store without a full NVS erase. Scoped strictly to the
+ * mtnode subtree — the device private key (meshtastic config subtree) and WiFi creds
+ * (wifi_cred subtree) are never touched. Batched with a pass cap so a large backlog is
+ * fully drained but a persistently-failing delete can't spin forever. */
+static void nodekeys_purge_foreign(void)
+{
+	char name[SETTINGS_MAX_NAME_LEN + 1];
+	size_t total = 0U;
+	int passes = 0;
+
+	do {
+		struct nodekeys_purge_ctx ctx = {.count = 0U, .more = false};
+
+		(void)settings_load_subtree_direct(MTNODE_SUBTREE, nodekeys_purge_cb, &ctx);
+		for (size_t i = 0U; i < ctx.count; i++) {
+			(void)snprintk(name, sizeof(name), MTNODE_SUBTREE "/%08x", ctx.ids[i]);
+			(void)settings_delete(name);
+		}
+		total += ctx.count;
+		if (!ctx.more || ++passes >= 64) {
+			break;
+		}
+	} while (true);
+
+	if (total > 0U) {
+		LOG_WRN("NodeDB purged %zu foreign (non-%u B) key record(s) from NVS",
+			total, (unsigned int)MTNODE_REC_LEN);
+	} else {
+		LOG_INF("NodeDB purge: no foreign key records in NVS");
+	}
+}
+#endif /* CONFIG_MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS */
+
 static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	uint8_t buf[MTNODE_REC_LEN];
 	uint32_t node_num;
 	uint32_t last_seen;
-	uint8_t role = 0U;
+	uint8_t role;
 	const uint8_t *pub;
 	char *endptr;
 	ssize_t read;
 
-	if (len == MTNODE_REC_LEN) {
-		/* Current format: last_seen (LE32) + role (u8) + public key. */
-		read = read_cb(cb_arg, buf, MTNODE_REC_LEN);
-		if (read != (ssize_t)MTNODE_REC_LEN) {
-			return 0;
-		}
-		last_seen = sys_get_le32(buf);
-		role = buf[sizeof(uint32_t)];
-		pub = buf + sizeof(uint32_t) + 1U;
-	} else if (len == MTNODE_REC_LEN_V1) {
-		/* Pre-role format: last_seen (LE32) + public key. Role defaults to CLIENT (0). */
-		read = read_cb(cb_arg, buf, MTNODE_REC_LEN_V1);
-		if (read != (ssize_t)MTNODE_REC_LEN_V1) {
-			return 0;
-		}
-		last_seen = sys_get_le32(buf);
-		pub = buf + sizeof(uint32_t);
-	} else if (len == MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) {
-		/* Legacy key-only record (pre-recency): restore the key, but rank it
-		 * oldest (last_seen 0) so it's evicted first and re-stamped on save. */
-		read = read_cb(cb_arg, buf, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
-		if (read != (ssize_t)MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) {
-			return 0;
-		}
-		last_seen = 0U;
-		pub = buf;
-	} else {
+	/* Only the current 37 B format is accepted. A stale-format record (a pre-role
+	 * 36 B or key-only 32 B one) is ignored here and removed from NVS by the
+	 * one-shot CONFIG_MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS pass. */
+	if (len != MTNODE_REC_LEN) {
 		LOG_WRN("Ignoring persisted node key '%s' with unexpected size %zu", key, len);
 		return 0;
 	}
+
+	read = read_cb(cb_arg, buf, MTNODE_REC_LEN);
+	if (read != (ssize_t)MTNODE_REC_LEN) {
+		return 0;
+	}
+	last_seen = sys_get_le32(buf);
+	role = buf[sizeof(uint32_t)];
+	pub = buf + sizeof(uint32_t) + 1U;
 
 	node_num = (uint32_t)strtoul(key, &endptr, 16);
 	if (*endptr != '\0' || node_num == 0U) {
@@ -1657,6 +1715,12 @@ int meshtastic_nodedb_init(void)
 	k_mutex_unlock(&nodedb_lock);
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+#if defined(CONFIG_MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS)
+	/* One-shot dev cleanup: drop any stale-format mtnode records before restoring,
+	 * so the load below only ever sees the current 37 B format. */
+	nodekeys_purge_foreign();
+#endif
+
 	/* Restore persisted peer public keys now the array is initialised and the
 	 * settings subsystem is up (settings_subsys_init ran earlier in
 	 * meshtastic_init). Runs outside the lock: nodekeys_set() takes it. */
