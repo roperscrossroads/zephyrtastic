@@ -67,8 +67,9 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define INH_ACTIVITY  BIT(2) /* within min_wake_secs of the last activity */
 #define INH_BOOT_WAIT BIT(3) /* within wait_bluetooth_secs of boot */
 #define INH_WIFI      BIT(4) /* the network link is up (IPv4 lease held) */
+#define INH_MANUAL    BIT(5) /* a bench/debug hold: `meshtastic pm off` (volatile) */
 #define INH_ALL                                                                                    \
-	(INH_POLICY | INH_PHONE | INH_ACTIVITY | INH_BOOT_WAIT | INH_WIFI)
+	(INH_POLICY | INH_PHONE | INH_ACTIVITY | INH_BOOT_WAIT | INH_WIFI | INH_MANUAL)
 
 /* Everything below is guarded by gov_lock. The bitmask read-modify-write AND the
  * paired pm_policy get/put happen together inside one region so the lock toggles
@@ -205,6 +206,32 @@ void meshtastic_power_note_wifi_down(void)
 	k_spin_unlock(&gov_lock, key);
 }
 
+/* Bench/debug override: pin the node awake (hold == true) or release the pin
+ * (hold == false), independent of every other inhibitor. This is a VOLATILE hold —
+ * it is not persisted and does not touch PowerConfig, so it survives no reboot and
+ * fights no phone. It exists to answer "is light sleep the cause?" in one command:
+ * `meshtastic pm off` sets it so a node stays observable for a session; `meshtastic
+ * pm on` clears it. Deliberately distinct from is_power_saving (the persisted
+ * preference the POLICY inhibitor tracks) — an observability switch, not a config
+ * write, so it is not gated by CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE nor refused on a
+ * managed node. Idempotent on the mask, like the WiFi notes. */
+void meshtastic_power_set_manual_inhibit(bool hold)
+{
+	k_spinlock_key_t key = k_spin_lock(&gov_lock);
+
+	inhibit_update_locked(INH_MANUAL, hold);
+	k_spin_unlock(&gov_lock, key);
+}
+
+bool meshtastic_power_manual_inhibit(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&gov_lock);
+	bool held = (inhibitors & INH_MANUAL) != 0U;
+
+	k_spin_unlock(&gov_lock, key);
+	return held;
+}
+
 void meshtastic_power_config_apply(void)
 {
 	meshtastic_Config config;
@@ -260,7 +287,7 @@ void meshtastic_power_inhibitors_str(uint32_t mask, char *buf, size_t n)
 		const char *name;
 	} names[] = {
 		{INH_POLICY, "POLICY"},       {INH_PHONE, "PHONE"}, {INH_ACTIVITY, "ACTIVITY"},
-		{INH_BOOT_WAIT, "BOOT_WAIT"}, {INH_WIFI, "WIFI"},
+		{INH_BOOT_WAIT, "BOOT_WAIT"}, {INH_WIFI, "WIFI"},   {INH_MANUAL, "MANUAL"},
 	};
 	size_t off = 0;
 

@@ -203,6 +203,16 @@ void meshtastic_power_note_wifi_down(void);
  * "meshtastic power" shell command to report why the SoC is (not) sleeping. */
 uint32_t meshtastic_power_inhibitors(void);
 void meshtastic_power_inhibitors_str(uint32_t mask, char *buf, size_t n);
+
+/* Volatile bench/debug override for the light-sleep governor. hold==true pins the
+ * node awake (a dedicated inhibitor), independent of every other inhibitor and of
+ * the persisted PowerConfig; hold==false releases it. Not persisted (cleared on
+ * reboot) and not a config write, so it neither fights a phone nor is refused on a
+ * managed node — an observability lever, driven by the "meshtastic pm [on|off]"
+ * shell command to rule light sleep in or out during a bench session. No-op without
+ * CONFIG_PM. */
+void meshtastic_power_set_manual_inhibit(bool hold);
+bool meshtastic_power_manual_inhibit(void);
 #else
 static inline void meshtastic_power_config_apply(void)
 {
@@ -232,6 +242,14 @@ static inline void meshtastic_power_inhibitors_str(uint32_t mask, char *buf, siz
 	if (n > 0U) {
 		buf[0] = '\0';
 	}
+}
+static inline void meshtastic_power_set_manual_inhibit(bool hold)
+{
+	(void)hold;
+}
+static inline bool meshtastic_power_manual_inhibit(void)
+{
+	return false;
 }
 #endif
 

@@ -207,4 +207,63 @@ ZTEST(power, test_boot_wait_arms_once)
 	zassert_false(standby_locked(), "STANDBY allowed after wait_bluetooth_secs");
 }
 
+/* MANUAL inhibitor: the volatile `meshtastic pm off` bench hold. It blocks STANDBY
+ * on its own, independent of PowerConfig, and its accessor mirrors the state. */
+ZTEST(power, test_manual_hold)
+{
+	apply_power_config(true, 0U, 0U); /* power saving on -> nothing else inhibits */
+	zassert_false(standby_locked(), "idle with power saving on -> unlocked");
+	zassert_false(meshtastic_power_manual_inhibit(), "hold starts released");
+
+	meshtastic_power_set_manual_inhibit(true);
+	zassert_true(standby_locked(), "manual hold must block STANDBY");
+	zassert_true(meshtastic_power_manual_inhibit(), "accessor reflects the hold");
+
+	/* Idempotent: a second set holds the same lock (no double get to unbalance). */
+	meshtastic_power_set_manual_inhibit(true);
+	zassert_true(standby_locked(), "duplicate hold stays locked");
+
+	meshtastic_power_set_manual_inhibit(false);
+	zassert_false(standby_locked(), "releasing the hold allows STANDBY");
+	zassert_false(meshtastic_power_manual_inhibit(), "accessor reflects the release");
+
+	/* Idempotent release: a second clear stays unlocked (no double put to assert). */
+	meshtastic_power_set_manual_inhibit(false);
+	zassert_false(standby_locked(), "duplicate release stays unlocked");
+}
+
+/* MANUAL composes with POLICY: it is independent of is_power_saving, so the hold
+ * keeps STANDBY blocked even after power saving is turned on, and clearing it while
+ * power saving is off leaves POLICY still holding the lock. */
+ZTEST(power, test_manual_composes_with_policy)
+{
+	apply_power_config(false, 0U, 0U);    /* POLICY set (power saving off) */
+	meshtastic_power_set_manual_inhibit(true); /* MANUAL set too */
+	zassert_true(standby_locked(), "both inhibitors set -> locked");
+
+	apply_power_config(true, 0U, 0U); /* clear POLICY; MANUAL still held */
+	zassert_true(standby_locked(), "manual hold alone still blocks STANDBY");
+
+	meshtastic_power_set_manual_inhibit(false); /* clear MANUAL; nothing set */
+	zassert_false(standby_locked(), "last inhibitor gone -> STANDBY allowed");
+
+	/* And the reverse order: POLICY outlives a released manual hold. */
+	meshtastic_power_set_manual_inhibit(true);
+	apply_power_config(false, 0U, 0U); /* POLICY set */
+	meshtastic_power_set_manual_inhibit(false);
+	zassert_true(standby_locked(), "POLICY still holds after the manual release");
+}
+
+/* meshtastic_power_reset() clears the manual hold (INH_MANUAL is in INH_ALL), so it
+ * cannot leak across test cases or a governor re-init. */
+ZTEST(power, test_manual_cleared_by_reset)
+{
+	meshtastic_power_set_manual_inhibit(true);
+	zassert_true(standby_locked(), "hold engaged");
+
+	meshtastic_power_reset();
+	zassert_false(standby_locked(), "reset clears the manual hold");
+	zassert_false(meshtastic_power_manual_inhibit(), "accessor clear after reset");
+}
+
 ZTEST_SUITE(power, NULL, NULL, power_before, NULL, NULL);

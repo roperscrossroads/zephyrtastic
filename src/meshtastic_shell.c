@@ -1600,7 +1600,15 @@ static int cmd_power_show(const struct shell *sh)
 		shell_print(sh, "STANDBY lock:        held by esp-idf radio controller "
 				"(WiFi/BLE), NOT the governor");
 	}
-	shell_print(sh, "light-sleep entries: %u", meshtastic_powermon_sleep_count());
+	shell_print(sh, "light-sleep entries: %u%s", meshtastic_powermon_sleep_count(),
+		    meshtastic_powermon_sleep_count() == 0U
+			    ? "  (0 == SoC has never light-slept; expected while a radio "
+			      "controller holds STANDBY)"
+			    : "");
+	if (meshtastic_power_manual_inhibit()) {
+		shell_print(sh, "manual pm hold:      ENGAGED -- pinned awake by `meshtastic pm "
+				"off` (volatile; cleared on reboot)");
+	}
 	return 0;
 }
 
@@ -1667,6 +1675,62 @@ static int cmd_power(const struct shell *sh, size_t argc, char **argv)
 	shell_error(sh, "expected on or off, got %s", argv[1]);
 	return -EINVAL;
 #endif
+}
+
+/*
+ * pm [on|off] — a volatile debug hold that pins the node awake, distinct from
+ * `power`.
+ *
+ *   pm off  disables light sleep now (holds the governor's MANUAL inhibitor).
+ *   pm on   re-enables it (releases the hold; sleep is governed by config again).
+ *   pm      reports whether the hold is engaged.
+ *
+ * Why this is separate from `power on|off`:
+ *   - `power off` writes is_power_saving=false into the PERSISTED PowerConfig (a
+ *     config write: it survives reboot, is refused on a managed node, and a phone
+ *     can flip it back). It expresses the node's power-saving *preference*.
+ *   - `pm off` sets a VOLATILE inhibitor only. It persists nothing, is cleared on
+ *     reboot, touches no config, and is never refused — because ruling light sleep
+ *     in or out for a debugging session is an observability action, not a
+ *     configuration one. Use it to pin a bench node awake without disturbing its
+ *     stored config or fighting an attached phone.
+ *
+ * Note this holds only the GOVERNOR's lock; on a radio-up node the esp-idf WiFi/BLE
+ * controller already pins STANDBY independently (see `power`), so there the hold is
+ * belt-and-suspenders. It bites where the governor is the deciding vote (radio down,
+ * e.g. under `netpause`, or a non-radio build).
+ */
+static int cmd_pm(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 1U) {
+		shell_print(sh, "manual pm hold: %s",
+			    meshtastic_power_manual_inhibit()
+				    ? "engaged (light sleep disabled; pinned awake)"
+				    : "released (light sleep governed by power config)");
+		shell_print(sh, "(`meshtastic power` shows the full governor + STANDBY-lock "
+				"state)");
+		return 0;
+	}
+
+	if (argc != 2U) {
+		shell_error(sh, "usage: meshtastic pm [on|off]");
+		return -EINVAL;
+	}
+
+	if (strcmp(argv[1], "off") == 0) {
+		meshtastic_power_set_manual_inhibit(true);
+		shell_print(sh, "light sleep DISABLED (node pinned awake; volatile, cleared on "
+				"reboot)");
+		return 0;
+	}
+	if (strcmp(argv[1], "on") == 0) {
+		meshtastic_power_set_manual_inhibit(false);
+		shell_print(sh, "light sleep RE-ENABLED (governed by power config)");
+		return 0;
+	}
+
+	shell_error(sh, "expected on or off, got %s", argv[1]);
+	return -EINVAL;
 }
 #endif /* CONFIG_PM */
 
@@ -1889,6 +1953,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(power, NULL,
 		  SHELL_HELP("Show or set the light-sleep power-saving policy.", "[on|off]"),
 		  cmd_power),
+	SHELL_CMD(pm, NULL,
+		  SHELL_HELP("Volatile bench hold: pin the node awake (off) or release (on). "
+			     "Not persisted; distinct from `power`.",
+			     "[on|off]"),
+		  cmd_pm),
 #endif
 #if defined(CONFIG_MESHTASTIC_BLE) && defined(CONFIG_MESHTASTIC_TCP)
 	SHELL_CMD(transport, NULL,
