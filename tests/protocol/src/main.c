@@ -743,6 +743,71 @@ ZTEST(protocol_stack, test_mesh_packet_conversion_preserves_decoded_metadata)
 	assert_payload(out.payload, out.payload_len, body, sizeof(body) - 1U);
 }
 
+/* ================= C3 migration acceptance detectors ==============================
+ *
+ * These assert the field preservation the hand-rolled struct meshtastic_packet loses at
+ * its converter boundaries (see docs/c3-migration-plan.md and module-parity.md root
+ * cause C3). The mechanism: while a loss stands, the detector asserts the DESIRED
+ * behavior and is marked ZTEST_EXPECT_FAIL so the suite stays green; when a migration
+ * phase preserves the field, its ZTEST_EXPECT_FAIL line is deleted and the detector
+ * becomes a normal regression guard. (An EXPECT_FAIL test that starts passing is
+ * reported as an "unexpected pass" — the signal to drop the marker.)
+ *
+ * The two below are now PLAIN passing guards: pki_encrypted + bitfield/consent were
+ * fixed in Phase 1 (to_mesh_pb). Phase 2 adds EXPECT_FAIL detectors here for emoji /
+ * rx_time on the RX -> FromRadio path (see the note after these two).
+ * ---------------------------------------------------------------------------------- */
+
+/* TXT-2: the PKC flag must reach the phone's FromRadio view. FIXED in Phase 1
+ * (to_mesh_pb now copies pki_encrypted); this is now the regression guard. */
+ZTEST(protocol_stack, test_c3_detector_pki_encrypted_reaches_phone)
+{
+	struct meshtastic_packet packet = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.id = 0x5301U,
+		.portnum = MESHTASTIC_PORT_PRIVATE,
+		.channel_index = meshtastic_channels_primary_index(),
+		.pki_encrypted = true,
+	};
+	meshtastic_MeshPacket mesh;
+
+	zassert_ok(meshtastic_packet_to_mesh_pb(&packet, &mesh), "conversion failed");
+	zassert_true(mesh.pki_encrypted,
+		     "pki_encrypted must survive to the phone (TXT-2) -- Phase 1 fixes to_mesh_pb");
+}
+
+/* Consent: the OK_TO_MQTT bitfield and its presence must reach the phone, so it can tell
+ * "declined" from "never asked". FIXED in Phase 1 (to_mesh_pb now carries Data.bitfield
+ * + presence); this is now the regression guard. */
+ZTEST(protocol_stack, test_c3_detector_consent_bitfield_reaches_phone)
+{
+	struct meshtastic_packet packet = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.id = 0x5302U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.channel_index = meshtastic_channels_primary_index(),
+		.has_bitfield = true,
+		.bitfield = MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK,
+	};
+	meshtastic_MeshPacket mesh;
+
+	zassert_ok(meshtastic_packet_to_mesh_pb(&packet, &mesh), "conversion failed");
+	zassert_true(mesh.decoded.has_bitfield, "bitfield presence must survive to the phone");
+	zassert_equal(mesh.decoded.bitfield, MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK,
+		      "OK_TO_MQTT consent must survive to the phone -- Phase 1 fixes to_mesh_pb");
+}
+
+/* NOTE: the emoji (TXT-1) and rx_time (TXT-6) detectors are deliberately NOT here.
+ * They cannot be expressed at the converter level: the boundary-adapter struct stays
+ * lossy by design (it never models emoji/rx_time), so a mesh_pb -> struct -> mesh_pb
+ * round-trip would stay red even after the migration. Their real acceptance is the
+ * production RX -> FromRadio path (does the PHONE see the field), which is built with
+ * the phone-capture harness in Phase 2 (Strategy C seam 1). See docs/c3-migration-plan.md. */
+
+/* ================= end C3 acceptance detectors ==================================== */
+
 /* Verifies MeshPacket copies preserve encrypted union data and the active payload variant. */
 ZTEST(protocol_stack, test_mesh_packet_copy_preserves_encrypted_payload)
 {

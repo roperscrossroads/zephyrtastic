@@ -194,6 +194,10 @@ int meshtastic_packet_to_mesh_pb(const struct meshtastic_packet *packet,
 	mesh->via_mqtt = packet->via_mqtt;
 	mesh->next_hop = packet->next_hop;
 	mesh->relay_node = packet->relay_node;
+	/* TXT-2: a DM decrypted via PKC must be flagged as such on the phone's FromRadio
+	 * view, so the app threads it into the private conversation. The struct already
+	 * carries this (set on the PKC decode path); it was simply never copied here. */
+	mesh->pki_encrypted = packet->pki_encrypted;
 	mesh->transport_mechanism =
 		packet->via_mqtt ? meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT
 				 : meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA;
@@ -211,6 +215,14 @@ int meshtastic_packet_to_mesh_pb(const struct meshtastic_packet *packet,
 	decoded->source = packet->data_source;
 	decoded->request_id = packet->request_id;
 	decoded->reply_id = packet->reply_id;
+	/* Carry Data.bitfield (OK_TO_MQTT consent + the want_response mirror) AND its
+	 * optional presence, so the phone / MQTT uplink view can tell "sender declined"
+	 * from "sender never sent the field" (absent == consent unknown). Preserving the
+	 * nanopb presence flag is what keeps that distinction — see the MQTT consent gate. */
+	if (packet->has_bitfield) {
+		decoded->has_bitfield = true;
+		decoded->bitfield = packet->bitfield;
+	}
 
 	return 0;
 }
