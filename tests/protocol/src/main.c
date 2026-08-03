@@ -3546,6 +3546,66 @@ ZTEST(protocol_stack, test_position_precision_masked_before_broadcast)
  * path, so it is channel-encrypted to the peer — dest is the peer (never
  * broadcast), wire hash is the primary channel hash (not the 0x00 PKC marker).
  * The PKI-on behavior (PKC or refuse) is covered in the admin_pki suite. */
+/* POS-1: the precision mask must apply to EVERY position we originate, not only the
+ * ones the position module builds. A phone-injected position arrives as an already-
+ * encoded POSITION payload sent straight through meshtastic_send_packet() (the
+ * meshtastic_send_mesh_pb() path), bypassing position_build_packet(). The TX-side
+ * sanitisation hook is what masks it; without the hook a full-resolution phone
+ * location leaks onto a coarse/no-share channel. This drives that path directly:
+ * encode a full-res Position and send it as a raw POSITION packet. */
+ZTEST(protocol_stack, test_tx_hook_masks_originated_position)
+{
+	const int32_t raw_lat = (int32_t)0x2ABCDEF1;
+	const int32_t raw_lon = (int32_t)0x7654321F;
+	meshtastic_Channel saved;
+	meshtastic_Position src = meshtastic_Position_init_zero;
+	meshtastic_Position sent;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	pb_ostream_t os;
+	struct meshtastic_packet pkt;
+	uint8_t primary = meshtastic_channels_primary_index();
+	int ret;
+
+	/* A full-resolution position, exactly as a phone would inject it. */
+	src.has_latitude_i = true;
+	src.latitude_i = raw_lat;
+	src.has_longitude_i = true;
+	src.longitude_i = raw_lon;
+	src.precision_bits = 32U;
+	os = pb_ostream_from_buffer(payload, sizeof(payload));
+	zassert_true(pb_encode(&os, meshtastic_Position_fields, &src), "position encode failed");
+
+	pkt = (struct meshtastic_packet){
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_POSITION,
+		.payload = payload,
+		.payload_len = os.bytes_written,
+		/* Unset: send_packet_prepare() defaults it to the primary slot. */
+		.channel_index = MESHTASTIC_CHANNEL_INDEX_INVALID,
+	};
+
+	/* Default primary is public LongFast @ precision 13 -> the hook must truncate a
+	 * raw send exactly as the module path does. */
+	zassert_ok(meshtastic_send_packet(&pkt, K_FOREVER), "send failed");
+	sent = g1_decode_sent_position();
+	zassert_equal(sent.precision_bits, 13U, "TX hook must stamp the applied precision (13)");
+	zassert_equal(sent.latitude_i, g1_expect_trunc(raw_lat, 13U),
+		      "phone-injected lat not masked by the TX hook");
+	zassert_equal(sent.longitude_i, g1_expect_trunc(raw_lon, 13U),
+		      "phone-injected lon not masked by the TX hook");
+	zassert_not_equal(sent.latitude_i, raw_lat,
+			  "full-resolution position leaked from the originated send path");
+
+	/* A no-share channel must fail closed for the originated path too (#10509). */
+	g1_set_primary_precision(&saved, 0U, true);
+	reset_mock_lora();
+	ret = meshtastic_send_packet(&pkt, K_FOREVER);
+	zassert_equal(ret, -ENODATA, "no-share channel must suppress an originated position (%d)",
+		      ret);
+	assert_mock_send_count(0U);
+	zassert_ok(meshtastic_channels_set_slot(primary, &saved), "restore failed");
+}
+
 ZTEST(protocol_stack, test_dm_addressing_no_pki_build)
 {
 	struct meshtastic_wire_header hdr;

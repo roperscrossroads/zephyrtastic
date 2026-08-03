@@ -28,6 +28,7 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_contention.h"
 #include "meshtastic_core.h"
+#include "meshtastic_modules.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_reliable.h"
@@ -635,6 +636,10 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 static int send_packet_prepare(const struct meshtastic_packet *packet,
 			       struct meshtastic_packet *local, uint8_t *wire, uint32_t *pkt_len)
 {
+	/* Scratch for a TX-sanitisation handler that re-encodes the payload (POS-1).
+	 * Must outlive meshtastic_build_wire_packet() below, which reads local->payload
+	 * — a stack buffer in this frame satisfies that. */
+	uint8_t sani[MESHTASTIC_MAX_PAYLOAD_LEN];
 	int ret;
 
 	if (!mt.initialized) {
@@ -663,6 +668,20 @@ static int send_packet_prepare(const struct meshtastic_packet *packet,
 	}
 	if (local->channel_index == MESHTASTIC_CHANNEL_INDEX_INVALID) {
 		local->channel_index = meshtastic_channels_primary_index();
+	}
+
+	/* TX-side sanitisation for packets we originate — the send-path mirror of the RX
+	 * module dispatch. Lets a module rewrite the outbound payload before the wire is
+	 * built (e.g. mask an outbound Position to its channel's sharing precision, POS-1).
+	 * Relays re-transmit the raw wire and never reach this path; MQTT-injected
+	 * third-party frames carry a foreign `from`/via_mqtt and are skipped — so only our
+	 * own traffic is altered. A negative return suppresses the send (e.g. -ENODATA on a
+	 * channel that shares no position, fail-closed like upstream). */
+	if (local->from == mt.node_id && !local->via_mqtt) {
+		ret = meshtastic_modules_sanitise_tx(local, sani, sizeof(sani));
+		if (ret < 0) {
+			return ret;
+		}
 	}
 
 	/* Next-hop routing (increment 2): stamp our relayer byte + learned next hop

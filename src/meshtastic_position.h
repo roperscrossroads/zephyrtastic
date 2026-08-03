@@ -87,6 +87,25 @@ void meshtastic_position_set_fixed(const meshtastic_Position *position);
 /** @brief Clear the fixed position (admin remove_fixed_position). */
 void meshtastic_position_clear_fixed(void);
 
+/**
+ * @brief TX-side precision mask for an outbound Position packet (POS-1).
+ *
+ * Masks a Position we are about to transmit to the sharing precision of the channel
+ * it will go out on, mirroring the self-generated path. Called by
+ * meshtastic_modules_sanitise_tx() for POSITION packets we originate. On success
+ * @p pkt->payload is repointed at @p scratch (holding the re-encoded, truncated
+ * Position).
+ *
+ * @param pkt         Outbound packet (portnum/payload/to/channel*). Rewritten in place.
+ * @param scratch     Caller buffer for the re-encoded payload; must outlive the send.
+ * @param scratch_len Size of @p scratch.
+ * @retval 0        Sanitised (or a no-op for a non-POSITION / undecodable payload).
+ * @retval -ENODATA The channel shares no position (precision 0) — suppress the send.
+ * @retval -ENOMEM  The re-encoded Position did not fit @p scratch.
+ */
+int meshtastic_position_sanitise_tx(struct meshtastic_packet *pkt, uint8_t *scratch,
+				    size_t scratch_len);
+
 #ifdef __cplusplus
 }
 #endif

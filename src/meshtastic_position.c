@@ -119,6 +119,67 @@ static uint32_t position_precision_for_channel(uint8_t index)
 	return precision;
 }
 
+/* TX-side sanitisation (the C1 send-path hook, for POSITION): mask a Position we are
+ * about to transmit to the sharing precision of the channel it will actually go out
+ * on — exactly what position_build_packet() does for a self-generated position. The
+ * self-generated path already masks; this closes POS-1, where a phone-injected
+ * position reaches meshtastic_send_mesh_pb() and radiates at FULL precision onto a
+ * channel configured for coarse or no sharing, because the phone->mesh path never ran
+ * it through the position module.
+ *
+ * Decodes the outbound Position, resolves the send channel's precision (the same
+ * resolution build_wire_packet uses), truncates the coordinates, stamps the applied
+ * precision, and re-encodes into @p scratch — the whole message round-trips, so no
+ * other Position field is disturbed. Idempotent on an already-masked payload
+ * (re-truncating to the same precision is a no-op). Returns 0 (with @p pkt repointed
+ * at @p scratch), -ENODATA when the channel shares no position (precision 0 — the
+ * caller suppresses the send, matching upstream's fail-closed), or -ENOMEM on a
+ * re-encode overflow. A payload that does not decode as a Position is left untouched. */
+int meshtastic_position_sanitise_tx(struct meshtastic_packet *pkt, uint8_t *scratch,
+				    size_t scratch_len)
+{
+	meshtastic_Position position = meshtastic_Position_init_zero;
+	pb_istream_t istream;
+	pb_ostream_t ostream;
+	uint8_t send_index;
+	uint32_t precision;
+
+	if (pkt->portnum != MESHTASTIC_PORT_POSITION) {
+		return 0;
+	}
+
+	send_index = meshtastic_channels_resolve_send_index(pkt->to, pkt->channel_index,
+							    pkt->channel);
+	precision = position_precision_for_channel(send_index);
+	if (precision == 0U) {
+		return -ENODATA;
+	}
+	if (precision > 32U) {
+		precision = 32U;
+	}
+
+	istream = pb_istream_from_buffer(pkt->payload, pkt->payload_len);
+	if (!pb_decode(&istream, meshtastic_Position_fields, &position)) {
+		return 0;
+	}
+
+	if (precision < 32U && position.has_latitude_i && position.has_longitude_i) {
+		meshtastic_position_truncate_latlon(&position.latitude_i, &position.longitude_i,
+						    precision);
+	}
+	position.precision_bits = precision;
+
+	ostream = pb_ostream_from_buffer(scratch, scratch_len);
+	if (!pb_encode(&ostream, meshtastic_Position_fields, &position)) {
+		LOG_ERR("position TX sanitise re-encode failed: %s", PB_GET_ERROR(&ostream));
+		return -ENOMEM;
+	}
+
+	pkt->payload = scratch;
+	pkt->payload_len = ostream.bytes_written;
+	return 0;
+}
+
 static int position_build_packet(uint32_t dest, bool want_response, uint8_t channel,
 				 uint32_t response_to_id, uint8_t *payload,
 				 struct meshtastic_packet *packet)

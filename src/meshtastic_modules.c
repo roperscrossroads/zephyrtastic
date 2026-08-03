@@ -5,9 +5,30 @@
 #include <errno.h>
 
 #include "meshtastic_modules.h"
+#if defined(CONFIG_MESHTASTIC_POSITION)
+#include "meshtastic_position.h"
+#endif
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
+
+int meshtastic_modules_sanitise_tx(struct meshtastic_packet *pkt, uint8_t *scratch,
+				   size_t scratch_len)
+{
+	if (pkt == NULL) {
+		return 0;
+	}
+
+#if defined(CONFIG_MESHTASTIC_POSITION)
+	if (pkt->portnum == MESHTASTIC_PORT_POSITION) {
+		return meshtastic_position_sanitise_tx(pkt, scratch, scratch_len);
+	}
+#else
+	ARG_UNUSED(scratch);
+	ARG_UNUSED(scratch_len);
+#endif
+	return 0;
+}
 
 static bool packet_is_to_us(const struct meshtastic_packet *packet)
 {
