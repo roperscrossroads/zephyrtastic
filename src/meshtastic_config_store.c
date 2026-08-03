@@ -982,8 +982,17 @@ int meshtastic_config_store_set_owner(const meshtastic_User *user)
 	}
 
 	store_lock();
-	copy_string(store.long_name, sizeof(store.long_name), user->long_name);
-	copy_string(store.short_name, sizeof(store.short_name), user->short_name);
+	/* Match upstream AdminModule::handleSetOwner: only overwrite a name field
+	 * when the incoming value is non-empty. An empty long/short name means
+	 * "leave this one unchanged" — `--set-owner` sends only the long name and
+	 * must not wipe the short name, and `--set-owner-short` (empty long) must
+	 * not wipe the long name. */
+	if (user->long_name[0] != '\0') {
+		copy_string(store.long_name, sizeof(store.long_name), user->long_name);
+	}
+	if (user->short_name[0] != '\0') {
+		copy_string(store.short_name, sizeof(store.short_name), user->short_name);
+	}
 	store.is_licensed = user->is_licensed;
 	store.is_unmessagable = user->has_is_unmessagable && user->is_unmessagable;
 	store_unlock();

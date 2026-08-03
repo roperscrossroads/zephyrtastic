@@ -1014,3 +1014,36 @@ ZTEST(admin_pki, test_config_record_version_window)
 	zassert_equal(meshtastic_config_store_setting_set("config/position", buf, (size_t)len),
 		      -EINVAL, "a too-old-version record must be refused");
 }
+
+/* ADMIN-1: set_owner with only a long name must NOT wipe the short name, and
+ * set_owner with only a short name must NOT wipe the long name — an empty field
+ * means "leave unchanged" (upstream AdminModule::handleSetOwner guards each with
+ * `if (*o.long_name)` / `if (*o.short_name)`). Before the fix, `--set-owner "X"`
+ * blanked the short name on air. */
+ZTEST(admin_pki, test_set_owner_preserves_empty_name_fields)
+{
+	meshtastic_User seed = meshtastic_User_init_zero;
+	meshtastic_User probe;
+	meshtastic_User rb;
+
+	/* Establish a known long+short. */
+	strcpy(seed.long_name, "Base Long Name");
+	strcpy(seed.short_name, "BASE");
+	zassert_ok(meshtastic_config_store_set_owner(&seed), "seed owner failed");
+
+	/* Update only the long name (empty short) — the short name must survive. */
+	probe = (meshtastic_User)meshtastic_User_init_zero;
+	strcpy(probe.long_name, "Renamed Long");
+	zassert_ok(meshtastic_config_store_set_owner(&probe), "set long-only failed");
+	meshtastic_fill_user(&rb);
+	zassert_str_equal(rb.long_name, "Renamed Long", "long name must update");
+	zassert_str_equal(rb.short_name, "BASE", "short name must be preserved on empty short");
+
+	/* Update only the short name (empty long) — the long name must survive. */
+	probe = (meshtastic_User)meshtastic_User_init_zero;
+	strcpy(probe.short_name, "NEW");
+	zassert_ok(meshtastic_config_store_set_owner(&probe), "set short-only failed");
+	meshtastic_fill_user(&rb);
+	zassert_str_equal(rb.short_name, "NEW", "short name must update");
+	zassert_str_equal(rb.long_name, "Renamed Long", "long name must be preserved on empty long");
+}
