@@ -3199,6 +3199,35 @@ ZTEST(protocol_stack, test_c3_detector_emoji_reaches_mesh)
 		      "Data.emoji must survive phone -> mesh (TXT-1) -- Phase 3 encodes the phone's Data");
 }
 
+/* C3 Phase 4a: mesh_pb_to_packet is the receive-side boundary adapter (MeshPacket -> flat
+ * struct). For the RX pipeline to carry a MeshPacket and materialise the struct on demand
+ * (Phase 4c), that converter must be faithful for the fields the struct DOES model but the
+ * converter historically dropped: rx_rssi/rx_snr and the OK_TO_MQTT consent bitfield. */
+ZTEST(protocol_stack, test_c3_detector_mesh_pb_to_packet_carries_rx_meta)
+{
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	struct meshtastic_packet packet;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+
+	mesh.from = PEER_NODE_ID;
+	mesh.to = TEST_NODE_ID;
+	mesh.id = 0x530CU;
+	mesh.rx_rssi = -37;
+	mesh.rx_snr = 6.0f;
+	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh.decoded.portnum = (meshtastic_PortNum)MESHTASTIC_PORT_TEXT_MESSAGE;
+	mesh.decoded.has_bitfield = true;
+	mesh.decoded.bitfield = MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK;
+
+	zassert_ok(meshtastic_mesh_pb_to_packet(&mesh, &packet, payload, sizeof(payload)),
+		   "mesh_pb_to_packet failed");
+	zassert_equal(packet.rssi, -37, "rx_rssi must survive MeshPacket -> struct");
+	zassert_equal(packet.snr, 6, "rx_snr must survive MeshPacket -> struct");
+	zassert_true(packet.has_bitfield, "bitfield presence must survive MeshPacket -> struct");
+	zassert_equal(packet.bitfield, MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK,
+		      "OK_TO_MQTT consent must survive MeshPacket -> struct (Phase 4a)");
+}
+
 /* Drive a local (directly-connected app) admin get-request through the dispatcher
  * and assert it emits the matching *_response — not the bare ROUTING ACK the
  * default arm used to send, which left the app spinning (A-4a). */

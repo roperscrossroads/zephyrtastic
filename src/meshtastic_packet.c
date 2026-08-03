@@ -518,8 +518,15 @@ int meshtastic_mesh_pb_to_packet(const meshtastic_MeshPacket *mesh,
 			.via_mqtt = mesh->via_mqtt,
 			.pki_encrypted = mesh->pki_encrypted,
 			.want_response = mesh->decoded.want_response,
-			.rssi = 0,
-			.snr = 0,
+			/* C3 Phase 4a: this converter is the receive-side boundary adapter, so it
+			 * must reproduce the RX metadata the flat struct models -- link quality and
+			 * the OK_TO_MQTT consent bitfield -- rather than zeroing them. All four ride
+			 * in the MeshPacket; carry them so the RX pipeline can materialise the struct
+			 * on demand (Phase 4c) without dropping SNR/RSSI or the consent signal. */
+			.rssi = mesh->rx_rssi,
+			.snr = (int8_t)mesh->rx_snr,
+			.has_bitfield = mesh->decoded.has_bitfield,
+			.bitfield = mesh->decoded.has_bitfield ? (uint8_t)mesh->decoded.bitfield : 0U,
 		};
 		return 0;
 	}
