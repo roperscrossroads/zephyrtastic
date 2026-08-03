@@ -26,7 +26,8 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define AIRTIME_MAX_DEFAULT 40U    /* % channel util; ~Meshtastic's background gate */
 #define DEDUP_TTL_DEFAULT   300U   /* seconds a (src,id) is remembered as a duplicate */
 #define RELIABLE_RETRIES_DEFAULT 3U    /* retransmits before giving up (Meshtastic default) */
-#define RELIABLE_TIMEOUT_DEFAULT 3000U /* ms between retransmits of an unacked send */
+#define RELIABLE_TIMEOUT_DEFAULT 0U /* 0 = airtime-adaptive interval (mirror upstream
+				     * getRetransmissionMsec); non-0 = fixed override in ms */
 #define ROUTE_TTL_DEFAULT        1800U /* s a learned next-hop stays trusted (upstream 30 min) */
 
 /* Contention window defaults reproduce the reference firmware exactly:

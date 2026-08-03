@@ -35,7 +35,8 @@ ZTEST(sched, test_compiled_defaults)
 		     "default airtime gate should be enabled and a valid percent");
 	zassert_true(c->dedup_ttl_sec > 0, "default dedup TTL should be enabled");
 	zassert_true(c->reliable_retries > 0, "default reliable retries should be enabled");
-	zassert_true(c->reliable_timeout_ms > 0, "default reliable timeout should be positive");
+	zassert_equal(c->reliable_timeout_ms, 0,
+		      "default reliable timeout 0 = airtime-adaptive (mirror upstream)");
 }
 
 ZTEST(sched, test_tier_mapping)

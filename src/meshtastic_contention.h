@@ -84,6 +84,32 @@ uint8_t meshtastic_contention_cw_from_snr(int8_t snr);
  */
 uint8_t meshtastic_contention_cw_from_util(uint8_t util_pct);
 
+/* Reference PROCESSING_TIME_MSEC (RadioInterface.h): time to construct, process
+ * and re-construct a packet, empirically determined upstream. */
+#define MESHTASTIC_RETX_PROCESSING_MS 4500U
+
+/**
+ * @brief Reliable-DM retransmit interval in ms — mirrors upstream
+ *        RadioInterface::getRetransmissionMsec.
+ *
+ * The sender must wait long enough for the packet to go out, the ACK to come
+ * back, and CSMA contention, so the interval scales with the modem preset. A
+ * FIXED timeout fires before the ACK can physically return on a slow preset
+ * (SF11/12), causing premature retransmits, wasted airtime and false
+ * MAX_RETRANSMIT against stock Meshtastic nodes. Formula:
+ *
+ *   2*airtime + (2^CWsize + 2*CWmax + 2^((CWmax+CWmin)/2)) * slot + PROCESSING
+ *
+ * with CWsize = map(util, 0, 100, CWmin, CWmax). CWmin/CWmax are the fixed 3/8
+ * the reference pins into THIS formula (not the runtime CSMA cw policy).
+ *
+ * @param airtime_ms  packet airtime (meshtastic_airtime_packet_ms)
+ * @param slot_ms     slot time (meshtastic_contention_effective_slot_ms)
+ * @param util_pct    channel utilisation, 0..100
+ */
+uint32_t meshtastic_contention_retransmit_ms(uint32_t airtime_ms, uint32_t slot_ms,
+					     uint8_t util_pct);
+
 /**
  * @brief Delay before transmitting a packet we originated.
  *

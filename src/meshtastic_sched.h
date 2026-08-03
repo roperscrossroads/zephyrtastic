@@ -73,7 +73,8 @@ struct meshtastic_sched_config {
 	uint8_t reliable_retries; /* retransmits of an unacked want_ack unicast we
 				   * originate, before giving up. 0 = disable
 				   * sender-side reliable delivery. */
-	uint16_t reliable_timeout_ms; /* base interval between those retransmits */
+	uint16_t reliable_timeout_ms; /* 0 = airtime-adaptive retransmit interval (mirrors
+				       * upstream getRetransmissionMsec); non-0 = fixed override ms */
 	uint16_t route_ttl_sec;   /* learned next-hop route lifetime in seconds; a
 				   * route older than this decays back to flood at
 				   * read time (upstream RouteHealth staleness).

@@ -206,6 +206,29 @@ uint8_t meshtastic_contention_cw_from_util(uint8_t util_pct)
 	return cw_from_util_p(&p, util_pct);
 }
 
+uint32_t meshtastic_contention_retransmit_ms(uint32_t airtime_ms, uint32_t slot_ms,
+					     uint8_t util_pct)
+{
+	uint8_t cw_size;
+	uint32_t cw_term;
+
+	if (util_pct > 100U) {
+		util_pct = 100U;
+	}
+
+	/* CWsize = map(util, 0, 100, CWmin, CWmax). The reference pins CWmin/CWmax
+	 * to the fixed 3/8 constants in this formula (not the runtime CSMA cw
+	 * policy), so use the compile-time defaults directly. */
+	cw_size = (uint8_t)(MESHTASTIC_CW_MIN +
+			    ((uint32_t)util_pct * (MESHTASTIC_CW_MAX - MESHTASTIC_CW_MIN)) / 100U);
+
+	/* (2^CWsize + 2*CWmax + 2^((CWmax+CWmin)/2)) * slot */
+	cw_term = (1U << cw_size) + 2U * MESHTASTIC_CW_MAX +
+		  (1U << ((MESHTASTIC_CW_MAX + MESHTASTIC_CW_MIN) / 2U));
+
+	return 2U * airtime_ms + cw_term * slot_ms + MESHTASTIC_RETX_PROCESSING_MS;
+}
+
 uint32_t meshtastic_contention_effective_slot_ms(uint8_t spread_factor, uint32_t bandwidth_hz,
 						 bool wide_lora)
 {

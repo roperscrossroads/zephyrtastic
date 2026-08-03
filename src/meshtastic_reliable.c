@@ -29,7 +29,9 @@
 
 #include "meshtastic/mesh.pb.h"
 
+#include "meshtastic_airtime.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_contention.h"
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
@@ -158,6 +160,39 @@ void meshtastic_reliable_reset(void)
 	k_mutex_unlock(&pend_lock);
 }
 
+/* Interval before the next retransmit of a pending reliable send. A non-zero
+ * reliable.timeout config is an explicit FIXED override (tests + manual tuning);
+ * otherwise derive an airtime-adaptive interval that mirrors upstream
+ * RadioInterface::getRetransmissionMsec, so the wait scales with the modem
+ * preset instead of firing before an ACK can physically return on a slow one. */
+static uint32_t retx_interval_ms(size_t wire_len, uint32_t override_ms)
+{
+	uint32_t airtime = 0U;
+	uint8_t util = 0U;
+	uint32_t slot;
+
+	if (override_ms != 0U) {
+		return override_ms;
+	}
+
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+	airtime = meshtastic_airtime_packet_ms((uint32_t)wire_len);
+	{
+		float u = meshtastic_airtime_channel_util_percent();
+
+		util = (u < 0.0f) ? 0U : (u > 100.0f ? 100U : (uint8_t)u);
+	}
+#else
+	ARG_UNUSED(wire_len);
+	/* Without airtime tracking the interval still scales with the preset via
+	 * the slot term below; the packet-airtime and utilisation terms are 0. */
+#endif
+
+	slot = meshtastic_contention_effective_slot_ms(mt.modem.spread_factor,
+						       mt.modem.bandwidth_hz, false);
+	return meshtastic_contention_retransmit_ms(airtime, slot, util);
+}
+
 void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint8_t *wire,
 			       uint32_t wire_len)
 {
@@ -220,7 +255,7 @@ void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint
 	pend[slot].to = local->to;
 	pend[slot].tier = meshtastic_sched_tier_for(local->portnum);
 	pend[slot].retries_left = c.reliable_retries;
-	pend[slot].next_due = now + (int64_t)c.reliable_timeout_ms;
+	pend[slot].next_due = now + (int64_t)retx_interval_ms(wire_len, c.reliable_timeout_ms);
 	pend[slot].active = true;
 
 	LOG_DBG("reliable: track id=0x%08x to 0x%08x retries=%u", local->id, local->to,
@@ -317,7 +352,7 @@ static void retx_work_fn(struct k_work *work)
 		}
 
 		pend[i].retries_left--;
-		pend[i].next_due = now + (int64_t)c.reliable_timeout_ms;
+		pend[i].next_due = now + (int64_t)retx_interval_ms(pend[i].wire_len, c.reliable_timeout_ms);
 		LOG_DBG("reliable: retransmit id=0x%08x (%u left)", pend[i].id,
 			pend[i].retries_left);
 		(void)meshtastic_radio_send_wire_prio(pend[i].wire, pend[i].wire_len, pend[i].tier);

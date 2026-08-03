@@ -1056,6 +1056,33 @@ ZTEST(wire_vectors, test_own_delay_scales_with_utilisation)
 	}
 }
 
+/* The reliable retransmit interval mirrors upstream getRetransmissionMsec:
+ * 2*airtime + (2^CWsize + 2*CWmax + 2^((CWmax+CWmin)/2)) * slot + PROCESSING,
+ * CWsize = map(util, 0, 100, CWmin=3, CWmax=8). A fixed timeout does not scale
+ * with airtime and would fire before an ACK can return on a slow preset. */
+ZTEST(wire_vectors, test_reliable_retransmit_matches_upstream)
+{
+	/* util 0 -> CWsize 3 -> cw_term = 2^3 + 2*8 + 2^5 = 8+16+32 = 56 */
+	zassert_equal(meshtastic_contention_retransmit_ms(50U, 3U, 0U),
+		      2U * 50U + 56U * 3U + MESHTASTIC_RETX_PROCESSING_MS,
+		      "util0 (fast-preset airtime/slot)");
+	/* util 50 -> CWsize 5 -> cw_term = 32+16+32 = 80; slow preset airtime+slot */
+	zassert_equal(meshtastic_contention_retransmit_ms(2000U, 200U, 50U),
+		      2U * 2000U + 80U * 200U + MESHTASTIC_RETX_PROCESSING_MS,
+		      "util50 (slow preset)");
+	/* util 100 -> CWsize 8 -> cw_term = 256+16+32 = 304 */
+	zassert_equal(meshtastic_contention_retransmit_ms(0U, 10U, 100U),
+		      304U * 10U + MESHTASTIC_RETX_PROCESSING_MS, "util100");
+	/* out-of-range utilisation clamps to 100 */
+	zassert_equal(meshtastic_contention_retransmit_ms(0U, 10U, 200U),
+		      meshtastic_contention_retransmit_ms(0U, 10U, 100U), "util clamps");
+	/* the point: a slow preset (bigger airtime) waits strictly longer than a
+	 * fast one — a fixed timeout would not. */
+	zassert_true(meshtastic_contention_retransmit_ms(2000U, 200U, 0U) >
+			     meshtastic_contention_retransmit_ms(50U, 3U, 0U),
+		     "slow preset must wait longer than fast");
+}
+
 /* The window is runtime policy, not a compile-time constant: the defaults
  * reproduce the reference, and "no-backoff" zeroes them so the port's original
  * transmit-immediately behaviour is the control arm of an on-air A/B. */
