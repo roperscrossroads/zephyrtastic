@@ -19,6 +19,7 @@
 #include <pb_encode.h>
 
 #include "meshtastic_channels.h"
+#include "meshtastic_clock.h"
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
@@ -541,7 +542,8 @@ static void fill_packet_from_header(const struct meshtastic_wire_header *hdr, in
 int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi, int8_t snr,
 				      struct meshtastic_packet *packet, uint8_t *payload,
 				      size_t payload_len, bool *decoded,
-				      enum meshtastic_decode_fail *fail_reason)
+				      enum meshtastic_decode_fail *fail_reason,
+				      meshtastic_MeshPacket *out_mesh)
 {
 	const struct meshtastic_wire_header *hdr;
 	meshtastic_Data data = meshtastic_Data_init_zero;
@@ -652,6 +654,19 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 	packet->bitfield = data.has_bitfield ? (uint8_t)data.bitfield : 0U;
 	packet->channel_index = channel_index;
 
+	/* C3 Phase 2: hand back the fully decoded MeshPacket so the phone-delivery path
+	 * carries fields the struct boundary adapter never models. Reuse to_mesh_pb for the
+	 * envelope (routing, channel hash, pki flag, transport), then overwrite `decoded`
+	 * with the faithful decrypted Data -- so every payload field (emoji/TXT-1, and any
+	 * the struct never models) survives by construction, not one hand-patched field at a
+	 * time. rx_time is the exception: it lives on no wire and no struct, so stamp it from
+	 * the node clock here -- its only source (0 when the clock is unset, matching upstream). */
+	if (out_mesh != NULL) {
+		(void)meshtastic_packet_to_mesh_pb(packet, out_mesh);
+		out_mesh->decoded = data;
+		out_mesh->rx_time = meshtastic_clock_now_epoch();
+	}
+
 	if (decoded != NULL) {
 		*decoded = true;
 	}
@@ -667,7 +682,7 @@ int meshtastic_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi, int
 	int ret;
 
 	ret = meshtastic_try_decode_wire_packet(buf, len, rssi, snr, packet, payload, payload_len,
-						&decoded, NULL);
+						&decoded, NULL, NULL);
 	if (ret < 0) {
 		return ret;
 	}

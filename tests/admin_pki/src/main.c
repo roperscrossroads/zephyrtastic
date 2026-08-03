@@ -523,7 +523,7 @@ ZTEST(admin_pki, test_rx_pkc_first_beats_colliding_channel)
 	memcpy(wire + MESHTASTIC_HDR_LEN, enc, enc_len);
 
 	ret = meshtastic_try_decode_wire_packet(wire, (int)(MESHTASTIC_HDR_LEN + enc_len), -20, 4,
-						&pkt, payload, sizeof(payload), &decoded, &fail);
+						&pkt, payload, sizeof(payload), &decoded, &fail, NULL);
 	zassert_ok(ret, "PKC DM decode returned %d", ret);
 	zassert_true(decoded, "PKC DM must decode");
 	zassert_true(pkt.pki_encrypted,
@@ -562,7 +562,7 @@ ZTEST(admin_pki, test_rx_pkc_first_beats_colliding_channel)
 		decoded = false;
 		fail = MESHTASTIC_DECODE_FAIL_NONE;
 		ret = meshtastic_try_decode_wire_packet(built, (int)built_len, -20, 4, &cpkt, payload,
-							sizeof(payload), &decoded, &fail);
+							sizeof(payload), &decoded, &fail, NULL);
 		zassert_ok(ret, "channel-frame decode returned %d", ret);
 		zassert_true(decoded, "channel frame on the colliding channel must decode");
 		zassert_false(cpkt.pki_encrypted,

@@ -58,10 +58,17 @@ int meshtastic_mesh_pb_to_packet(const meshtastic_MeshPacket *mesh,
 int meshtastic_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi, int8_t snr,
 				  struct meshtastic_packet *packet, uint8_t *payload,
 				  size_t payload_len);
+/*
+ * @param out_mesh Optional. When non-NULL and the frame decodes, receives the fully
+ *        decoded MeshPacket -- including fields the flat struct cannot model (Data.emoji,
+ *        MeshPacket.rx_time) -- so the phone-delivery path can carry it verbatim (C3
+ *        Phase 2). Left untouched when the frame is ignored or fails to decode.
+ */
 int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi, int8_t snr,
 				      struct meshtastic_packet *packet, uint8_t *payload,
 				      size_t payload_len, bool *decoded,
-				      enum meshtastic_decode_fail *fail_reason);
+				      enum meshtastic_decode_fail *fail_reason,
+				      meshtastic_MeshPacket *out_mesh);
 uint8_t meshtastic_packet_wire_hash_for_index(uint8_t channel_index);
 int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t *out,
 				 uint32_t *out_len);

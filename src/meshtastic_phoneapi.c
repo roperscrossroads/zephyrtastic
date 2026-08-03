@@ -469,20 +469,29 @@ toradio_decoded:
 	}
 }
 
-void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet)
+void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet,
+				   const meshtastic_MeshPacket *decoded_mesh)
 {
 	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
 	struct meshtastic_phoneapi *transports[MESHTASTIC_PHONEAPI_MAX_TRANSPORTS];
 	uint8_t count;
-	int ret;
 
 	from.id = meshtastic_next_fromradio_id();
 	from.which_payload_variant = meshtastic_FromRadio_packet_tag;
 
-	ret = meshtastic_packet_to_mesh_pb(packet, &from.packet);
-	if (ret < 0) {
-		LOG_DBG("FromRadio packet encode skipped (%d)", ret);
-		return;
+	if (decoded_mesh != NULL) {
+		/* C3 Phase 2: the RX path decoded the wire frame straight into this
+		 * MeshPacket, so deliver it verbatim. Fields the flat struct never
+		 * models -- Data.emoji, MeshPacket.rx_time -- reach the phone by
+		 * construction instead of being dropped by the to_mesh_pb rebuild. */
+		from.packet = *decoded_mesh;
+	} else {
+		int ret = meshtastic_packet_to_mesh_pb(packet, &from.packet);
+
+		if (ret < 0) {
+			LOG_DBG("FromRadio packet encode skipped (%d)", ret);
+			return;
+		}
 	}
 
 	k_mutex_lock(&phoneapi_lock, K_FOREVER);

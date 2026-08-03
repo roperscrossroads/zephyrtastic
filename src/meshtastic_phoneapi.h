@@ -97,11 +97,20 @@ void meshtastic_phoneapi_enqueue_queue_status(struct meshtastic_phoneapi *api, i
 					      uint32_t mesh_packet_id);
 void meshtastic_phoneapi_handle_toradio(struct meshtastic_phoneapi *api, const uint8_t *buf,
 					size_t len);
-void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet);
+/*
+ * @param decoded_mesh Optional fully decoded MeshPacket for this frame. When non-NULL it
+ *        is delivered to the phone verbatim (carrying fields the flat struct cannot model,
+ *        e.g. Data.emoji / MeshPacket.rx_time); when NULL the packet is rebuilt via
+ *        meshtastic_packet_to_mesh_pb (C3 Phase 2).
+ */
+void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet,
+				   const meshtastic_MeshPacket *decoded_mesh);
 #else
-static inline void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet)
+static inline void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet,
+						 const meshtastic_MeshPacket *decoded_mesh)
 {
 	ARG_UNUSED(packet);
+	ARG_UNUSED(decoded_mesh);
 }
 #endif
 

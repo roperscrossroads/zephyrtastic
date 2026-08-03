@@ -421,7 +421,15 @@ static int relay_injected_encrypted_mesh_packet(const meshtastic_MeshPacket *mes
 	return meshtastic_radio_send_wire(wire, MESHTASTIC_HDR_LEN + (uint32_t)enc_len);
 }
 
-static void deliver_packet(const struct meshtastic_packet *packet)
+/* Shared body behind the public meshtastic_handle_inbound_packet() (below) and the
+ * RF RX path, which passes the decoded MeshPacket so the phone gets it verbatim (C3
+ * Phase 2). Forward-declared here because the RX path calls it before its definition. */
+static void handle_inbound_impl(const struct meshtastic_packet *packet, const uint8_t *wire,
+				size_t wire_len, bool decoded,
+				const meshtastic_MeshPacket *decoded_mesh);
+
+static void deliver_packet(const struct meshtastic_packet *packet,
+			   const meshtastic_MeshPacket *decoded_mesh)
 {
 	if (mt.recv_cb != NULL) {
 		mt.recv_cb(packet->from, packet->to, packet->portnum, packet->payload,
@@ -429,7 +437,7 @@ static void deliver_packet(const struct meshtastic_packet *packet)
 	}
 
 	meshtastic_emit_event(MESHTASTIC_EVENT_PACKET_RECEIVED, 0, packet);
-	meshtastic_phoneapi_on_packet(packet);
+	meshtastic_phoneapi_on_packet(packet, decoded_mesh);
 
 	/* Light-sleep governor: a packet delivered to us is activity, so refresh the
 	 * min_wake_secs wake window. This is the single delivery choke point; it counts
@@ -505,6 +513,10 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 	uint32_t pkt_id;
 	struct meshtastic_packet packet;
 	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	/* C3 Phase 2: try_decode fills this with the fully decoded MeshPacket (emoji,
+	 * rx_time) so the phone gets the frame verbatim. ~430 B on the RX-thread stack --
+	 * re-check `kernel thread stacks` high-water at the bench (Phase-0 deferred item). */
+	meshtastic_MeshPacket rx_mesh = meshtastic_MeshPacket_init_zero;
 	bool decoded = false;
 	enum meshtastic_decode_fail fail_reason = MESHTASTIC_DECODE_FAIL_NONE;
 	int ret;
@@ -626,7 +638,7 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 	dup_add(src, pkt_id, rx_hop_limit);
 
 	ret = meshtastic_try_decode_wire_packet(buf, len, rssi, snr, &packet, payload,
-						sizeof(payload), &decoded, &fail_reason);
+						sizeof(payload), &decoded, &fail_reason, &rx_mesh);
 	if (ret < 0) {
 		LOG_DBG("RX header parse failed (%d)", ret);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
@@ -662,7 +674,9 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 	mt.status.last_rssi = rssi;
 	mt.status.last_snr = snr;
 
-	meshtastic_handle_inbound_packet(&packet, buf, (size_t)len, decoded);
+	/* Pass the decoded MeshPacket (valid only when decoded==true; consumed only on the
+	 * deliver path, which runs only for a decoded frame) so the phone sees it verbatim. */
+	handle_inbound_impl(&packet, buf, (size_t)len, decoded, decoded ? &rx_mesh : NULL);
 }
 
 static void log_inject_mesh_packet(const char *phase, const meshtastic_MeshPacket *mesh)
@@ -820,8 +834,9 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 	return 0;
 }
 
-void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, const uint8_t *wire,
-				      size_t wire_len, bool decoded)
+static void handle_inbound_impl(const struct meshtastic_packet *packet, const uint8_t *wire,
+				size_t wire_len, bool decoded,
+				const meshtastic_MeshPacket *decoded_mesh)
 {
 	const struct meshtastic_wire_header *hdr = NULL;
 	bool suppress_relay = false;
@@ -862,7 +877,7 @@ void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, co
 			} else
 #endif
 			{
-				deliver_packet(packet);
+				deliver_packet(packet, decoded_mesh);
 			}
 		}
 
@@ -882,6 +897,15 @@ void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, co
 	if (hdr != NULL && !suppress_relay) {
 		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, packet);
 	}
+}
+
+void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, const uint8_t *wire,
+				      size_t wire_len, bool decoded)
+{
+	/* Public boundary: callers that hold only the flat struct (locally injected
+	 * downlinks, tests) get the to_mesh_pb rebuild on the phone path. The RF RX path
+	 * uses handle_inbound_impl() directly to carry the decoded MeshPacket verbatim. */
+	handle_inbound_impl(packet, wire, wire_len, decoded, NULL);
 }
 
 void meshtastic_router_stamp_originated(uint32_t to, uint32_t from, uint8_t *next_hop,

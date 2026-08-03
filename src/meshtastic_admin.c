@@ -244,7 +244,7 @@ static void admin_emit_reply(meshtastic_AdminMessage *resp)
 		(void)meshtastic_send_packet(&pkt, K_NO_WAIT);
 	} else {
 		pkt.channel_index = 0U;
-		meshtastic_phoneapi_on_packet(&pkt);
+		meshtastic_phoneapi_on_packet(&pkt, NULL);
 	}
 }
 
@@ -280,7 +280,7 @@ static void admin_ack_write(meshtastic_Routing_Error err)
 	pkt.payload = buf;
 	pkt.payload_len = stream.bytes_written;
 
-	meshtastic_phoneapi_on_packet(&pkt);
+	meshtastic_phoneapi_on_packet(&pkt, NULL);
 }
 
 /* ------------------------------------------------------------------------- */

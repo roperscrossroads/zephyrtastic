@@ -122,7 +122,7 @@ static void notify_failure(uint32_t id, uint32_t to)
 		.payload = buf,
 		.payload_len = os.bytes_written,
 		.channel_index = meshtastic_channels_primary_index(),
-	});
+	}, NULL);
 #endif
 }
 

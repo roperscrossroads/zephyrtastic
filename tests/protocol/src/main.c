@@ -8,6 +8,7 @@
 
 #include <pb_decode.h>
 #include <pb_encode.h>
+#include <psa/crypto.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
@@ -803,8 +804,10 @@ ZTEST(protocol_stack, test_c3_detector_consent_bitfield_reaches_phone)
  * They cannot be expressed at the converter level: the boundary-adapter struct stays
  * lossy by design (it never models emoji/rx_time), so a mesh_pb -> struct -> mesh_pb
  * round-trip would stay red even after the migration. Their real acceptance is the
- * production RX -> FromRadio path (does the PHONE see the field), which is built with
- * the phone-capture harness in Phase 2 (Strategy C seam 1). See docs/c3-migration-plan.md. */
+ * production RX -> FromRadio path (does the PHONE see the field), built with the
+ * phone-capture (getcap) harness in Phase 2 (Strategy C seam 1). Those two detectors
+ * -- test_c3_detector_emoji_reaches_phone / _rx_time_reaches_phone -- live after the
+ * getcap harness is defined (below). See docs/c3-migration-plan.md. */
 
 /* ================= end C3 acceptance detectors ==================================== */
 
@@ -2986,6 +2989,158 @@ static void getcap_reset(void)
 		getcap_registered = true;
 	}
 	meshtastic_phoneapi_reset(&getcap_api);
+}
+
+/* ================= C3 Phase 2 acceptance detectors (emoji / rx_time) ===============
+ *
+ * These assert the two fields the struct meshtastic_packet boundary adapter never
+ * models -- Data.emoji (TXT-1) and MeshPacket.rx_time (TXT-6) -- reach the phone on
+ * the real RX -> FromRadio path. They cannot be written at the converter level (see
+ * the NOTE by the Phase-0/1 detectors above): the struct is lossy by design, so the
+ * acceptance is the production path, captured via the getcap transport. Phase 2
+ * carries the decoded MeshPacket verbatim to the phone, which makes both pass.
+ *
+ * The existing struct-routed frame builders (build_wire_packet) cannot carry emoji --
+ * C3 blocking its own test -- so we hand-build an emoji-carrying, channel-encrypted
+ * frame here and inject it through the real decode path.
+ * ---------------------------------------------------------------------------------- */
+
+/* AES-CTR to a channel slot, mirroring production ctr_crypt()'s nonce layout (id at
+ * byte 0, from at byte 8, both little-endian). CTR is symmetric: the very operation
+ * the RX path uses to decrypt is what encrypts our plaintext Data here. */
+static void test_channel_ctr_encrypt(uint8_t ch_index, uint32_t from, uint32_t id,
+				     const uint8_t *in, size_t len, uint8_t *out, size_t out_cap)
+{
+	struct meshtastic_channel_key key;
+	uint8_t nonce[16] = {0};
+	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+	psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
+	psa_key_id_t kid = PSA_KEY_ID_NULL;
+	size_t out_len = 0U;
+	size_t fin_len = 0U;
+
+	zassert_ok(meshtastic_channels_get_key(ch_index, &key), "channel key unavailable");
+	zassert_true(key.len == 16U || key.len == 32U, "expected an AES key on the primary channel");
+
+	sys_put_le32(id, nonce);
+	sys_put_le32(from, nonce + 8U);
+
+	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_ENCRYPT);
+	psa_set_key_algorithm(&attr, PSA_ALG_CTR);
+	psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
+	psa_set_key_bits(&attr, (uint32_t)(key.len * 8U));
+	psa_set_key_lifetime(&attr, PSA_KEY_LIFETIME_VOLATILE);
+
+	zassert_equal(psa_import_key(&attr, key.bytes, key.len, &kid), PSA_SUCCESS, "psa import");
+	zassert_equal(psa_cipher_encrypt_setup(&op, kid, PSA_ALG_CTR), PSA_SUCCESS, "psa setup");
+	zassert_equal(psa_cipher_set_iv(&op, nonce, sizeof(nonce)), PSA_SUCCESS, "psa iv");
+	zassert_equal(psa_cipher_update(&op, in, len, out, out_cap, &out_len), PSA_SUCCESS,
+		      "psa update");
+	zassert_equal(psa_cipher_finish(&op, out + out_len, out_cap - out_len, &fin_len),
+		      PSA_SUCCESS, "psa finish");
+	(void)psa_destroy_key(kid);
+}
+
+/* Build a channel-encrypted reaction: a Data{portnum=TEXT, emoji=1, payload=body}
+ * broadcast from PEER_NODE_ID on the primary channel, wrapped in a wire header. */
+static uint32_t build_emoji_wire_frame(uint32_t id, const char *body, uint8_t *wire)
+{
+	meshtastic_Data data = meshtastic_Data_init_zero;
+	uint8_t plain[MESHTASTIC_PKT_MAX];
+	uint8_t enc[MESHTASTIC_PKT_MAX];
+	pb_ostream_t os;
+	struct meshtastic_wire_header hdr;
+	uint8_t ch = meshtastic_channels_primary_index();
+	size_t plain_len;
+
+	data.portnum = (meshtastic_PortNum)MESHTASTIC_PORT_TEXT_MESSAGE;
+	data.payload.size = (pb_size_t)strlen(body);
+	memcpy(data.payload.bytes, body, data.payload.size);
+	data.emoji = 1U; /* the reaction flag the struct adapter drops (TXT-1) */
+
+	os = pb_ostream_from_buffer(plain, sizeof(plain));
+	zassert_true(pb_encode(&os, meshtastic_Data_fields, &data), "Data encode failed");
+	plain_len = os.bytes_written;
+
+	test_channel_ctr_encrypt(ch, PEER_NODE_ID, id, plain, plain_len, enc, sizeof(enc));
+
+	hdr.dest = sys_cpu_to_le32(MESHTASTIC_NODE_BROADCAST);
+	hdr.src = sys_cpu_to_le32(PEER_NODE_ID);
+	hdr.id = sys_cpu_to_le32(id);
+	hdr.flags = (3U & MESHTASTIC_FLAGS_HOP_LIMIT_MASK) |
+		    ((3U & 0x07U) << MESHTASTIC_FLAGS_HOP_START_SHIFT);
+	hdr.channel = meshtastic_channels_get_hash(ch);
+	hdr.next_hop = 0U;
+	hdr.relay_node = 0U;
+
+	memcpy(wire, &hdr, sizeof(hdr));
+	memcpy(wire + MESHTASTIC_HDR_LEN, enc, plain_len);
+	return (uint32_t)(MESHTASTIC_HDR_LEN + plain_len);
+}
+
+/* Inject an emoji reaction through the real RX path and return the FromRadio.packet
+ * the phone (getcap transport) would receive. Seeds the clock first when seed_epoch
+ * is non-zero, so rx_time (stamped at decode) is deterministic. */
+static bool capture_rx_reaction(uint32_t id, uint32_t seed_epoch, meshtastic_MeshPacket *out)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_phoneapi_frame frame;
+
+	getcap_reset();
+	if (seed_epoch != 0U) {
+		meshtastic_clock_set_epoch(seed_epoch, MESHTASTIC_CLOCK_QUALITY_GPS);
+	}
+
+	wire_len = build_emoji_wire_frame(id, "\xf0\x9f\x91\x8d" /* thumbs-up emoji */, wire);
+	inject_rx_frame(wire, wire_len, -20, 6);
+
+	/* RX is processed on the stack's RX thread, so the FromRadio is enqueued
+	 * asynchronously; wait for it to land rather than racing the pop. */
+	for (int i = 0; i < 200 && meshtastic_phoneapi_pending_count(&getcap_api) == 0U; i++) {
+		k_sleep(K_MSEC(5));
+	}
+
+	while (meshtastic_phoneapi_pop_frame(&getcap_api, &frame)) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t is = pb_istream_from_buffer(frame.data, frame.len);
+
+		if (pb_decode(&is, meshtastic_FromRadio_fields, &from) &&
+		    from.which_payload_variant == meshtastic_FromRadio_packet_tag &&
+		    from.packet.from == PEER_NODE_ID && from.packet.id == id) {
+			*out = from.packet;
+			return true;
+		}
+	}
+	return false;
+}
+
+/* TXT-1: a reaction's Data.emoji flag must reach the phone. The struct adapter drops
+ * it; Phase 2 carries the decoded MeshPacket verbatim on the RX -> FromRadio path. */
+ZTEST(protocol_stack, test_c3_detector_emoji_reaches_phone)
+{
+	meshtastic_MeshPacket pkt = meshtastic_MeshPacket_init_zero;
+
+	zassert_true(capture_rx_reaction(0x5309U, 0U, &pkt),
+		     "no FromRadio.packet delivered for the injected reaction");
+	zassert_equal(pkt.which_payload_variant, meshtastic_MeshPacket_decoded_tag,
+		      "reaction must reach the phone decoded");
+	zassert_equal(pkt.decoded.emoji, 1U,
+		      "Data.emoji must survive to the phone (TXT-1) -- Phase 2 carries MeshPacket");
+}
+
+/* TXT-6: MeshPacket.rx_time (stamped at decode from the node clock) must reach the
+ * phone. The struct adapter never had the field; Phase 2 stamps and carries it. */
+ZTEST(protocol_stack, test_c3_detector_rx_time_reaches_phone)
+{
+	const uint32_t epoch = 1609459200U; /* 2021-01-01T00:00:00Z */
+	meshtastic_MeshPacket pkt = meshtastic_MeshPacket_init_zero;
+
+	zassert_true(capture_rx_reaction(0x530AU, epoch, &pkt),
+		     "no FromRadio.packet delivered for the injected reaction");
+	zassert_true(pkt.rx_time >= epoch && pkt.rx_time <= epoch + 2U,
+		     "MeshPacket.rx_time must reflect the decode-time clock (TXT-6); got %u",
+		     pkt.rx_time);
 }
 
 /* Drive a local (directly-connected app) admin get-request through the dispatcher
