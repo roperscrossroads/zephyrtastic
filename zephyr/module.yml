@@ -7,6 +7,9 @@ build:
     # board ports (e.g. heltec_wifi_lora32_v4) are discovered automatically,
     # without needing -DBOARD_ROOT= on every build.
     board_root: .
+    # Expose this repo's local dts/bindings so out-of-tree bindings (e.g. the
+    # simulated LoRa driver's meshtastic,lora-sim) resolve without -DDTS_ROOT=.
+    dts_root: .
 samples:
   - samples
 tests:

@@ -1,0 +1,72 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+/*
+ * Test-facing control surface for the simulated LoRa driver (drivers/lora_sim).
+ *
+ * A native_sim test drives the real Meshtastic stack against this fake radio:
+ * transmitted frames are captured (lora_sim_take_tx) and frames are injected as
+ * if received over the air (lora_sim_inject). The driver models per-frame airtime
+ * (identical to the SX126x driver) and channel-busy, so contention / duty-cycle /
+ * dedup behaviour is exercised under twister with no hardware.
+ */
+#ifndef MESHTASTIC_LORA_SIM_H_
+#define MESHTASTIC_LORA_SIM_H_
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include <zephyr/device.h>
+#include <zephyr/kernel.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** A single captured transmission. */
+struct lora_sim_frame {
+	uint8_t  data[256];
+	uint8_t  len;
+	uint32_t air_ms; /**< modelled airtime of this frame (ms) */
+	int64_t  t_ms;   /**< k_uptime_get() at TX */
+};
+
+/**
+ * @brief Deliver a frame to the node as if received over the air.
+ *
+ * Calls the stack's registered receive callback synchronously.
+ * @return 0 on success, -EAGAIN if no receiver is armed, -EMSGSIZE if too long.
+ */
+int lora_sim_inject(const struct device *dev, const uint8_t *data, uint8_t len,
+		    int16_t rssi, int8_t snr);
+
+/**
+ * @brief Pop the next captured TX frame.
+ * @return 0 on success; -ENOMSG (K_NO_WAIT) or -EAGAIN (timeout) if none.
+ */
+int lora_sim_take_tx(const struct device *dev, struct lora_sim_frame *out,
+		     k_timeout_t timeout);
+
+/** @brief Number of frames currently waiting in the TX capture queue. */
+int lora_sim_tx_pending(const struct device *dev);
+
+/**
+ * @brief True if the stack currently has a receive callback armed.
+ *
+ * The mesh stack cancels RX while transmitting (half-duplex), so a test should
+ * wait for this before injecting a frame the node must actually hear.
+ */
+bool lora_sim_rx_armed(const struct device *dev);
+
+/** @brief Force the modelled channel busy for @p ms from now (LBT/contention). */
+void lora_sim_set_busy(const struct device *dev, uint32_t ms);
+
+/** @brief Silently drop the next @p n transmissions (retransmit/reliability). */
+void lora_sim_drop_next(const struct device *dev, unsigned int n);
+
+/** @brief Clear the capture queue, drop counter and busy state (between tests). */
+void lora_sim_reset(const struct device *dev);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* MESHTASTIC_LORA_SIM_H_ */

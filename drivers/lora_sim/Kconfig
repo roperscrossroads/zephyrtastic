@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config LORA_SIM
+	bool "Simulated LoRa transceiver for native_sim"
+	default y
+	depends on DT_HAS_MESHTASTIC_LORA_SIM_ENABLED
+	depends on LORA
+	help
+	  Fake LoRa driver for native_sim. Transmitted frames are captured in a
+	  queue a test drains (lora_sim_take_tx); tests inject received frames
+	  (lora_sim_inject). Per-frame airtime is computed with the same math as
+	  the SX126x driver and the channel is modelled busy for that airtime, so
+	  duty-cycle / contention / flood-dedup behaviour of the real stack runs
+	  under twister with no radio hardware.
+
+if LORA_SIM
+
+config LORA_SIM_TX_QUEUE_DEPTH
+	int "Captured-TX queue depth"
+	default 16
+	range 1 256
+	help
+	  Maximum number of transmitted frames buffered for a test to drain.
+
+endif # LORA_SIM

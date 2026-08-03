@@ -6,3 +6,6 @@ zephyr_include_directories(include)
 if(NOT TARGET meshtastic)
   add_subdirectory(src)
 endif()
+
+# Out-of-tree simulated LoRa driver, for native_sim mesh testing (no hardware).
+add_subdirectory_ifdef(CONFIG_LORA_SIM drivers/lora_sim)

@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0
+#
+# Simulated LoRa transceiver for native_sim. Standalone (no bus) — the fake
+# radio's behaviour is driven entirely by the test API in <meshtastic/lora_sim.h>,
+# so no hardware-descriptive properties are needed for Tier 1. Loss is controlled
+# by lora_sim_drop_next(); RSSI/SNR are supplied per-frame by lora_sim_inject().
+
+description: Simulated LoRa transceiver for native_sim
+
+compatible: "meshtastic,lora-sim"
+
+include: base.yaml

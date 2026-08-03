@@ -1,0 +1,1 @@
+meshtastic	Meshtastic (zephyrtastic port — out-of-tree bindings)
