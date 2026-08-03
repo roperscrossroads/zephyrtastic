@@ -19,6 +19,7 @@
 #include <zephyr/ztest.h>
 
 #include "meshtastic_airtime.h"
+#include "meshtastic_telemetry_internal.h"
 
 /* Tolerances: percentages are small; k_sleep/tick granularity adds a hair. */
 #define CH_EPS 0.05f
@@ -113,6 +114,23 @@ ZTEST(airtime, test_channel_rolling_window)
 
 	zassert_within(meshtastic_airtime_channel_util_percent(), 3.3333f, CH_EPS,
 		       "A expired, B(2000) survives -> 3.333%%");
+}
+
+/* TELEM-2: native_sim has no fuel_gauge0, so this exercises the no-battery path.
+ * With no valid state-of-charge, the port must advertise the ">100 = powered"
+ * sentinel (101) rather than leave battery_level unset — an unset field decodes
+ * to a bare 0%%, which clients render as a critically-flat node. */
+ZTEST(airtime, test_device_metrics_powered_sentinel_without_fuel_gauge)
+{
+	meshtastic_DeviceMetrics m;
+
+	zassert_ok(meshtastic_collect_device_metrics(&m), "collect must succeed");
+	zassert_true(m.has_battery_level, "battery_level must be present, not omitted");
+	zassert_equal(m.battery_level, 101U,
+		      "no-battery node must report 101 (powered), got %u",
+		      (unsigned int)m.battery_level);
+	zassert_false(m.has_voltage, "voltage must stay unset with no reading");
+	zassert_true(m.has_uptime_seconds, "uptime must always be present");
 }
 
 ZTEST_SUITE(airtime, NULL, NULL, airtime_before, NULL, NULL);

@@ -28,6 +28,14 @@ int meshtastic_telemetry_encode_packet(uint32_t dest, uint8_t channel, uint32_t 
 				       const meshtastic_Telemetry *telemetry, uint8_t *payload,
 				       struct meshtastic_packet *packet);
 
+/**
+ * @brief Populate DeviceMetrics (uptime, battery, channel/air utilization).
+ *
+ * With no valid battery source, @c battery_level is set to the "powered" sentinel
+ * (>100) rather than left unset, matching upstream's MAGIC_USB_BATTERY_LEVEL.
+ */
+int meshtastic_collect_device_metrics(meshtastic_DeviceMetrics *metrics);
+
 #ifdef __cplusplus
 }
 #endif

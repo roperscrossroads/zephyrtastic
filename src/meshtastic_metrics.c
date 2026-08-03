@@ -29,6 +29,13 @@ static const struct device *const fuel_gauge_dev = DEVICE_DT_GET(DT_ALIAS(fuel_g
 #define MESHTASTIC_HAS_FUEL_GAUGE0 0
 #endif
 
+/* battery_level > 100 means "powered / no battery" on the wire (telemetry.proto:
+ * "0-100 (>100 means powered)"). Upstream sends this MAGIC_USB_BATTERY_LEVEL when a
+ * node has no battery or is on external power (DeviceTelemetry.cpp). We advertise it
+ * whenever we have no valid state-of-charge reading, so a healthy USB-powered node
+ * reports "powered" rather than a bare 0 % that clients render as critically flat. */
+#define MESHTASTIC_BATTERY_LEVEL_POWERED 101U
+
 static void collect_fuel_gauge(meshtastic_DeviceMetrics *metrics)
 {
 #if MESHTASTIC_HAS_FUEL_GAUGE0
@@ -73,6 +80,14 @@ int meshtastic_collect_device_metrics(meshtastic_DeviceMetrics *metrics)
 	metrics->uptime_seconds = k_uptime_seconds();
 
 	collect_fuel_gauge(metrics);
+
+	if (!metrics->has_battery_level) {
+		/* No fuel gauge, or the read failed: report the "powered" sentinel
+		 * instead of leaving battery_level unset (which decodes to 0 % and
+		 * reads as a dead node). Voltage stays unset — we have no reading. */
+		metrics->has_battery_level = true;
+		metrics->battery_level = MESHTASTIC_BATTERY_LEVEL_POWERED;
+	}
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 	metrics->has_channel_utilization = true;
