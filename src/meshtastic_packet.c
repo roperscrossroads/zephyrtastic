@@ -100,8 +100,8 @@ destroy:
 	return ret;
 }
 
-static int encode_packet_data(const struct meshtastic_packet *packet, uint8_t *buf, size_t buf_len,
-			      size_t *encoded_len)
+static int encode_packet_data(const struct meshtastic_packet *packet, const meshtastic_Data *base,
+			      uint8_t *buf, size_t buf_len, size_t *encoded_len)
 {
 	meshtastic_Data data = meshtastic_Data_init_zero;
 	pb_ostream_t stream;
@@ -115,7 +115,25 @@ static int encode_packet_data(const struct meshtastic_packet *packet, uint8_t *b
 		return -EINVAL;
 	}
 
+	/* C3 Phase 3: when the caller supplies the originating Data (a phone-injected
+	 * MeshPacket, `base`), start from it so a Data field the flat struct never models --
+	 * Data.emoji (TXT-1), and any future one -- carries to the wire by construction.
+	 *
+	 * Every field the struct DOES model is overwritten below, from the struct (which the
+	 * TX-sanitiser may have rewritten) or from node-authoritative state: payload, portnum,
+	 * want_response, the mqtt-consent bitfield, dest, source, request_id, reply_id. So the
+	 * *only* field that rides through from base today is emoji. This override set is a
+	 * load-bearing contract: a future node-authoritative Data field MUST be added here, or
+	 * the phone's value would leak unbidden. */
+	if (base != NULL) {
+		data = *base;
+	}
+
 	data.portnum = (meshtastic_PortNum)packet->portnum;
+	/* Keep this assignment UNCONDITIONAL (do not fold into the `> 0` guard below): it is
+	 * what clobbers base's payload size, so a TX-sanitiser rewrite -- e.g. POS-1 masking a
+	 * phone-injected Position -- always wins and base's full-precision bytes never reach
+	 * the wire. nanopb emits only `.size` bytes, so a shorter sanitised payload is safe. */
 	data.payload.size = (pb_size_t)packet->payload_len;
 	if (packet->payload_len > 0U) {
 		memcpy(data.payload.bytes, packet->payload, packet->payload_len);
@@ -166,7 +184,7 @@ int meshtastic_encode_data(uint32_t portnum, const uint8_t *payload, size_t payl
 		.payload_len = payload_len,
 	};
 
-	return encode_packet_data(&packet, buf, buf_len, encoded_len);
+	return encode_packet_data(&packet, NULL, buf, buf_len, encoded_len);
 }
 
 int meshtastic_packet_to_mesh_pb(const struct meshtastic_packet *packet,
@@ -694,8 +712,8 @@ int meshtastic_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi, int
 	return 0;
 }
 
-int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t *out,
-				 uint32_t *out_len)
+int meshtastic_build_wire_packet_data(const struct meshtastic_packet *packet,
+				      const meshtastic_Data *base, uint8_t *out, uint32_t *out_len)
 {
 	uint8_t nonce[16];
 	struct meshtastic_wire_header *hdr;
@@ -707,7 +725,7 @@ int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t
 	bool pki_done = false;
 	int ret;
 
-	ret = encode_packet_data(packet, mt_ws.pb_buf, sizeof(mt_ws.pb_buf), &encoded_len);
+	ret = encode_packet_data(packet, base, mt_ws.pb_buf, sizeof(mt_ws.pb_buf), &encoded_len);
 	if (ret < 0) {
 		return ret;
 	}
@@ -804,6 +822,13 @@ int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t
 	return 0;
 }
 
+int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t *out,
+				 uint32_t *out_len)
+{
+	/* Internal originators build the Data from the struct alone (no verbatim base). */
+	return meshtastic_build_wire_packet_data(packet, NULL, out, out_len);
+}
+
 int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 {
 	struct meshtastic_packet packet;
@@ -842,7 +867,10 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 			.relay_node = mesh->relay_node,
 		};
 
-		return meshtastic_send_packet(&packet, K_FOREVER);
+		/* C3 Phase 3: carry the phone's own decoded Data through the send path so
+		 * fields the flat struct never models (Data.emoji, a reaction's flag) reach
+		 * the wire, instead of being rebuilt lossily from the struct. */
+		return meshtastic_send_packet_data(&packet, &mesh->decoded, K_FOREVER);
 	}
 
 	if (mesh->which_payload_variant != meshtastic_MeshPacket_encrypted_tag) {

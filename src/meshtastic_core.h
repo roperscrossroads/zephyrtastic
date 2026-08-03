@@ -97,6 +97,13 @@ uint32_t meshtastic_allocate_packet_id(void);
 uint32_t meshtastic_next_fromradio_id(void);
 void meshtastic_emit_event(enum meshtastic_event_type type, int err,
 			   const struct meshtastic_packet *packet);
+/*
+ * Originate a packet carrying an optional verbatim @p base Data (a phone-injected
+ * MeshPacket's decoded payload) so Data fields the flat struct never models -- Data.emoji,
+ * ... -- survive to the wire (C3 Phase 3). meshtastic_send_packet() is the base==NULL entry.
+ */
+int meshtastic_send_packet_data(const struct meshtastic_packet *packet,
+				const meshtastic_Data *base, k_timeout_t wait);
 const char *meshtastic_long_name(void);
 const char *meshtastic_short_name(void);
 meshtastic_HardwareModel meshtastic_hw_model(void);

@@ -419,18 +419,24 @@ static void build_peer_wire_packet(uint32_t to, uint32_t id, uint8_t hop_limit, 
 			  (const uint8_t *)text, strlen(text), wire, wire_len);
 }
 
+/* Copy out the single wire frame the node last transmitted (asserts exactly one send). */
+static void capture_last_tx_wire(uint8_t *wire, uint32_t *wire_len)
+{
+	k_mutex_lock(&mock_lora.lock, K_FOREVER);
+	zassert_equal(mock_lora.send_count, 1U, "expected one lora_send call");
+	zassert_true(mock_lora.last_tx_len > MESHTASTIC_HDR_LEN, "expected wire payload");
+	*wire_len = mock_lora.last_tx_len;
+	memcpy(wire, mock_lora.last_tx, *wire_len);
+	k_mutex_unlock(&mock_lora.lock);
+}
+
 static void decode_last_tx(struct meshtastic_packet *decoded, uint8_t *payload, size_t payload_len)
 {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t wire_len;
 	int ret;
 
-	k_mutex_lock(&mock_lora.lock, K_FOREVER);
-	zassert_equal(mock_lora.send_count, 1U, "expected one lora_send call");
-	zassert_true(mock_lora.last_tx_len > MESHTASTIC_HDR_LEN, "expected wire payload");
-	wire_len = mock_lora.last_tx_len;
-	memcpy(wire, mock_lora.last_tx, wire_len);
-	k_mutex_unlock(&mock_lora.lock);
+	capture_last_tx_wire(wire, &wire_len);
 
 	ret = meshtastic_decode_wire_packet(wire, wire_len, 0, 0, decoded, payload, payload_len);
 	zassert_ok(ret, "meshtastic_decode_wire_packet failed: %d", ret);
@@ -3141,6 +3147,56 @@ ZTEST(protocol_stack, test_c3_detector_rx_time_reaches_phone)
 	zassert_true(pkt.rx_time >= epoch && pkt.rx_time <= epoch + 2U,
 		     "MeshPacket.rx_time must reflect the decode-time clock (TXT-6); got %u",
 		     pkt.rx_time);
+}
+
+/* Decode the single frame the node last transmitted back into a MeshPacket, so a test
+ * can inspect Data-level fields (emoji) the flat-struct `decode_last_tx` cannot see.
+ * Wraps the captured wire as an encrypted MeshPacket and runs the real channel decrypt. */
+static void decode_last_tx_mesh(meshtastic_MeshPacket *out)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	const struct meshtastic_wire_header *hdr;
+
+	capture_last_tx_wire(wire, &wire_len);
+
+	hdr = (const struct meshtastic_wire_header *)wire;
+	*out = (meshtastic_MeshPacket)meshtastic_MeshPacket_init_zero;
+	out->from = sys_le32_to_cpu(hdr->src);
+	out->to = sys_le32_to_cpu(hdr->dest);
+	out->id = sys_le32_to_cpu(hdr->id);
+	out->channel = hdr->channel;
+	out->which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
+	out->encrypted.size = (pb_size_t)(wire_len - MESHTASTIC_HDR_LEN);
+	memcpy(out->encrypted.bytes, wire + MESHTASTIC_HDR_LEN, out->encrypted.size);
+
+	zassert_ok(meshtastic_mesh_pb_try_decode(out), "TX frame did not decode");
+	zassert_equal(out->which_payload_variant, meshtastic_MeshPacket_decoded_tag,
+		      "TX frame did not decode to a Data");
+}
+
+/* TXT-1, send side: a phone-originated reaction (decoded Data with emoji=1) must keep its
+ * emoji flag on the wire. The old path flattened the phone's Data through the struct and
+ * rebuilt via encode_packet_data, dropping emoji; Phase 3 encodes the phone's Data. */
+ZTEST(protocol_stack, test_c3_detector_emoji_reaches_mesh)
+{
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	meshtastic_MeshPacket tx;
+
+	mesh.from = TEST_NODE_ID;
+	mesh.to = MESHTASTIC_NODE_BROADCAST;
+	mesh.id = 0x530BU;
+	mesh.channel = meshtastic_channels_primary_index();
+	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh.decoded.portnum = (meshtastic_PortNum)MESHTASTIC_PORT_TEXT_MESSAGE;
+	mesh.decoded.payload.size = 4U;
+	memcpy(mesh.decoded.payload.bytes, "\xf0\x9f\x91\x8d" /* thumbs-up emoji */, 4U);
+	mesh.decoded.emoji = 1U;
+
+	zassert_ok(meshtastic_send_mesh_pb(&mesh), "send_mesh_pb failed");
+	decode_last_tx_mesh(&tx);
+	zassert_equal(tx.decoded.emoji, 1U,
+		      "Data.emoji must survive phone -> mesh (TXT-1) -- Phase 3 encodes the phone's Data");
 }
 
 /* Drive a local (directly-connected app) admin get-request through the dispatcher

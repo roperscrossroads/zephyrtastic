@@ -634,7 +634,8 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 }
 
 static int send_packet_prepare(const struct meshtastic_packet *packet,
-			       struct meshtastic_packet *local, uint8_t *wire, uint32_t *pkt_len)
+			       const meshtastic_Data *base, struct meshtastic_packet *local,
+			       uint8_t *wire, uint32_t *pkt_len)
 {
 	/* Scratch for a TX-sanitisation handler that re-encodes the payload (POS-1).
 	 * Must outlive meshtastic_build_wire_packet() below, which reads local->payload
@@ -692,7 +693,7 @@ static int send_packet_prepare(const struct meshtastic_packet *packet,
 					   &local->relay_node);
 
 	k_mutex_lock(&mt_ws.lock, K_FOREVER);
-	ret = meshtastic_build_wire_packet(local, wire, pkt_len);
+	ret = meshtastic_build_wire_packet_data(local, base, wire, pkt_len);
 	k_mutex_unlock(&mt_ws.lock);
 
 	return ret;
@@ -720,14 +721,15 @@ static int send_packet_complete(const struct meshtastic_packet *local, const uin
 	return 0;
 }
 
-int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t wait)
+int meshtastic_send_packet_data(const struct meshtastic_packet *packet,
+				const meshtastic_Data *base, k_timeout_t wait)
 {
 	struct meshtastic_packet local;
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t pkt_len = 0U;
 	int ret;
 
-	ret = send_packet_prepare(packet, &local, wire, &pkt_len);
+	ret = send_packet_prepare(packet, base, &local, wire, &pkt_len);
 	if (ret < 0) {
 		return ret;
 	}
@@ -785,6 +787,14 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 	}
 
 	return send_packet_complete(&local, wire, pkt_len, ret, K_TIMEOUT_EQ(wait, K_FOREVER));
+}
+
+int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t wait)
+{
+	/* Public originator entry: the Data is built from the struct alone. The phone-injected
+	 * path (meshtastic_send_mesh_pb) uses the _data variant to carry its decoded Data
+	 * verbatim (C3 Phase 3). */
+	return meshtastic_send_packet_data(packet, NULL, wait);
 }
 
 int meshtastic_send_data(uint32_t dest, uint32_t portnum, const uint8_t *payload,
