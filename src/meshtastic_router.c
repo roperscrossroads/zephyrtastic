@@ -448,7 +448,8 @@ static void deliver_packet(const struct meshtastic_packet *packet,
 
 void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *hdr,
 					  const uint8_t *wire, size_t wire_len,
-					  const struct meshtastic_packet *packet)
+					  const struct meshtastic_packet *packet,
+					  const meshtastic_MeshPacket *mesh)
 {
 	uint32_t src;
 	uint32_t dest;
@@ -474,7 +475,9 @@ void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *h
 		return;
 	}
 
-	if (dest == MESHTASTIC_NODE_BROADCAST && packet->id == 0U) {
+	/* Phase 4b: id comes off the wire header (always present, even on the encrypted
+	 * relay path where there is no decoded MeshPacket) -- the same source dedup keys on. */
+	if (dest == MESHTASTIC_NODE_BROADCAST && sys_le32_to_cpu(hdr->id) == 0U) {
 		LOG_DBG("Ignore id=0 broadcast relay");
 		return;
 	}
@@ -495,7 +498,11 @@ void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *h
 		return;
 	}
 
-	relay_packet(wire, (int)wire_len, hdr, hop_limit, packet->snr);
+	/* Phase 4b: rx SNR from the decoded MeshPacket when the RF path supplied one
+	 * (rx_mesh->rx_snr == (float)packet->snr by construction), else the flat struct on
+	 * the encrypted-relay / DUP_UPGRADE / inject paths that carry no MeshPacket. */
+	relay_packet(wire, (int)wire_len, hdr, hop_limit,
+		     mesh != NULL ? (int8_t)mesh->rx_snr : packet->snr);
 }
 
 static meshtastic_Routing_Error decode_fail_to_routing_err(enum meshtastic_decode_fail r)
@@ -625,7 +632,7 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 
 		LOG_DBG("Hop-upgraded duplicate (src=0x%08x id=0x%08x hops=%u): relay", src,
 			pkt_id, rx_hop_limit);
-		meshtastic_routing_sniff_rebroadcast(hdr, buf, (size_t)len, &upgraded);
+		meshtastic_routing_sniff_rebroadcast(hdr, buf, (size_t)len, &upgraded, NULL);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
@@ -897,7 +904,9 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 	}
 
 	if (hdr != NULL && !suppress_relay) {
-		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, packet);
+		/* Phase 4b: decoded_mesh is NULL on the encrypted-relay path (no decode) and
+		 * the public inject/test path -> struct-fallback for snr inside. */
+		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, packet, decoded_mesh);
 	}
 }
 

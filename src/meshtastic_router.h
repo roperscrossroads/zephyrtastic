@@ -56,7 +56,8 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh);
  */
 void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *hdr,
 					  const uint8_t *wire, size_t wire_len,
-					  const struct meshtastic_packet *packet);
+					  const struct meshtastic_packet *packet,
+					  const meshtastic_MeshPacket *mesh);
 
 /** @brief Routing-port handling for decoded packets (e.g. ACK replies). */
 void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet);
