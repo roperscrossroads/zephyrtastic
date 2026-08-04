@@ -3149,6 +3149,56 @@ ZTEST(protocol_stack, test_c3_detector_rx_time_reaches_phone)
 		     pkt.rx_time);
 }
 
+/* Phase 4b invariant — dedup identity is keyed off the WIRE HEADER, and the decoded
+ * MeshPacket carries it byte-identical. process_lora_rx computes (src,id) from
+ * hdr->src/hdr->id and calls dup_add() BEFORE decode; Phase 4b then points the
+ * relay/routing/next-hop consumers (sniff_rebroadcast, send_error, learn_next_hop,
+ * the on_decoded cluster) at the decoded MeshPacket (rx_mesh) instead of the flat
+ * struct. This locks in that the (from,id) those consumers will read off rx_mesh
+ * equals the (src,id) dedup used off the wire -- so the flip cannot silently change
+ * dedup/relay identity. Non-circular: it compares the delivered MeshPacket against the
+ * raw wire-header bytes, with no (from,id) capture filter to bias the result. */
+ZTEST(protocol_stack, test_c3_detector_dedup_identity_matches_meshpacket)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	const struct meshtastic_wire_header *hdr;
+	uint32_t hdr_src, hdr_id;
+	struct meshtastic_phoneapi_frame frame;
+	bool matched = false;
+
+	wire_len = build_emoji_wire_frame(0x4B01U, "\xf0\x9f\x91\x8d" /* thumbs-up */, wire);
+	hdr = (const struct meshtastic_wire_header *)wire;
+	hdr_src = sys_le32_to_cpu(hdr->src);
+	hdr_id = sys_le32_to_cpu(hdr->id);
+
+	getcap_reset();
+	inject_rx_frame(wire, wire_len, -20, 6);
+
+	for (int i = 0; i < 200 && meshtastic_phoneapi_pending_count(&getcap_api) == 0U; i++) {
+		k_sleep(K_MSEC(5));
+	}
+
+	while (meshtastic_phoneapi_pop_frame(&getcap_api, &frame)) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t is = pb_istream_from_buffer(frame.data, frame.len);
+
+		if (pb_decode(&is, meshtastic_FromRadio_fields, &from) &&
+		    from.which_payload_variant == meshtastic_FromRadio_packet_tag) {
+			zassert_equal(from.packet.from, hdr_src,
+				      "MeshPacket.from 0x%08x != wire-header src 0x%08x "
+				      "(dedup identity must survive to the MeshPacket)",
+				      from.packet.from, hdr_src);
+			zassert_equal(from.packet.id, hdr_id,
+				      "MeshPacket.id 0x%08x != wire-header id 0x%08x",
+				      from.packet.id, hdr_id);
+			matched = true;
+			break;
+		}
+	}
+	zassert_true(matched, "no FromRadio.packet delivered to assert identity against");
+}
+
 /* Decode the single frame the node last transmitted back into a MeshPacket, so a test
  * can inspect Data-level fields (emoji) the flat-struct `decode_last_tx` cannot see.
  * Wraps the captured wire as an encrypted MeshPacket and runs the real channel decrypt. */
