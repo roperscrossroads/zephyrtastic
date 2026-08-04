@@ -11,6 +11,39 @@ config POWER_DOMAIN
 config POWER_DOMAIN_GPIO
 	default y
 
+# --- PSRAM: 2 MB QUAD (ESP32-S3R2) ----------------------------------------
+# Counterpart to the R8 board's octal block. These used to live in
+# samples/meshtastic/overlay-v4-unified.conf, which is shared with the 8 MB
+# OCTAL R8 — so the overlay's unconditional CONFIG_SPIRAM_MODE_QUAD=y was
+# correct here and wrong there. The PSRAM part is board hardware; it belongs
+# with the board.
+#
+# Values below are exactly what the overlay set, so this is a no-op refactor
+# for the V4 — hardware-verified previously ("Found 2MB PSRAM @ 40MHz").
+if ESP_SPIRAM
+
+choice SPIRAM_MODE
+	default SPIRAM_MODE_QUAD
+endchoice
+
+choice SPIRAM_TYPE
+	default SPIRAM_TYPE_ESPPSRAM16
+endchoice
+
+# 40M was chosen for safe first bring-up and never revisited. The part supports
+# more; bumping is a separate, bench-verified change (see docs/memory-savings.md).
+choice SPIRAM_SPEED
+	default SPIRAM_SPEED_40M
+endchoice
+
+# NOTE: ESP_SPIRAM_HEAP_SIZE is deliberately left at the Zephyr default (1 MB).
+# With ~57 KB of .ext_ram.bss that uses ~1.05 MB of the 2 MB part, leaving
+# ~945 KB idle. Raising it to ~1572864 (1.5 MB) would hand that to the external
+# shared-multi-heap (which is where ESP_WIFI_HEAP_SPIRAM sends WiFi allocations)
+# and still leave ~450 KB of BSS headroom. Not done here only because the V4 is
+# the proven bench platform and this would be an unverified change to it.
+endif # ESP_SPIRAM
+
 if LVGL
 
 config LV_Z_VDB_SIZE
