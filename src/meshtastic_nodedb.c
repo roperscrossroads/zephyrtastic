@@ -58,8 +58,9 @@ struct nodedb_entry {
 };
 
 static K_MUTEX_DEFINE(nodedb_lock);
-/* MESHTASTIC_EXT_RAM_BSS_ATTR: no-op unless CONFIG_ESP_SPIRAM (V4-only) — places this table
- * in PSRAM instead of internal DRAM. See PSRAM-NEXT-STEPS.md. */
+/* MESHTASTIC_EXT_RAM_BSS_ATTR: no-op unless CONFIG_ESP_SPIRAM (V4 family only) — places this
+ * table in PSRAM instead of internal DRAM. Rules for what may live there:
+ * src/meshtastic_ext_ram.h; budget and remaining levers: docs/memory-savings.md. */
 static MESHTASTIC_EXT_RAM_BSS_ATTR struct nodedb_entry nodedb_entries[CONFIG_MESHTASTIC_NODEDB_MAX_NODES];
 static size_t nodedb_entry_count;
 

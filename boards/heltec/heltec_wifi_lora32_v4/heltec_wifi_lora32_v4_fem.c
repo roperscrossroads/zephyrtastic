@@ -119,14 +119,45 @@ void meshtastic_radio_fem_set_tx(bool tx)
 SYS_INIT(heltec_v4_fem_init, POST_KERNEL, 80);
 
 /*
+ * ---------------------------------------------------------------------------
+ * L76K GNSS control — board-aware pin map.
+ *
+ * Octal PSRAM on the R8 claims GPIO33-37 for the wide MSPI bus, so the whole GNSS
+ * control map moved vs the plain V4, and two of the lines were dropped entirely:
+ *
+ *              V4                     V4 R8
+ *   EN        GPIO34 (gpio1.2)        GPIO42 (gpio1.10)      active-low
+ *   STANDBY   GPIO40 (gpio1.8)        — dropped (GPIO40 is Vext on the R8!)
+ *   RESET     GPIO42 (gpio1.10)       — removed
+ *
+ * EN (and STANDBY, on the V4) are held at their run state by gpio-hogs in the board
+ * .dts; this file only *pulses RESET at boot* where a reset line exists, plus the
+ * `gps` bench CLI. On the R8 there is no reset line — and GPIO42 is now the ENABLE
+ * line, so the V4's boot reset pulse would drive it and disturb the hog — and GPIO40
+ * is the Vext power rail, so driving it as "standby" would power-cycle the OLED/GPS.
+ * Both the reset pulse and the standby control are therefore compiled out for the R8.
+ * ---------------------------------------------------------------------------
+ */
+#if defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V4_R8_ESP32S3_PROCPU)
+#define GPS_EN_PIN      10 /* gpio1 — GPIO42, GPS_EN, active-low (0 = enabled) */
+#define GPS_HAS_STANDBY  0 /* GPIO40 is Vext on the R8 — never drive it as standby */
+#define GPS_HAS_RESET    0 /* R8 has no GNSS reset line (GPIO42 is now the enable)  */
+#else /* plain V4 (rev 4.2 / 4.3) */
+#define GPS_EN_PIN       2 /* gpio1 — GPIO34, GPS_EN, active-low (0 = enabled) */
+#define GPS_STANDBY_PIN  8 /* gpio1 — GPIO40, high = force wake                */
+#define GPS_RESET_PIN   10 /* gpio1 — GPIO42, L76K reset, active-low           */
+#define GPS_HAS_STANDBY  1
+#define GPS_HAS_RESET    1
+#endif
+
+#if GPS_HAS_RESET
+/*
  * L76K GNSS reset pulse — mirrors firmware/src/gps/GPS.cpp, which resets the L76K
  * at boot for a clean, known start. The DT holds EN low (enabled) and STANDBY high
  * (awake) via gpio-hogs; RESET is active-low on GPIO42 (gpio1.10): assert low
  * >=100 ms, then release. The DT hog for this pin was removed so we can pulse it.
  * Runs after the GPIO drivers and before/around the GNSS driver reading uart1.
  */
-#define GPS_RESET_PIN 10 /* gpio1 — GPIO42, L76K reset, active-low */
-
 static int heltec_v4_gps_reset(void)
 {
 	const struct device *const gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
@@ -147,6 +178,7 @@ static int heltec_v4_gps_reset(void)
 }
 
 SYS_INIT(heltec_v4_gps_reset, POST_KERNEL, 85);
+#endif /* GPS_HAS_RESET — on the R8 the gps_en_hog holds GPS enabled; no reset line */
 
 /*
  * ---------------------------------------------------------------------------
@@ -170,14 +202,15 @@ SYS_INIT(heltec_v4_gps_reset, POST_KERNEL, 85);
  */
 #if defined(CONFIG_SHELL)
 
-#define GPS_EN_PIN      2 /* gpio1 — GPIO34, GPS_EN, active-low (0 = enabled) */
-#define GPS_STANDBY_PIN 8 /* gpio1 — GPIO40, high = force wake                */
+/* GPS_EN_PIN / GPS_STANDBY_PIN / GPS_HAS_* come from the board-aware block above. */
 
 /* Last-commanded physical levels, seeded to the gpio-hog boot defaults so
  * `gps status` is truthful before any command (reading back an output pin is
  * driver-dependent on ESP32, so intent is tracked rather than sampled). */
 static int gps_en_level = 0;      /* enabled */
+#if GPS_HAS_STANDBY
 static int gps_standby_level = 1; /* awake   */
+#endif
 
 static const struct device *gps_gpio1(void)
 {
@@ -230,30 +263,43 @@ static int cmd_gps_wake(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
+#if GPS_HAS_STANDBY
 	return gps_drive(sh, GPS_STANDBY_PIN, 1, &gps_standby_level, "STANDBY high: awake");
+#else
+	shell_error(sh, "no STANDBY line on this board (GPIO40 is Vext on the R8)");
+	return -ENOTSUP;
+#endif
 }
 
 static int cmd_gps_sleep(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
+#if GPS_HAS_STANDBY
 	return gps_drive(sh, GPS_STANDBY_PIN, 0, &gps_standby_level, "STANDBY low: asleep");
+#else
+	shell_error(sh, "no STANDBY line on this board (GPIO40 is Vext on the R8)");
+	return -ENOTSUP;
+#endif
 }
 
 static int cmd_gps_reset(const struct shell *sh, size_t argc, char **argv)
 {
-	int ret;
-
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
+#if GPS_HAS_RESET
+	int ret = heltec_v4_gps_reset();
 
-	ret = heltec_v4_gps_reset();
 	if (ret < 0) {
 		shell_error(sh, "reset failed: %d", ret);
 		return ret;
 	}
 	shell_print(sh, "pulsed RESET (GPIO42)");
 	return 0;
+#else
+	shell_error(sh, "no GNSS reset line on this board (R8: GPIO42 is the enable)");
+	return -ENOTSUP;
+#endif
 }
 
 static int cmd_gps_baud(const struct shell *sh, size_t argc, char **argv)
@@ -379,8 +425,13 @@ static int cmd_gps_status(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
+#if GPS_HAS_STANDBY
 	shell_print(sh, "EN(GPIO34)=%d [0=on]  STANDBY(GPIO40)=%d [1=wake]  (last commanded)",
 		    gps_en_level, gps_standby_level);
+#else
+	shell_print(sh, "EN(GPIO42)=%d [0=on]  (R8: no STANDBY/RESET lines)  (last commanded)",
+		    gps_en_level);
+#endif
 	if (uart != NULL && uart_config_get(uart, &cfg) == 0) {
 		shell_print(sh, "uart1 baud=%u", cfg.baudrate);
 	} else {
@@ -466,11 +517,17 @@ static int cmd_gps_pinmux(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
+#if defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V4_R8_ESP32S3_PROCPU)
+	gps_dump_pin(sh, "EN", 42);
+	gps_dump_pin(sh, "TX", 38);
+	gps_dump_pin(sh, "RX", 39);
+#else
 	gps_dump_pin(sh, "EN", 34);
 	gps_dump_pin(sh, "TX", 38);
 	gps_dump_pin(sh, "RX", 39);
 	gps_dump_pin(sh, "STANDBY", 40);
 	gps_dump_pin(sh, "RESET", 42);
+#endif
 	shell_print(sh, "U1RXD in : src_gpio=%u matrix_en=%u  (want gpio=39 en=1)",
 		    (unsigned)(insel & 0x3fU), (unsigned)((insel >> 7) & 1U));
 	shell_print(sh, "UART1    : conf0=0x%08x  %u%c%u  loopback=%u", c0, databits,

@@ -8,6 +8,62 @@ config POWER_DOMAIN
 config POWER_DOMAIN_GPIO
 	default y
 
+# --- PSRAM: 8 MB OCTAL (ESP32-S3R8) ---------------------------------------
+# These MUST live with the board, not in an application overlay: the PSRAM part
+# is a property of the module, and an overlay shared with the 2 MB-quad V4 will
+# get one of the two boards wrong. (It did: overlay-v4-unified.conf used to pin
+# CONFIG_SPIRAM_MODE_QUAD=y unconditionally, which the R8 silently inherited —
+# an octal part driven in quad mode. ESP_SPIRAM_SIZE is safe by construction, it
+# is derived from the psram0 DT node, but the *mode* had no such guard.)
+#
+# The 8 MB octal PSRAM is soldered onto the R8 module -- it is the defining feature of
+# the R8 vs the 2 MB-quad V4, not an application option. Force it on for the app image so
+# no build (unified, net, ble, or a bare `west build -b <board> samples/meshtastic`) can
+# silently omit it. `ESP_SPIRAM` has base `default n`; MCUboot must never touch PSRAM
+# (it carries its own `default n if MCUBOOT`), hence the `!MCUBOOT` guard here. If octal
+# @ 80 MHz is unstable on first hardware, drop SPIRAM_SPEED below to 40M -- never disable.
+config ESP_SPIRAM
+	default y if !MCUBOOT
+
+# Only defaults are set here, so an application can still override any of them.
+if ESP_SPIRAM
+
+choice SPIRAM_MODE
+	default SPIRAM_MODE_OCT
+endchoice
+
+# ESPPSRAM64 = 8 MB. The SPIRAM_TYPE choice already `depends on
+# (ESP_SPIRAM_SIZE = 8388608)` for this entry, i.e. it is cross-checked against
+# the psram0 DT size — stated explicitly here so the intent is visible.
+choice SPIRAM_TYPE
+	default SPIRAM_TYPE_ESPPSRAM64
+endchoice
+
+# 80 MHz is the rated/standard operating point for a WROOM-1 N16R8 octal part, but
+# first hardware bring-up (rzr3, 2026-08-03) was UNSTABLE at 80M: the boot log showed
+#   E: restore cache fail  ->  flash_esp32: Flash write error -5  ->  NVS/settings init -5
+# i.e. flash writes fault. On an octal-PSRAM S3 a flash write suspends+restores the MMU
+# cache, and the freshly-tuned 80 MHz octal PSRAM timing does not survive that cycle, so
+# NVS/settings/WiFi-credentials all fail to persist. Dropping to 40M (as the note below
+# always warned) gives the cache-restore enough timing margin. Revisit 80M only with a
+# dedicated flash/PSRAM MSPI-timing investigation.  (Was: default SPIRAM_SPEED_80M.)
+choice SPIRAM_SPEED
+	default SPIRAM_SPEED_40M
+endchoice
+
+# Shared-multi-heap external pool (linker: _ext_ram_heap_start.._ext_ram_heap_end).
+# The Zephyr default is 1 MB, sized for a 2 MB part; on 8 MB that leaves ~6.9 MB
+# of the module doing nothing. 4 MB still leaves ~4 MB of address space for
+# .ext_ram.bss growth, and the linker ASSERT ("External SPIRAM overflowed")
+# catches an overrun at build time rather than at runtime.
+#
+# This costs nothing in flash or boot image: .ext_ram.data is NOLOAD, so the
+# reservation is address space inside the part, not bytes in zephyr.bin.
+config ESP_SPIRAM_HEAP_SIZE
+	default 4194304
+
+endif # ESP_SPIRAM
+
 if LVGL
 
 config LV_Z_VDB_SIZE

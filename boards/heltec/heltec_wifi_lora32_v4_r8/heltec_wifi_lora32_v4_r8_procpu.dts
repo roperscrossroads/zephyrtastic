@@ -8,9 +8,12 @@
  *   - no ADC_CTRL (battery divider is ungated)
  *   - KCT8103L FEM (CTX RX-mode select on GPIO5, same as V4 4.3)
  *   - GPS enable moves to GPIO42; standby line dropped
- * All R8-specific pins are VERIFY(hardware) — this target is a scaffold to
- * iterate on once the board is in hand; octal-PSRAM bring-up in particular is
- * unconfirmed.
+ * All R8-specific pins are VERIFY(hardware) — nothing here has been confirmed
+ * against a board yet, octal-PSRAM bring-up least of all.
+ *
+ * The PSRAM part itself is configured in this board's Kconfig.defconfig (OCTAL
+ * mode, ESPPSRAM64, 80 MHz, 4 MB shared-multi-heap pool), not here and not in an
+ * application overlay — see the comment there.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -46,16 +49,59 @@
 };
 
 /*
+ * ---------------------------------------------------------------------------
+ * GPIO33-37 DO NOT EXIST ON THIS BOARD.
+ * ---------------------------------------------------------------------------
+ * On an ESP32-S3 fitted with OCTAL PSRAM, GPIO33..37 are consumed by the wider
+ * MSPI bus that reaches the PSRAM die (SPIIO4, SPIIO5, SPIIO6, SPIIO7, SPIDQS).
+ * They are not merely "in use" by a peripheral we could rehome — the module
+ * bonds them to the PSRAM, so anything that muxes them away corrupts every
+ * PSRAM access, including the .ext_ram.bss that the NodeDB, config store and
+ * PhoneAPI queues live in. The 2 MB QUAD-PSRAM V4 leaves these five pins free,
+ * which is precisely why Heltec could use GPIO34/35/36/37 there and had to move
+ * all four here.
+ *
+ * Consequences, all handled in this file:
+ *   GPIO34  VGNSS_Ctrl -> GPIO42        (gps_en_hog below; the plain-V4 GPIO34
+ *                                        hog lives in that board's own .dts,
+ *                                        which this board does not include)
+ *   GPIO35  white LED  -> GPIO46        (&led0 and &ledc0_default below)
+ *   GPIO36  Vext       -> GPIO40        (vext_ctrl above)
+ *   GPIO37  ADC_CTRL   -> gone entirely (/delete-node/ &adc_ctrl above)
+ *
+ * Anything added to the shared -common.dtsi / -pinctrl.dtsi in the 33..37 range
+ * from now on must be overridden here too.
+ */
+
+/*
  * White LED moves GPIO35 -> GPIO46 on R8 (per the Heltec V4-R8 pin map). On the
  * plain V4, GPIO46 is the GC1109 FEM CPS mode pin; R8 fits the KCT8103L (mode on
  * GPIO5), so GPIO46 is free for the LED here. The common.dtsi led0 defaults to
  * GPIO35 — override it. VERIFY(hardware): confirm the LED is on GPIO46 on R8.
- * NOTE: the PWM LED (pwm_led_white via ledc0) still maps to the common GPIO35
- * pinctrl — only the plain gpio-led is moved here; add an R8 ledc0 pinctrl
- * override if PWM LED control on R8 is needed.
  */
 &led0 {
 	gpios = <&gpio1 14 GPIO_ACTIVE_HIGH>;	/* GPIO46 */
+};
+
+/*
+ * Move the LEDC output for the PWM LED to GPIO46 as well, so it drives the same
+ * LED the gpio-led node does instead of a PSRAM data line.
+ *
+ * This is a LATENT fault rather than a currently-firing one, which is what makes
+ * it worth spelling out. The meshtastic sample builds with CONFIG_PWM=n, so the
+ * LEDC driver is not compiled in and never applies its pinctrl state. But ledc0
+ * is still status="okay" in the merged devicetree with pinctrl-0 =
+ * <&ledc0_default>, so the moment anyone enables CONFIG_PWM on this board (LED
+ * brightness, a buzzer, a display backlight) the LEDC driver's init would mux
+ * LEDC_LS_SIG_OUT0 onto GPIO35 = SPIIO6 and pull the PSRAM out from under a
+ * running system. The symptom would be random corruption of PSRAM-resident
+ * structs, not a visibly broken LED — hours of debugging aimed at the wrong
+ * subsystem.
+ */
+&ledc0_default {
+	group1 {
+		pinmux = <LEDC_CH0_GPIO46>;
+	};
 };
 
 /*
