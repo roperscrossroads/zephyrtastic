@@ -217,13 +217,33 @@ void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet)
 	}
 }
 
-void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet)
+void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet,
+				       const meshtastic_MeshPacket *mesh)
 {
 	uint8_t self_byte;
+	uint32_t from;
+	uint32_t to;
+	bool via_mqtt;
+	uint8_t relay_node;
+	uint32_t request_id;
 
 	if (packet == NULL) {
 		return;
 	}
+
+	/* Phase 4b (RX-currency groundwork): read the identity/route fields from the
+	 * decoded MeshPacket when the RF RX path supplied one (rx_mesh); fall back to the
+	 * flat struct on the public inject/test path, which carries no MeshPacket. rx_mesh
+	 * is converted from the just-decoded struct (meshtastic_packet_to_mesh_pb copies
+	 * every field below), so the two reps are byte-identical here -- this is
+	 * parity-preserving preparation for the 4c boundary flip, not a behaviour change.
+	 * The (src,id) half of that identity is separately locked by
+	 * test_c3_detector_dedup_identity_matches_meshpacket. */
+	from = mesh ? mesh->from : packet->from;
+	to = mesh ? mesh->to : packet->to;
+	via_mqtt = mesh ? mesh->via_mqtt : packet->via_mqtt;
+	relay_node = mesh ? (uint8_t)mesh->relay_node : packet->relay_node;
+	request_id = mesh ? mesh->decoded.request_id : packet->request_id;
 
 	/* Next-hop route learning (increment 3). Learn a route only from traffic
 	 * that crossed the LoRa mesh addressed to this node specifically -- a unicast
@@ -234,15 +254,14 @@ void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet)
 	 * messages to us qualify too. Excluded: broadcasts (no confirmed return
 	 * path) and MQTT-gateway injections (relay_node never rode the air, so it
 	 * says nothing about the LoRa topology). */
-	if (packet->to != mt.node_id || packet->from == 0U || packet->from == mt.node_id ||
-	    packet->via_mqtt) {
+	if (to != mt.node_id || from == 0U || from == mt.node_id || via_mqtt) {
 		return;
 	}
 
 	/* relay_node 0 carries no route hint; our own low byte would mean relaying
 	 * through ourselves, which is never a valid next hop. */
 	self_byte = (uint8_t)(mt.node_id & 0xFFU);
-	if (packet->relay_node == 0U || packet->relay_node == self_byte) {
+	if (relay_node == 0U || relay_node == self_byte) {
 		return;
 	}
 
@@ -252,19 +271,18 @@ void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet)
 	 * carried our original outbound too (we overheard the rebroadcast); and
 	 * the one-byte relayer id must resolve to exactly one known node — a
 	 * colliding low byte could point the route at the wrong neighbour. */
-	if (packet->request_id == 0U) {
+	if (request_id == 0U) {
 		return;
 	}
-	if (!relayer_carried_our_packet(packet->request_id, packet->relay_node)) {
+	if (!relayer_carried_our_packet(request_id, relay_node)) {
 		return;
 	}
-	if (meshtastic_nodedb_resolve_unique_last_byte(packet->relay_node) == 0U) {
+	if (meshtastic_nodedb_resolve_unique_last_byte(relay_node) == 0U) {
 		return;
 	}
 
-	if (meshtastic_nodedb_set_next_hop(packet->from, packet->relay_node) == 0) {
-		LOG_DBG("route learn: next_hop(0x%08x)=0x%02x", (unsigned int)packet->from,
-			packet->relay_node);
+	if (meshtastic_nodedb_set_next_hop(from, relay_node) == 0) {
+		LOG_DBG("route learn: next_hop(0x%08x)=0x%02x", (unsigned int)from, relay_node);
 	}
 }
 

@@ -92,7 +92,8 @@ void meshtastic_router_stamp_originated(uint32_t to, uint32_t from, uint8_t *nex
  * Broadcasts and MQTT-injected packets are ignored (no confirmed LoRa return
  * path). Must be called after NodeDB module dispatch so the source entry exists.
  */
-void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet);
+void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet,
+				       const meshtastic_MeshPacket *mesh);
 
 /**
  * @brief Send a ROUTING error (NAK) to the sender of an undecodable want_ack unicast.

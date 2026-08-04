@@ -887,8 +887,10 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		meshtastic_routing_on_decoded(packet);
 		meshtastic_dispatch_modules(packet);
 		/* After module dispatch: the NodeDB has now created/refreshed the
-		 * source entry, so a learned next hop has somewhere to land. */
-		meshtastic_routing_learn_next_hop(packet);
+		 * source entry, so a learned next hop has somewhere to land.
+		 * Phase 4b: pass rx_mesh (NULL on the public inject/test path -> struct
+		 * fallback inside). */
+		meshtastic_routing_learn_next_hop(packet, decoded_mesh);
 	} else if (hdr != NULL) {
 		LOG_DBG("RX encrypted relay 0x%08x->0x%08x id=0x%08x", packet->from, packet->to,
 			packet->id);
