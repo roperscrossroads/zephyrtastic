@@ -60,7 +60,8 @@ void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *h
 					  const meshtastic_MeshPacket *mesh);
 
 /** @brief Routing-port handling for decoded packets (e.g. ACK replies). */
-void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet);
+void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet,
+				   const meshtastic_MeshPacket *mesh);
 
 /**
  * @brief Stamp next-hop routing fields on a directed unicast this node originates.

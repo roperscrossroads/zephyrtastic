@@ -891,7 +891,7 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 #if defined(CONFIG_MESHTASTIC_MQTT)
 		meshtastic_mqtt_on_rx(packet, wire, wire_len);
 #endif
-		meshtastic_routing_on_decoded(packet);
+		meshtastic_routing_on_decoded(packet, decoded_mesh);
 		meshtastic_dispatch_modules(packet);
 		/* After module dispatch: the NodeDB has now created/refreshed the
 		 * source entry, so a learned next hop has somewhere to land.

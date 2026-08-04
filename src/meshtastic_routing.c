@@ -58,12 +58,6 @@ static bool relayer_carried_our_packet(uint32_t id, uint8_t relayer)
 	return false;
 }
 
-static bool packet_is_to_us(const struct meshtastic_packet *packet)
-{
-	return packet != NULL &&
-	       (packet->to == mt.node_id || packet->to == MESHTASTIC_NODE_BROADCAST);
-}
-
 static uint8_t routing_hop_limit_for_reply(const struct meshtastic_packet *req)
 {
 	int16_t hops_used;
@@ -150,19 +144,44 @@ static int routing_send_reply(uint32_t to, uint32_t request_id, uint8_t ch_index
 	return meshtastic_send_packet(&reply, wait);
 }
 
-static int routing_send_ack(const struct meshtastic_packet *req)
+static int routing_send_ack(const struct meshtastic_packet *req, const meshtastic_MeshPacket *mesh)
 {
 	uint8_t ch_index;
+	uint32_t to;
+	uint32_t from;
+	uint32_t id;
+	uint8_t channel_index;
 
-	if (req == NULL || req->to != mt.node_id) {
+	if (req == NULL) {
 		return -EINVAL;
 	}
 
-	ch_index = (req->channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID)
-			   ? req->channel_index
+	/* Phase 4b: read the ACK's target/identity/channel from the decoded MeshPacket when
+	 * the RF path supplied one, else the flat struct. mesh->channel carries the RESOLVED
+	 * channel INDEX -- the converter copies packet->channel_index into it; on the wire it
+	 * is a hash, in memory it is the index (upstream's MeshPacket.channel convention). So
+	 * there is NO ambiguous hash->index re-resolution: read it directly, guarding the
+	 * < MAX_CHANNELS index range exactly as mesh_pb_to_packet does. The two reps are
+	 * byte-identical here (rx_mesh is converted from req), so this is parity-preserving. */
+	to = mesh ? mesh->to : req->to;
+	from = mesh ? mesh->from : req->from;
+	id = mesh ? mesh->id : req->id;
+	channel_index = mesh ? ((mesh->channel < MESHTASTIC_MAX_CHANNELS)
+					? (uint8_t)mesh->channel
+					: MESHTASTIC_CHANNEL_INDEX_INVALID)
+			     : req->channel_index;
+
+	if (to != mt.node_id) {
+		return -EINVAL;
+	}
+
+	ch_index = (channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID)
+			   ? channel_index
 			   : meshtastic_channels_primary_index();
 
-	return routing_send_reply(req->from, req->id, ch_index, meshtastic_Routing_Error_NONE,
+	/* hop-limit and want-ack policy for the reply are header/Data reads on req; the struct
+	 * still exists on every 4b path, so they stay struct-based (not in 4b's scope). */
+	return routing_send_reply(from, id, ch_index, meshtastic_Routing_Error_NONE,
 				  routing_hop_limit_for_reply(req),
 				  routing_ack_should_request_ack(req), K_FOREVER);
 }
@@ -201,19 +220,39 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
 				 routing_hop_limit_for_reply(req), false, K_NO_WAIT);
 }
 
-void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet)
+void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet,
+				   const meshtastic_MeshPacket *mesh)
 {
-	if (packet == NULL || !packet_is_to_us(packet) || packet->from == mt.node_id) {
+	uint32_t from;
+	uint32_t to;
+	uint32_t portnum;
+	bool want_ack;
+
+	if (packet == NULL) {
 		return;
 	}
 
-	/* An incoming ROUTING packet may be an ACK/NAK for something we sent. */
-	if (packet->portnum == MESHTASTIC_PORT_ROUTING) {
+	/* Phase 4b: read this consumer's own fields from the decoded MeshPacket when the RF
+	 * path supplied one, else the flat struct (public inject/test path). Byte-identical
+	 * here (rx_mesh is converted from packet). */
+	from = mesh ? mesh->from : packet->from;
+	to = mesh ? mesh->to : packet->to;
+	portnum = mesh ? mesh->decoded.portnum : packet->portnum;
+	want_ack = mesh ? mesh->want_ack : packet->want_ack;
+
+	if (!(to == mt.node_id || to == MESHTASTIC_NODE_BROADCAST) || from == mt.node_id) {
+		return;
+	}
+
+	/* An incoming ROUTING packet may be an ACK/NAK for something we sent. reliable
+	 * decodes the Routing payload from the struct (Phase 7 migrates it); the struct is
+	 * still built on every 4b path, so pass it through. */
+	if (portnum == MESHTASTIC_PORT_ROUTING) {
 		meshtastic_reliable_on_routing(packet);
 	}
 
-	if (packet->want_ack && packet->to == mt.node_id) {
-		(void)routing_send_ack(packet);
+	if (want_ack && to == mt.node_id) {
+		(void)routing_send_ack(packet, mesh);
 	}
 }
 
