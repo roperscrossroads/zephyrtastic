@@ -42,6 +42,9 @@ meaningful only if this firmware is ever built for a 433 MHz Heltec variant.
 |---|---|---|---|
 | MCU | ESP32-**S3R2** | ESP32-**S3R2** | ESP32-**S3R8** |
 | PSRAM | 2 MB quad (QSPI) | 2 MB quad (QSPI) | 8 MB octal (OPI) |
+| PSRAM mode @ speed | `SPIRAM_MODE_QUAD` @ 40 MHz | `SPIRAM_MODE_QUAD` @ 40 MHz | **`SPIRAM_MODE_OCT` @ 80 MHz** |
+| PSRAM heap (`ESP_SPIRAM_HEAP_SIZE`) | 1 MB (Zephyr default) | 1 MB (Zephyr default) | **4 MB** |
+| **GPIO33–37** | free | free | **bonded to the PSRAM bus — unusable** |
 | Flash | 16 MB | 16 MB | 16 MB |
 | MT hardware model | **110** | **110** | **132** |
 | Zephyr target | `heltec_wifi_lora32_v4/esp32s3/procpu` | `heltec_wifi_lora32_v4/esp32s3/procpu` | `heltec_wifi_lora32_v4_r8/esp32s3/procpu` |
@@ -70,3 +73,42 @@ chip-enable/detect = **GPIO2**.
 One firmware image per PSRAM class; the **FEM (GC1109 vs KCT8103L) is
 auto-detected at boot** by reading CSD — it is *not* a build-time choice.
 Only PSRAM size selects the target (`v4` = 2 MB, `v4_r8` = 8 MB).
+
+## PSRAM notes (V4 family)
+
+### GPIO33–37 are gone on the R8
+
+An ESP32-S3 with **octal** PSRAM routes five extra MSPI lines — SPIIO4, SPIIO5,
+SPIIO6, SPIIO7 and SPIDQS — to **GPIO33–37**, which the module bonds to the
+PSRAM die. They are not pins a peripheral is merely "using": muxing any of them
+away corrupts every PSRAM access, and since the NodeDB, config store, MQTT
+context and PhoneAPI queues all live in `.ext_ram.bss`, the symptom is random
+corruption of application state rather than an obviously broken peripheral.
+
+The 2 MB **quad** V4 leaves all five free, which is exactly why Heltec used
+GPIO34/35/36/37 there and had to relocate every one of them on the R8 (see the
+table above). Two practical consequences:
+
+- **Any new pin assignment in the shared `-common.dtsi` / `-pinctrl.dtsi` in the
+  33–37 range must be overridden in `heltec_wifi_lora32_v4_r8_procpu.dts`.**
+  Nothing in the build system will warn about it.
+- Watch for *latent* assignments. `ledc0` is `status = "okay"` with the shared
+  `ledc0_default` pinctrl, but the meshtastic sample builds `CONFIG_PWM=n`, so
+  the driver never applies that state. Enabling PWM on the R8 without the
+  GPIO46 pinctrl override would have muxed LEDC onto GPIO35 = SPIIO6 at driver
+  init. That override is now in the R8 `.dts`.
+
+### Where PSRAM settings live
+
+Mode, type, speed and heap size are **board** properties and live in each
+board's `Kconfig.defconfig`, *not* in an application overlay. An overlay shared
+between a quad board and an octal board can only be right for one of them:
+`overlay-v4-unified.conf` previously pinned `CONFIG_SPIRAM_MODE_QUAD=y`
+unconditionally, and the R8 inherited it.
+
+That mistake was invisible in every build artefact. `ESP_SPIRAM_SIZE` is derived
+from the `psram0` devicetree node so it was correctly 8 MB, and the
+`SPIRAM_TYPE` choice carries a `depends on (ESP_SPIRAM_SIZE = ...)` cross-check
+so it correctly resolved to `ESPPSRAM64` — but **`SPIRAM_MODE` has no guard
+against the devicetree at all**, so "octal part, quad mode" linked cleanly and
+produced a normal-looking image.
