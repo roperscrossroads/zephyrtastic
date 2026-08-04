@@ -835,7 +835,13 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 
 	LOG_DBG("inject delivering locally port=%u payload_len=%zu", (unsigned int)packet.portnum,
 		packet.payload_len);
-	meshtastic_handle_inbound_packet(&packet, NULL, 0U, decoded);
+	/* Phase 4b: deliver the decoded injected MeshPacket (work) verbatim to the phone via
+	 * the RX-currency path, not the flat struct -- the struct adapter drops Data.emoji
+	 * (TXT-1), so an injected reaction would otherwise reach the phone stripped of its
+	 * emoji flag. Mirrors the RF path (process_lora_rx passes rx_mesh). The migrated routing
+	 * consumers see work == packet byte-for-byte, and via_mqtt=true gates learn_next_hop
+	 * while sniff is skipped (wire==NULL) -- so only the phone delivery gains emoji. */
+	handle_inbound_impl(&packet, NULL, 0U, decoded, decoded ? &work : NULL);
 	LOG_DBG("inject done (local delivery)");
 
 	return 0;

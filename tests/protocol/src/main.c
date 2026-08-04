@@ -3199,6 +3199,56 @@ ZTEST(protocol_stack, test_c3_detector_dedup_identity_matches_meshpacket)
 	zassert_true(matched, "no FromRadio.packet delivered to assert identity against");
 }
 
+/* TXT-1 on the INJECT path: an injected (MQTT-downlink) reaction must reach the phone with
+ * Data.emoji set. The flat-struct adapter drops it (meshtastic_mesh_pb_to_packet has no emoji
+ * field), so before Phase 4b an injected reaction reached the phone stripped of the flag.
+ * Phase 4b delivers the injected MeshPacket verbatim via the RX-currency path, mirroring what
+ * process_lora_rx does for on-air frames. */
+ZTEST(protocol_stack, test_c3_detector_inject_emoji_reaches_phone)
+{
+	meshtastic_MeshPacket inj = meshtastic_MeshPacket_init_zero;
+	struct meshtastic_phoneapi_frame frame;
+	const uint32_t id = 0x4C01U;
+	bool matched = false;
+
+	getcap_reset();
+
+	inj.from = PEER_NODE_ID;
+	inj.to = MESHTASTIC_NODE_BROADCAST;
+	inj.id = id;
+	inj.channel = 0U;   /* primary channel index */
+	inj.hop_limit = 0U; /* decoded + hop_limit 0 -> local delivery only, no relay TX */
+	inj.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	inj.decoded.portnum = (meshtastic_PortNum)MESHTASTIC_PORT_TEXT_MESSAGE;
+	inj.decoded.payload.size = 4U;
+	memcpy(inj.decoded.payload.bytes, "\xf0\x9f\x91\x8d" /* thumbs-up */, 4);
+	inj.decoded.emoji = 1U;
+
+	zassert_ok(meshtastic_inject_downlink_mesh_packet(&inj), "inject failed");
+
+	for (int i = 0; i < 200 && meshtastic_phoneapi_pending_count(&getcap_api) == 0U; i++) {
+		k_sleep(K_MSEC(5));
+	}
+
+	while (meshtastic_phoneapi_pop_frame(&getcap_api, &frame)) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t is = pb_istream_from_buffer(frame.data, frame.len);
+
+		if (pb_decode(&is, meshtastic_FromRadio_fields, &from) &&
+		    from.which_payload_variant == meshtastic_FromRadio_packet_tag &&
+		    from.packet.from == PEER_NODE_ID && from.packet.id == id) {
+			zassert_equal(from.packet.which_payload_variant,
+				      meshtastic_MeshPacket_decoded_tag,
+				      "injected reaction must reach the phone decoded");
+			zassert_equal(from.packet.decoded.emoji, 1U,
+				      "Data.emoji must survive the inject path to the phone (TXT-1)");
+			matched = true;
+			break;
+		}
+	}
+	zassert_true(matched, "no FromRadio.packet delivered for the injected reaction");
+}
+
 /* Decode the single frame the node last transmitted back into a MeshPacket, so a test
  * can inspect Data-level fields (emoji) the flat-struct `decode_last_tx` cannot see.
  * Wraps the captured wire as an encrypted MeshPacket and runs the real channel decrypt. */
