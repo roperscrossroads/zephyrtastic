@@ -194,21 +194,35 @@ static uint32_t retx_interval_ms(size_t wire_len, uint32_t override_ms)
 }
 
 void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint8_t *wire,
-			       uint32_t wire_len)
+			       uint32_t wire_len, const meshtastic_MeshPacket *mesh)
 {
 	struct meshtastic_sched_config c;
+	bool want_ack;
+	uint32_t from;
+	uint32_t to;
+	uint32_t portnum;
+	uint32_t id;
 	int64_t now;
 	int slot;
 
-	if (local == NULL || wire == NULL || wire_len == 0U || wire_len > MESHTASTIC_PKT_MAX) {
+	if ((local == NULL && mesh == NULL) || wire == NULL || wire_len == 0U ||
+	    wire_len > MESHTASTIC_PKT_MAX) {
 		return;
 	}
 
+	/* C3 Phase 7d: read the just-sent packet's identity from the outgoing MeshPacket when
+	 * the mesh-native send engine supplied one, else the flat struct. Byte-identical — the
+	 * struct is materialised from the same tx_mesh. */
+	want_ack = mesh ? mesh->want_ack : local->want_ack;
+	from = mesh ? mesh->from : local->from;
+	to = mesh ? mesh->to : local->to;
+	portnum = mesh ? (uint32_t)mesh->decoded.portnum : local->portnum;
+	id = mesh ? mesh->id : local->id;
+
 	/* Only our-origin, want_ack, unicast application packets. ROUTING control
 	 * packets (e.g. the ACKs we send) are not themselves retransmitted. */
-	if (!local->want_ack || local->from != mt.node_id ||
-	    local->to == MESHTASTIC_NODE_BROADCAST || local->to == mt.node_id ||
-	    local->portnum == MESHTASTIC_PORT_ROUTING) {
+	if (!want_ack || from != mt.node_id || to == MESHTASTIC_NODE_BROADCAST ||
+	    to == mt.node_id || portnum == MESHTASTIC_PORT_ROUTING) {
 		return;
 	}
 
@@ -222,7 +236,7 @@ void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint
 	k_mutex_lock(&pend_lock, K_FOREVER);
 
 	/* Already tracking this id (e.g. a resend through send_packet)? Leave it. */
-	if (find_locked(local->id) >= 0) {
+	if (find_locked(id) >= 0) {
 		k_mutex_unlock(&pend_lock);
 		return;
 	}
@@ -251,15 +265,14 @@ void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint
 
 	memcpy(pend[slot].wire, wire, wire_len);
 	pend[slot].wire_len = (uint16_t)wire_len;
-	pend[slot].id = local->id;
-	pend[slot].to = local->to;
-	pend[slot].tier = meshtastic_sched_tier_for(local->portnum);
+	pend[slot].id = id;
+	pend[slot].to = to;
+	pend[slot].tier = meshtastic_sched_tier_for(portnum);
 	pend[slot].retries_left = c.reliable_retries;
 	pend[slot].next_due = now + (int64_t)retx_interval_ms(wire_len, c.reliable_timeout_ms);
 	pend[slot].active = true;
 
-	LOG_DBG("reliable: track id=0x%08x to 0x%08x retries=%u", local->id, local->to,
-		c.reliable_retries);
+	LOG_DBG("reliable: track id=0x%08x to 0x%08x retries=%u", id, to, c.reliable_retries);
 
 	reschedule_locked(now);
 	k_mutex_unlock(&pend_lock);

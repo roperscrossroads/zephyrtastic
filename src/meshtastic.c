@@ -642,7 +642,8 @@ int meshtastic_init(const struct meshtastic_config *cfg)
  * must outlive the send) for the lock-free tail. Returns the build status: <0 aborts the
  * send (incl. -ENODATA from a sanitiser that fail-closes on a no-share channel). */
 static int mt_ws_build_wire_locked(uint8_t *wire, uint32_t *pkt_len,
-				   struct meshtastic_packet *local, uint8_t *local_payload)
+				   struct meshtastic_packet *local, uint8_t *local_payload,
+				   meshtastic_MeshPacket *tx_local)
 {
 	meshtastic_MeshPacket *mesh = &mt_ws.tx_mesh;
 	uint8_t next_hop;
@@ -691,14 +692,23 @@ static int mt_ws_build_wire_locked(uint8_t *wire, uint32_t *pkt_len,
 		return ret;
 	}
 
-	/* Materialise the flat struct the lock-free tail (airtime / reliable / mqtt / TX_DONE)
-	 * consumes. Its payload is copied into local_payload — stable across the blocking radio
-	 * send — so the tail never reaches back into mt_ws.tx_mesh after we drop the lock. */
+	/* C3 Phase 7d: snapshot the final outgoing MeshPacket so the lock-free tail's
+	 * mesh-native hooks (reliable_on_tx / mqtt_on_tx) read the authoritative Data — emoji
+	 * and any field the flat struct never modelled survive our own reliable/uplink path.
+	 * Copied off the shared workspace so a concurrent send can't overwrite it during our
+	 * blocking radio submit. */
+	meshtastic_mesh_packet_copy(tx_local, mesh);
+
+	/* Materialise the flat struct the lock-free tail (airtime / tier / TX_DONE event)
+	 * still consumes — the TX_DONE event is a public struct boundary. Its payload is copied
+	 * into local_payload, stable across the blocking radio send, so the tail never reaches
+	 * back into mt_ws.tx_mesh after we drop the lock. */
 	return meshtastic_mesh_pb_to_packet(mesh, local, local_payload,
 					    MESHTASTIC_MAX_PAYLOAD_LEN);
 }
 
-static int send_packet_complete(const struct meshtastic_packet *local, const uint8_t *wire,
+static int send_packet_complete(const struct meshtastic_packet *local,
+				const meshtastic_MeshPacket *mesh, const uint8_t *wire,
 				uint32_t pkt_len, int tx_ret, bool emit_done)
 {
 	if (tx_ret < 0) {
@@ -714,7 +724,7 @@ static int send_packet_complete(const struct meshtastic_packet *local, const uin
 		(unsigned int)pkt_len);
 	meshtastic_emit_event(MESHTASTIC_EVENT_TX_DONE, 0, local);
 #if defined(CONFIG_MESHTASTIC_MQTT)
-	meshtastic_mqtt_on_tx(local, wire, pkt_len);
+	meshtastic_mqtt_on_tx(local, wire, pkt_len, mesh);
 #endif
 
 	return 0;
@@ -724,8 +734,9 @@ static int send_packet_complete(const struct meshtastic_packet *local, const uin
  * gate, radio submit (own-CW contention for broadcasts), reliable tracking, TX_DONE +
  * MQTT uplink. Operates only on the materialised @p local + built @p wire — mt_ws is no
  * longer touched here, so the blocking radio submit runs without the workspace lock. */
-static int send_wire_tail(const struct meshtastic_packet *local, uint8_t *wire,
-			  uint32_t pkt_len, k_timeout_t wait)
+static int send_wire_tail(const struct meshtastic_packet *local,
+			  const meshtastic_MeshPacket *mesh, uint8_t *wire, uint32_t pkt_len,
+			  k_timeout_t wait)
 {
 	uint8_t tier = meshtastic_sched_tier_for(local->portnum);
 	int ret;
@@ -777,15 +788,16 @@ static int send_wire_tail(const struct meshtastic_packet *local, uint8_t *wire,
 	if (ret >= 0) {
 		/* Track for retransmission if it is a want_ack unicast we originate
 		 * (the hook self-filters everything else). */
-		meshtastic_reliable_on_tx(local, wire, pkt_len);
+		meshtastic_reliable_on_tx(local, wire, pkt_len, mesh);
 	}
 
-	return send_packet_complete(local, wire, pkt_len, ret, K_TIMEOUT_EQ(wait, K_FOREVER));
+	return send_packet_complete(local, mesh, wire, pkt_len, ret, K_TIMEOUT_EQ(wait, K_FOREVER));
 }
 
 int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t wait)
 {
 	struct meshtastic_packet local;
+	meshtastic_MeshPacket tx_local;
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint8_t local_payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	uint32_t pkt_len = 0U;
@@ -821,19 +833,20 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 	ret = meshtastic_packet_to_mesh_pb(packet, &mt_ws.tx_mesh);
 	if (ret == 0) {
 		mt_ws.tx_mesh.channel = send_index;
-		ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload);
+		ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
 	}
 	k_mutex_unlock(&mt_ws.lock);
 	if (ret < 0) {
 		return ret;
 	}
 
-	return send_wire_tail(&local, wire, pkt_len, wait);
+	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait);
 }
 
 int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t wait)
 {
 	struct meshtastic_packet local;
+	meshtastic_MeshPacket tx_local;
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint8_t local_payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	uint32_t pkt_len = 0U;
@@ -862,13 +875,13 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 	mt_ws.tx_mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
 	mt_ws.tx_mesh.to = to_norm;
 	mt_ws.tx_mesh.channel = send_index;
-	ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload);
+	ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
 	k_mutex_unlock(&mt_ws.lock);
 	if (ret < 0) {
 		return ret;
 	}
 
-	return send_wire_tail(&local, wire, pkt_len, wait);
+	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait);
 }
 
 int meshtastic_send_data(uint32_t dest, uint32_t portnum, const uint8_t *payload,

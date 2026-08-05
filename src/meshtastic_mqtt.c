@@ -1326,23 +1326,29 @@ static void mqtt_thread_fn(void *p1, void *p2, void *p3)
 }
 
 void meshtastic_mqtt_on_tx(const struct meshtastic_packet *packet, const uint8_t *wire,
-			   size_t wire_len)
+			   size_t wire_len, const meshtastic_MeshPacket *mesh)
 {
 #if IS_ENABLED(CONFIG_MESHTASTIC_MQTT_UPLINK_ENABLED)
 	/*
 	 * Match official firmware: uplink on LoRa TX only for packets we originate
 	 * (Router::send). Heard packets are uplinked from meshtastic_mqtt_on_rx().
+	 * C3 Phase 7d: when the mesh-native send engine supplies the outgoing MeshPacket,
+	 * the plaintext uplink is built from it (Data.emoji and any unmodelled field survive
+	 * our own uplink), else the flat struct (the pre-encrypted PKC path passes NULL).
 	 */
-	if (packet != NULL && packet->from != meshtastic_get_node_id()) {
-		LOG_DBG("MQTT uplink skipped on TX (from 0x%08x, not us)", packet->from);
+	uint32_t from = mesh ? mesh->from : (packet != NULL ? packet->from : 0U);
+
+	if (from != meshtastic_get_node_id()) {
+		LOG_DBG("MQTT uplink skipped on TX (from 0x%08x, not us)", from);
 		return;
 	}
 
-	mqtt_queue_uplink(packet, wire, wire_len, NULL);
+	mqtt_queue_uplink(packet, wire, wire_len, mesh);
 #else
 	ARG_UNUSED(packet);
 	ARG_UNUSED(wire);
 	ARG_UNUSED(wire_len);
+	ARG_UNUSED(mesh);
 #endif
 }
 

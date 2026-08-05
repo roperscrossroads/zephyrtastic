@@ -941,7 +941,9 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 				.relay_node = rn,
 			};
 
-			meshtastic_mqtt_on_tx(&tx_packet, wire, wire_len);
+			/* Pre-encrypted PKC send: no decoded MeshPacket in hand — the mqtt
+			 * uplink falls back to the wire (encrypted) / struct path. */
+			meshtastic_mqtt_on_tx(&tx_packet, wire, wire_len, NULL);
 #endif
 		}
 	}

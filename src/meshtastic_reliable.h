@@ -26,12 +26,14 @@ extern "C" {
  * originated by us, want_ack set, unicast (not broadcast, not to ourselves) and
  * not a ROUTING control packet. Non-qualifying packets are ignored.
  *
- * @param local  The packet as sent (from/to/id/portnum/want_ack).
+ * @param local  Flat-struct view of the packet as sent (fallback source).
  * @param wire   The exact on-air bytes to retransmit.
  * @param wire_len Length of @p wire.
+ * @param mesh   The outgoing MeshPacket when the send engine supplied one, else NULL;
+ *               read in preference to @p local (C3 Phase 7d currency).
  */
 void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint8_t *wire,
-			       uint32_t wire_len);
+			       uint32_t wire_len, const meshtastic_MeshPacket *mesh);
 
 /**
  * Consume a decoded ROUTING packet addressed to us. If its request_id matches a
@@ -58,11 +60,13 @@ void meshtastic_reliable_reset(void);
 #else
 
 static inline void meshtastic_reliable_on_tx(const struct meshtastic_packet *local,
-					     const uint8_t *wire, uint32_t wire_len)
+					     const uint8_t *wire, uint32_t wire_len,
+					     const meshtastic_MeshPacket *mesh)
 {
 	ARG_UNUSED(local);
 	ARG_UNUSED(wire);
 	ARG_UNUSED(wire_len);
+	ARG_UNUSED(mesh);
 }
 
 static inline void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing,
