@@ -916,7 +916,7 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		}
 
 #if defined(CONFIG_MESHTASTIC_MQTT)
-		meshtastic_mqtt_on_rx(pkt, wire, wire_len);
+		meshtastic_mqtt_on_rx(pkt, wire, wire_len, decoded_mesh);
 #endif
 		meshtastic_routing_on_decoded(pkt, decoded_mesh);
 		meshtastic_dispatch_modules(pkt, decoded_mesh);

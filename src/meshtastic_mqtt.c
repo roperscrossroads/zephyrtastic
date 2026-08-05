@@ -703,16 +703,32 @@ static void mqtt_perhaps_report_to_map(void)
 
 #if IS_ENABLED(CONFIG_MESHTASTIC_MQTT_UPLINK_ENABLED)
 static void mqtt_queue_uplink(const struct meshtastic_packet *packet, const uint8_t *wire,
-			      size_t wire_len)
+			      size_t wire_len, const meshtastic_MeshPacket *rx_mesh)
 {
 	uint8_t ch_index = meshtastic_channels_primary_index();
 
-	if (packet == NULL || wire == NULL || wire_len == 0U) {
+	if ((packet == NULL && rx_mesh == NULL) || wire == NULL || wire_len == 0U) {
 		return;
 	}
 
-	if (packet->channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID) {
-		ch_index = packet->channel_index;
+	/* C3 Phase 7: read the gate/consent fields from the decoded MeshPacket when the RX
+	 * path supplied one, else the flat struct (TX path / public inject). Byte-identical —
+	 * the struct is materialised from the same rx_mesh. */
+	uint8_t channel_index = rx_mesh ? ((rx_mesh->channel < MESHTASTIC_MAX_CHANNELS)
+						   ? (uint8_t)rx_mesh->channel
+						   : MESHTASTIC_CHANNEL_INDEX_INVALID)
+					: packet->channel_index;
+	uint32_t from = rx_mesh ? rx_mesh->from : packet->from;
+	uint32_t to = rx_mesh ? rx_mesh->to : packet->to;
+	uint32_t id = rx_mesh ? rx_mesh->id : packet->id;
+	bool via_mqtt = rx_mesh ? rx_mesh->via_mqtt : packet->via_mqtt;
+	uint32_t portnum = rx_mesh ? (uint32_t)rx_mesh->decoded.portnum : packet->portnum;
+	bool has_bitfield = rx_mesh ? rx_mesh->decoded.has_bitfield : packet->has_bitfield;
+	uint8_t bitfield = rx_mesh ? (has_bitfield ? (uint8_t)rx_mesh->decoded.bitfield : 0U)
+				   : packet->bitfield;
+
+	if (channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID) {
+		ch_index = channel_index;
 	}
 
 	if (!meshtastic_channels_uplink_enabled(ch_index)) {
@@ -720,16 +736,16 @@ static void mqtt_queue_uplink(const struct meshtastic_packet *packet, const uint
 		return;
 	}
 
-	bool from_us = (packet->from == meshtastic_get_node_id());
+	bool from_us = (from == meshtastic_get_node_id());
 
-	if (packet->via_mqtt) {
-		LOG_DBG("Skipping MQTT uplink 0x%08x->0x%08x id=0x%08x (via_mqtt set)",
-			packet->from, packet->to, packet->id);
+	if (via_mqtt) {
+		LOG_DBG("Skipping MQTT uplink 0x%08x->0x%08x id=0x%08x (via_mqtt set)", from, to,
+			id);
 		return;
 	}
 
-	if (mqtt_should_skip_portnum(packet->portnum, from_us)) {
-		LOG_DBG("Skipping MQTT uplink port=%u on default broker", packet->portnum);
+	if (mqtt_should_skip_portnum(portnum, from_us)) {
+		LOG_DBG("Skipping MQTT uplink port=%u on default broker", portnum);
 		return;
 	}
 
@@ -748,14 +764,12 @@ static void mqtt_queue_uplink(const struct meshtastic_packet *packet, const uint
 	 *     to a broker on the operator's own network
 	 */
 	if (!from_us && !mqtt_broker_is_private()) {
-		bool ok_to_mqtt = packet->has_bitfield &&
-				  (packet->bitfield & MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK);
+		bool ok_to_mqtt = has_bitfield && (bitfield & MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK);
 
 		if (!ok_to_mqtt) {
-			LOG_DBG("Skipping MQTT uplink 0x%08x id=0x%08x (%s)", packet->from,
-				packet->id,
-				packet->has_bitfield ? "OK_TO_MQTT clear"
-						     : "no bitfield, consent unknown");
+			LOG_DBG("Skipping MQTT uplink 0x%08x id=0x%08x (%s)", from, id,
+				has_bitfield ? "OK_TO_MQTT clear"
+					     : "no bitfield, consent unknown");
 			return;
 		}
 	}
@@ -767,19 +781,31 @@ static void mqtt_queue_uplink(const struct meshtastic_packet *packet, const uint
 		return;
 	}
 
-	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	meshtastic_MeshPacket built = meshtastic_MeshPacket_init_zero;
+	const meshtastic_MeshPacket *uplink;
 	if (IS_ENABLED(CONFIG_MESHTASTIC_MQTT_ENCRYPTION_ENABLED)) {
-		ret = mqtt_mesh_from_wire(wire, wire_len, &mesh);
+		/* Publish the ciphertext exactly as heard/sent — built from the wire, not the
+		 * decoded form. */
+		ret = mqtt_mesh_from_wire(wire, wire_len, &built);
 		if (ret < 0) {
 			LOG_DBG("MQTT uplink wire parse failed (%d) len=%zu", ret, wire_len);
 			return;
 		}
+		uplink = &built;
+	} else if (rx_mesh != NULL) {
+		/* C3 Phase 7: uplink the decoded packet we actually received, verbatim — its
+		 * Data.emoji, rx_time, and any field the flat struct never modelled reach the
+		 * broker, instead of being dropped by a struct->mesh rebuild (heard-packet path). */
+		uplink = rx_mesh;
 	} else {
-		ret = meshtastic_packet_to_mesh_pb(packet, &mesh);
+		/* No decoded MeshPacket in hand (our own TX, or a public inject): rebuild from
+		 * the struct. */
+		ret = meshtastic_packet_to_mesh_pb(packet, &built);
 		if (ret < 0) {
 			LOG_DBG("MQTT uplink mesh encode failed (%d)", ret);
 			return;
 		}
+		uplink = &built;
 	}
 
 	const char *channel_id = meshtastic_runtime_channel_name();
@@ -798,7 +824,7 @@ static void mqtt_queue_uplink(const struct meshtastic_packet *packet, const uint
 	entry->topic[sizeof(entry->topic) - 1U] = '\0';
 
 	size_t env_len = 0U;
-	ret = mqtt_encode_envelope(&mesh, channel_id, gateway_id, entry->payload,
+	ret = mqtt_encode_envelope(uplink, channel_id, gateway_id, entry->payload,
 				   sizeof(entry->payload), &env_len);
 	if (ret < 0) {
 		k_mutex_unlock(&mqtt_ctx.lock);
@@ -1312,7 +1338,7 @@ void meshtastic_mqtt_on_tx(const struct meshtastic_packet *packet, const uint8_t
 		return;
 	}
 
-	mqtt_queue_uplink(packet, wire, wire_len);
+	mqtt_queue_uplink(packet, wire, wire_len, NULL);
 #else
 	ARG_UNUSED(packet);
 	ARG_UNUSED(wire);
@@ -1321,22 +1347,28 @@ void meshtastic_mqtt_on_tx(const struct meshtastic_packet *packet, const uint8_t
 }
 
 void meshtastic_mqtt_on_rx(const struct meshtastic_packet *packet, const uint8_t *wire,
-			   size_t wire_len)
+			   size_t wire_len, const meshtastic_MeshPacket *mesh)
 {
 #if IS_ENABLED(CONFIG_MESHTASTIC_MQTT_UPLINK_ENABLED)
 	/*
 	 * Match official firmware: uplink on LoRa RX only for packets from other nodes.
+	 * C3 Phase 7: identity + the whole uplink come from the decoded MeshPacket when the
+	 * RF path supplied one (heard-packet fields survive), else the flat struct.
 	 */
-	if (packet != NULL && packet->from == meshtastic_get_node_id()) {
+	bool from_us = mesh ? (mesh->from == meshtastic_get_node_id())
+			    : (packet != NULL && packet->from == meshtastic_get_node_id());
+
+	if (from_us) {
 		LOG_DBG("MQTT uplink skipped on RX (packet from us)");
 		return;
 	}
 
-	mqtt_queue_uplink(packet, wire, wire_len);
+	mqtt_queue_uplink(packet, wire, wire_len, mesh);
 #else
 	ARG_UNUSED(packet);
 	ARG_UNUSED(wire);
 	ARG_UNUSED(wire_len);
+	ARG_UNUSED(mesh);
 #endif
 }
 

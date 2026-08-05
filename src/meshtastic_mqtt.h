@@ -18,7 +18,7 @@ bool meshtastic_mqtt_is_connected(void);
 void meshtastic_mqtt_on_tx(const struct meshtastic_packet *packet, const uint8_t *wire,
 			   size_t wire_len);
 void meshtastic_mqtt_on_rx(const struct meshtastic_packet *packet, const uint8_t *wire,
-			   size_t wire_len);
+			   size_t wire_len, const meshtastic_MeshPacket *mesh);
 
 #ifdef __cplusplus
 }
