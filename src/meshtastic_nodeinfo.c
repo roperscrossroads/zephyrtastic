@@ -67,15 +67,15 @@ static struct nodeinfo_peer *peer_get_locked(uint32_t node, int64_t now_ms)
 	return oldest;
 }
 
-static bool packet_decode_user(const struct meshtastic_packet *packet, meshtastic_User *user)
+static bool packet_decode_user(const uint8_t *payload, size_t payload_len, meshtastic_User *user)
 {
 	pb_istream_t stream;
 
-	if (packet->payload == NULL || packet->payload_len == 0U) {
+	if (payload == NULL || payload_len == 0U) {
 		return false;
 	}
 
-	stream = pb_istream_from_buffer(packet->payload, packet->payload_len);
+	stream = pb_istream_from_buffer(payload, payload_len);
 	if (!pb_decode(&stream, meshtastic_User_fields, user)) {
 		const char *err = PB_GET_ERROR(&stream);
 
@@ -211,7 +211,7 @@ int meshtastic_nodeinfo_request(uint32_t peer)
 static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet *packet,
 						 const meshtastic_MeshPacket *mesh)
 {
-	const bool is_nodeinfo = packet != NULL && packet->portnum == MESHTASTIC_PORT_NODEINFO;
+	bool is_nodeinfo;
 	bool should_request = false;
 	bool has_user = false;
 	bool log_user = false;
@@ -219,27 +219,54 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 	int64_t now_ms;
 	meshtastic_User user = meshtastic_User_init_zero;
 	struct nodeinfo_peer *peer;
+	uint32_t from;
+	uint32_t request_id;
+	uint8_t channel_index;
 
-	ARG_UNUSED(mesh);
+	if (packet == NULL) {
+		return;
+	}
 
-	if (packet == NULL || packet->from == 0U || packet->from == meshtastic_get_node_id()) {
+	/*
+	 * Phase 5b: read identity / portnum / channel from the MeshPacket (the C3
+	 * currency) on the RF path, struct fallback on the NULL-mesh boundary.
+	 * mesh->channel is the RESOLVED index (not the wire hash) — read it directly
+	 * with the < MAX_CHANNELS guard, exactly as routing_send_ack does. The reply
+	 * follow-up below feeds that index to nodeinfo_build_packet, matching the
+	 * prior struct behaviour (this handler already used channel_index, not a hash).
+	 */
+	from = mesh ? mesh->from : packet->from;
+	request_id = mesh ? mesh->decoded.request_id : packet->request_id;
+	/* mesh->decoded.portnum is the nanopb meshtastic_PortNum enum; the struct's
+	 * portnum is a uint32_t. Read through uint32_t so the compare below is not an
+	 * enum-vs-enum mismatch (-Werror=enum-compare) against the public port enum. */
+	is_nodeinfo = (mesh ? (uint32_t)mesh->decoded.portnum : packet->portnum) ==
+		      MESHTASTIC_PORT_NODEINFO;
+	channel_index = mesh ? ((mesh->channel < MESHTASTIC_MAX_CHANNELS)
+					? (uint8_t)mesh->channel
+					: MESHTASTIC_CHANNEL_INDEX_INVALID)
+			     : packet->channel_index;
+
+	if (from == 0U || from == meshtastic_get_node_id()) {
 		return;
 	}
 
 	if (is_nodeinfo) {
-		has_user = packet_decode_user(packet, &user);
-		if (!has_user && packet->request_id != 0U) {
+		has_user = packet_decode_user(mesh ? mesh->decoded.payload.bytes : packet->payload,
+					      mesh ? mesh->decoded.payload.size : packet->payload_len,
+					      &user);
+		if (!has_user && request_id != 0U) {
 			LOG_WRN("NodeInfo reply from 0x%08x (request_id 0x%08x) decode failed",
-				packet->from, packet->request_id);
+				from, request_id);
 		}
 	}
 
 	now_ms = k_uptime_get();
 	k_mutex_lock(&nodeinfo_lock, K_FOREVER);
 
-	peer = peer_get_locked(packet->from, now_ms);
+	peer = peer_get_locked(from, now_ms);
 	if (has_user) {
-		log_user = packet->request_id != 0U || !peer->has_user;
+		log_user = request_id != 0U || !peer->has_user;
 		peer->has_user = true;
 	}
 
@@ -248,8 +275,8 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 			     (int64_t)CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC *
 				     MSEC_PER_SEC)) {
 		should_request = true;
-		channel = (packet->channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID)
-				  ? packet->channel_index
+		channel = (channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID)
+				  ? channel_index
 				  : meshtastic_channels_primary_index();
 		peer->request_time_valid = true;
 		peer->last_request_ms = now_ms;
@@ -258,7 +285,7 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 	k_mutex_unlock(&nodeinfo_lock);
 
 	if (log_user) {
-		log_nodeinfo_user(packet->from, packet->request_id, &user);
+		log_nodeinfo_user(from, request_id, &user);
 	}
 
 	if (should_request) {
@@ -266,8 +293,8 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 		struct meshtastic_packet nodeinfo_packet;
 		int send_ret;
 
-		LOG_INF("Heard unknown node 0x%08x, asking for NodeInfo", packet->from);
-		send_ret = nodeinfo_build_packet(packet->from, true, channel, 0U, payload,
+		LOG_INF("Heard unknown node 0x%08x, asking for NodeInfo", from);
+		send_ret = nodeinfo_build_packet(from, true, channel, 0U, payload,
 						 &nodeinfo_packet);
 		if (send_ret == 0) {
 			(void)meshtastic_send_packet(&nodeinfo_packet, K_NO_WAIT);

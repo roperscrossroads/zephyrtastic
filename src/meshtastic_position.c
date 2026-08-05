@@ -403,16 +403,16 @@ static int position_restore_fixed(void)
 
 MESHTASTIC_SETTINGS_APPLY_DEFINE(position_fixed, position_restore_fixed);
 
-static bool packet_decode_position(const struct meshtastic_packet *packet,
+static bool packet_decode_position(const uint8_t *payload, size_t payload_len,
 				   meshtastic_Position *position)
 {
 	pb_istream_t stream;
 
-	if (packet->payload == NULL || packet->payload_len == 0U) {
+	if (payload == NULL || payload_len == 0U) {
 		return false;
 	}
 
-	stream = pb_istream_from_buffer(packet->payload, packet->payload_len);
+	stream = pb_istream_from_buffer(payload, payload_len);
 	if (!pb_decode(&stream, meshtastic_Position_fields, position)) {
 		const char *err = PB_GET_ERROR(&stream);
 
@@ -443,10 +443,25 @@ static void meshtastic_module_position_on_packet(const struct meshtastic_packet 
 						 const meshtastic_MeshPacket *mesh)
 {
 	meshtastic_Position position = meshtastic_Position_init_zero;
+	uint32_t from;
+	uint32_t request_id;
+	bool want_response;
 
-	ARG_UNUSED(mesh);
+	if (packet == NULL) {
+		return;
+	}
 
-	if (packet == NULL || packet->from == 0U || packet->from == meshtastic_get_node_id()) {
+	/*
+	 * Phase 5b: read identity + the decoded payload from the MeshPacket (the C3
+	 * currency) on the RF path; fall back to the flat struct on the NULL-mesh
+	 * public-inject / test boundary. Byte-identical on the RF path (the struct
+	 * is materialised from the same MeshPacket), so this is parity-preserving.
+	 */
+	from = mesh ? mesh->from : packet->from;
+	request_id = mesh ? mesh->decoded.request_id : packet->request_id;
+	want_response = mesh ? mesh->decoded.want_response : packet->want_response;
+
+	if (from == 0U || from == meshtastic_get_node_id()) {
 		return;
 	}
 
@@ -454,19 +469,21 @@ static void meshtastic_module_position_on_packet(const struct meshtastic_packet 
 	 * want_response Position packets are requests (often empty payload), not
 	 * position updates — stock clients must not treat them as lat/lon data.
 	 */
-	if (packet->want_response) {
+	if (want_response) {
 		return;
 	}
 
-	if (!packet_decode_position(packet, &position)) {
-		if (packet->request_id != 0U) {
+	if (!packet_decode_position(mesh ? mesh->decoded.payload.bytes : packet->payload,
+				    mesh ? mesh->decoded.payload.size : packet->payload_len,
+				    &position)) {
+		if (request_id != 0U) {
 			LOG_WRN("Position reply from 0x%08x (request_id 0x%08x) decode failed",
-				packet->from, packet->request_id);
+				from, request_id);
 		}
 		return;
 	}
 
-	log_position(packet->from, packet->request_id, &position);
+	log_position(from, request_id, &position);
 }
 
 static bool interval_elapsed(bool valid, int64_t last_ms, int64_t now_ms, int64_t interval_ms)
