@@ -74,6 +74,20 @@ module = MESHTASTIC
 module-str = meshtastic
 source "subsys/logging/Kconfig.template.log_config"
 
+config MESHTASTIC_LOG_WALLCLOCK
+	bool "Stamp logs with wall-clock time once the clock is seeded"
+	depends on MESHTASTIC && LOG
+	default y
+	select LOG_TIMESTAMP_64BIT
+	help
+	  Register a log timestamp source that returns the meshtastic wall clock
+	  (the SNTP / GPS / phone-seeded Unix epoch, millisecond precision) once it
+	  is valid, so syslog and console lines carry real time instead of
+	  1970+uptime. Falls back to k_uptime before the clock is seeded. log_output
+	  renders "1970 + timestamp/freq", so the source returns epoch milliseconds
+	  with freq=1000 -- which needs 64-bit log timestamps to hold, hence the
+	  select of LOG_TIMESTAMP_64BIT.
+
 rsource "Kconfig.core"
 rsource "Kconfig.nodedb"
 rsource "Kconfig.nodeinfo"

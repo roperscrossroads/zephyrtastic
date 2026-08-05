@@ -99,3 +99,41 @@ uint32_t meshtastic_clock_uptime_to_epoch(uint32_t uptime_sec)
 
 	return (uint32_t)(boot_epoch + (int64_t)uptime_sec);
 }
+
+#if defined(CONFIG_MESHTASTIC_LOG_WALLCLOCK)
+
+#include <zephyr/init.h>
+#include <zephyr/logging/log_ctrl.h>
+
+/*
+ * Feed the logging subsystem wall-clock time once the clock is seeded, so syslog
+ * and console lines carry real time (2026-..) instead of 1970+uptime. log_output
+ * renders "1970 + timestamp/freq", so returning epoch milliseconds with freq=1000
+ * yields the real date to the millisecond. boot_epoch is the epoch at k_uptime==0,
+ * so boot_epoch*1000 + k_uptime_get() is a monotonic ms wall clock. Before the
+ * clock is valid, fall back to k_uptime (the familiar 1970+uptime) so early-boot
+ * lines stay ordered; the source re-checks clock_valid on every call and switches
+ * to wall time the instant SNTP/GPS/phone seeds the clock, with no re-registration.
+ */
+static log_timestamp_t meshtastic_log_timestamp(void)
+{
+	int64_t up_ms = k_uptime_get();
+
+	if (clock_valid) {
+		return (log_timestamp_t)(boot_epoch * 1000 + up_ms);
+	}
+
+	return (log_timestamp_t)up_ms;
+}
+
+static int meshtastic_log_wallclock_init(void)
+{
+	(void)log_set_timestamp_func(meshtastic_log_timestamp, 1000U);
+	return 0;
+}
+
+/* APPLICATION level: the log subsystem is up by now; the clock may not be seeded
+ * yet, which the source handles per-call (see above). */
+SYS_INIT(meshtastic_log_wallclock_init, APPLICATION, 0);
+
+#endif /* CONFIG_MESHTASTIC_LOG_WALLCLOCK */
