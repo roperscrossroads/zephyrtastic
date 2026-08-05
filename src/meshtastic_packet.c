@@ -657,39 +657,45 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 		}
 	}
 
-	ret = copy_data_payload(&data, payload, payload_len, &packet_payload);
-	if (ret < 0) {
-		return ret;
-	}
-
-	packet->portnum = (uint32_t)data.portnum;
-	packet->payload = packet_payload;
-	packet->payload_len = data.payload.size;
-	packet->data_dest = data.dest;
-	packet->data_source = data.source;
-	packet->request_id = data.request_id;
-	packet->reply_id = data.reply_id;
-	packet->want_response = data.want_response;
-	/* Carried through so the MQTT bridge can honour the sender's consent.
-	 * has_bitfield is kept separate from the value: an absent field means
-	 * the sender never expressed a preference, which is NOT the same as
-	 * expressing "no" — though both must be treated as "do not republish".
-	 */
-	packet->has_bitfield = data.has_bitfield;
-	packet->bitfield = data.has_bitfield ? (uint8_t)data.bitfield : 0U;
+	/* channel_index is needed by both output paths: the MeshPacket envelope (below) and the
+	 * flat struct (else). pki_encrypted was already set on the decrypt path above. */
 	packet->channel_index = channel_index;
 
-	/* C3 Phase 2: hand back the fully decoded MeshPacket so the phone-delivery path
-	 * carries fields the struct boundary adapter never models. Reuse to_mesh_pb for the
-	 * envelope (routing, channel hash, pki flag, transport), then overwrite `decoded`
-	 * with the faithful decrypted Data -- so every payload field (emoji/TXT-1, and any
-	 * the struct never models) survives by construction, not one hand-patched field at a
-	 * time. rx_time is the exception: it lives on no wire and no struct, so stamp it from
-	 * the node clock here -- its only source (0 when the clock is unset, matching upstream). */
 	if (out_mesh != NULL) {
+		/* C3 Phase 4d: the RX path's currency is the MeshPacket. The flat struct is
+		 * materialised on demand at the module boundary (Phase 4c), so its decoded fields
+		 * are read nowhere before then -- and they were only ever consumed here to build
+		 * out_mesh->decoded, which is immediately replaced by the faithful Data below. So
+		 * skip filling them: packet_to_mesh_pb takes the envelope from the header-filled
+		 * struct + channel_index (+ pki_encrypted), then out_mesh->decoded gets the decrypted
+		 * Data verbatim (emoji/TXT-1 and any field the struct never modelled). rx_time lives
+		 * on no wire and no struct -- stamp it from the node clock (0 if the clock is unset,
+		 * matching upstream). The resulting MeshPacket is byte-identical to the pre-4d
+		 * struct->mesh build (test_c3_detector_*; the RX suite runs through this path). */
 		(void)meshtastic_packet_to_mesh_pb(packet, out_mesh);
 		out_mesh->decoded = data;
 		out_mesh->rx_time = meshtastic_clock_now_epoch();
+	} else {
+		/* Struct-only decode path (meshtastic_decode_wire_packet + tests that want the flat
+		 * struct): fill its decoded fields from the decrypted Data. */
+		ret = copy_data_payload(&data, payload, payload_len, &packet_payload);
+		if (ret < 0) {
+			return ret;
+		}
+
+		packet->portnum = (uint32_t)data.portnum;
+		packet->payload = packet_payload;
+		packet->payload_len = data.payload.size;
+		packet->data_dest = data.dest;
+		packet->data_source = data.source;
+		packet->request_id = data.request_id;
+		packet->reply_id = data.reply_id;
+		packet->want_response = data.want_response;
+		/* has_bitfield kept separate from the value: an absent field means the sender never
+		 * expressed a preference, NOT the same as "no" -- though both mean do-not-republish
+		 * to the MQTT bridge. */
+		packet->has_bitfield = data.has_bitfield;
+		packet->bitfield = data.has_bitfield ? (uint8_t)data.bitfield : 0U;
 	}
 
 	if (decoded != NULL) {
