@@ -12,7 +12,7 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-bool meshtastic_telemetry_decode_request(const struct meshtastic_packet *packet,
+bool meshtastic_telemetry_decode_request(const uint8_t *payload, size_t payload_len,
 					 meshtastic_Telemetry *request)
 {
 	pb_istream_t stream;
@@ -21,12 +21,12 @@ bool meshtastic_telemetry_decode_request(const struct meshtastic_packet *packet,
 		return false;
 	}
 
-	if (packet == NULL || packet->payload == NULL || packet->payload_len == 0U) {
+	if (payload == NULL || payload_len == 0U) {
 		*request = (meshtastic_Telemetry)meshtastic_Telemetry_init_zero;
 		return true;
 	}
 
-	stream = pb_istream_from_buffer(packet->payload, packet->payload_len);
+	stream = pb_istream_from_buffer(payload, payload_len);
 	if (!pb_decode(&stream, meshtastic_Telemetry_fields, request)) {
 		LOG_DBG("Telemetry request decode failed: %s", PB_GET_ERROR(&stream));
 		return false;

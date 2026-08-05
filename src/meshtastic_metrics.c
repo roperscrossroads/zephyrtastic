@@ -190,14 +190,18 @@ static int meshtastic_module_device_telemetry_alloc_reply(const struct meshtasti
 	int64_t now_ms;
 	int ret;
 
-	ARG_UNUSED(mesh);
-
 	if (req == NULL || reply == NULL || req->from == 0U ||
 	    req->from == meshtastic_get_node_id()) {
 		return -EINVAL;
 	}
 
-	if (!meshtastic_telemetry_decode_request(req, &request)) {
+	/* Phase 5c: decode the request payload from the MeshPacket (currency) on the
+	 * RF path, struct fallback on the NULL-mesh boundary (byte-identical). The
+	 * reply envelope (dest/channel/response_to_id) stays sourced from req until
+	 * the send-path currency migration (Phase 6) reworks the reply builders. */
+	if (!meshtastic_telemetry_decode_request(mesh ? mesh->decoded.payload.bytes : req->payload,
+						 mesh ? mesh->decoded.payload.size : req->payload_len,
+						 &request)) {
 		return -ENOENT;
 	}
 

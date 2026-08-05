@@ -46,8 +46,9 @@ static int traceroute_alloc_reply(const struct meshtastic_packet *req,
 	meshtastic_RouteDiscovery rd = meshtastic_RouteDiscovery_init_zero;
 	pb_istream_t istream;
 	pb_ostream_t ostream;
-
-	ARG_UNUSED(mesh);
+	const uint8_t *req_payload;
+	size_t req_payload_len;
+	int8_t snr;
 
 	if (req == NULL || reply == NULL) {
 		return -EINVAL;
@@ -57,8 +58,16 @@ static int traceroute_alloc_reply(const struct meshtastic_packet *req,
 	 * node (see meshtastic_dispatch_modules), so req->to is always our node id
 	 * here — a broadcast/relayed trace never reaches this responder. */
 
+	/* Phase 5c: read the RouteDiscovery payload + RX SNR from the decoded
+	 * MeshPacket (the C3 currency) on the RF path, struct fallback on the
+	 * NULL-mesh boundary. Byte-identical on the RF path. The reply envelope
+	 * (set_reply_to below) stays on req until the Phase 6 send-path migration. */
+	req_payload = mesh ? mesh->decoded.payload.bytes : req->payload;
+	req_payload_len = mesh ? mesh->decoded.payload.size : req->payload_len;
+	snr = mesh ? (int8_t)mesh->rx_snr : req->snr;
+
 	/* Decode the accumulated request (route[] = intermediate hops toward us). */
-	istream = pb_istream_from_buffer(req->payload, req->payload_len);
+	istream = pb_istream_from_buffer(req_payload, req_payload_len);
 	if (!pb_decode(&istream, meshtastic_RouteDiscovery_fields, &rd)) {
 		LOG_WRN("traceroute: RouteDiscovery decode failed");
 		return -EINVAL;
@@ -66,7 +75,7 @@ static int traceroute_alloc_reply(const struct meshtastic_packet *req,
 
 	/* Destination appends only the SNR of the last hop (to us), not its id. */
 	if (rd.snr_towards_count < (pb_size_t)ARRAY_SIZE(rd.snr_towards)) {
-		rd.snr_towards[rd.snr_towards_count++] = snr_to_q4(req->snr);
+		rd.snr_towards[rd.snr_towards_count++] = snr_to_q4(snr);
 	}
 
 	ostream = pb_ostream_from_buffer(payload, sizeof(payload));
@@ -83,7 +92,7 @@ static int traceroute_alloc_reply(const struct meshtastic_packet *req,
 	reply->payload_len = ostream.bytes_written;
 
 	LOG_INF("traceroute: reply to 0x%08x (%u hops toward, snr %ddB)", req->from,
-		(unsigned int)rd.route_count, req->snr);
+		(unsigned int)rd.route_count, snr);
 	return 0;
 }
 

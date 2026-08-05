@@ -16,9 +16,11 @@ extern "C" {
 /**
  * @brief Decode a port-67 Telemetry want_response probe.
  *
+ * Takes the decoded payload bytes directly so callers can feed either the
+ * decoded MeshPacket (@c mesh->decoded.payload) or the flat struct's payload.
  * An empty payload decodes as @c Telemetry_init_zero (variant 0).
  */
-bool meshtastic_telemetry_decode_request(const struct meshtastic_packet *packet,
+bool meshtastic_telemetry_decode_request(const uint8_t *payload, size_t payload_len,
 					 meshtastic_Telemetry *request);
 
 /**
