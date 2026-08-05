@@ -3031,7 +3031,7 @@ ZTEST(protocol_stack, test_mqtt_borne_admin_refused_on_legacy_admin_channel)
 	 * known-CLIENT starting state, with no store write needed between the two
 	 * phases. */
 	pkt.via_mqtt = true;
-	meshtastic_admin_handle_remote(&pkt);
+	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(K_MSEC(30));
 	zassert_equal(current_device_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
 		      "an MQTT-borne packet must not get identity-less channel authorization");
@@ -3041,7 +3041,7 @@ ZTEST(protocol_stack, test_mqtt_borne_admin_refused_on_legacy_admin_channel)
 	 * fixture that never authorizes anything. */
 	pkt.id = 0xADD10004U;
 	pkt.via_mqtt = false;
-	meshtastic_admin_handle_remote(&pkt);
+	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(K_MSEC(30));
 	zassert_equal(current_device_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
 		      "control: a mesh-borne admin on the legacy channel should apply");
@@ -4867,7 +4867,7 @@ ZTEST(protocol_stack, test_remote_admin_unauthorized_refused)
 	make_remote_admin_packet(&pkt, buf, len, meshtastic_channels_primary_index(), true);
 
 	reset_mock_lora();
-	meshtastic_admin_handle_remote(&pkt);
+	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(ADMIN_REPLY_SETTLE);
 	assert_mock_send_count(1U); /* the NAK back to the sender, drained here */
 	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
@@ -4918,7 +4918,7 @@ ZTEST(protocol_stack, test_remote_admin_channel_requires_passkey)
 					sizeof(buf));
 	make_remote_admin_packet(&pkt, buf, len, ADMIN_TEST_CH_INDEX, true);
 	reset_mock_lora();
-	meshtastic_admin_handle_remote(&pkt);
+	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(ADMIN_REPLY_SETTLE);
 	assert_mock_send_count(1U); /* BAD_SESSION_KEY NAK */
 	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
@@ -4931,7 +4931,7 @@ ZTEST(protocol_stack, test_remote_admin_channel_requires_passkey)
 					buf, sizeof(buf));
 	make_remote_admin_packet(&pkt, buf, len, ADMIN_TEST_CH_INDEX, true);
 	reset_mock_lora();
-	meshtastic_admin_handle_remote(&pkt);
+	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(ADMIN_REPLY_SETTLE);
 	assert_mock_send_count(1U); /* success ROUTING ACK */
 	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
@@ -5014,7 +5014,7 @@ ZTEST(protocol_stack, test_remote_admin_pkc_admin_key_authorized)
 	pkt.pki_encrypted = true;
 
 	reset_mock_lora();
-	meshtastic_admin_handle_remote(&pkt);
+	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(ADMIN_REPLY_SETTLE);
 	assert_mock_send_count(1U); /* success ROUTING ACK */
 	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
@@ -5053,7 +5053,7 @@ ZTEST(protocol_stack, test_remote_admin_pkc_wrong_key_unauthorized)
 	pkt.pki_encrypted = true;
 
 	reset_mock_lora();
-	meshtastic_admin_handle_remote(&pkt);
+	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(ADMIN_REPLY_SETTLE);
 	assert_mock_send_count(1U); /* ADMIN_PUBLIC_KEY_UNAUTHORIZED NAK */
 	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,

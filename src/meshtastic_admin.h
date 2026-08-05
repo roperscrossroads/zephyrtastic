@@ -32,7 +32,8 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt);
  *
  * @param pkt Decoded internal packet carrying the AdminMessage bytes.
  */
-void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt);
+void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
+				    const meshtastic_MeshPacket *mesh);
 
 /** Reset admin edit-transaction state (call on phone disconnect). */
 void meshtastic_admin_reset(void);

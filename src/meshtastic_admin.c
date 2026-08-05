@@ -81,12 +81,11 @@ static meshtastic_AdminMessage admin_resp;
  * path fans out via the PhoneAPI; the remote path transmits back over the mesh
  * to the requester. Serialized by admin_lock (single dispatch at a time). */
 static struct admin_ctx {
-	uint32_t from;			   /* requester node id (reply destination) */
-	uint32_t id;			   /* request packet id (reply request_id) */
-	bool want_ack;			   /* requester asked for a ROUTING ACK */
-	uint8_t channel_index;		   /* channel the request arrived on */
-	bool remote;			   /* true: reply over the mesh, not PhoneAPI */
-	const struct meshtastic_packet *rx; /* remote only: the received packet */
+	uint32_t from;	       /* requester node id (reply destination) */
+	uint32_t id;	       /* request packet id (reply request_id) */
+	bool want_ack;	       /* requester asked for a ROUTING ACK */
+	uint8_t channel_index; /* channel the request arrived on */
+	bool remote;	       /* true: reply over the mesh, not PhoneAPI */
 } admin_cur;
 
 /* begin_edit_settings ... commit_edit_settings transaction state (single local
@@ -259,7 +258,12 @@ static void admin_ack_write(meshtastic_Routing_Error err)
 	struct meshtastic_packet pkt = {0};
 
 	if (admin_cur.remote) {
-		meshtastic_routing_send_error(admin_cur.rx, err);
+		/* routing_send_error reads only from/id off the request; synthesize the
+		 * minimal struct from the stashed scalars (C3 Phase 7 — no retained
+		 * struct pointer, no lifetime coupling to the RX frame). */
+		meshtastic_routing_send_error(
+			&(struct meshtastic_packet){.from = admin_cur.from, .id = admin_cur.id},
+			err);
 		return;
 	}
 
@@ -544,11 +548,11 @@ static bool admin_channel_authorized(uint8_t channel_index)
 /* Decide whether a remote admin packet is authorized. On refusal, sets *err to
  * the ROUTING error to return. Mirrors AdminModule: PKC admin_key first, then
  * the legacy admin channel, else NOT_AUTHORIZED. */
-static bool admin_remote_authorized(const struct meshtastic_packet *pkt,
-				    meshtastic_Routing_Error *err)
+static bool admin_remote_authorized(bool pki_encrypted, uint32_t from, bool via_mqtt,
+				    uint8_t channel_index, meshtastic_Routing_Error *err)
 {
-	if (pkt->pki_encrypted) {
-		if (admin_key_matches_sender(pkt->from)) {
+	if (pki_encrypted) {
+		if (admin_key_matches_sender(from)) {
 			return true;
 		}
 		*err = meshtastic_Routing_Error_ADMIN_PUBLIC_KEY_UNAUTHORIZED;
@@ -564,15 +568,15 @@ static bool admin_remote_authorized(const struct meshtastic_packet *pkt,
 	 * including a frame that arrived over RF with the wire flag set. PKC admin
 	 * is unaffected — its authorization is a key match, which MQTT cannot
 	 * forge. */
-	if (pkt->via_mqtt) {
+	if (via_mqtt) {
 		LOG_WRN("admin: refusing legacy-channel authorization for an MQTT-borne "
 			"packet from 0x%08x",
-			pkt->from);
+			from);
 		*err = meshtastic_Routing_Error_NOT_AUTHORIZED;
 		return false;
 	}
 
-	if (admin_channel_authorized(pkt->channel_index)) {
+	if (admin_channel_authorized(channel_index)) {
 		return true;
 	}
 	*err = meshtastic_Routing_Error_NOT_AUTHORIZED;
@@ -960,38 +964,66 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
 			       .want_ack = pkt->want_ack,
 			       .channel_index = 0U,
 			       .remote = false,
-			       .rx = NULL,
 		       },
 		       pkt->decoded.payload.bytes, pkt->decoded.payload.size);
 	return true; /* consumed — never forward admin onto the mesh */
 }
 
-void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt)
+void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
+				    const meshtastic_MeshPacket *mesh)
 {
 	meshtastic_Routing_Error auth_err = meshtastic_Routing_Error_NOT_AUTHORIZED;
+	uint32_t from;
+	uint32_t id;
+	bool want_ack;
+	uint8_t channel_index;
+	bool pki_encrypted;
+	bool via_mqtt;
+	const uint8_t *payload;
+	size_t payload_len;
 
-	if (pkt == NULL || (pkt->payload == NULL && pkt->payload_len != 0U)) {
+	if (pkt == NULL && mesh == NULL) {
+		return;
+	}
+
+	/* C3 Phase 7: read the request from the decoded MeshPacket when the RF path supplied
+	 * one, else the flat struct (public inject / test path — meshtastic_handle_inbound_packet
+	 * passes decoded_mesh = NULL, so the fallback is mandatory). Byte-identical — the struct
+	 * is materialised from the same rx_mesh, mirroring the channel index the same way. */
+	from = mesh ? mesh->from : pkt->from;
+	id = mesh ? mesh->id : pkt->id;
+	want_ack = mesh ? mesh->want_ack : pkt->want_ack;
+	channel_index = mesh ? ((mesh->channel < MESHTASTIC_MAX_CHANNELS)
+					? (uint8_t)mesh->channel
+					: MESHTASTIC_CHANNEL_INDEX_INVALID)
+			     : pkt->channel_index;
+	pki_encrypted = mesh ? mesh->pki_encrypted : pkt->pki_encrypted;
+	via_mqtt = mesh ? mesh->via_mqtt : pkt->via_mqtt;
+	payload = mesh ? mesh->decoded.payload.bytes : pkt->payload;
+	payload_len = mesh ? mesh->decoded.payload.size : pkt->payload_len;
+
+	if (payload == NULL && payload_len != 0U) {
 		return;
 	}
 
 	/* Packet-level authorization before touching the AdminMessage contents. On
 	 * refusal, NAK the requester with the specific reason and drop it. */
-	if (!admin_remote_authorized(pkt, &auth_err)) {
-		LOG_WRN("admin: remote admin from 0x%08x unauthorized (err=%d)", pkt->from,
+	if (!admin_remote_authorized(pki_encrypted, from, via_mqtt, channel_index, &auth_err)) {
+		LOG_WRN("admin: remote admin from 0x%08x unauthorized (err=%d)", from,
 			(int)auth_err);
-		meshtastic_routing_send_error(pkt, auth_err);
+		meshtastic_routing_send_error(
+			&(struct meshtastic_packet){.from = from, .id = id}, auth_err);
 		return;
 	}
 
 	admin_dispatch((struct admin_ctx){
-			       .from = pkt->from,
-			       .id = pkt->id,
-			       .want_ack = pkt->want_ack,
-			       .channel_index = pkt->channel_index,
+			       .from = from,
+			       .id = id,
+			       .want_ack = want_ack,
+			       .channel_index = channel_index,
 			       .remote = true,
-			       .rx = pkt,
 		       },
-		       pkt->payload, pkt->payload_len);
+		       payload, payload_len);
 }
 
 void meshtastic_admin_reset(void)
