@@ -92,19 +92,16 @@ void meshtastic_position_clear_fixed(void);
  *
  * Masks a Position we are about to transmit to the sharing precision of the channel
  * it will go out on, mirroring the self-generated path. Called by
- * meshtastic_modules_sanitise_tx() for POSITION packets we originate. On success
- * @p pkt->payload is repointed at @p scratch (holding the re-encoded, truncated
- * Position).
+ * meshtastic_modules_sanitise_tx() for POSITION packets we originate. The Position in
+ * @p mesh->decoded.payload is re-encoded in place (truncated + precision stamped).
  *
- * @param pkt         Outbound packet (portnum/payload/to/channel*). Rewritten in place.
- * @param scratch     Caller buffer for the re-encoded payload; must outlive the send.
- * @param scratch_len Size of @p scratch.
+ * @param mesh  Outbound MeshPacket; @p mesh->channel must be the resolved send index.
+ *              @p mesh->decoded.payload is rewritten in place.
  * @retval 0        Sanitised (or a no-op for a non-POSITION / undecodable payload).
  * @retval -ENODATA The channel shares no position (precision 0) — suppress the send.
- * @retval -ENOMEM  The re-encoded Position did not fit @p scratch.
+ * @retval -ENOMEM  The re-encoded Position did not fit the payload buffer.
  */
-int meshtastic_position_sanitise_tx(struct meshtastic_packet *pkt, uint8_t *scratch,
-				    size_t scratch_len);
+int meshtastic_position_sanitise_tx(meshtastic_MeshPacket *mesh);
 
 #ifdef __cplusplus
 }

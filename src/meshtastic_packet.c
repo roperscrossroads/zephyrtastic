@@ -847,7 +847,6 @@ int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t
 
 int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 {
-	struct meshtastic_packet packet;
 	uint32_t encrypted_len;
 	struct meshtastic_wire_header *hdr;
 	uint8_t hop_limit;
@@ -859,34 +858,12 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 	}
 
 	if (mesh->which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
-		packet = (struct meshtastic_packet){
-			.from = mesh->from,
-			.to = (mesh->to != 0U) ? mesh->to : MESHTASTIC_NODE_BROADCAST,
-			.id = mesh->id,
-			.portnum = (uint32_t)mesh->decoded.portnum,
-			.payload = mesh->decoded.payload.bytes,
-			.payload_len = mesh->decoded.payload.size,
-			.data_dest = mesh->decoded.dest,
-			.data_source = mesh->decoded.source,
-			.request_id = mesh->decoded.request_id,
-			.reply_id = mesh->decoded.reply_id,
-			.hop_limit = mesh->hop_limit,
-			.hop_start = mesh->hop_start,
-			.channel = 0U,
-			.channel_index = (mesh->channel < MESHTASTIC_MAX_CHANNELS)
-						 ? (uint8_t)mesh->channel
-						 : MESHTASTIC_CHANNEL_INDEX_INVALID,
-			.want_ack = mesh->want_ack,
-			.via_mqtt = mesh->via_mqtt,
-			.want_response = mesh->decoded.want_response,
-			.next_hop = mesh->next_hop,
-			.relay_node = mesh->relay_node,
-		};
-
-		/* C3 Phase 3: carry the phone's own decoded Data through the send path so
-		 * fields the flat struct never models (Data.emoji, a reaction's flag) reach
-		 * the wire, instead of being rebuilt lossily from the struct. */
-		return meshtastic_send_packet_data(&packet, &mesh->decoded, K_FOREVER);
+		/* C3 Phase 6c: feed the phone's decoded MeshPacket straight into the
+		 * mesh-native send engine. Its decoded Data is the authoritative outgoing
+		 * payload, so fields the flat struct never models (Data.emoji, a reaction's
+		 * flag, anything upstream adds next) reach the wire by construction — no struct
+		 * round-trip, no hand-patched `base`. */
+		return meshtastic_send_mesh_decoded(mesh, K_FOREVER);
 	}
 
 	if (mesh->which_payload_variant != meshtastic_MeshPacket_encrypted_tag) {
@@ -932,7 +909,7 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 	uint8_t rn = mesh->relay_node;
 
 	/* Next-hop routing (increment 2): the app/PKC path arrives already
-	 * encrypted and bypasses send_packet_prepare, so stamp our relayer byte +
+	 * encrypted and bypasses the mesh-native send engine, so stamp our relayer byte +
 	 * learned next hop here. hdr->dest/src are already normalized above. */
 	meshtastic_router_stamp_originated(sys_le32_to_cpu(hdr->dest), sys_le32_to_cpu(hdr->src),
 					   &nh, &rn);

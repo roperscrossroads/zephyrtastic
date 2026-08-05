@@ -63,21 +63,19 @@ void meshtastic_dispatch_modules(const struct meshtastic_packet *packet,
  * @brief TX-side sanitisation hook for packets we originate — the send-path mirror of
  * meshtastic_dispatch_modules() (upstream's alterReceived / callModules-on-send).
  *
- * Dispatches per-portnum; a handler may rewrite @p pkt (typically repointing its
- * payload at @p scratch) to alter what actually goes on air — e.g. masking an outbound
- * Position to the sharing precision of its channel (POS-1). Called from the send path
- * for locally-originated packets only; relays and MQTT-injected third-party frames do
- * not pass through it.
+ * C3 Phase 6c: mesh-native. Dispatches per-portnum on @p mesh->decoded.portnum; a
+ * handler may rewrite @p mesh->decoded.payload in place to alter what actually goes on
+ * air — e.g. masking an outbound Position to the sharing precision of its channel
+ * (POS-1). Called from the send engine for locally-originated packets only, with
+ * @p mesh->channel already resolved to the send index; relays and MQTT-injected
+ * third-party frames do not pass through it.
  *
- * @param pkt         Outbound packet, rewritten in place by a matching handler.
- * @param scratch     Caller buffer a handler may re-encode into; must outlive the send.
- * @param scratch_len Size of @p scratch.
+ * @param mesh Outbound MeshPacket, rewritten in place by a matching handler.
  * @retval 0        Send the (possibly rewritten) packet.
  * @retval -ENODATA Suppress the send (e.g. a channel that shares no position).
  * @retval <0       Other errno from a handler.
  */
-int meshtastic_modules_sanitise_tx(struct meshtastic_packet *pkt, uint8_t *scratch,
-				   size_t scratch_len);
+int meshtastic_modules_sanitise_tx(meshtastic_MeshPacket *mesh);
 
 /**
  * @brief Fill standard reply header fields per Meshtastic setReplyTo().

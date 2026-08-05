@@ -12,20 +12,17 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-int meshtastic_modules_sanitise_tx(struct meshtastic_packet *pkt, uint8_t *scratch,
-				   size_t scratch_len)
+int meshtastic_modules_sanitise_tx(meshtastic_MeshPacket *mesh)
 {
-	if (pkt == NULL) {
+	if (mesh == NULL) {
 		return 0;
 	}
 
 #if defined(CONFIG_MESHTASTIC_POSITION)
-	if (pkt->portnum == MESHTASTIC_PORT_POSITION) {
-		return meshtastic_position_sanitise_tx(pkt, scratch, scratch_len);
+	/* portnum is the nanopb enum; compare through uint32_t (-Werror=enum-compare). */
+	if ((uint32_t)mesh->decoded.portnum == MESHTASTIC_PORT_POSITION) {
+		return meshtastic_position_sanitise_tx(mesh);
 	}
-#else
-	ARG_UNUSED(scratch);
-	ARG_UNUSED(scratch_len);
 #endif
 	return 0;
 }

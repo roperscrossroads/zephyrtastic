@@ -633,84 +633,69 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	return 0;
 }
 
-static int send_packet_prepare(const struct meshtastic_packet *packet,
-			       const meshtastic_Data *base, struct meshtastic_packet *local,
-			       uint8_t *wire, uint32_t *pkt_len)
+/* C3 Phase 6c: build the outgoing wire from the staged MeshPacket (mt_ws.tx_mesh) — the
+ * core of the mesh-native send engine. PRECONDITION: mt_ws.lock is held and mt_ws.tx_mesh
+ * carries the envelope, the authoritative decoded Data, and mesh->channel already resolved
+ * to the send index. Applies the mesh-native envelope defaults, runs the TX-sanitiser on
+ * our own originations (POS-1), stamps next-hop routing, encodes+encrypts the frame into
+ * @p wire, then materialises the flat @p local (payload copied into @p local_payload, which
+ * must outlive the send) for the lock-free tail. Returns the build status: <0 aborts the
+ * send (incl. -ENODATA from a sanitiser that fail-closes on a no-share channel). */
+static int mt_ws_build_wire_locked(uint8_t *wire, uint32_t *pkt_len,
+				   struct meshtastic_packet *local, uint8_t *local_payload)
 {
-	/* Scratch for a TX-sanitisation handler that re-encodes the payload (POS-1).
-	 * Must outlive meshtastic_build_wire_packet() below, which reads local->payload
-	 * — a stack buffer in this frame satisfies that. */
-	uint8_t sani[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_MeshPacket *mesh = &mt_ws.tx_mesh;
+	uint8_t next_hop;
+	uint8_t relay_node;
 	int ret;
 
-	if (!mt.initialized) {
-		return -EINVAL;
+	if (mesh->from == 0U) {
+		mesh->from = mt.node_id;
 	}
-
-	if (packet == NULL || packet->to == 0U ||
-	    (packet->payload == NULL && packet->payload_len != 0U) ||
-	    packet->payload_len > MESHTASTIC_MAX_PAYLOAD_LEN) {
-		LOG_ERR("Invalid packet");
-		return -EINVAL;
+	if (mesh->id == 0U) {
+		mesh->id = meshtastic_allocate_packet_id();
 	}
-
-	*local = *packet;
-	if (local->from == 0U) {
-		local->from = mt.node_id;
+	if (mesh->hop_limit == 0U) {
+		mesh->hop_limit = mt.hop_limit;
 	}
-	if (local->id == 0U) {
-		local->id = meshtastic_allocate_packet_id();
-	}
-	if (local->hop_limit == 0U) {
-		local->hop_limit = mt.hop_limit;
-	}
-	if (local->hop_start == 0U) {
-		local->hop_start = local->hop_limit;
-	}
-	if (local->channel_index == MESHTASTIC_CHANNEL_INDEX_INVALID) {
-		local->channel_index = meshtastic_channels_primary_index();
+	if (mesh->hop_start == 0U) {
+		mesh->hop_start = mesh->hop_limit;
 	}
 
 	/* TX-side sanitisation for packets we originate — the send-path mirror of the RX
-	 * module dispatch. Lets a module rewrite the outbound payload before the wire is
-	 * built (e.g. mask an outbound Position to its channel's sharing precision, POS-1).
-	 * Relays re-transmit the raw wire and never reach this path; MQTT-injected
-	 * third-party frames carry a foreign `from`/via_mqtt and are skipped — so only our
-	 * own traffic is altered. A negative return suppresses the send (e.g. -ENODATA on a
-	 * channel that shares no position, fail-closed like upstream). */
-	if (local->from == mt.node_id && !local->via_mqtt) {
-		ret = meshtastic_modules_sanitise_tx(local, sani, sizeof(sani));
+	 * module dispatch, now operating on the outbound MeshPacket. Lets a module rewrite
+	 * mesh->decoded.payload before the wire is built (mask an outbound Position to its
+	 * channel's sharing precision, POS-1). Relays re-transmit the raw wire and never
+	 * reach this path; MQTT-injected third-party frames carry a foreign `from`/via_mqtt
+	 * and are skipped — so only our own traffic is altered. A negative return suppresses
+	 * the send (e.g. -ENODATA on a channel that shares no position, fail-closed like
+	 * upstream). */
+	if (mesh->from == mt.node_id && !mesh->via_mqtt) {
+		ret = meshtastic_modules_sanitise_tx(mesh);
 		if (ret < 0) {
 			return ret;
 		}
 	}
 
-	/* Next-hop routing (increment 2): stamp our relayer byte + learned next hop
-	 * on directed unicasts we originate. Covers every internal originator and the
-	 * decoded phoneAPI path; the encrypted phoneAPI/PKC path stamps in
-	 * meshtastic_send_mesh_pb. */
-	meshtastic_router_stamp_originated(local->to, local->from, &local->next_hop,
-					   &local->relay_node);
+	/* Next-hop routing (increment 2): stamp our relayer byte + learned next hop on
+	 * directed unicasts we originate. MeshPacket's next_hop/relay_node are wider ints, so
+	 * marshal through uint8_t for the stamper (mirrors the encrypted-path stamp). */
+	next_hop = (uint8_t)mesh->next_hop;
+	relay_node = (uint8_t)mesh->relay_node;
+	meshtastic_router_stamp_originated(mesh->to, mesh->from, &next_hop, &relay_node);
+	mesh->next_hop = next_hop;
+	mesh->relay_node = relay_node;
 
-	/* C3 Phase 6: the wire is built mesh-native. Convert the (defaulted, sanitised,
-	 * stamped) struct to the outgoing MeshPacket (in mt_ws scratch, off the right-sized
-	 * app-thread send stacks); carry the phone's emoji from `base` (the one Data field
-	 * to_mesh_pb cannot model) and resolve the send index into mesh->channel for the
-	 * builder. 6c will let send_mesh_pb feed its MeshPacket straight in, retiring this
-	 * struct hop and `base`. */
-	k_mutex_lock(&mt_ws.lock, K_FOREVER);
-	ret = meshtastic_packet_to_mesh_pb(local, &mt_ws.tx_mesh);
-	if (ret == 0) {
-		if (base != NULL) {
-			mt_ws.tx_mesh.decoded.emoji = base->emoji;
-		}
-		mt_ws.tx_mesh.channel = meshtastic_channels_resolve_send_index(
-			local->to, local->channel_index, local->channel);
-		ret = meshtastic_build_wire_from_mesh(&mt_ws.tx_mesh, wire, pkt_len);
+	ret = meshtastic_build_wire_from_mesh(mesh, wire, pkt_len);
+	if (ret < 0) {
+		return ret;
 	}
-	k_mutex_unlock(&mt_ws.lock);
 
-	return ret;
+	/* Materialise the flat struct the lock-free tail (airtime / reliable / mqtt / TX_DONE)
+	 * consumes. Its payload is copied into local_payload — stable across the blocking radio
+	 * send — so the tail never reaches back into mt_ws.tx_mesh after we drop the lock. */
+	return meshtastic_mesh_pb_to_packet(mesh, local, local_payload,
+					    MESHTASTIC_MAX_PAYLOAD_LEN);
 }
 
 static int send_packet_complete(const struct meshtastic_packet *local, const uint8_t *wire,
@@ -735,27 +720,22 @@ static int send_packet_complete(const struct meshtastic_packet *local, const uin
 	return 0;
 }
 
-int meshtastic_send_packet_data(const struct meshtastic_packet *packet,
-				const meshtastic_Data *base, k_timeout_t wait)
+/* Lock-free send tail shared by both mesh-native entry points: schedule tier, airtime
+ * gate, radio submit (own-CW contention for broadcasts), reliable tracking, TX_DONE +
+ * MQTT uplink. Operates only on the materialised @p local + built @p wire — mt_ws is no
+ * longer touched here, so the blocking radio submit runs without the workspace lock. */
+static int send_wire_tail(const struct meshtastic_packet *local, uint8_t *wire,
+			  uint32_t pkt_len, k_timeout_t wait)
 {
-	struct meshtastic_packet local;
-	uint8_t wire[MESHTASTIC_PKT_MAX];
-	uint32_t pkt_len = 0U;
+	uint8_t tier = meshtastic_sched_tier_for(local->portnum);
 	int ret;
-
-	ret = send_packet_prepare(packet, base, &local, wire, &pkt_len);
-	if (ret < 0) {
-		return ret;
-	}
-
-	uint8_t tier = meshtastic_sched_tier_for(local.portnum);
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 	/* Airtime gate: throttle only the node's own periodic background beacons
 	 * (broadcast, fire-and-forget). Requested replies (unicast and/or a caller
 	 * that waits) and every higher tier are never gated. */
 	if (tier == MT_SCHED_TIER_BG && K_TIMEOUT_EQ(wait, K_NO_WAIT) &&
-	    local.to == MESHTASTIC_NODE_BROADCAST) {
+	    local->to == MESHTASTIC_NODE_BROADCAST) {
 		/* Single scalar, captured once — a direct atomic read is sufficient
 		 * (see the concurrency note in meshtastic_sched.h). */
 		uint8_t max_util = meshtastic_sched_get()->airtime_max_util;
@@ -764,7 +744,7 @@ int meshtastic_send_packet_data(const struct meshtastic_packet *packet,
 		    meshtastic_airtime_channel_util_percent() >= (float)max_util) {
 			meshtastic_sched_stat_airtime_drop();
 			LOG_DBG("airtime gate: suppressed BG broadcast port=%u (chan util >= %u%%)",
-				(unsigned int)local.portnum, max_util);
+				(unsigned int)local->portnum, max_util);
 			return 0;
 		}
 	}
@@ -777,7 +757,7 @@ int meshtastic_send_packet_data(const struct meshtastic_packet *packet,
 		 * lockstep. delay_ms of 0 (window disabled, or the draw landing on slot 0)
 		 * is identical to the immediate path. Directed unicasts keep immediate
 		 * timing; the relay path has its own (weighted) jitter. */
-		if (local.to == MESHTASTIC_NODE_BROADCAST) {
+		if (local->to == MESHTASTIC_NODE_BROADCAST) {
 			struct meshtastic_contention_plan plan;
 			uint8_t util = 0U;
 
@@ -797,18 +777,98 @@ int meshtastic_send_packet_data(const struct meshtastic_packet *packet,
 	if (ret >= 0) {
 		/* Track for retransmission if it is a want_ack unicast we originate
 		 * (the hook self-filters everything else). */
-		meshtastic_reliable_on_tx(&local, wire, pkt_len);
+		meshtastic_reliable_on_tx(local, wire, pkt_len);
 	}
 
-	return send_packet_complete(&local, wire, pkt_len, ret, K_TIMEOUT_EQ(wait, K_FOREVER));
+	return send_packet_complete(local, wire, pkt_len, ret, K_TIMEOUT_EQ(wait, K_FOREVER));
 }
 
 int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t wait)
 {
-	/* Public originator entry: the Data is built from the struct alone. The phone-injected
-	 * path (meshtastic_send_mesh_pb) uses the _data variant to carry its decoded Data
-	 * verbatim (C3 Phase 3). */
-	return meshtastic_send_packet_data(packet, NULL, wait);
+	struct meshtastic_packet local;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint8_t local_payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	uint32_t pkt_len = 0U;
+	uint8_t channel_index;
+	uint8_t send_index;
+	int ret;
+
+	if (!mt.initialized) {
+		return -EINVAL;
+	}
+
+	if (packet == NULL || packet->to == 0U ||
+	    (packet->payload == NULL && packet->payload_len != 0U) ||
+	    packet->payload_len > MESHTASTIC_MAX_PAYLOAD_LEN) {
+		LOG_ERR("Invalid packet");
+		return -EINVAL;
+	}
+
+	/* Resolve the send channel from the struct while its wire-hash field is still in hand:
+	 * default an unset index to the primary, then run the resolution the wire build keys
+	 * on. to_mesh_pb() stores only the index in mesh->channel and drops the hash, so this
+	 * must happen here (identical inputs/order to the pre-6c struct path). */
+	channel_index = (packet->channel_index == MESHTASTIC_CHANNEL_INDEX_INVALID)
+				? meshtastic_channels_primary_index()
+				: packet->channel_index;
+	send_index = meshtastic_channels_resolve_send_index(packet->to, channel_index,
+							    packet->channel);
+
+	/* C3 Phase 6c: the wire is built mesh-native. Convert the struct to the outgoing
+	 * MeshPacket in mt_ws scratch (off the right-sized app-thread send stacks) and build
+	 * under the workspace lock; the mesh-native defaults / sanitise / stamp run inside. */
+	k_mutex_lock(&mt_ws.lock, K_FOREVER);
+	ret = meshtastic_packet_to_mesh_pb(packet, &mt_ws.tx_mesh);
+	if (ret == 0) {
+		mt_ws.tx_mesh.channel = send_index;
+		ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload);
+	}
+	k_mutex_unlock(&mt_ws.lock);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return send_wire_tail(&local, wire, pkt_len, wait);
+}
+
+int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t wait)
+{
+	struct meshtastic_packet local;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint8_t local_payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	uint32_t pkt_len = 0U;
+	uint32_t to_norm;
+	uint8_t channel_index;
+	uint8_t send_index;
+	int ret;
+
+	if (!mt.initialized || mesh == NULL) {
+		return -EINVAL;
+	}
+
+	/* Phone/PKC decoded send path (C3 Phase 6c): the MeshPacket's decoded Data is
+	 * authoritative — emoji and every field the flat struct never modelled ride through
+	 * by construction, so the Phase-3 `base` hop is gone. Normalise the destination and
+	 * resolve the send channel exactly as the struct path does (default an out-of-range
+	 * index to the primary; the phone carries no wire hash). */
+	to_norm = (mesh->to != 0U) ? mesh->to : MESHTASTIC_NODE_BROADCAST;
+	channel_index = (mesh->channel < MESHTASTIC_MAX_CHANNELS)
+				? (uint8_t)mesh->channel
+				: meshtastic_channels_primary_index();
+	send_index = meshtastic_channels_resolve_send_index(to_norm, channel_index, 0U);
+
+	k_mutex_lock(&mt_ws.lock, K_FOREVER);
+	meshtastic_mesh_packet_copy(&mt_ws.tx_mesh, mesh);
+	mt_ws.tx_mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mt_ws.tx_mesh.to = to_norm;
+	mt_ws.tx_mesh.channel = send_index;
+	ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload);
+	k_mutex_unlock(&mt_ws.lock);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return send_wire_tail(&local, wire, pkt_len, wait);
 }
 
 int meshtastic_send_data(uint32_t dest, uint32_t portnum, const uint8_t *payload,

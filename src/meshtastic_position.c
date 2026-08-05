@@ -127,16 +127,18 @@ static uint32_t position_precision_for_channel(uint8_t index)
  * channel configured for coarse or no sharing, because the phone->mesh path never ran
  * it through the position module.
  *
- * Decodes the outbound Position, resolves the send channel's precision (the same
- * resolution build_wire_packet uses), truncates the coordinates, stamps the applied
- * precision, and re-encodes into @p scratch — the whole message round-trips, so no
- * other Position field is disturbed. Idempotent on an already-masked payload
- * (re-truncating to the same precision is a no-op). Returns 0 (with @p pkt repointed
- * at @p scratch), -ENODATA when the channel shares no position (precision 0 — the
- * caller suppresses the send, matching upstream's fail-closed), or -ENOMEM on a
- * re-encode overflow. A payload that does not decode as a Position is left untouched. */
-int meshtastic_position_sanitise_tx(struct meshtastic_packet *pkt, uint8_t *scratch,
-				    size_t scratch_len)
+ * C3 Phase 6c: mesh-native. Operates on the outbound MeshPacket the send engine builds
+ * the wire from — @p mesh->channel is the already-resolved send index the engine will
+ * key the frame with, so precision reads off it directly (no re-resolution). Decodes
+ * mesh->decoded.payload, truncates the coordinates, stamps the applied precision, and
+ * re-encodes IN PLACE back into the payload buffer (the decode has already extracted
+ * every field into @p position, so overwriting the source bytes is safe) — the whole
+ * message round-trips, no other Position field is disturbed. Idempotent on an
+ * already-masked payload. Returns 0 (payload rewritten), -ENODATA when the channel
+ * shares no position (precision 0 — the caller suppresses the send, matching upstream's
+ * fail-closed), or -ENOMEM on a re-encode overflow. A payload that does not decode as a
+ * Position is left untouched. */
+int meshtastic_position_sanitise_tx(meshtastic_MeshPacket *mesh)
 {
 	meshtastic_Position position = meshtastic_Position_init_zero;
 	pb_istream_t istream;
@@ -144,12 +146,15 @@ int meshtastic_position_sanitise_tx(struct meshtastic_packet *pkt, uint8_t *scra
 	uint8_t send_index;
 	uint32_t precision;
 
-	if (pkt->portnum != MESHTASTIC_PORT_POSITION) {
+	/* mesh->decoded.portnum is the nanopb meshtastic_PortNum enum; compare through
+	 * uint32_t against the public port constant (avoids -Werror=enum-compare). */
+	if ((uint32_t)mesh->decoded.portnum != MESHTASTIC_PORT_POSITION) {
 		return 0;
 	}
 
-	send_index = meshtastic_channels_resolve_send_index(pkt->to, pkt->channel_index,
-							    pkt->channel);
+	/* mesh->channel is the resolved send index (the engine ran
+	 * meshtastic_channels_resolve_send_index before calling us). */
+	send_index = (uint8_t)mesh->channel;
 	precision = position_precision_for_channel(send_index);
 	if (precision == 0U) {
 		return -ENODATA;
@@ -158,7 +163,7 @@ int meshtastic_position_sanitise_tx(struct meshtastic_packet *pkt, uint8_t *scra
 		precision = 32U;
 	}
 
-	istream = pb_istream_from_buffer(pkt->payload, pkt->payload_len);
+	istream = pb_istream_from_buffer(mesh->decoded.payload.bytes, mesh->decoded.payload.size);
 	if (!pb_decode(&istream, meshtastic_Position_fields, &position)) {
 		return 0;
 	}
@@ -169,14 +174,14 @@ int meshtastic_position_sanitise_tx(struct meshtastic_packet *pkt, uint8_t *scra
 	}
 	position.precision_bits = precision;
 
-	ostream = pb_ostream_from_buffer(scratch, scratch_len);
+	ostream = pb_ostream_from_buffer(mesh->decoded.payload.bytes,
+					 sizeof(mesh->decoded.payload.bytes));
 	if (!pb_encode(&ostream, meshtastic_Position_fields, &position)) {
 		LOG_ERR("position TX sanitise re-encode failed: %s", PB_GET_ERROR(&ostream));
 		return -ENOMEM;
 	}
 
-	pkt->payload = scratch;
-	pkt->payload_len = ostream.bytes_written;
+	mesh->decoded.payload.size = (pb_size_t)ostream.bytes_written;
 	return 0;
 }
 

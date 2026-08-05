@@ -4131,7 +4131,7 @@ ZTEST(protocol_stack, test_tx_hook_masks_originated_position)
 		.portnum = MESHTASTIC_PORT_POSITION,
 		.payload = payload,
 		.payload_len = os.bytes_written,
-		/* Unset: send_packet_prepare() defaults it to the primary slot. */
+		/* Unset: meshtastic_send_packet() defaults it to the primary slot. */
 		.channel_index = MESHTASTIC_CHANNEL_INDEX_INVALID,
 	};
 
