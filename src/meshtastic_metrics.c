@@ -247,9 +247,17 @@ MESHTASTIC_MODULE_DEFINE(device_telemetry, MESHTASTIC_PORT_TELEMETRY, 0, NULL,
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND) ||                                         \
 	(defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                         \
 	 defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND))
-/* Bounded telemetry build + protobuf-encode + enqueue. Measured peak ~300 B on
- * hardware (kernel thread stacks); 2 KB keeps ~7x margin. STACK_SENTINEL guards. */
-static K_THREAD_STACK_DEFINE(telemetry_stack, 2048);
+/* 2026-08-05: the "~300 B measured peak" below was stale — it measured the
+ * bounded build+encode helper in isolation, not the actual call this thread
+ * makes. meshtastic_send_device_metrics() calls into meshtastic_send_data(),
+ * whose C3-migrated mesh-native wire-builder path measured ~3012/3072 (98%)
+ * on a *different*, larger-stack thread (meshtastic_shell, manually
+ * triggering the same send via `meshtastic metrics send`) — this dedicated
+ * 2048 B stack overflowed on every real firing of the 1-hour auto-send timer
+ * across all 3 bench nodes (STACK_SENTINEL didn't catch it: a fast/severe
+ * overflow corrupts before the next-context-switch check fires). 6 KB keeps
+ * the same ~50% margin now targeted for other threads on this send path. */
+static K_THREAD_STACK_DEFINE(telemetry_stack, 6144);
 static struct k_thread telemetry_thread;
 
 static uint32_t telemetry_period_sec(void)

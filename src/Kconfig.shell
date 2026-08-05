@@ -13,13 +13,16 @@ if MESHTASTIC_SHELL
 
 config MESHTASTIC_SHELL_WORK_STACK_SIZE
 	int "Meshtastic shell work thread stack size"
-	default 3072
+	default 6144
 	help
 	  Stack size for deferred shell commands that may block on LoRa TX or
-	  protobuf encoding. Measured peak ~600 B on hardware. Bumped back to the
-	  pre-tuning 3072 (2026-08-04) now that the interactive serial shell is on
-	  again for bench use — extra margin for interactive command paths, with
-	  STACK_SENTINEL as the backstop against an unexpected spike.
+	  protobuf encoding. The "~600 B measured peak" this default used to cite
+	  covered simple commands only; "meshtastic metrics send" measured
+	  3012/3072 (98%) on hardware (2026-08-05) — it drives the same
+	  C3-migrated meshtastic_send_data() path that overflowed the dedicated
+	  telemetry auto-send thread's 2 KB stack (see meshtastic_metrics.c).
+	  Bumped to 6144 for the same ~50% margin now targeted across that send
+	  path, with STACK_SENTINEL as the backstop against a further spike.
 
 config MESHTASTIC_SHELL_WORK_PRIORITY
 	int "Meshtastic shell work thread priority"
