@@ -100,68 +100,43 @@ destroy:
 	return ret;
 }
 
-static int encode_packet_data(const struct meshtastic_packet *packet, const meshtastic_Data *base,
-			      uint8_t *buf, size_t buf_len, size_t *encoded_len)
+static int encode_packet_data(const meshtastic_MeshPacket *mesh, uint8_t *buf, size_t buf_len,
+			      size_t *encoded_len)
 {
-	meshtastic_Data data = meshtastic_Data_init_zero;
+	meshtastic_Data data;
 	pb_ostream_t stream;
 
-	if (packet == NULL || buf == NULL || encoded_len == NULL) {
+	if (mesh == NULL || buf == NULL || encoded_len == NULL) {
 		return -EINVAL;
 	}
 
-	if ((packet->payload == NULL && packet->payload_len != 0U) ||
-	    packet->payload_len > MESHTASTIC_MAX_PAYLOAD_LEN) {
+	if (mesh->decoded.payload.size > MESHTASTIC_MAX_PAYLOAD_LEN) {
 		return -EINVAL;
 	}
 
-	/* C3 Phase 3: when the caller supplies the originating Data (a phone-injected
-	 * MeshPacket, `base`), start from it so a Data field the flat struct never models --
-	 * Data.emoji (TXT-1), and any future one -- carries to the wire by construction.
-	 *
-	 * Every field the struct DOES model is overwritten below, from the struct (which the
-	 * TX-sanitiser may have rewritten) or from node-authoritative state: payload, portnum,
-	 * want_response, the mqtt-consent bitfield, dest, source, request_id, reply_id. So the
-	 * *only* field that rides through from base today is emoji. This override set is a
-	 * load-bearing contract: a future node-authoritative Data field MUST be added here, or
-	 * the phone's value would leak unbidden. */
-	if (base != NULL) {
-		data = *base;
-	}
-
-	data.portnum = (meshtastic_PortNum)packet->portnum;
-	/* Keep this assignment UNCONDITIONAL (do not fold into the `> 0` guard below): it is
-	 * what clobbers base's payload size, so a TX-sanitiser rewrite -- e.g. POS-1 masking a
-	 * phone-injected Position -- always wins and base's full-precision bytes never reach
-	 * the wire. nanopb emits only `.size` bytes, so a shorter sanitised payload is safe. */
-	data.payload.size = (pb_size_t)packet->payload_len;
-	if (packet->payload_len > 0U) {
-		memcpy(data.payload.bytes, packet->payload, packet->payload_len);
-	}
-	data.want_response = packet->want_response;
+	/* C3 Phase 6: mesh->decoded IS the authoritative outgoing Data -- payload, portnum,
+	 * want_response, dest/source, request_id/reply_id, and any field the flat struct never
+	 * models (Data.emoji, TXT-1) all by construction. Struct originators reach here via
+	 * to_mesh_pb (which fills decoded from the struct, after the TX-sanitiser has rewritten
+	 * the payload); the phone path carries its own decoded verbatim. So the encoder no
+	 * longer merges a separate `base`. */
+	data = mesh->decoded;
 
 	/* Every packet we originate carries the bitfield, mirroring the reference
 	 * (Router.cpp: set under isFromUs). Bit 0 is our own MQTT consent, taken
-	 * from config.lora.config_ok_to_mqtt; bit 1 mirrors want_response.
-	 *
-	 * Always emitting the field — even when consent is false — matters: a
-	 * receiver cannot distinguish "declined" from "too old to say" if the
-	 * field is absent, and it must treat absence as declined. Sending it
-	 * makes our answer explicit either way.
+	 * from config.lora.config_ok_to_mqtt; bit 1 mirrors want_response. This stays
+	 * node-authoritative and is re-stamped here (never trusted from the phone): a
+	 * receiver cannot distinguish "declined" from "too old to say" if the field is
+	 * absent and must treat absence as declined, so we always emit it.
 	 */
 	data.has_bitfield = true;
 	data.bitfield = 0U;
 	if (mt.config_ok_to_mqtt) {
 		data.bitfield |= MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK;
 	}
-	if (packet->want_response) {
+	if (data.want_response) {
 		data.bitfield |= MESHTASTIC_BITFIELD_WANT_RESPONSE_MASK;
 	}
-
-	data.dest = packet->data_dest;
-	data.source = packet->data_source;
-	data.request_id = packet->request_id;
-	data.reply_id = packet->reply_id;
 
 	stream = pb_ostream_from_buffer(buf, buf_len);
 	if (!pb_encode(&stream, meshtastic_Data_fields, &data)) {
@@ -178,13 +153,20 @@ static int encode_packet_data(const struct meshtastic_packet *packet, const mesh
 int meshtastic_encode_data(uint32_t portnum, const uint8_t *payload, size_t payload_len,
 			   uint8_t *buf, size_t buf_len, size_t *encoded_len)
 {
-	struct meshtastic_packet packet = {
-		.portnum = portnum,
-		.payload = payload,
-		.payload_len = payload_len,
-	};
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
 
-	return encode_packet_data(&packet, NULL, buf, buf_len, encoded_len);
+	if ((payload == NULL && payload_len != 0U) || payload_len > MESHTASTIC_MAX_PAYLOAD_LEN) {
+		return -EINVAL;
+	}
+
+	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh.decoded.portnum = (meshtastic_PortNum)portnum;
+	mesh.decoded.payload.size = (pb_size_t)payload_len;
+	if (payload_len > 0U) {
+		memcpy(mesh.decoded.payload.bytes, payload, payload_len);
+	}
+
+	return encode_packet_data(&mesh, buf, buf_len, encoded_len);
 }
 
 int meshtastic_packet_to_mesh_pb(const struct meshtastic_packet *packet,
@@ -725,8 +707,8 @@ int meshtastic_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi, int
 	return 0;
 }
 
-int meshtastic_build_wire_packet_data(const struct meshtastic_packet *packet,
-				      const meshtastic_Data *base, uint8_t *out, uint32_t *out_len)
+int meshtastic_build_wire_from_mesh(const meshtastic_MeshPacket *mesh, uint8_t *out,
+				    uint32_t *out_len)
 {
 	uint8_t nonce[16];
 	struct meshtastic_wire_header *hdr;
@@ -738,13 +720,18 @@ int meshtastic_build_wire_packet_data(const struct meshtastic_packet *packet,
 	bool pki_done = false;
 	int ret;
 
-	ret = encode_packet_data(packet, base, mt_ws.pb_buf, sizeof(mt_ws.pb_buf), &encoded_len);
+	if (mesh == NULL || out == NULL || out_len == NULL) {
+		return -EINVAL;
+	}
+
+	ret = encode_packet_data(mesh, mt_ws.pb_buf, sizeof(mt_ws.pb_buf), &encoded_len);
 	if (ret < 0) {
 		return ret;
 	}
 
-	ch_index = meshtastic_channels_resolve_send_index(packet->to, packet->channel_index,
-							  packet->channel);
+	/* mesh->channel is the fully-resolved send index (the caller ran
+	 * meshtastic_channels_resolve_send_index); use it directly for the key + wire hash. */
+	ch_index = (uint8_t)mesh->channel;
 	ret = meshtastic_channels_get_key(ch_index, &key);
 	if (ret < 0) {
 		return ret;
@@ -769,12 +756,12 @@ int meshtastic_build_wire_packet_data(const struct meshtastic_packet *packet,
 
 		meshtastic_config_store_get_owner_flags(&is_licensed, &is_unmessagable);
 
-		if (packet->to != MESHTASTIC_NODE_BROADCAST && packet->to != 0U &&
+		if (mesh->to != MESHTASTIC_NODE_BROADCAST && mesh->to != 0U &&
 		    meshtastic_pki_have_key() && !is_licensed &&
-		    packet->portnum != (uint32_t)meshtastic_PortNum_TRACEROUTE_APP &&
-		    packet->portnum != (uint32_t)meshtastic_PortNum_NODEINFO_APP &&
-		    packet->portnum != (uint32_t)meshtastic_PortNum_ROUTING_APP &&
-		    packet->portnum != (uint32_t)meshtastic_PortNum_POSITION_APP) {
+		    mesh->decoded.portnum != meshtastic_PortNum_TRACEROUTE_APP &&
+		    mesh->decoded.portnum != meshtastic_PortNum_NODEINFO_APP &&
+		    mesh->decoded.portnum != meshtastic_PortNum_ROUTING_APP &&
+		    mesh->decoded.portnum != meshtastic_PortNum_POSITION_APP) {
 			size_t pki_len;
 			int pret;
 
@@ -783,7 +770,7 @@ int meshtastic_build_wire_packet_data(const struct meshtastic_packet *packet,
 				return -EMSGSIZE; /* too large for PKC — refuse (parity: TOO_LARGE) */
 			}
 
-			pret = meshtastic_pki_encrypt(packet->to, packet->from, packet->id,
+			pret = meshtastic_pki_encrypt(mesh->to, mesh->from, mesh->id,
 						      mt_ws.pb_buf, encoded_len, mt_ws.enc_buf,
 						      sizeof(mt_ws.enc_buf), &pki_len);
 			if (pret == 0) {
@@ -792,7 +779,7 @@ int meshtastic_build_wire_packet_data(const struct meshtastic_packet *packet,
 				pki_done = true;
 			} else {
 				LOG_WRN("No public key for 0x%08x; refusing to send DM as channel "
-					"traffic", (unsigned int)packet->to);
+					"traffic", (unsigned int)mesh->to);
 				/* EACCES, not ENOKEY: the latter is a Linux errno extension
 				 * absent from the xtensa/picolibc target libc. */
 				return -EACCES;
@@ -803,8 +790,8 @@ int meshtastic_build_wire_packet_data(const struct meshtastic_packet *packet,
 
 	if (!pki_done) {
 		memset(nonce, 0, sizeof(nonce));
-		sys_put_le32(packet->id, nonce);
-		sys_put_le32(packet->from, nonce + 8U);
+		sys_put_le32(mesh->id, nonce);
+		sys_put_le32(mesh->from, nonce + 8U);
 
 		ret = ctr_crypt(key.bytes, key.len, nonce, mt_ws.pb_buf, mt_ws.enc_buf,
 				encoded_len);
@@ -814,20 +801,20 @@ int meshtastic_build_wire_packet_data(const struct meshtastic_packet *packet,
 	}
 
 	hdr = (struct meshtastic_wire_header *)out;
-	hdr->dest = sys_cpu_to_le32(packet->to);
-	hdr->src = sys_cpu_to_le32(packet->from);
-	hdr->id = sys_cpu_to_le32(packet->id);
-	hdr->flags = (packet->hop_limit & MESHTASTIC_FLAGS_HOP_LIMIT_MASK) |
-		     ((packet->hop_start & 0x07U) << MESHTASTIC_FLAGS_HOP_START_SHIFT);
-	if (packet->want_ack) {
+	hdr->dest = sys_cpu_to_le32(mesh->to);
+	hdr->src = sys_cpu_to_le32(mesh->from);
+	hdr->id = sys_cpu_to_le32(mesh->id);
+	hdr->flags = ((uint8_t)mesh->hop_limit & MESHTASTIC_FLAGS_HOP_LIMIT_MASK) |
+		     (((uint8_t)mesh->hop_start & 0x07U) << MESHTASTIC_FLAGS_HOP_START_SHIFT);
+	if (mesh->want_ack) {
 		hdr->flags |= MESHTASTIC_FLAGS_WANT_ACK;
 	}
-	if (packet->via_mqtt) {
+	if (mesh->via_mqtt) {
 		hdr->flags |= MESHTASTIC_FLAGS_VIA_MQTT;
 	}
 	hdr->channel = wire_hash;
-	hdr->next_hop = packet->next_hop;
-	hdr->relay_node = packet->relay_node;
+	hdr->next_hop = (uint8_t)mesh->next_hop;
+	hdr->relay_node = (uint8_t)mesh->relay_node;
 
 	memcpy(out + MESHTASTIC_HDR_LEN, mt_ws.enc_buf, payload_len);
 	*out_len = (uint32_t)(MESHTASTIC_HDR_LEN + payload_len);
@@ -838,8 +825,24 @@ int meshtastic_build_wire_packet_data(const struct meshtastic_packet *packet,
 int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t *out,
 				 uint32_t *out_len)
 {
-	/* Internal originators build the Data from the struct alone (no verbatim base). */
-	return meshtastic_build_wire_packet_data(packet, NULL, out, out_len);
+	meshtastic_MeshPacket mesh;
+	int ret;
+
+	if (packet == NULL) {
+		return -EINVAL;
+	}
+
+	/* Public/struct adapter into the mesh-native builder. to_mesh_pb fills the outgoing
+	 * MeshPacket from the struct (its decoded Data carries no emoji -- struct originators
+	 * never have one). to_mesh_pb stores the raw channel_index in mesh->channel, so resolve
+	 * the actual send index here (honouring a bare wire-hash originator/test) first. */
+	ret = meshtastic_packet_to_mesh_pb(packet, &mesh);
+	if (ret < 0) {
+		return ret;
+	}
+	mesh.channel = meshtastic_channels_resolve_send_index(packet->to, packet->channel_index,
+							      packet->channel);
+	return meshtastic_build_wire_from_mesh(&mesh, out, out_len);
 }
 
 int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)

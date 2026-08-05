@@ -692,8 +692,22 @@ static int send_packet_prepare(const struct meshtastic_packet *packet,
 	meshtastic_router_stamp_originated(local->to, local->from, &local->next_hop,
 					   &local->relay_node);
 
+	/* C3 Phase 6: the wire is built mesh-native. Convert the (defaulted, sanitised,
+	 * stamped) struct to the outgoing MeshPacket (in mt_ws scratch, off the right-sized
+	 * app-thread send stacks); carry the phone's emoji from `base` (the one Data field
+	 * to_mesh_pb cannot model) and resolve the send index into mesh->channel for the
+	 * builder. 6c will let send_mesh_pb feed its MeshPacket straight in, retiring this
+	 * struct hop and `base`. */
 	k_mutex_lock(&mt_ws.lock, K_FOREVER);
-	ret = meshtastic_build_wire_packet_data(local, base, wire, pkt_len);
+	ret = meshtastic_packet_to_mesh_pb(local, &mt_ws.tx_mesh);
+	if (ret == 0) {
+		if (base != NULL) {
+			mt_ws.tx_mesh.decoded.emoji = base->emoji;
+		}
+		mt_ws.tx_mesh.channel = meshtastic_channels_resolve_send_index(
+			local->to, local->channel_index, local->channel);
+		ret = meshtastic_build_wire_from_mesh(&mt_ws.tx_mesh, wire, pkt_len);
+	}
 	k_mutex_unlock(&mt_ws.lock);
 
 	return ret;

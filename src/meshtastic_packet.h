@@ -73,14 +73,13 @@ uint8_t meshtastic_packet_wire_hash_for_index(uint8_t channel_index);
 int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t *out,
 				 uint32_t *out_len);
 /*
- * @param base Optional originating Data (a phone-injected MeshPacket's decoded payload).
- *        When non-NULL the encoded Data starts from it, so fields the flat struct never
- *        models (Data.emoji, ...) survive to the wire; the struct/TX-sanitiser still owns
- *        payload, portnum and the mqtt bitfield. NULL == build from the struct alone (C3
- *        Phase 3). meshtastic_build_wire_packet() is the base==NULL wrapper.
+ * Mesh-native wire builder (C3 Phase 6): encodes mesh->decoded (the authoritative outgoing
+ * Data, emoji included), re-stamps the node-authoritative mqtt-consent bitfield, resolves
+ * PKC-vs-channel, encrypts and frames. @p mesh->channel must be the fully-resolved send
+ * index. meshtastic_build_wire_packet() is the struct adapter (to_mesh_pb + resolve).
  */
-int meshtastic_build_wire_packet_data(const struct meshtastic_packet *packet,
-				      const meshtastic_Data *base, uint8_t *out, uint32_t *out_len);
+int meshtastic_build_wire_from_mesh(const meshtastic_MeshPacket *mesh, uint8_t *out,
+				    uint32_t *out_len);
 int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh);
 
 #ifdef __cplusplus

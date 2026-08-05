@@ -88,6 +88,10 @@ struct meshtastic_workspace {
 	uint8_t enc_buf[MESHTASTIC_PAYLOAD_MAX + 16U];
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint8_t rx_dec[MESHTASTIC_PAYLOAD_MAX + 16U];
+	/* C3 Phase 6: the outgoing MeshPacket the mesh-native wire build works from, kept
+	 * off the (right-sized) app-thread send stacks. Guarded by @ref lock alongside the
+	 * pb_buf/enc_buf scratch the build already serialises on. */
+	meshtastic_MeshPacket tx_mesh;
 };
 
 extern struct meshtastic_context mt;
