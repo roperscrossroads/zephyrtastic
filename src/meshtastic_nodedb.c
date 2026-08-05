@@ -21,6 +21,7 @@
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
 
+#include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
 #include "meshtastic_modules.h"
 #include "meshtastic_sched.h"
@@ -995,15 +996,15 @@ static int mtrec_export(int (*export_func)(const char *name, const void *val, si
 SETTINGS_STATIC_HANDLER_DEFINE(mtrec, MTREC_SUBTREE, NULL, mtrec_set, NULL, mtrec_export);
 #endif /* CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS */
 
-static bool decode_user_payload(const struct meshtastic_packet *packet, meshtastic_User *user)
+static bool decode_user_payload(const uint8_t *payload, size_t payload_len, meshtastic_User *user)
 {
 	pb_istream_t stream;
 
-	if (packet->payload == NULL || packet->payload_len == 0U) {
+	if (payload == NULL || payload_len == 0U) {
 		return false;
 	}
 
-	stream = pb_istream_from_buffer(packet->payload, packet->payload_len);
+	stream = pb_istream_from_buffer(payload, payload_len);
 	if (!pb_decode(&stream, meshtastic_User_fields, user)) {
 		LOG_DBG("NodeDB User decode failed: %s", PB_GET_ERROR(&stream));
 		return false;
@@ -1012,32 +1013,45 @@ static bool decode_user_payload(const struct meshtastic_packet *packet, meshtast
 	return true;
 }
 
-static bool packet_hops_away(const struct meshtastic_packet *packet, uint8_t *hops_away)
+/* C3 Phase 8d: dual-rep — read the hop fields from the decoded MeshPacket when the RF path
+ * supplied one, else the flat struct (NULL-mesh public inject / test boundary). */
+static bool packet_hops_away(const struct meshtastic_packet *packet,
+			     const meshtastic_MeshPacket *mesh, uint8_t *hops_away)
 {
-	if (packet->hop_start == 0U || packet->hop_start < packet->hop_limit) {
+	uint8_t hop_start = mesh ? (uint8_t)mesh->hop_start : packet->hop_start;
+	uint8_t hop_limit = mesh ? (uint8_t)mesh->hop_limit : packet->hop_limit;
+
+	if (hop_start == 0U || hop_start < hop_limit) {
 		return false;
 	}
 
-	*hops_away = packet->hop_start - packet->hop_limit;
+	*hops_away = hop_start - hop_limit;
 	return true;
 }
 
 static void apply_basic_packet(struct nodedb_entry *entry, const struct meshtastic_packet *packet,
-			       uint32_t now_sec)
+			       const meshtastic_MeshPacket *mesh, uint32_t now_sec)
 {
 	uint8_t hops_away;
+	/* C3 Phase 8d dual-rep. mesh->channel is the resolved index; snr is the float
+	 * MeshPacket.rx_snr (the plan sanctions the float round-trip for this consumer —
+	 * byte-identical here, rx_snr is (float)(int8) on the RF path). */
+	uint8_t channel_index = mesh ? ((mesh->channel < MESHTASTIC_MAX_CHANNELS)
+						? (uint8_t)mesh->channel
+						: MESHTASTIC_CHANNEL_INDEX_INVALID)
+				     : packet->channel_index;
 
 	entry->node.last_heard = now_sec;
-	entry->node.snr = (float)packet->snr;
-	entry->node.channel = (packet->channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID)
-				      ? packet->channel_index
-				      : 0U;
+	entry->node.snr = mesh ? mesh->rx_snr : (float)packet->snr;
+	entry->node.channel =
+		(channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID) ? channel_index : 0U;
 	/* node.next_hop is the *learned route to reach this node* (next-hop router),
 	 * set from ACK/relay correlation — NOT the packet's outbound next_hop hint.
 	 * Don't overwrite it with the incoming wire field. */
-	WRITE_BIT(entry->node.bitfield, NODEINFO_BITFIELD_VIA_MQTT_BIT, packet->via_mqtt);
+	WRITE_BIT(entry->node.bitfield, NODEINFO_BITFIELD_VIA_MQTT_BIT,
+		  mesh ? mesh->via_mqtt : packet->via_mqtt);
 
-	if (packet_hops_away(packet, &hops_away)) {
+	if (packet_hops_away(packet, mesh, &hops_away)) {
 		entry->node.has_hops_away = true;
 		entry->node.hops_away = hops_away;
 	}
@@ -1052,10 +1066,18 @@ static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *p
 	bool has_user = false;
 	struct nodedb_entry *entry;
 	uint32_t now_sec;
+	uint32_t from;
+	uint32_t portnum;
 
-	ARG_UNUSED(mesh);
+	if (packet == NULL && mesh == NULL) {
+		return;
+	}
 
-	if (packet == NULL || packet->from == 0U || packet->from == meshtastic_get_node_id()) {
+	/* C3 Phase 8d: identity + portnum from the decoded MeshPacket on the RF path, flat
+	 * struct on the NULL-mesh boundary. NodeDB is now MeshPacket-native like every other
+	 * RX consumer — the struct is only the fallback. */
+	from = mesh ? mesh->from : packet->from;
+	if (from == 0U || from == meshtastic_get_node_id()) {
 		return;
 	}
 
@@ -1063,20 +1085,23 @@ static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *p
 	 * NodeInfo carries identity + pubkey. Position/telemetry/status are not
 	 * retained (full-lean) — hearing them still updates last_heard via the
 	 * basic-packet path below. */
-	if (packet->portnum == MESHTASTIC_PORT_NODEINFO) {
-		has_user = decode_user_payload(packet, &user);
+	portnum = mesh ? (uint32_t)mesh->decoded.portnum : packet->portnum;
+	if (portnum == MESHTASTIC_PORT_NODEINFO) {
+		has_user = decode_user_payload(mesh ? mesh->decoded.payload.bytes : packet->payload,
+					       mesh ? mesh->decoded.payload.size : packet->payload_len,
+					       &user);
 	}
 
 	now_sec = uptime_seconds();
 
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
-	entry = get_or_create_entry_locked(packet->from);
+	entry = get_or_create_entry_locked(from);
 	if (entry == NULL) {
 		k_mutex_unlock(&nodedb_lock);
 		return;
 	}
 
-	apply_basic_packet(entry, packet, now_sec);
+	apply_basic_packet(entry, packet, mesh, now_sec);
 
 	if (has_user) {
 		apply_user(entry, &user);
