@@ -439,9 +439,12 @@ static void log_position(uint32_t from, uint32_t request_id, const meshtastic_Po
 	}
 }
 
-static void meshtastic_module_position_on_packet(const struct meshtastic_packet *packet)
+static void meshtastic_module_position_on_packet(const struct meshtastic_packet *packet,
+						 const meshtastic_MeshPacket *mesh)
 {
 	meshtastic_Position position = meshtastic_Position_init_zero;
+
+	ARG_UNUSED(mesh);
 
 	if (packet == NULL || packet->from == 0U || packet->from == meshtastic_get_node_id()) {
 		return;
@@ -472,11 +475,14 @@ static bool interval_elapsed(bool valid, int64_t last_ms, int64_t now_ms, int64_
 }
 
 static int meshtastic_module_position_alloc_reply(const struct meshtastic_packet *req,
+						  const meshtastic_MeshPacket *mesh,
 						  struct meshtastic_packet *reply)
 {
 	static uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	int64_t now_ms;
 	int ret;
+
+	ARG_UNUSED(mesh);
 
 	if (req == NULL || reply == NULL || req->from == 0U ||
 	    req->from == meshtastic_get_node_id()) {

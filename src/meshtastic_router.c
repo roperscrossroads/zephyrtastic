@@ -919,7 +919,7 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		meshtastic_mqtt_on_rx(pkt, wire, wire_len);
 #endif
 		meshtastic_routing_on_decoded(pkt, decoded_mesh);
-		meshtastic_dispatch_modules(pkt);
+		meshtastic_dispatch_modules(pkt, decoded_mesh);
 		/* After module dispatch: the NodeDB has now created/refreshed the
 		 * source entry, so a learned next hop has somewhere to land.
 		 * Phase 4b: pass rx_mesh (NULL on the public inject/test path -> struct

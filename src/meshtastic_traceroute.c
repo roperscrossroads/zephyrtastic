@@ -39,12 +39,15 @@ static int8_t snr_to_q4(int8_t snr_db)
 }
 
 static int traceroute_alloc_reply(const struct meshtastic_packet *req,
+				  const meshtastic_MeshPacket *mesh,
 				  struct meshtastic_packet *reply)
 {
 	static uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	meshtastic_RouteDiscovery rd = meshtastic_RouteDiscovery_init_zero;
 	pb_istream_t istream;
 	pb_ostream_t ostream;
+
+	ARG_UNUSED(mesh);
 
 	if (req == NULL || reply == NULL) {
 		return -EINVAL;

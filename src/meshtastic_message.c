@@ -12,8 +12,11 @@ static bool packet_is_for_us(const struct meshtastic_packet *packet)
 	return packet->to == meshtastic_get_node_id() || packet->to == MESHTASTIC_NODE_BROADCAST;
 }
 
-static void meshtastic_module_message_on_packet(const struct meshtastic_packet *packet)
+static void meshtastic_module_message_on_packet(const struct meshtastic_packet *packet,
+						const meshtastic_MeshPacket *mesh)
 {
+	ARG_UNUSED(mesh);
+
 	if (packet == NULL || packet->payload == NULL || packet->payload_len == 0U) {
 		return;
 	}

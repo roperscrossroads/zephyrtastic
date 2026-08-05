@@ -35,7 +35,8 @@ static bool packet_is_to_us(const struct meshtastic_packet *packet)
 	return packet != NULL && packet->to == meshtastic_get_node_id();
 }
 
-void meshtastic_dispatch_modules(const struct meshtastic_packet *packet)
+void meshtastic_dispatch_modules(const struct meshtastic_packet *packet,
+				 const meshtastic_MeshPacket *mesh)
 {
 	struct meshtastic_packet reply = {0};
 	const struct meshtastic_module *handler = NULL;
@@ -52,7 +53,7 @@ void meshtastic_dispatch_modules(const struct meshtastic_packet *packet)
 
 		if ((mod->flags & MESHTASTIC_MODULE_ALL_PACKETS) != 0U ||
 		    mod->portnum == packet->portnum) {
-			mod->on_packet(packet);
+			mod->on_packet(packet, mesh);
 		}
 	}
 
@@ -65,7 +66,7 @@ void meshtastic_dispatch_modules(const struct meshtastic_packet *packet)
 			continue;
 		}
 
-		ret = mod->alloc_reply(packet, &reply);
+		ret = mod->alloc_reply(packet, mesh, &reply);
 		if (ret == -ENOENT) {
 			continue;
 		}

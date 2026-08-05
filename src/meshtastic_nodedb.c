@@ -1045,12 +1045,15 @@ static void apply_basic_packet(struct nodedb_entry *entry, const struct meshtast
 	nodedb_dirty = true; /* last_heard (and any new node) changed the sort order */
 }
 
-static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *packet)
+static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *packet,
+					       const meshtastic_MeshPacket *mesh)
 {
 	meshtastic_User user = meshtastic_User_init_zero;
 	bool has_user = false;
 	struct nodedb_entry *entry;
 	uint32_t now_sec;
+
+	ARG_UNUSED(mesh);
 
 	if (packet == NULL || packet->from == 0U || packet->from == meshtastic_get_node_id()) {
 		return;

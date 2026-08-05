@@ -179,6 +179,7 @@ static struct device_telemetry_peer *peer_get_locked(uint32_t from, int64_t now_
 }
 
 static int meshtastic_module_device_telemetry_alloc_reply(const struct meshtastic_packet *req,
+							  const meshtastic_MeshPacket *mesh,
 							  struct meshtastic_packet *reply)
 {
 	static uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
@@ -188,6 +189,8 @@ static int meshtastic_module_device_telemetry_alloc_reply(const struct meshtasti
 	struct device_telemetry_peer *peer;
 	int64_t now_ms;
 	int ret;
+
+	ARG_UNUSED(mesh);
 
 	if (req == NULL || reply == NULL || req->from == 0U ||
 	    req->from == meshtastic_get_node_id()) {

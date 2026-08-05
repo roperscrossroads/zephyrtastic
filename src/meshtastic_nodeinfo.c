@@ -208,7 +208,8 @@ int meshtastic_nodeinfo_request(uint32_t peer)
 	return meshtastic_send_packet(&packet, K_NO_WAIT);
 }
 
-static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet *packet)
+static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet *packet,
+						 const meshtastic_MeshPacket *mesh)
 {
 	const bool is_nodeinfo = packet != NULL && packet->portnum == MESHTASTIC_PORT_NODEINFO;
 	bool should_request = false;
@@ -218,6 +219,8 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 	int64_t now_ms;
 	meshtastic_User user = meshtastic_User_init_zero;
 	struct nodeinfo_peer *peer;
+
+	ARG_UNUSED(mesh);
 
 	if (packet == NULL || packet->from == 0U || packet->from == meshtastic_get_node_id()) {
 		return;
@@ -273,12 +276,15 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 }
 
 static int meshtastic_module_nodeinfo_alloc_reply(const struct meshtastic_packet *req,
+						  const meshtastic_MeshPacket *mesh,
 						  struct meshtastic_packet *reply)
 {
 	static uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	int64_t now_ms;
 	struct nodeinfo_peer *peer;
 	int ret;
+
+	ARG_UNUSED(mesh);
 
 	if (req == NULL || reply == NULL || req->from == 0U ||
 	    req->from == meshtastic_get_node_id()) {
