@@ -852,6 +852,9 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 				const meshtastic_MeshPacket *decoded_mesh)
 {
 	const struct meshtastic_wire_header *hdr = NULL;
+	const struct meshtastic_packet *pkt = packet;
+	struct meshtastic_packet materialized;
+	uint8_t mpayload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	bool suppress_relay = false;
 
 	if (packet == NULL) {
@@ -862,57 +865,76 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		hdr = (const struct meshtastic_wire_header *)wire;
 	}
 
+	/* Phase 4c: on the RF decoded path, the decoded MeshPacket (decoded_mesh / rx_mesh) is the
+	 * primary representation -- materialise the flat struct on demand from it for the consumers
+	 * not yet migrated to the MeshPacket (recv_cb via deliver_packet, dispatch_modules, admin,
+	 * mqtt), so process_lora_rx can stop building the struct itself (4d). The struct<->MeshPacket
+	 * round-trip is lossless (test_c3_struct_mesh_roundtrip_lossless) EXCEPT the wire channel hash:
+	 * the MeshPacket stores the resolved channel index, so a PKC frame's 0x00 marker would come
+	 * back as a channel hash and misroute the reply modules build from req->channel. Restore it
+	 * from the wire header, which is authoritative and always present here (identical to what
+	 * try_decode sets). On the encrypted-relay / public inject / test paths there is no MeshPacket,
+	 * so pkt stays the passed-in struct. */
+	if (decoded && decoded_mesh != NULL &&
+	    meshtastic_mesh_pb_to_packet(decoded_mesh, &materialized, mpayload, sizeof(mpayload)) == 0) {
+		if (hdr != NULL) {
+			materialized.channel = hdr->channel;
+		}
+		pkt = &materialized;
+	}
+
 	if (decoded) {
-		LOG_INF("RX from 0x%08x to 0x%08x port=%u len=%zu ch_idx=%u", packet->from,
-			packet->to, (unsigned int)packet->portnum, packet->payload_len,
-			packet->channel_index);
+		LOG_INF("RX from 0x%08x to 0x%08x port=%u len=%zu ch_idx=%u", pkt->from,
+			pkt->to, (unsigned int)pkt->portnum, pkt->payload_len,
+			pkt->channel_index);
 
 		if (meshtastic_rebroadcast_mode() ==
 			    meshtastic_Config_DeviceConfig_RebroadcastMode_CORE_PORTNUMS_ONLY &&
-		    packet->portnum != MESHTASTIC_PORT_TEXT_MESSAGE &&
-		    packet->portnum != MESHTASTIC_PORT_POSITION &&
-		    packet->portnum != MESHTASTIC_PORT_NODEINFO &&
-		    packet->portnum != MESHTASTIC_PORT_ROUTING &&
-		    packet->portnum != MESHTASTIC_PORT_TELEMETRY) {
-			LOG_DBG("CORE_PORTNUMS_ONLY: drop port %u", (unsigned int)packet->portnum);
+		    pkt->portnum != MESHTASTIC_PORT_TEXT_MESSAGE &&
+		    pkt->portnum != MESHTASTIC_PORT_POSITION &&
+		    pkt->portnum != MESHTASTIC_PORT_NODEINFO &&
+		    pkt->portnum != MESHTASTIC_PORT_ROUTING &&
+		    pkt->portnum != MESHTASTIC_PORT_TELEMETRY) {
+			LOG_DBG("CORE_PORTNUMS_ONLY: drop port %u", (unsigned int)pkt->portnum);
 			/* The mode suppresses this portnum: not delivered above, and not
 			 * relayed either (upstream's skipHandle covers both with one gate).
 			 * Encrypted relays (the !decoded branch) are unaffected. */
 			suppress_relay = true;
-		} else if (packet->to == mt.node_id || packet->to == MESHTASTIC_NODE_BROADCAST) {
+		} else if (pkt->to == mt.node_id || pkt->to == MESHTASTIC_NODE_BROADCAST) {
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 			/* Remote admin: an ADMIN_APP unicast to us from another node is
 			 * authorized + applied on the mesh (PKC admin_key / passkey), not
 			 * delivered to the phone as an ordinary RX packet. */
-			if (packet->portnum == MESHTASTIC_PORT_ADMIN && packet->to == mt.node_id &&
-			    packet->from != mt.node_id) {
-				meshtastic_admin_handle_remote(packet);
+			if (pkt->portnum == MESHTASTIC_PORT_ADMIN && pkt->to == mt.node_id &&
+			    pkt->from != mt.node_id) {
+				meshtastic_admin_handle_remote(pkt);
 			} else
 #endif
 			{
-				deliver_packet(packet, decoded_mesh);
+				deliver_packet(pkt, decoded_mesh);
 			}
 		}
 
 #if defined(CONFIG_MESHTASTIC_MQTT)
-		meshtastic_mqtt_on_rx(packet, wire, wire_len);
+		meshtastic_mqtt_on_rx(pkt, wire, wire_len);
 #endif
-		meshtastic_routing_on_decoded(packet, decoded_mesh);
-		meshtastic_dispatch_modules(packet);
+		meshtastic_routing_on_decoded(pkt, decoded_mesh);
+		meshtastic_dispatch_modules(pkt);
 		/* After module dispatch: the NodeDB has now created/refreshed the
 		 * source entry, so a learned next hop has somewhere to land.
 		 * Phase 4b: pass rx_mesh (NULL on the public inject/test path -> struct
 		 * fallback inside). */
-		meshtastic_routing_learn_next_hop(packet, decoded_mesh);
+		meshtastic_routing_learn_next_hop(pkt, decoded_mesh);
 	} else if (hdr != NULL) {
-		LOG_DBG("RX encrypted relay 0x%08x->0x%08x id=0x%08x", packet->from, packet->to,
-			packet->id);
+		LOG_DBG("RX encrypted relay 0x%08x->0x%08x id=0x%08x", pkt->from, pkt->to,
+			pkt->id);
 	}
 
 	if (hdr != NULL && !suppress_relay) {
 		/* Phase 4b: decoded_mesh is NULL on the encrypted-relay path (no decode) and
-		 * the public inject/test path -> struct-fallback for snr inside. */
-		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, packet, decoded_mesh);
+		 * the public inject/test path -> struct-fallback for snr inside. Phase 4c: pkt is
+		 * the materialised struct on the decoded RF path, else the passed-in struct. */
+		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, pkt, decoded_mesh);
 	}
 }
 

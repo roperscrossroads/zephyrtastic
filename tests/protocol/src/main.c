@@ -3249,6 +3249,76 @@ ZTEST(protocol_stack, test_c3_detector_inject_emoji_reaches_phone)
 	zassert_true(matched, "no FromRadio.packet delivered for the injected reaction");
 }
 
+/* Phase 4c precondition: the struct -> MeshPacket -> struct round-trip must be lossless, so
+ * handle_inbound_impl can materialise the flat struct on demand from rx_mesh for the consumers
+ * not yet migrated to the MeshPacket (recv_cb, dispatch_modules, admin, mqtt). Any field the
+ * converters silently drop would change those consumers' behaviour on air. Asserts every one of
+ * the 24 struct fields. The wire channel HASH is set consistent with the resolved index here so
+ * it round-trips; the one case where it would not (a PKC 0x00 marker, index 0 -> get_hash(0)) is
+ * handled in 4c by restoring channel from the wire header, exercised by the PKC RX tests. */
+ZTEST(protocol_stack, test_c3_struct_mesh_roundtrip_lossless)
+{
+	uint8_t body[] = {0xde, 0xad, 0xbe, 0xef, 0x01};
+	uint8_t back_payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	struct meshtastic_packet back;
+	struct meshtastic_packet orig = {
+		.from = 0x11223344U,
+		.to = 0x55667788U,
+		.id = 0x99aabbccU,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = body,
+		.payload_len = sizeof(body),
+		.data_dest = 0x0d0d0d0dU,
+		.data_source = 0x05050505U,
+		.request_id = 0x12345678U,
+		.reply_id = 0x87654321U,
+		.hop_limit = 3U,
+		.hop_start = 5U,
+		.channel = meshtastic_channels_get_hash(2U), /* consistent with channel_index below */
+		.channel_index = 2U,
+		.next_hop = 0xABU,
+		.relay_node = 0xCDU,
+		.want_ack = true,
+		.via_mqtt = false,
+		.pki_encrypted = true,
+		.want_response = true,
+		.has_bitfield = true,
+		.bitfield = 0x03U,
+		.rssi = -42,
+		.snr = 7,
+	};
+
+	zassert_ok(meshtastic_packet_to_mesh_pb(&orig, &mesh), "struct->mesh failed");
+	zassert_ok(meshtastic_mesh_pb_to_packet(&mesh, &back, back_payload, sizeof(back_payload)),
+		   "mesh->struct failed");
+
+	zassert_equal(back.from, orig.from, "from");
+	zassert_equal(back.to, orig.to, "to");
+	zassert_equal(back.id, orig.id, "id");
+	zassert_equal(back.portnum, orig.portnum, "portnum");
+	zassert_equal(back.payload_len, orig.payload_len, "payload_len");
+	zassert_mem_equal(back.payload, orig.payload, orig.payload_len, "payload bytes");
+	zassert_equal(back.data_dest, orig.data_dest, "data_dest");
+	zassert_equal(back.data_source, orig.data_source, "data_source");
+	zassert_equal(back.request_id, orig.request_id, "request_id");
+	zassert_equal(back.reply_id, orig.reply_id, "reply_id");
+	zassert_equal(back.hop_limit, orig.hop_limit, "hop_limit");
+	zassert_equal(back.hop_start, orig.hop_start, "hop_start");
+	zassert_equal(back.channel, orig.channel, "channel hash");
+	zassert_equal(back.channel_index, orig.channel_index, "channel_index");
+	zassert_equal(back.next_hop, orig.next_hop, "next_hop");
+	zassert_equal(back.relay_node, orig.relay_node, "relay_node");
+	zassert_equal(back.want_ack, orig.want_ack, "want_ack");
+	zassert_equal(back.via_mqtt, orig.via_mqtt, "via_mqtt");
+	zassert_equal(back.pki_encrypted, orig.pki_encrypted, "pki_encrypted");
+	zassert_equal(back.want_response, orig.want_response, "want_response");
+	zassert_equal(back.has_bitfield, orig.has_bitfield, "has_bitfield");
+	zassert_equal(back.bitfield, orig.bitfield, "bitfield");
+	zassert_equal(back.rssi, orig.rssi, "rssi");
+	zassert_equal(back.snr, orig.snr, "snr");
+}
+
 /* Decode the single frame the node last transmitted back into a MeshPacket, so a test
  * can inspect Data-level fields (emoji) the flat-struct `decode_last_tx` cannot see.
  * Wraps the captured wire as an encrypted MeshPacket and runs the real channel decrypt. */
