@@ -675,6 +675,82 @@ ZTEST(protocol_stack, test_send_packet_preserves_explicit_metadata)
 	assert_payload(decoded.payload, decoded.payload_len, body, sizeof(body));
 }
 
+/*
+ * Byte-exact wire golden frames — the send-path byte-identical gate for the C3
+ * Phase-6 send-currency inversion. meshtastic_build_wire_packet() drives the exact
+ * encode + channel-encrypt + header path (encode_packet_data / build_wire_packet_data)
+ * with caller-fixed from/id, so the channel-CTR ciphertext (nonce = id@0 / from@8) is
+ * reproducible. A single changed wire byte fails these loudly. PKC frames are NOT
+ * byte-reproducible (random extraNonce) — the PKC envelope is guarded by the admin_pki
+ * suite's decrypt-round-trip + 0x00-marker tests instead.
+ *
+ * Captured on LongFast + the default PSK (the suite config) with config_ok_to_mqtt
+ * pinned false. To regenerate after an intentional wire change, dump wire[] and relock.
+ */
+static const uint8_t golden_text_bcast[] = {
+	0xffU, 0xffU, 0xffU, 0xffU, 0x78U, 0x56U, 0x34U, 0x12U, 0x0dU, 0x0cU, 0x0bU, 0x0aU,
+	0x63U, 0x08U, 0x00U, 0x00U, 0x90U, 0xeeU, 0x2aU, 0x37U, 0xa2U, 0x19U, 0x27U, 0x77U,
+	0xa0U, 0x5cU, 0x8bU, 0xb3U, 0xeaU, 0x92U, 0x28U, 0x86U, 0x7dU,
+};
+static const uint8_t golden_rich_unicast[] = {
+	0x21U, 0x43U, 0x65U, 0x87U, 0x78U, 0x56U, 0x34U, 0x12U, 0x55U, 0x55U, 0x44U, 0x44U,
+	0xddU, 0x08U, 0x21U, 0x43U, 0x17U, 0x5fU, 0x66U, 0x06U, 0xa1U, 0x87U, 0x58U, 0xc4U,
+	0x8bU, 0xa2U, 0x03U, 0xc1U, 0xfdU, 0x8fU, 0x01U, 0x68U, 0x9cU, 0xd9U, 0x91U, 0xf0U,
+	0x34U, 0xa6U, 0x0eU, 0x6fU, 0x7eU, 0x6bU, 0xabU, 0xb9U, 0x6cU, 0xa2U, 0x81U, 0xebU,
+};
+
+ZTEST(protocol_stack, test_wire_golden_frames)
+{
+	const bool saved_mqtt = mt.config_ok_to_mqtt;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	/* Pin the node-authoritative consent bit so the encoded Data.bitfield (and thus
+	 * the ciphertext) is deterministic regardless of test ordering. */
+	mt.config_ok_to_mqtt = false;
+
+	/* Case 1: a plain broadcast text. */
+	build_wire_packet(TEST_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x0A0B0C0DU, 3U,
+			  MESHTASTIC_PORT_TEXT_MESSAGE, (const uint8_t *)"golden-tx-1", 11U, wire,
+			  &wire_len);
+	zassert_equal(wire_len, sizeof(golden_text_bcast), "text golden length drift (%u)",
+		      wire_len);
+	zassert_mem_equal(wire, golden_text_bcast, wire_len, "text broadcast wire drift");
+
+	/* Case 2: a rich unicast exercising the full Data field set + header flags. */
+	{
+		const uint8_t body[] = {0x10, 0x20, 0x30};
+		struct meshtastic_packet packet = {
+			.from = TEST_NODE_ID,
+			.to = PEER_NODE_ID,
+			.id = 0x44445555U,
+			.portnum = MESHTASTIC_PORT_PRIVATE,
+			.payload = body,
+			.payload_len = sizeof(body),
+			.data_dest = OTHER_NODE_ID,
+			.data_source = TEST_NODE_ID,
+			.request_id = 0x1010U,
+			.reply_id = 0x2020U,
+			.hop_limit = 5U,
+			.hop_start = 6U,
+			.channel_index = meshtastic_channels_primary_index(),
+			.next_hop = 0x21U,
+			.relay_node = 0x43U,
+			.want_ack = true,
+			.via_mqtt = true,
+			.want_response = true,
+		};
+		int ret = meshtastic_build_wire_packet(&packet, wire, &wire_len);
+
+		zassert_ok(ret, "rich unicast build failed: %d", ret);
+		zassert_equal(wire_len, sizeof(golden_rich_unicast), "rich golden length drift (%u)",
+			      wire_len);
+		zassert_mem_equal(wire, golden_rich_unicast, wire_len, "rich unicast wire drift");
+	}
+
+	mt.config_ok_to_mqtt = saved_mqtt;
+}
+
 /* Verifies radio send errors emit TX_FAILED and update failure status instead of TX_DONE. */
 ZTEST(protocol_stack, test_radio_send_failure_emits_failed_event)
 {
