@@ -35,7 +35,7 @@ bool meshtastic_telemetry_decode_request(const uint8_t *payload, size_t payload_
 	return true;
 }
 
-int meshtastic_telemetry_encode_packet(uint32_t dest, uint8_t channel, uint32_t response_to_id,
+int meshtastic_telemetry_encode_packet(uint32_t dest, uint32_t response_to_id,
 				       const meshtastic_Telemetry *telemetry, uint8_t *payload,
 				       struct meshtastic_packet *packet)
 {
@@ -56,7 +56,6 @@ int meshtastic_telemetry_encode_packet(uint32_t dest, uint8_t channel, uint32_t 
 		.portnum = MESHTASTIC_PORT_TELEMETRY,
 		.payload = payload,
 		.payload_len = stream.bytes_written,
-		.channel = channel,
 		.want_response = false,
 		.request_id = response_to_id,
 	};

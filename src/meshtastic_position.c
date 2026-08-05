@@ -185,9 +185,8 @@ int meshtastic_position_sanitise_tx(meshtastic_MeshPacket *mesh)
 	return 0;
 }
 
-static int position_build_packet(uint32_t dest, bool want_response, uint8_t channel,
-				 uint32_t response_to_id, uint8_t *payload,
-				 struct meshtastic_packet *packet)
+static int position_build_packet(uint32_t dest, bool want_response, uint32_t response_to_id,
+				 uint8_t *payload, struct meshtastic_packet *packet)
 {
 	meshtastic_Position position;
 	pb_ostream_t stream;
@@ -196,11 +195,12 @@ static int position_build_packet(uint32_t dest, bool want_response, uint8_t chan
 	uint32_t precision;
 
 	/* G-1: clamp the position to the precision of the channel it will actually
-	 * be transmitted on. meshtastic_build_wire_packet resolves the send channel
-	 * from (to, channel_index, channel-hash); this packet carries channel_index 0,
-	 * so mirror that exact resolution here. Computed before touching pos_state so
-	 * a sharing-disabled channel neither burns a sequence number nor leaks. */
-	send_index = meshtastic_channels_resolve_send_index(dest, 0U, channel);
+	 * be transmitted on. The send path resolves the channel from (to, channel_index)
+	 * and this packet carries channel_index 0 (the send default → primary; a reply's
+	 * channel is installed by set_reply_to at dispatch), so mirror that exact resolution
+	 * here. Computed before touching pos_state so a sharing-disabled channel neither burns
+	 * a sequence number nor leaks. */
+	send_index = meshtastic_channels_resolve_send_index(dest, 0U, 0U);
 	precision = position_precision_for_channel(send_index);
 	if (precision == 0U) {
 		/* Sharing disabled / fail-closed on this channel: emit no position. */
@@ -246,7 +246,6 @@ static int position_build_packet(uint32_t dest, bool want_response, uint8_t chan
 		.portnum = MESHTASTIC_PORT_POSITION,
 		.payload = payload,
 		.payload_len = stream.bytes_written,
-		.channel = channel,
 		.want_response = want_response,
 		.request_id = response_to_id,
 	};
@@ -260,7 +259,7 @@ static int position_send(uint32_t dest, k_timeout_t wait)
 	struct meshtastic_packet packet;
 	int ret;
 
-	ret = position_build_packet(dest, false, 0U, 0U, payload, &packet);
+	ret = position_build_packet(dest, false, 0U, payload, &packet);
 	if (ret < 0) {
 		return ret;
 	}
@@ -523,7 +522,7 @@ static int meshtastic_module_position_alloc_reply(const struct meshtastic_packet
 	pos_state.last_reply_ms = now_ms;
 	k_mutex_unlock(&pos_lock);
 
-	ret = position_build_packet(req->from, false, req->channel, req->id, payload, reply);
+	ret = position_build_packet(req->from, false, req->id, payload, reply);
 	if (ret == -ENODATA) {
 		LOG_DBG("Position request from 0x%08x ignored (no position)", req->from);
 		return -ENOENT;

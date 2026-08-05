@@ -101,9 +101,8 @@ static void log_nodeinfo_user(uint32_t from, uint32_t request_id, const meshtast
 	}
 }
 
-static int nodeinfo_build_packet(uint32_t dest, bool want_response, uint8_t channel,
-				 uint32_t response_to_id, uint8_t *payload,
-				 struct meshtastic_packet *packet)
+static int nodeinfo_build_packet(uint32_t dest, bool want_response, uint32_t response_to_id,
+				 uint8_t *payload, struct meshtastic_packet *packet)
 {
 	meshtastic_User user;
 	pb_ostream_t stream;
@@ -123,7 +122,6 @@ static int nodeinfo_build_packet(uint32_t dest, bool want_response, uint8_t chan
 		.portnum = MESHTASTIC_PORT_NODEINFO,
 		.payload = payload,
 		.payload_len = stream.bytes_written,
-		.channel = channel,
 		.want_response = want_response,
 		.request_id = response_to_id,
 	};
@@ -131,14 +129,13 @@ static int nodeinfo_build_packet(uint32_t dest, bool want_response, uint8_t chan
 	return 0;
 }
 
-int meshtastic_send_node_info_ex(uint32_t dest, bool want_response, uint8_t channel,
-				 uint32_t response_to_id)
+int meshtastic_send_node_info_ex(uint32_t dest, bool want_response, uint32_t response_to_id)
 {
 	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	struct meshtastic_packet packet;
 	int ret;
 
-	ret = nodeinfo_build_packet(dest, want_response, channel, response_to_id, payload, &packet);
+	ret = nodeinfo_build_packet(dest, want_response, response_to_id, payload, &packet);
 	if (ret < 0) {
 		return ret;
 	}
@@ -148,7 +145,7 @@ int meshtastic_send_node_info_ex(uint32_t dest, bool want_response, uint8_t chan
 
 int meshtastic_send_node_info(uint32_t dest)
 {
-	return meshtastic_send_node_info_ex(dest, false, 0U, 0U);
+	return meshtastic_send_node_info_ex(dest, false, 0U);
 }
 
 /* Ask one peer for its NodeInfo, throttled through the same per-peer request
@@ -198,7 +195,7 @@ int meshtastic_nodeinfo_request(uint32_t peer)
 		return -EAGAIN;
 	}
 
-	ret = nodeinfo_build_packet(peer, true, 0U, 0U, payload, &packet);
+	ret = nodeinfo_build_packet(peer, true, 0U, payload, &packet);
 	if (ret < 0) {
 		return ret;
 	}
@@ -215,25 +212,19 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 	bool should_request = false;
 	bool has_user = false;
 	bool log_user = false;
-	uint8_t channel = 0U;
 	int64_t now_ms;
 	meshtastic_User user = meshtastic_User_init_zero;
 	struct nodeinfo_peer *peer;
 	uint32_t from;
 	uint32_t request_id;
-	uint8_t channel_index;
 
 	if (packet == NULL) {
 		return;
 	}
 
 	/*
-	 * Phase 5b: read identity / portnum / channel from the MeshPacket (the C3
-	 * currency) on the RF path, struct fallback on the NULL-mesh boundary.
-	 * mesh->channel is the RESOLVED index (not the wire hash) — read it directly
-	 * with the < MAX_CHANNELS guard, exactly as routing_send_ack does. The reply
-	 * follow-up below feeds that index to nodeinfo_build_packet, matching the
-	 * prior struct behaviour (this handler already used channel_index, not a hash).
+	 * Phase 5b: read identity / portnum from the MeshPacket (the C3 currency) on the
+	 * RF path, struct fallback on the NULL-mesh boundary.
 	 */
 	from = mesh ? mesh->from : packet->from;
 	request_id = mesh ? mesh->decoded.request_id : packet->request_id;
@@ -242,10 +233,6 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 	 * enum-vs-enum mismatch (-Werror=enum-compare) against the public port enum. */
 	is_nodeinfo = (mesh ? (uint32_t)mesh->decoded.portnum : packet->portnum) ==
 		      MESHTASTIC_PORT_NODEINFO;
-	channel_index = mesh ? ((mesh->channel < MESHTASTIC_MAX_CHANNELS)
-					? (uint8_t)mesh->channel
-					: MESHTASTIC_CHANNEL_INDEX_INVALID)
-			     : packet->channel_index;
 
 	if (from == 0U || from == meshtastic_get_node_id()) {
 		return;
@@ -275,9 +262,6 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 			     (int64_t)CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC *
 				     MSEC_PER_SEC)) {
 		should_request = true;
-		channel = (channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID)
-				  ? channel_index
-				  : meshtastic_channels_primary_index();
 		peer->request_time_valid = true;
 		peer->last_request_ms = now_ms;
 	}
@@ -294,8 +278,7 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 		int send_ret;
 
 		LOG_INF("Heard unknown node 0x%08x, asking for NodeInfo", from);
-		send_ret = nodeinfo_build_packet(from, true, channel, 0U, payload,
-						 &nodeinfo_packet);
+		send_ret = nodeinfo_build_packet(from, true, 0U, payload, &nodeinfo_packet);
 		if (send_ret == 0) {
 			(void)meshtastic_send_packet(&nodeinfo_packet, K_NO_WAIT);
 		}
@@ -335,7 +318,7 @@ static int meshtastic_module_nodeinfo_alloc_reply(const struct meshtastic_packet
 
 	LOG_INF("NodeInfo request from 0x%08x, sending response", req->from);
 
-	ret = nodeinfo_build_packet(req->from, false, req->channel, req->id, payload, reply);
+	ret = nodeinfo_build_packet(req->from, false, req->id, payload, reply);
 	if (ret < 0) {
 		return ret;
 	}

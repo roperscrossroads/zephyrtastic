@@ -231,8 +231,7 @@ static int meshtastic_module_device_telemetry_alloc_reply(const struct meshtasti
 	telemetry.which_variant = meshtastic_Telemetry_device_metrics_tag;
 	telemetry.variant.device_metrics = metrics;
 
-	ret = meshtastic_telemetry_encode_packet(req->from, req->channel, req->id, &telemetry,
-						 payload, reply);
+	ret = meshtastic_telemetry_encode_packet(req->from, req->id, &telemetry, payload, reply);
 	if (ret == 0) {
 		LOG_INF("Device telemetry request from 0x%08x, sending response", req->from);
 	}
