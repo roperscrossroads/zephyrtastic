@@ -737,8 +737,6 @@ static bool inject_is_admin(const meshtastic_MeshPacket *mesh)
 int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 {
 	meshtastic_MeshPacket work;
-	struct meshtastic_packet packet;
-	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	bool local;
 	bool relay;
 	bool decoded = false;
@@ -825,23 +823,15 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 		}
 	}
 
-	ret = meshtastic_mesh_pb_to_packet(&work, &packet, payload, sizeof(payload));
-	if (ret < 0) {
-		LOG_DBG("inject mesh_pb_to_packet failed (%d)", ret);
-		return ret;
-	}
-
-	packet.via_mqtt = true;
-
-	LOG_DBG("inject delivering locally port=%u payload_len=%zu", (unsigned int)packet.portnum,
-		packet.payload_len);
-	/* Phase 4b: deliver the decoded injected MeshPacket (work) verbatim to the phone via
-	 * the RX-currency path, not the flat struct -- the struct adapter drops Data.emoji
-	 * (TXT-1), so an injected reaction would otherwise reach the phone stripped of its
-	 * emoji flag. Mirrors the RF path (process_lora_rx passes rx_mesh). The migrated routing
-	 * consumers see work == packet byte-for-byte, and via_mqtt=true gates learn_next_hop
-	 * while sniff is skipped (wire==NULL) -- so only the phone delivery gains emoji. */
-	handle_inbound_impl(&packet, NULL, 0U, decoded, decoded ? &work : NULL);
+	LOG_DBG("inject delivering locally port=%u payload_len=%u",
+		(unsigned int)work.decoded.portnum, (unsigned int)work.decoded.payload.size);
+	/* C3 Phase 4b/8d: deliver the decoded injected MeshPacket (work) verbatim via the
+	 * RX-currency path — handle_inbound_impl materialises the flat struct from it on demand
+	 * for the public boundaries (recv_cb/event), exactly as the RF path does, so Data.emoji
+	 * (TXT-1) survives to the phone. We pass packet == NULL: there is no separate struct to
+	 * build here (that was a redundant second mesh_pb_to_packet). via_mqtt/TRANSPORT_MQTT are
+	 * already set on `work` above; wire==NULL keeps sniff skipped and gates learn_next_hop. */
+	handle_inbound_impl(NULL, NULL, 0U, decoded, decoded ? &work : NULL);
 	LOG_DBG("inject done (local delivery)");
 
 	return 0;
@@ -857,7 +847,10 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 	uint8_t mpayload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	bool suppress_relay = false;
 
-	if (packet == NULL) {
+	/* C3 Phase 8d: a caller may pass packet == NULL when it hands us a decoded MeshPacket
+	 * (the MQTT-downlink inject) — we materialise the struct from it below. Only both-NULL
+	 * is nothing to do. */
+	if (packet == NULL && decoded_mesh == NULL) {
 		return;
 	}
 
@@ -881,6 +874,12 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 			materialized.channel = hdr->channel;
 		}
 		pkt = &materialized;
+	}
+
+	/* If the caller gave us only a decoded MeshPacket (packet == NULL) and materialising it
+	 * failed, there is no struct to fall back on — nothing to deliver. */
+	if (pkt == NULL) {
+		return;
 	}
 
 	if (decoded) {

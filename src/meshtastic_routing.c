@@ -90,16 +90,30 @@ static uint8_t routing_hop_limit_for_reply(const struct meshtastic_packet *req)
 	return mt.hop_limit;
 }
 
-static bool routing_ack_should_request_ack(const struct meshtastic_packet *req)
+static bool routing_ack_should_request_ack(const struct meshtastic_packet *req,
+					   const meshtastic_MeshPacket *mesh)
 {
 	/*
 	 * Mirror Meshtastic firmware's special case for direct text messages:
 	 * request an ACK for the ROUTING ACK itself so DMs get reliable delivery
-	 * confirmation back to the sender.
+	 * confirmation back to the sender. C3 Phase 8d: dual-rep — read from the
+	 * decoded MeshPacket on the RF path, struct on the NULL-mesh boundary.
 	 */
-	return req != NULL && req->want_ack && req->to == mt.node_id &&
-	       (req->portnum == MESHTASTIC_PORT_TEXT_MESSAGE ||
-		req->portnum == meshtastic_PortNum_TEXT_MESSAGE_COMPRESSED_APP);
+	uint32_t to;
+	uint32_t portnum;
+	bool want_ack;
+
+	if (req == NULL && mesh == NULL) {
+		return false;
+	}
+
+	want_ack = mesh ? mesh->want_ack : req->want_ack;
+	to = mesh ? mesh->to : req->to;
+	portnum = mesh ? (uint32_t)mesh->decoded.portnum : req->portnum;
+
+	return want_ack && to == mt.node_id &&
+	       (portnum == MESHTASTIC_PORT_TEXT_MESSAGE ||
+		portnum == meshtastic_PortNum_TEXT_MESSAGE_COMPRESSED_APP);
 }
 
 /* Build and transmit a ROUTING reply (ACK when err == NONE, otherwise a NAK)
@@ -179,11 +193,12 @@ static int routing_send_ack(const struct meshtastic_packet *req, const meshtasti
 			   ? channel_index
 			   : meshtastic_channels_primary_index();
 
-	/* hop-limit and want-ack policy for the reply are header/Data reads on req; the struct
-	 * still exists on every 4b path, so they stay struct-based (not in 4b's scope). */
+	/* want-ack policy reads the decoded mesh (Phase 8d); hop-limit stays struct-based —
+	 * routing_hop_limit_for_reply is also fed synthesised structs (reack_duplicate /
+	 * send_error) with no mesh, so the struct is its natural input there. */
 	return routing_send_reply(from, id, ch_index, meshtastic_Routing_Error_NONE,
 				  routing_hop_limit_for_reply(req),
-				  routing_ack_should_request_ack(req), K_FOREVER);
+				  routing_ack_should_request_ack(req, mesh), K_FOREVER);
 }
 
 void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire_hash,
