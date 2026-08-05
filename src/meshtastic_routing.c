@@ -325,12 +325,3 @@ void meshtastic_routing_learn_next_hop(const struct meshtastic_packet *packet,
 	}
 }
 
-void meshtastic_routing_sniff(const struct meshtastic_wire_header *hdr, const uint8_t *wire,
-			      size_t wire_len, const struct meshtastic_packet *packet, bool decoded)
-{
-	ARG_UNUSED(decoded);
-
-	/* Dead wrapper (no in-tree callers) but exported; it holds only the struct, so
-	 * pass NULL for the MeshPacket -> struct-fallback reads in sniff_rebroadcast. */
-	meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, packet, NULL);
-}

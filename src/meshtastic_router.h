@@ -134,15 +134,6 @@ void meshtastic_routing_note_own_echo(uint32_t id, uint8_t relay_node);
 void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire_hash,
 					uint8_t hop_limit, uint8_t hop_start);
 
-/**
- * @brief Post-RX hook for relay policy.
- *
- * Currently delegates to @ref meshtastic_routing_sniff_rebroadcast.
- */
-void meshtastic_routing_sniff(const struct meshtastic_wire_header *hdr, const uint8_t *wire,
-			      size_t wire_len, const struct meshtastic_packet *packet,
-			      bool decoded);
-
 #ifdef __cplusplus
 }
 #endif
