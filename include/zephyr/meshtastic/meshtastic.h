@@ -146,11 +146,27 @@ enum meshtastic_event_type {
 };
 
 /**
- * @brief Decoded Meshtastic packet.
+ * @brief Decoded Meshtastic packet — the public API boundary adapter.
  *
  * Payload pointers passed to callbacks are valid only for the duration of the
  * callback. Callers of meshtastic_send_packet() must keep @p payload valid
  * until the function returns.
+ *
+ * @note Representation contract (C3 migration, complete). The stack's *internal*
+ * pipeline currency is the decoded protobuf @c meshtastic_MeshPacket (which carries
+ * its @c meshtastic_Data payload), so every wire/phone field survives by construction.
+ * This flat struct is deliberately nanopb-free and survives only as the adapter at the
+ * public boundaries, converted to/from @c meshtastic_MeshPacket at each:
+ *   - originator entry — meshtastic_send_packet()/send_data()/send_text() and the
+ *     module reply built in alloc_reply(): a struct is built and converted in;
+ *   - receive/event exit — the RX path materialises a struct on demand for recv_cb
+ *     and @ref meshtastic_event.packet (e.g. the TX_DONE and TEXT_MESSAGE events);
+ *   - dual-rep fallback — internal RX consumers read the decoded MeshPacket when the
+ *     RF path supplies one and fall back to this struct only on the NULL-mesh boundary
+ *     (the public meshtastic_handle_inbound_packet() and test injectors).
+ * It is no longer a lossy intermediate in the pipeline; it does not model @c Data.emoji,
+ * @c rx_time, or fields upstream adds next, which is why those flow only on the
+ * MeshPacket. Do not reintroduce it as an internal carrier between two internal stages.
  */
 struct meshtastic_packet {
 	/** Source node ID. Filled automatically for local sends when zero. */
