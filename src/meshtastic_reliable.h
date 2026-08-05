@@ -37,8 +37,13 @@ void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint
  * Consume a decoded ROUTING packet addressed to us. If its request_id matches a
  * pending send, resolve that send: a NONE error_reason is a delivery ACK, any
  * other error_reason is a NAK. Both stop retransmission.
+ *
+ * @param routing Flat-struct view (the fallback on the public inject / test path).
+ * @param mesh    Decoded MeshPacket when the RF path supplied one, else NULL; read
+ *                in preference to @p routing (C3 Phase 7 currency).
  */
-void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing);
+void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing,
+				    const meshtastic_MeshPacket *mesh);
 
 /**
  * Note that we heard our own packet @p id rebroadcast on-air (wire src == our
@@ -60,9 +65,11 @@ static inline void meshtastic_reliable_on_tx(const struct meshtastic_packet *loc
 	ARG_UNUSED(wire_len);
 }
 
-static inline void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing)
+static inline void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing,
+						  const meshtastic_MeshPacket *mesh)
 {
 	ARG_UNUSED(routing);
+	ARG_UNUSED(mesh);
 }
 
 static inline void meshtastic_reliable_on_implicit_ack(uint32_t id)

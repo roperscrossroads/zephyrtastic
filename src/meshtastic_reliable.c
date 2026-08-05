@@ -265,17 +265,36 @@ void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint
 	k_mutex_unlock(&pend_lock);
 }
 
-void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing)
+void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing,
+				    const meshtastic_MeshPacket *mesh)
 {
 	meshtastic_Routing decoded = meshtastic_Routing_init_zero;
 	pb_istream_t is;
+	uint32_t to;
+	uint32_t from;
+	uint32_t request_id;
+	const uint8_t *payload;
+	size_t payload_len;
 	bool is_nak;
 
-	if (routing == NULL || routing->to != mt.node_id || routing->request_id == 0U) {
+	if (routing == NULL && mesh == NULL) {
 		return;
 	}
 
-	is = pb_istream_from_buffer(routing->payload, routing->payload_len);
+	/* C3 Phase 7: read this consumer's fields from the decoded MeshPacket when the RF path
+	 * supplied one, else the flat struct (public inject / test path). Byte-identical — the
+	 * struct is converted from the same rx_mesh, so request_id / to / from / payload match. */
+	to = mesh ? mesh->to : routing->to;
+	from = mesh ? mesh->from : routing->from;
+	request_id = mesh ? mesh->decoded.request_id : routing->request_id;
+	payload = mesh ? mesh->decoded.payload.bytes : routing->payload;
+	payload_len = mesh ? mesh->decoded.payload.size : routing->payload_len;
+
+	if (to != mt.node_id || request_id == 0U) {
+		return;
+	}
+
+	is = pb_istream_from_buffer(payload, payload_len);
 	if (!pb_decode(&is, meshtastic_Routing_fields, &decoded)) {
 		return; /* not a Routing payload we can read */
 	}
@@ -284,7 +303,7 @@ void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing)
 		 (decoded.error_reason != meshtastic_Routing_Error_NONE);
 
 	k_mutex_lock(&pend_lock, K_FOREVER);
-	if (!resolve_locked(routing->request_id)) {
+	if (!resolve_locked(request_id)) {
 		k_mutex_unlock(&pend_lock);
 		return; /* not one of ours (or already resolved) */
 	}
@@ -294,15 +313,15 @@ void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing)
 	/* Either way the peer answered, so the route that carried the exchange
 	 * works: reset its failure strikes (M4). A NAK is a delivery failure for
 	 * the app, not for the route. */
-	meshtastic_nodedb_note_route_success(routing->from);
+	meshtastic_nodedb_note_route_success(from);
 
 	if (is_nak) {
 		meshtastic_sched_stat_reliable_fail();
-		LOG_INF("reliable: id=0x%08x NAK (err=%d)", routing->request_id,
+		LOG_INF("reliable: id=0x%08x NAK (err=%d)", request_id,
 			(int)decoded.error_reason);
 	} else {
 		meshtastic_sched_stat_reliable_ack();
-		LOG_INF("reliable: id=0x%08x delivered (explicit ack)", routing->request_id);
+		LOG_INF("reliable: id=0x%08x delivered (explicit ack)", request_id);
 	}
 }
 

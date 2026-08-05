@@ -244,11 +244,11 @@ void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet,
 		return;
 	}
 
-	/* An incoming ROUTING packet may be an ACK/NAK for something we sent. reliable
-	 * decodes the Routing payload from the struct (Phase 7 migrates it); the struct is
-	 * still built on every 4b path, so pass it through. */
+	/* An incoming ROUTING packet may be an ACK/NAK for something we sent. reliable reads
+	 * the Routing payload + request_id from the decoded MeshPacket when the RF path supplied
+	 * one (C3 Phase 7), falling back to the struct on the public inject / test path. */
 	if (portnum == MESHTASTIC_PORT_ROUTING) {
-		meshtastic_reliable_on_routing(packet);
+		meshtastic_reliable_on_routing(packet, mesh);
 	}
 
 	if (want_ack && to == mt.node_id) {
