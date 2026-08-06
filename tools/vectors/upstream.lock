@@ -1,5 +1,5 @@
 {
-  "upstream": "firmware @ ff951059c",
+  "upstream": "firmware @ e2460b546",
   "regions": {
     "xor_hash": {
       "file": "src/mesh/Channels.cpp",
@@ -9,7 +9,7 @@
     },
     "djb2_hash": {
       "file": "src/mesh/RadioInterface.cpp",
-      "line": 908,
+      "line": 943,
       "anchor": "uint32_t hash(const char *str)",
       "sha256": "a40dc5227198efd31211d550ba05b2c245a1b04ee8b01d4543d863460317453b"
     },
@@ -33,13 +33,13 @@
     },
     "compute_slot_time": {
       "file": "src/mesh/RadioInterface.cpp",
-      "line": 1364,
+      "line": 1387,
       "anchor": "uint32_t RadioInterface::computeSlotTimeMsec(",
       "sha256": "0975fc4b008d1941a251bca7490f3dc373359d8ea79ba8ec157052ce5b4086ff"
     },
     "get_cw_size": {
       "file": "src/mesh/RadioInterface.cpp",
-      "line": 759,
+      "line": 794,
       "anchor": "uint8_t RadioInterface::getCWsize(",
       "sha256": "b0e8505473141b47de7568a7f34acea19f84981d38fb1da8cde632d227440386"
     }

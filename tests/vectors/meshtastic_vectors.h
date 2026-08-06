@@ -8,15 +8,15 @@
  * reimplementing an algorithm. That is what makes these vectors able to
  * catch a symmetric error that the self-loopback tests cannot.
  *
- * Upstream: firmware @ ff951059c
+ * Upstream: firmware @ e2460b546
  * Verbatim regions (sha256 of extracted text):
  *   xor_hash                 src/mesh/Channels.cpp:27  77646cb87b60e197
- *   djb2_hash                src/mesh/RadioInterface.cpp:908  a40dc5227198efd3
+ *   djb2_hash                src/mesh/RadioInterface.cpp:943  a40dc5227198efd3
  *   modem_preset_to_params   src/mesh/MeshRadio.h:203  ae57bdd95cbc01a9
  *   init_nonce               src/mesh/CryptoEngine.cpp:428  80e7d0462008af80
  *   preset_display_name      src/DisplayFormatters.cpp:4  745b97c5d1836239
- *   compute_slot_time        src/mesh/RadioInterface.cpp:1364  0975fc4b008d1941
- *   get_cw_size              src/mesh/RadioInterface.cpp:759  b0e8505473141b47
+ *   compute_slot_time        src/mesh/RadioInterface.cpp:1387  0975fc4b008d1941
+ *   get_cw_size              src/mesh/RadioInterface.cpp:794  b0e8505473141b47
  */
 
 #ifndef MESHTASTIC_VECTORS_H_
