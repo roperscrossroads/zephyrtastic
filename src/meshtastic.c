@@ -175,8 +175,13 @@ static int node_id_from_hwinfo(uint32_t *node_id)
  * keeps consecutive ids distinct even if the RNG were to repeat itself.
  *
  * Wire format is unchanged — the id is still an opaque 32-bit value.
+ *
+ * MESHTASTIC_PKT_ID_COUNTER_BITS (meshtastic_core.h) mirrors upstream
+ * Router.cpp generatePacketId()'s split exactly: a 10-bit rolling counter in
+ * the low bits, 22 fresh random bits refreshed on every call in the high bits
+ * ("rollingPacketId &= ID_COUNTER_MASK; id = rollingPacketId | random() << 10").
  */
-#define PKT_ID_COUNTER_BITS 10U
+#define PKT_ID_COUNTER_BITS MESHTASTIC_PKT_ID_COUNTER_BITS
 #define PKT_ID_COUNTER_MASK BIT_MASK(PKT_ID_COUNTER_BITS)
 
 static int seed_packet_id(void)

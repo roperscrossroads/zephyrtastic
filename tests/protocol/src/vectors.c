@@ -346,6 +346,25 @@ ZTEST(wire_vectors, test_nonce_vectors_encode_the_overlap)
 			  "bytes 4..7 must be zero when extraNonce is unused");
 }
 
+/* The test above only checks the harvested vector table is internally consistent —
+ * it never calls our own code. This one closes that gap: feed the channel-crypto
+ * nonce builder (meshtastic_packet.c, exposed for exactly this) the vector's inputs
+ * and assert its OUTPUT is the harvested bytes, so a layout regression there is
+ * caught here instead of only showing up as an interop failure against a real
+ * stock node (a self-loopback encrypt/decrypt round-trip can't catch this: both
+ * sides would use the same wrong layout and still agree with each other). */
+ZTEST(wire_vectors, test_channel_nonce_matches_reference_layout)
+{
+	uint8_t nonce[16];
+
+	/* psk_id1_from_deadbeef: id=1, from=0xdeadbeef, no extraNonce (channel path). */
+	meshtastic_channel_nonce_build(nonce, 1U, 0xdeadbeefU);
+	zassert_mem_equal(nonce,
+			  ((const uint8_t[16]){ 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+						 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x00, 0x00 }),
+			  sizeof(nonce), "channel nonce layout must match reference initNonce(extraNonce=0)");
+}
+
 /* The port's hardcoded default channel name must equal upstream's LONG_FAST
  * display name (parity: crypto #1, radio D3).
  *

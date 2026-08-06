@@ -43,6 +43,21 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 BUILD_ASSERT(sizeof(struct meshtastic_wire_header) == MESHTASTIC_HDR_LEN,
 	     "Meshtastic wire header must be exactly 16 bytes");
 
+/*
+ * AES-CTR channel nonce, matching reference CryptoEngine::initNonce(from, id) with
+ * extraNonce=0 -- the PSK/channel path never sets it (that parameter is PKC-only, see
+ * meshtastic_pki_nonce_build()). Byte layout: [0..3]=id LE32, [4..7]=0, [8..11]=from LE32,
+ * [12..15]=0. Pulled out as its own pure function (no crypto, just the packing) so it can
+ * be pinned directly against the upstream layout in a test, the same way
+ * meshtastic_contention.c's pure functions are pinned against RadioInterface's.
+ */
+void meshtastic_channel_nonce_build(uint8_t out[16], uint32_t id, uint32_t from)
+{
+	memset(out, 0, 16U);
+	sys_put_le32(id, out);
+	sys_put_le32(from, out + 8U);
+}
+
 static int ctr_crypt(const uint8_t *key, size_t key_len, const uint8_t nonce[16], const uint8_t *in,
 		     uint8_t *out, size_t len)
 {
@@ -269,9 +284,7 @@ static int decrypt_mesh_encrypted_key(uint32_t from, uint32_t id, const uint8_t 
 
 	k_mutex_lock(&mt_ws.lock, K_FOREVER);
 
-	memset(nonce, 0, sizeof(nonce));
-	sys_put_le32(id, nonce);
-	sys_put_le32(from, nonce + 8U);
+	meshtastic_channel_nonce_build(nonce, id, from);
 
 	ret = ctr_crypt(key->bytes, key->len, nonce, enc, mt_ws.rx_dec, enc_len);
 	if (ret < 0) {
@@ -789,9 +802,7 @@ int meshtastic_build_wire_from_mesh(const meshtastic_MeshPacket *mesh, uint8_t *
 #endif
 
 	if (!pki_done) {
-		memset(nonce, 0, sizeof(nonce));
-		sys_put_le32(mesh->id, nonce);
-		sys_put_le32(mesh->from, nonce + 8U);
+		meshtastic_channel_nonce_build(nonce, mesh->id, mesh->from);
 
 		ret = ctr_crypt(key.bytes, key.len, nonce, mt_ws.pb_buf, mt_ws.enc_buf,
 				encoded_len);

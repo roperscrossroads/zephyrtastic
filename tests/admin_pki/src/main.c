@@ -39,6 +39,7 @@
 #include "meshtastic_packet.h"
 #include "meshtastic_pki.h"
 #include "meshtastic_router.h"
+#include "vectors/meshtastic_vectors.h"
 
 #define TEST_NODE_ID 0x12345678U
 #define PEER_NODE_ID 0x87654321U
@@ -1046,4 +1047,23 @@ ZTEST(admin_pki, test_set_owner_preserves_empty_name_fields)
 	meshtastic_fill_user(&rb);
 	zassert_str_equal(rb.short_name, "NEW", "short name must update");
 	zassert_str_equal(rb.long_name, "Renamed Long", "long name must be preserved on empty long");
+}
+
+/* Pin the PKC (X25519+AES-CCM) nonce builder against a vector harvested by
+ * running upstream's actual CryptoEngine::initNonce (tests/vectors, tool
+ * tools/vectors/harvest.py) — not a hand-reimplemented copy of the formula.
+ * A self-loopback encrypt/decrypt test can't catch a layout error here: both
+ * sides use the same function, so they'd agree with each other even if the
+ * bytes are in the wrong place relative to a real stock node. */
+ZTEST(admin_pki, test_pki_nonce_matches_reference_layout)
+{
+	uint8_t nonce[MESHTASTIC_PKI_NONCE_LEN];
+
+	/* pkc_extra_aabbccdd: id=1, from=0xdeadbeef, extraNonce=0xaabbccdd. */
+	meshtastic_pki_nonce_build(nonce, 1U, 0xdeadbeefU, 0xaabbccddU);
+	zassert_mem_equal(nonce,
+			  ((const uint8_t[MESHTASTIC_PKI_NONCE_LEN]){ 0x01, 0x00, 0x00, 0x00, 0xdd, 0xcc,
+								      0xbb, 0xaa, 0xef, 0xbe, 0xad, 0xde,
+								      0x00 }),
+			  sizeof(nonce), "PKC nonce layout must match reference initNonce(extraNonce!=0)");
 }

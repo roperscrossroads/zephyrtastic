@@ -21,6 +21,8 @@
 #define MESHTASTIC_PKI_KEY_LEN 32
 /** Bytes added on the wire by PKC: 8-byte CCM tag + 4-byte extra nonce. */
 #define MESHTASTIC_PKI_OVERHEAD 12
+/** AES-CCM nonce length for PKC, matching reference CryptoEngine. */
+#define MESHTASTIC_PKI_NONCE_LEN 13
 
 /**
  * Load our X25519 keypair from the SecurityConfig, or generate + persist one if
@@ -53,5 +55,15 @@ int meshtastic_pki_decrypt(uint32_t from, uint32_t id, const uint8_t *enc, size_
  */
 int meshtastic_pki_encrypt(uint32_t to, uint32_t from, uint32_t id, const uint8_t *plain,
 			   size_t plain_len, uint8_t *out, size_t out_cap, size_t *out_len);
+
+/*
+ * AES-CCM nonce byte-packing -- pure, no crypto. Matches reference
+ * CryptoEngine::initNonce(from, id, extraNonce): [0..3]=id LE32, [4..7]=extraNonce
+ * LE32, [8..11]=from LE32, [12]=0. Exposed for the upstream-layout pin test
+ * (test_pki_nonce_matches_reference_layout) -- self-loopback encrypt/decrypt tests
+ * can't catch a layout error since both sides would agree with themselves.
+ */
+void meshtastic_pki_nonce_build(uint8_t nonce[MESHTASTIC_PKI_NONCE_LEN], uint32_t id, uint32_t from,
+				uint32_t extra);
 
 #endif /* MESHTASTIC_PKI_H_ */

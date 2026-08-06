@@ -16,6 +16,7 @@ the gaps. Companion to [`memory-savings.md`](memory-savings.md) and
 | **OTA** | `MCUBOOT_IMG_MANAGER=y` + `MESHTASTIC_OTA_AUTOCONFIRM` (confirm after N s healthy uptime); A/B slots, health-gated `just ota`/`just confirm`. |
 | **Radio** | Deaf-radio re-arm recovery in the RX thread (failed post-TX re-arm is retried). |
 | **RX pipeline** | Non-blocking: phone fan-out + MQTT are async drop-oldest; decode/dispatch CPU-bounded (see ARCH-REVIEW #6 reassessment). |
+| **Wire-crypto vectors** | The `vectors` suite (T4/T6's target) now pins actual production code, not just the harvested fixture: `meshtastic_channel_nonce_build`/`meshtastic_pki_nonce_build` were pulled out as pure functions specifically so `tests/protocol`/`tests/admin_pki` can call them and assert the output against `tests/vectors/meshtastic_vectors.h` (harvested by compiling and running upstream's `CryptoEngine.cpp`, not reimplemented) — closes the class of bug a self-loopback encrypt/decrypt round-trip can't catch (both sides agree with each other even if the wire layout is wrong). 2026-08-05. |
 
 Gaps the backlog below closes: **no watchdog · zero BLE coverage in sim · no
 coverage measurement · no hardware-in-the-loop automation.**

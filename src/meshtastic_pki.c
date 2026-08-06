@@ -31,7 +31,7 @@ LOG_MODULE_REGISTER(meshtastic_pki, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define PKI_KEY_LEN     MESHTASTIC_PKI_KEY_LEN
 #define PKI_TAG_LEN     8
 #define PKI_EXTRA_LEN   4
-#define PKI_NONCE_LEN   13
+#define PKI_NONCE_LEN   MESHTASTIC_PKI_NONCE_LEN
 #define PKI_CCM_ALG     PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, PKI_TAG_LEN)
 
 /* Our keypair, kept in RAM after load/generate. g_priv is the raw X25519 scalar
@@ -227,10 +227,10 @@ static int pki_shared_aes_key(const uint8_t peer_pub[PKI_KEY_LEN], uint8_t out_k
 	return 0;
 }
 
-static void pki_build_nonce(uint8_t nonce[PKI_NONCE_LEN], uint32_t id, uint32_t from,
-			    uint32_t extra)
+void meshtastic_pki_nonce_build(uint8_t nonce[MESHTASTIC_PKI_NONCE_LEN], uint32_t id, uint32_t from,
+				uint32_t extra)
 {
-	memset(nonce, 0, PKI_NONCE_LEN);
+	memset(nonce, 0, MESHTASTIC_PKI_NONCE_LEN);
 	sys_put_le32(id, nonce);          /* [0..3]  packet id  */
 	sys_put_le32(extra, nonce + 4U);  /* [4..7]  extra nonce */
 	sys_put_le32(from, nonce + 8U);   /* [8..11] from node  */
@@ -279,7 +279,7 @@ int meshtastic_pki_decrypt(uint32_t from, uint32_t id, const uint8_t *enc, size_
 	/* wire = ciphertext || tag(8) || extraNonce(4). PSA wants ct||tag together. */
 	ct_tag_len = enc_len - PKI_EXTRA_LEN;                  /* ciphertext + 8-byte tag */
 	extra = sys_get_le32(enc + enc_len - PKI_EXTRA_LEN);
-	pki_build_nonce(nonce, id, from, extra);
+	meshtastic_pki_nonce_build(nonce, id, from, extra);
 
 	psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
 	psa_set_key_bits(&attr, 256);
@@ -337,7 +337,7 @@ int meshtastic_pki_encrypt(uint32_t to, uint32_t from, uint32_t id, const uint8_
 		memset(aes_key, 0, sizeof(aes_key));
 		return -EIO;
 	}
-	pki_build_nonce(nonce, id, from, extra);
+	meshtastic_pki_nonce_build(nonce, id, from, extra);
 
 	psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
 	psa_set_key_bits(&attr, 256);

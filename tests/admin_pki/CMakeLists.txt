@@ -5,6 +5,7 @@ project(meshtastic_admin_pki_tests)
 
 target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+  ${CMAKE_CURRENT_SOURCE_DIR}/..
   ${CMAKE_BINARY_DIR}/modules/meshtastic-zephyr/src
   ${CMAKE_BINARY_DIR}/modules/meshtastic-zephyr/src/proto
 )

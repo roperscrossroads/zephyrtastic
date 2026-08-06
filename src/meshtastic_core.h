@@ -97,8 +97,17 @@ struct meshtastic_workspace {
 extern struct meshtastic_context mt;
 extern struct meshtastic_workspace mt_ws;
 
+/* Packet-id low-bit counter width, mirroring upstream Router.cpp
+ * generatePacketId()'s ID_COUNTER_MASK (10-bit rolling counter, 22 random high
+ * bits refreshed per call). Exposed so the bit-width itself -- not just "looks
+ * random" -- can be pinned against upstream in a test. */
+#define MESHTASTIC_PKT_ID_COUNTER_BITS 10U
+
 uint32_t meshtastic_allocate_packet_id(void);
 uint32_t meshtastic_next_fromradio_id(void);
+/* AES-CTR channel nonce byte-packing -- pure, no crypto. Exposed for the
+ * upstream-layout pin test (test_channel_nonce_matches_reference_layout). */
+void meshtastic_channel_nonce_build(uint8_t out[16], uint32_t id, uint32_t from);
 void meshtastic_emit_event(enum meshtastic_event_type type, int err,
 			   const struct meshtastic_packet *packet);
 /*

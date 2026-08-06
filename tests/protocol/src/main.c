@@ -2877,6 +2877,30 @@ ZTEST(protocol_stack, test_packet_ids_are_not_a_plain_counter)
 		     non_sequential, ARRAY_SIZE(ids) - 1U);
 }
 
+/* The test above checks "looks random enough" but not the actual bit-layout
+ * upstream's generatePacketId() documents: a 10-bit rolling counter in the low
+ * bits (so consecutive ids' low bits step by exactly 1, mod 1024 -- the part
+ * that "keeps consecutive ids distinct even if the RNG were to repeat itself")
+ * and fresh random bits above that. Pin the low-bit stepping directly, so a
+ * change to the counter width silently drifting from upstream's split is
+ * caught here instead of showing up only as "ids collide more than expected"
+ * noise somewhere else. */
+ZTEST(protocol_stack, test_packet_id_low_bits_are_a_rolling_counter)
+{
+	const uint32_t mask = BIT_MASK(MESHTASTIC_PKT_ID_COUNTER_BITS);
+	uint32_t prev = meshtastic_allocate_packet_id() & mask;
+
+	for (size_t i = 0; i < 32U; i++) {
+		uint32_t cur = meshtastic_allocate_packet_id() & mask;
+
+		zassert_equal(cur, (prev + 1U) & mask,
+			      "low %u bits must roll +1 mod %u each allocation (step %zu: "
+			      "0x%x -> 0x%x)",
+			      MESHTASTIC_PKT_ID_COUNTER_BITS, mask + 1U, i, prev, cur);
+		prev = cur;
+	}
+}
+
 /* --- MQTT downlink must not reach remote admin (security H4) --------------- */
 
 static meshtastic_Config_DeviceConfig_Role current_device_role(void)
