@@ -20,6 +20,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
 #include "meshtastic_config_store.h"
+#include "meshtastic_mqtt.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
@@ -551,6 +552,40 @@ ZTEST(protocol_stack, test_bitfield_carries_want_response)
 		     "the consent bit is independent of want_response");
 
 	mt.config_ok_to_mqtt = saved;
+}
+
+/* The DontMqttMeBro gate itself (parity: mqtt #1) — pure predicate, no
+ * networking, so it's tested directly instead of only via bitfield stamping.
+ * meshtastic_mqtt.c is never compiled into a sim suite (needs real sockets),
+ * so this is the only coverage the honour-path gate gets.
+ */
+ZTEST(protocol_stack, test_mqtt_consent_gate_truth_table)
+{
+	/* Our own packets always uplink, consent bit or not. */
+	zassert_true(meshtastic_mqtt_consent_allows_uplink(true, false, false, 0U),
+		     "self-origin must bypass the gate even with no bitfield");
+	zassert_true(meshtastic_mqtt_consent_allows_uplink(true, false, true, 0U),
+		     "self-origin must bypass the gate even with consent clear");
+
+	/* A private broker is exempt regardless of the sender's consent. */
+	zassert_true(meshtastic_mqtt_consent_allows_uplink(false, true, false, 0U),
+		     "a private broker must bypass the gate with no bitfield");
+	zassert_true(meshtastic_mqtt_consent_allows_uplink(false, true, true, 0U),
+		     "a private broker must bypass the gate with consent clear");
+
+	/* Public broker, someone else's packet: consent must be explicit. */
+	zassert_false(meshtastic_mqtt_consent_allows_uplink(false, false, false, 0U),
+		      "an absent bitfield must read as declined, not permitted");
+	zassert_false(meshtastic_mqtt_consent_allows_uplink(false, false, true, 0U),
+		      "a present-but-clear OK_TO_MQTT bit must be refused");
+	zassert_true(meshtastic_mqtt_consent_allows_uplink(false, false, true,
+							     MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK),
+		     "an explicit OK_TO_MQTT bit must be honoured");
+
+	/* Unrelated bits (e.g. want_response) must not leak into the consent check. */
+	zassert_false(meshtastic_mqtt_consent_allows_uplink(
+			      false, false, true, MESHTASTIC_BITFIELD_WANT_RESPONSE_MASK),
+		      "only the OK_TO_MQTT bit may grant consent");
 }
 
 ZTEST_SUITE(protocol_stack, NULL, protocol_suite_setup, protocol_before, NULL, NULL);

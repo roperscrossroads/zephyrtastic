@@ -750,28 +750,13 @@ static void mqtt_queue_uplink(const struct meshtastic_packet *packet, const uint
 	}
 
 	/* Honour the sender's MQTT consent — "DontMqttMeBro" (parity: mqtt #1).
-	 *
-	 * Republishing another node's traffic takes it off the local RF mesh and
-	 * puts it somewhere the sender may never have agreed to. The reference
-	 * gates that on the OK_TO_MQTT bit, and treats an ABSENT bitfield as
-	 * "no": a node too old to express a preference cannot be assumed to have
-	 * given one.
-	 *
-	 * Two exemptions, both from the reference (MQTT.cpp onSend):
-	 *   - our own packets: we consented via config_ok_to_mqtt, and the bit we
-	 *     stamped is our answer, not a gate on ourselves
-	 *   - a private broker: the concern is exposure to a public broker, not
-	 *     to a broker on the operator's own network
-	 */
-	if (!from_us && !mqtt_broker_is_private()) {
-		bool ok_to_mqtt = has_bitfield && (bitfield & MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK);
-
-		if (!ok_to_mqtt) {
-			LOG_DBG("Skipping MQTT uplink 0x%08x id=0x%08x (%s)", from, id,
-				has_bitfield ? "OK_TO_MQTT clear"
-					     : "no bitfield, consent unknown");
-			return;
-		}
+	 * Gate logic lives in meshtastic_mqtt_consent_allows_uplink() (header) so
+	 * it stays unit-testable without networking. */
+	if (!meshtastic_mqtt_consent_allows_uplink(from_us, mqtt_broker_is_private(), has_bitfield,
+						    bitfield)) {
+		LOG_DBG("Skipping MQTT uplink 0x%08x id=0x%08x (%s)", from, id,
+			has_bitfield ? "OK_TO_MQTT clear" : "no bitfield, consent unknown");
+		return;
 	}
 
 	char topic[128];
