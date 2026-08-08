@@ -28,6 +28,7 @@
 
 #include <esp_attr.h>
 
+#include <zephyr/meshtastic/diagnostics.h>
 #include <zephyr/meshtastic/meshtastic.h>
 
 LOG_MODULE_REGISTER(meshtastic_sample, LOG_LEVEL_INF);
@@ -87,6 +88,7 @@ static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mg
 				  struct net_if *iface)
 {
 	static bool logged;
+	struct meshtastic_watchdog_crash_info crash;
 	uint32_t i;
 
 	ARG_UNUSED(cb);
@@ -105,6 +107,17 @@ static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mg
 			continue; /* slot never used yet */
 		}
 		log_reset_cause_line("  ", rtc_history[idx].boot_count, rtc_history[idx].reset_cause);
+	}
+
+	/* Companion to the ring above: if the *last* reset was watchdog-forced,
+	 * this fills in what the bare cause code above can't -- see
+	 * meshtastic_watchdog_take_last_crash() for why RTC-persistent memory
+	 * rather than the coredump/log path. One-shot: reported here, then gone. */
+	if (meshtastic_watchdog_take_last_crash(&crash)) {
+		LOG_INF("Watchdog crash info: %u ms since last check-in, heap free=%u "
+			"allocated=%u max_allocated=%u, interrupted thread \"%s\"",
+			crash.since_checkin_ms, crash.heap_free, crash.heap_allocated,
+			crash.heap_max_allocated, crash.thread_name);
 	}
 }
 

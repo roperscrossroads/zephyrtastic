@@ -8,6 +8,11 @@
 #ifndef MESHTASTIC_WATCHDOG_H_
 #define MESHTASTIC_WATCHDOG_H_
 
+/* struct meshtastic_watchdog_crash_info and meshtastic_watchdog_take_last_crash()
+ * are public API — declared once in zephyr/meshtastic/diagnostics.h, defined in
+ * meshtastic_watchdog.c (which includes that header directly). Nothing to
+ * redeclare here; this header only covers the internal-only init/checkin calls. */
+
 #if defined(CONFIG_MESHTASTIC_WATCHDOG)
 
 /**
