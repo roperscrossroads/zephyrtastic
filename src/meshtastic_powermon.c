@@ -18,6 +18,7 @@
 #include <zephyr/sys/util.h>
 
 #include "meshtastic_powermon.h"
+#include "meshtastic_watchdog.h"
 
 #include <zephyr/logging/log.h>
 /* Own log module so its verbosity can be raised at the bench ("log level dbg
@@ -87,6 +88,12 @@ void meshtastic_powermon_set(uint32_t bits)
 {
 	atomic_val_t prev = atomic_or(&pm_state, (atomic_val_t)bits);
 	atomic_val_t now = prev | (atomic_val_t)bits;
+
+	/* Watchdog liveness signal: every LoRa TX/RX power-state transition lands
+	 * here, driven both by real RF activity and unconditionally by the
+	 * periodic AGC-reset timer (see Kconfig.watchdog) -- a real proof the
+	 * radio subsystem is still alive, not just that some thread exists. */
+	meshtastic_watchdog_checkin();
 
 	if (now != prev) {
 		pm_log_change((uint32_t)now);

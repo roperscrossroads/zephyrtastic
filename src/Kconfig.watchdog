@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_WATCHDOG
+	bool "Hardware watchdog (force-reset a wedged system)"
+	default y
+	select WATCHDOG
+	help
+	  Arms the SoC's hardware watchdog timer (wdt0) at boot and feeds it
+	  periodically, but ONLY while meshtastic_watchdog_checkin() keeps landing
+	  (wired to meshtastic_powermon_set(), which fires on every LoRa TX/RX
+	  power-state transition — driven both by real RF activity and by the
+	  unconditional periodic AGC-reset timer, so it ticks at least once every
+	  CONFIG_MESHTASTIC_AGC_RESET_INTERVAL_MS regardless of mesh traffic).
+
+	  This exists for a specific, observed gap: every silent-hang outage seen
+	  on the bench (a node goes dark with zero log activity, no assert, no
+	  fatal-error trace, unresponsive to ping/telnet/SMP) left NOTHING for
+	  CONFIG_DEBUG_COREDUMP/CONFIG_RESET_ON_FATAL_ERROR to catch, because
+	  those only fire on a software fault Zephyr's own detection can see (a
+	  CPU exception, an assert, a stack overflow). A watchdog doesn't care
+	  *why* the radio-power-state machine stopped ticking, only that it did —
+	  so it catches the class of hang nothing else here can, at the cost of
+	  turning "dead until someone finds it and power-cycles it" into
+	  "auto-recovers within one timeout window."
+
+if MESHTASTIC_WATCHDOG
+
+config MESHTASTIC_WATCHDOG_TIMEOUT_MS
+	int "Watchdog timeout (ms)"
+	default 180000
+	range 60000 600000
+	help
+	  How long without a check-in before the hardware forces a reset. Set
+	  generously above the guaranteed once-per-AGC-reset-interval tick
+	  (default 60 s) to leave real margin for scheduling jitter, PM
+	  light-sleep wake latency, or a legitimately slow admin/OTA operation —
+	  this is a last-resort backstop, not a tight liveness probe.
+
+config MESHTASTIC_WATCHDOG_FEED_INTERVAL_MS
+	int "Watchdog feed-check interval (ms)"
+	default 30000
+	range 5000 60000
+	help
+	  How often the feed worker wakes up to decide whether to feed the
+	  watchdog. Must be well under the timeout (several checks per window)
+	  so a hang is caught within roughly one timeout period, not two.
+
+endif # MESHTASTIC_WATCHDOG
