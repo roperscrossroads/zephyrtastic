@@ -51,6 +51,13 @@ extern const struct bt_gatt_attr attr_meshtastic_svc[];
 static MESHTASTIC_EXT_RAM_BSS_ATTR
 	struct meshtastic_phoneapi_frame ble_queue[CONFIG_MESHTASTIC_BLE_FROMRADIO_QUEUE_SIZE];
 
+/* ToRadio/FromRadio decode-encode scratch (508 B / 768 B) for
+ * meshtastic_phoneapi_handle_toradio() and friends — off PSRAM for the same
+ * reason as ble_queue above. Only the ble_work_stack work-queue thread ever
+ * touches these, so no lock is needed. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR meshtastic_ToRadio ble_to_scratch;
+static MESHTASTIC_EXT_RAM_BSS_ATTR meshtastic_FromRadio ble_from_scratch;
+
 static struct {
 	struct meshtastic_phoneapi api;
 	struct k_mutex lock;
@@ -568,7 +575,8 @@ int meshtastic_ble_init(void)
 	k_mutex_init(&ble.lock);
 
 	meshtastic_phoneapi_init(&ble.api, "ble", ble_queue, ARRAY_SIZE(ble_queue), ble_data_ready,
-				 ble_disconnect, ble_invalidate_delivery, NULL);
+				 ble_disconnect, ble_invalidate_delivery, NULL, &ble_to_scratch,
+				 &ble_from_scratch);
 	meshtastic_phoneapi_register(&ble.api);
 
 	k_work_queue_start(&ble.work_q, ble_work_stack, CONFIG_MESHTASTIC_BLE_WORK_STACK_SIZE,

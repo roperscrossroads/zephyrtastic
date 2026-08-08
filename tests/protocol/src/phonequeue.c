@@ -27,13 +27,16 @@
 
 static struct meshtastic_phoneapi_frame q_storage[Q_SIZE];
 static struct meshtastic_phoneapi api;
+static meshtastic_ToRadio to_scratch;
+static meshtastic_FromRadio from_scratch;
 
 static void phonequeue_before(void *fixture)
 {
 	ARG_UNUSED(fixture);
 	meshtastic_sched_defaults();
 	meshtastic_sched_stats_reset();
-	meshtastic_phoneapi_init(&api, "test", q_storage, Q_SIZE, NULL, NULL, NULL, NULL);
+	meshtastic_phoneapi_init(&api, "test", q_storage, Q_SIZE, NULL, NULL, NULL, NULL,
+				 &to_scratch, &from_scratch);
 }
 
 /* Build a FromRadio carrying a decoded MeshPacket on the given portnum. `id`

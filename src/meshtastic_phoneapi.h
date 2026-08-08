@@ -61,6 +61,19 @@ struct meshtastic_phoneapi {
 	meshtastic_phoneapi_disconnect_cb_t disconnect;
 	meshtastic_phoneapi_invalidate_cb_t invalidate_delivery;
 	void *user_data;
+	/*
+	 * Caller-owned decode/encode scratch (508 B / 768 B — see
+	 * meshtastic_phoneapi.c's own comment on meshtastic_phoneapi_handle_toradio()
+	 * for why these must not be stack locals). Each transport supplies its own
+	 * storage at meshtastic_phoneapi_init() time, exactly like `queue` above —
+	 * every transport has exactly one serving thread that ever touches its own
+	 * `api` instance, so a per-instance scratch needs no locking. Transports
+	 * are expected to place this in PSRAM via MESHTASTIC_EXT_RAM_BSS_ATTR where
+	 * available (see meshtastic_ext_ram.h) since it is CPU-only and never
+	 * touched by DMA, an ISR, or a flash write.
+	 */
+	meshtastic_ToRadio *to_scratch;
+	meshtastic_FromRadio *from_scratch;
 };
 
 #if defined(CONFIG_MESHTASTIC_PHONEAPI)
@@ -68,7 +81,8 @@ void meshtastic_phoneapi_init(struct meshtastic_phoneapi *api, const char *name,
 			      struct meshtastic_phoneapi_frame *queue, uint8_t queue_size,
 			      meshtastic_phoneapi_data_ready_cb_t data_ready,
 			      meshtastic_phoneapi_disconnect_cb_t disconnect,
-			      meshtastic_phoneapi_invalidate_cb_t invalidate_delivery, void *user_data);
+			      meshtastic_phoneapi_invalidate_cb_t invalidate_delivery, void *user_data,
+			      meshtastic_ToRadio *to_scratch, meshtastic_FromRadio *from_scratch);
 void meshtastic_phoneapi_release_current_frame(struct meshtastic_phoneapi *api);
 void meshtastic_phoneapi_register(struct meshtastic_phoneapi *api);
 void meshtastic_phoneapi_reset(struct meshtastic_phoneapi *api);

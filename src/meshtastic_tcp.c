@@ -57,6 +57,13 @@ enum tcp_rx_state {
 static MESHTASTIC_EXT_RAM_BSS_ATTR
 	struct meshtastic_phoneapi_frame tcp_queue[CONFIG_MESHTASTIC_TCP_FROMRADIO_QUEUE_SIZE];
 
+/* ToRadio/FromRadio decode-encode scratch (508 B / 768 B) for
+ * meshtastic_phoneapi_handle_toradio() and friends — this thread's own, off
+ * PSRAM for the same reason as tcp_queue above. Only the meshtastic_tcp thread
+ * ever touches these, so no lock is needed. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR meshtastic_ToRadio tcp_to_scratch;
+static MESHTASTIC_EXT_RAM_BSS_ATTR meshtastic_FromRadio tcp_from_scratch;
+
 static struct {
 	struct meshtastic_phoneapi api;
 	int client_fd;
@@ -451,7 +458,8 @@ static void tcp_thread(void *p1, void *p2, void *p3)
 int meshtastic_tcp_init(void)
 {
 	meshtastic_phoneapi_init(&tcp.api, "tcp", tcp_queue, ARRAY_SIZE(tcp_queue),
-				 tcp_data_ready, tcp_disconnect, NULL, NULL);
+				 tcp_data_ready, tcp_disconnect, NULL, NULL, &tcp_to_scratch,
+				 &tcp_from_scratch);
 
 	/* Wake eventfd for the thread's blocking poll (queued FromRadio frames).
 	 * Non-fatal if unavailable — the poll then caps its wait at 200 ms so TX

@@ -14,6 +14,7 @@
 #include <pb_decode.h>
 #include <pb_encode.h>
 
+#include "meshtastic_ext_ram.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_sched.h"
@@ -34,6 +35,14 @@ static struct {
 } phoneapi;
 
 static K_MUTEX_DEFINE(phoneapi_lock);
+
+/* meshtastic_phoneapi_on_packet()'s scratch: unlike to_scratch/from_scratch (one
+ * per transport, single-owner-thread), this one is shared -- on_packet() fans a
+ * single FromRadio out to every registered transport and is called from router/
+ * reliable/admin code, not any one transport's own thread, so it is protected by
+ * phoneapi_lock (widened to cover this struct's whole lifetime, not just the
+ * transports[] copy) rather than living on a stack no single thread owns. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR meshtastic_FromRadio on_packet_scratch;
 
 int meshtastic_phoneapi_encode_fromradio_frame(const meshtastic_FromRadio *from,
 					       struct meshtastic_phoneapi_frame *frame)
@@ -68,7 +77,8 @@ void meshtastic_phoneapi_init(struct meshtastic_phoneapi *api, const char *name,
 			      struct meshtastic_phoneapi_frame *queue, uint8_t queue_size,
 			      meshtastic_phoneapi_data_ready_cb_t data_ready,
 			      meshtastic_phoneapi_disconnect_cb_t disconnect,
-			      meshtastic_phoneapi_invalidate_cb_t invalidate_delivery, void *user_data)
+			      meshtastic_phoneapi_invalidate_cb_t invalidate_delivery, void *user_data,
+			      meshtastic_ToRadio *to_scratch, meshtastic_FromRadio *from_scratch)
 {
 	*api = (struct meshtastic_phoneapi){
 		.name = name,
@@ -78,6 +88,8 @@ void meshtastic_phoneapi_init(struct meshtastic_phoneapi *api, const char *name,
 		.disconnect = disconnect,
 		.invalidate_delivery = invalidate_delivery,
 		.user_data = user_data,
+		.to_scratch = to_scratch,
+		.from_scratch = from_scratch,
 	};
 	k_mutex_init(&api->lock);
 }
@@ -335,65 +347,78 @@ int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 void meshtastic_phoneapi_enqueue_queue_status(struct meshtastic_phoneapi *api, int res,
 					      uint32_t mesh_packet_id)
 {
-	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+	meshtastic_FromRadio *from = api->from_scratch;
 	uint32_t pending = meshtastic_phoneapi_pending_count(api);
 
-	from.id = meshtastic_next_fromradio_id();
-	from.which_payload_variant = meshtastic_FromRadio_queueStatus_tag;
-	from.queueStatus.res = (int8_t)CLAMP(res, INT8_MIN, INT8_MAX);
-	from.queueStatus.free = (pending >= api->queue_size) ? 0U : (api->queue_size - pending);
-	from.queueStatus.maxlen = api->queue_size;
-	from.queueStatus.mesh_packet_id = mesh_packet_id;
+	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+	from->id = meshtastic_next_fromradio_id();
+	from->which_payload_variant = meshtastic_FromRadio_queueStatus_tag;
+	from->queueStatus.res = (int8_t)CLAMP(res, INT8_MIN, INT8_MAX);
+	from->queueStatus.free = (pending >= api->queue_size) ? 0U : (api->queue_size - pending);
+	from->queueStatus.maxlen = api->queue_size;
+	from->queueStatus.mesh_packet_id = mesh_packet_id;
 
-	(void)meshtastic_phoneapi_enqueue_fromradio(api, &from);
+	(void)meshtastic_phoneapi_enqueue_fromradio(api, from);
 }
 
 void meshtastic_phoneapi_enqueue_my_info(struct meshtastic_phoneapi *api, uint32_t request_id)
 {
-	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+	meshtastic_FromRadio *from = api->from_scratch;
 	uint8_t node_id[4];
 
 	ARG_UNUSED(request_id);
 
-	from.id = meshtastic_next_fromradio_id();
-	from.which_payload_variant = meshtastic_FromRadio_my_info_tag;
-	from.my_info.my_node_num = meshtastic_get_node_id();
-	from.my_info.min_app_version = 0U;
-	from.my_info.nodedb_count = 1U;
-	from.my_info.device_id.size = sizeof(node_id);
+	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+	from->id = meshtastic_next_fromradio_id();
+	from->which_payload_variant = meshtastic_FromRadio_my_info_tag;
+	from->my_info.my_node_num = meshtastic_get_node_id();
+	from->my_info.min_app_version = 0U;
+	from->my_info.nodedb_count = 1U;
+	from->my_info.device_id.size = sizeof(node_id);
 	sys_put_le32(meshtastic_get_node_id(), node_id);
-	memcpy(from.my_info.device_id.bytes, node_id, sizeof(node_id));
-	strncpy(from.my_info.pio_env, "zephyr", sizeof(from.my_info.pio_env) - 1U);
+	memcpy(from->my_info.device_id.bytes, node_id, sizeof(node_id));
+	strncpy(from->my_info.pio_env, "zephyr", sizeof(from->my_info.pio_env) - 1U);
 
-	(void)meshtastic_phoneapi_enqueue_fromradio(api, &from);
+	(void)meshtastic_phoneapi_enqueue_fromradio(api, from);
 }
 
 void meshtastic_phoneapi_enqueue_rebooted(struct meshtastic_phoneapi *api)
 {
-	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+	meshtastic_FromRadio *from = api->from_scratch;
 
-	from.which_payload_variant = meshtastic_FromRadio_rebooted_tag;
-	from.rebooted = true;
+	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+	from->which_payload_variant = meshtastic_FromRadio_rebooted_tag;
+	from->rebooted = true;
 
-	(void)meshtastic_phoneapi_enqueue_fromradio(api, &from);
+	(void)meshtastic_phoneapi_enqueue_fromradio(api, from);
 }
 
 void meshtastic_phoneapi_handle_toradio(struct meshtastic_phoneapi *api, const uint8_t *buf,
 					size_t len)
 {
-	meshtastic_ToRadio to = meshtastic_ToRadio_init_zero;
+	/*
+	 * meshtastic_ToRadio is 508 B — too big to carry as a stack local across
+	 * this whole function (which, for an admin/packet request, calls all the
+	 * way down through meshtastic_send_mesh_pb() -> routing/encryption/radio,
+	 * a chain already measured elsewhere at ~3 KB of its own stack). Every
+	 * transport supplies its own scratch storage at init time (PSRAM-backed
+	 * where available — see meshtastic_ext_ram.h); this function only ever
+	 * runs on that transport's own serving thread, so no locking is needed.
+	 */
+	meshtastic_ToRadio *to = api->to_scratch;
 	pb_istream_t stream;
 	int ret = 0;
 
+	*to = (meshtastic_ToRadio)meshtastic_ToRadio_init_zero;
 	stream = pb_istream_from_buffer(buf, len);
-	if (!pb_decode(&stream, meshtastic_ToRadio_fields, &to)) {
+	if (!pb_decode(&stream, meshtastic_ToRadio_fields, to)) {
 		/*
 		 * StreamAPI resync can deliver one extra byte when a false length
 		 * includes the next frame's START1 (0x94) as payload.
 		 */
 		if (len > 1U && buf[len - 1U] == 0x94U) {
 			stream = pb_istream_from_buffer(buf, len - 1U);
-			if (pb_decode(&stream, meshtastic_ToRadio_fields, &to)) {
+			if (pb_decode(&stream, meshtastic_ToRadio_fields, to)) {
 				LOG_DBG("%s ToRadio recovered after dropping trailing "
 					"START1 (%u -> %u bytes)",
 					api->name, (unsigned int)len, (unsigned int)(len - 1U));
@@ -415,32 +440,32 @@ toradio_decoded:
 			(unsigned int)stream.bytes_left);
 	}
 
-	LOG_DBG("%s ToRadio variant=%u len=%u", api->name, (unsigned int)to.which_payload_variant,
+	LOG_DBG("%s ToRadio variant=%u len=%u", api->name, (unsigned int)to->which_payload_variant,
 		(unsigned int)len);
 
-	switch (to.which_payload_variant) {
+	switch (to->which_payload_variant) {
 	case meshtastic_ToRadio_packet_tag:
-		LOG_DBG("%s ToRadio packet id=%u", api->name, to.packet.id);
+		LOG_DBG("%s ToRadio packet id=%u", api->name, to->packet.id);
 #if IS_ENABLED(CONFIG_MESHTASTIC_ADMIN)
-		if (to.packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
-		    to.packet.decoded.portnum == meshtastic_PortNum_ADMIN_APP &&
-		    to.packet.to == meshtastic_get_node_id() &&
-		    meshtastic_admin_handle_local(&to.packet)) {
+		if (to->packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
+		    to->packet.decoded.portnum == meshtastic_PortNum_ADMIN_APP &&
+		    to->packet.to == meshtastic_get_node_id() &&
+		    meshtastic_admin_handle_local(&to->packet)) {
 			/* Consumed as local admin — do NOT transmit on the mesh. Still
 			 * emit a QueueStatus so the phone's StreamAPI stays in sync. */
-			meshtastic_phoneapi_enqueue_queue_status(api, 0, to.packet.id);
+			meshtastic_phoneapi_enqueue_queue_status(api, 0, to->packet.id);
 			break;
 		}
 #endif
-		ret = meshtastic_send_mesh_pb(&to.packet);
-		meshtastic_phoneapi_enqueue_queue_status(api, ret, to.packet.id);
+		ret = meshtastic_send_mesh_pb(&to->packet);
+		meshtastic_phoneapi_enqueue_queue_status(api, ret, to->packet.id);
 		break;
 	case meshtastic_ToRadio_want_config_id_tag:
-		LOG_DBG("%s ToRadio want_config_id=%u", api->name, to.want_config_id);
+		LOG_DBG("%s ToRadio want_config_id=%u", api->name, to->want_config_id);
 #if IS_ENABLED(CONFIG_MESHTASTIC_ADMIN)
 		meshtastic_admin_reset(); /* clear stale edit txn on (re)connect */
 #endif
-		meshtastic_phoneapi_enqueue_phone_config(api, to.want_config_id);
+		meshtastic_phoneapi_enqueue_phone_config(api, to->want_config_id);
 		break;
 	case meshtastic_ToRadio_disconnect_tag:
 		LOG_DBG("%s ToRadio disconnect", api->name);
@@ -452,19 +477,19 @@ toradio_decoded:
 		}
 		break;
 	case meshtastic_ToRadio_heartbeat_tag:
-		LOG_DBG("%s ToRadio heartbeat nonce=%u", api->name, to.heartbeat.nonce);
+		LOG_DBG("%s ToRadio heartbeat nonce=%u", api->name, to->heartbeat.nonce);
 		meshtastic_phoneapi_enqueue_queue_status(api, 0, 0U);
 #if IS_ENABLED(CONFIG_MESHTASTIC_NODEINFO)
 		/* nonce==1 asks the node to re-announce its NodeInfo so peers can
 		 * re-learn it (e.g. after a reboot); mirrors firmware PhoneAPI.cpp. */
-		if (to.heartbeat.nonce == 1U) {
+		if (to->heartbeat.nonce == 1U) {
 			(void)meshtastic_send_node_info(MESHTASTIC_NODE_BROADCAST);
 		}
 #endif
 		break;
 	default:
 		LOG_WRN("%s unsupported ToRadio variant %u", api->name,
-			(unsigned int)to.which_payload_variant);
+			(unsigned int)to->which_payload_variant);
 		break;
 	}
 }
@@ -472,36 +497,48 @@ toradio_decoded:
 void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet,
 				   const meshtastic_MeshPacket *decoded_mesh)
 {
-	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
 	struct meshtastic_phoneapi *transports[MESHTASTIC_PHONEAPI_MAX_TRANSPORTS];
 	uint8_t count;
+	meshtastic_FromRadio *from = &on_packet_scratch;
 
-	from.id = meshtastic_next_fromradio_id();
-	from.which_payload_variant = meshtastic_FromRadio_packet_tag;
+	/* phoneapi_lock now guards on_packet_scratch too (not just the transports[]
+	 * copy below): this function is reached from router/reliable/admin code on
+	 * whichever thread is processing that packet, not a single owning thread,
+	 * so the shared scratch needs the same lock the transport list already
+	 * uses. enqueue_fromradio() below takes each transport's own api->lock,
+	 * always nested INSIDE phoneapi_lock, never the other way round anywhere
+	 * in this file -- a consistent nesting order, so this can't deadlock
+	 * against the lock enqueue_fromradio takes internally. */
+	k_mutex_lock(&phoneapi_lock, K_FOREVER);
+
+	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+	from->id = meshtastic_next_fromradio_id();
+	from->which_payload_variant = meshtastic_FromRadio_packet_tag;
 
 	if (decoded_mesh != NULL) {
 		/* C3 Phase 2: the RX path decoded the wire frame straight into this
 		 * MeshPacket, so deliver it verbatim. Fields the flat struct never
 		 * models -- Data.emoji, MeshPacket.rx_time -- reach the phone by
 		 * construction instead of being dropped by the to_mesh_pb rebuild. */
-		from.packet = *decoded_mesh;
+		from->packet = *decoded_mesh;
 	} else {
-		int ret = meshtastic_packet_to_mesh_pb(packet, &from.packet);
+		int ret = meshtastic_packet_to_mesh_pb(packet, &from->packet);
 
 		if (ret < 0) {
 			LOG_DBG("FromRadio packet encode skipped (%d)", ret);
+			k_mutex_unlock(&phoneapi_lock);
 			return;
 		}
 	}
 
-	k_mutex_lock(&phoneapi_lock, K_FOREVER);
 	count = phoneapi.count;
 	memcpy(transports, phoneapi.transports, count * sizeof(transports[0]));
-	k_mutex_unlock(&phoneapi_lock);
 
-	LOG_DBG("FromRadio packet fan-out to %u transport(s), mesh id=%u", count, from.packet.id);
+	LOG_DBG("FromRadio packet fan-out to %u transport(s), mesh id=%u", count, from->packet.id);
 
 	for (uint8_t i = 0; i < count; i++) {
-		(void)meshtastic_phoneapi_enqueue_fromradio(transports[i], &from);
+		(void)meshtastic_phoneapi_enqueue_fromradio(transports[i], from);
 	}
+
+	k_mutex_unlock(&phoneapi_lock);
 }

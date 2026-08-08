@@ -14,6 +14,7 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/ring_buffer.h>
 
+#include "meshtastic_ext_ram.h"
 #include "meshtastic_serial.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -46,6 +47,16 @@ enum meshtastic_serial_parse_state {
 
 RING_BUF_DECLARE(serial_rx_rb, CONFIG_MESHTASTIC_SERIAL_RX_BUF_SIZE);
 RING_BUF_DECLARE(serial_tx_rb, CONFIG_MESHTASTIC_SERIAL_TX_BUF_SIZE);
+
+/* ToRadio/FromRadio decode-encode scratch (508 B / 768 B) for
+ * meshtastic_phoneapi_handle_toradio() and friends. This is the tightest of
+ * the three PhoneAPI transports' dedicated stacks (CONFIG_MESHTASTIC_SERIAL_
+ * WORK_STACK_SIZE, 4096 B vs TCP's 16384 B and BLE's 6144 B) sharing the exact
+ * same decode+admin+send call chain, so getting these off the stack matters
+ * most here. Off PSRAM where available (see meshtastic_ext_ram.h) — CPU-only,
+ * touched only by the serial work-queue thread, never DMA/ISR/flash-write. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR meshtastic_ToRadio serial_to_scratch;
+static MESHTASTIC_EXT_RAM_BSS_ATTR meshtastic_FromRadio serial_from_scratch;
 
 static struct {
 	const struct device *dev;
@@ -444,7 +455,8 @@ int meshtastic_serial_init(void)
 	}
 
 	meshtastic_phoneapi_init(&serial.api, "serial", serial.queue, ARRAY_SIZE(serial.queue),
-				 serial_data_ready, serial_disconnect, NULL, NULL);
+				 serial_data_ready, serial_disconnect, NULL, NULL,
+				 &serial_to_scratch, &serial_from_scratch);
 	meshtastic_phoneapi_register(&serial.api);
 
 	k_work_queue_start(&serial.work_q, serial_work_stack,

@@ -228,37 +228,44 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 		meshtastic_ModuleConfig_tak_tag,
 		meshtastic_ModuleConfig_mesh_beacon_tag,
 	};
-	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+	/* 768 B -- lives in api->from_scratch (caller-owned, PSRAM where available),
+	 * not on this thread's stack. See meshtastic_phoneapi_handle_toradio()'s own
+	 * comment for why; this function is that state machine's per-frame builder,
+	 * called repeatedly (once per emitted config frame) from the same
+	 * single-owner transport thread. */
+	meshtastic_FromRadio *from = api->from_scratch;
 	int ret;
+
+	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
 
 	while (true) {
 		switch (api->config_state) {
 		case MESHTASTIC_PHONEAPI_CONFIG_IDLE:
 			return -ENOENT;
 		case MESHTASTIC_PHONEAPI_CONFIG_MY_INFO:
-			fill_my_info(&from);
-			return emit_frame(api, &from, MESHTASTIC_PHONEAPI_CONFIG_DEVICE_UI, 0U,
+			fill_my_info(from);
+			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_DEVICE_UI, 0U,
 					  frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_DEVICE_UI:
-			from.id = meshtastic_next_fromradio_id();
-			from.which_payload_variant = meshtastic_FromRadio_deviceuiConfig_tag;
-			(void)meshtastic_config_store_get_device_ui(&from.deviceuiConfig);
-			return emit_frame(api, &from, MESHTASTIC_PHONEAPI_CONFIG_NODE_INFO, 0U,
+			from->id = meshtastic_next_fromradio_id();
+			from->which_payload_variant = meshtastic_FromRadio_deviceuiConfig_tag;
+			(void)meshtastic_config_store_get_device_ui(&from->deviceuiConfig);
+			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_NODE_INFO, 0U,
 					  frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_NODE_INFO:
-			fill_node_info(&from);
+			fill_node_info(from);
 			/* ONLY_NODES (app Stage 2): own node info then straight to the
 			 * node DB, skipping metadata/config -- mirrors firmware
 			 * STATE_SEND_OWN_NODEINFO under SPECIAL_NONCE_ONLY_NODES. */
 			return emit_frame(
-				api, &from,
+				api, from,
 				(api->config_request_id == MESHTASTIC_PHONEAPI_NONCE_ONLY_NODES)
 					? MESHTASTIC_PHONEAPI_CONFIG_OTHER_NODEINFOS
 					: MESHTASTIC_PHONEAPI_CONFIG_METADATA,
 				0U, frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_METADATA:
-			fill_metadata_frame(&from);
-			return emit_frame(api, &from, MESHTASTIC_PHONEAPI_CONFIG_REGION_PRESETS,
+			fill_metadata_frame(from);
+			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_REGION_PRESETS,
 					  0U, frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_REGION_PRESETS:
 			/* region -> valid-modem-preset compatibility map. The official
@@ -266,14 +273,14 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 			 * (see firmware PhoneAPI.cpp STATE_SEND_REGION_PRESETS); omitting it
 			 * stalls the config handshake. Built from the reference region table
 			 * so the app can constrain region+preset selections. */
-			from.id = meshtastic_next_fromradio_id();
-			from.which_payload_variant = meshtastic_FromRadio_region_presets_tag;
-			meshtastic_build_region_preset_map(&from.region_presets);
-			return emit_frame(api, &from, MESHTASTIC_PHONEAPI_CONFIG_CHANNELS, 0U,
+			from->id = meshtastic_next_fromradio_id();
+			from->which_payload_variant = meshtastic_FromRadio_region_presets_tag;
+			meshtastic_build_region_preset_map(&from->region_presets);
+			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_CHANNELS, 0U,
 					  frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_CHANNELS:
-			fill_channel(&from, api->config_index);
-			return emit_frame(api, &from,
+			fill_channel(from, api->config_index);
+			return emit_frame(api, from,
 					  (api->config_index + 1U >= MESHTASTIC_MAX_CHANNELS)
 						  ? MESHTASTIC_PHONEAPI_CONFIG_CONFIGS
 						  : MESHTASTIC_PHONEAPI_CONFIG_CHANNELS,
@@ -283,11 +290,11 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 					  frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_CONFIGS:
 			while (api->config_index < ARRAY_SIZE(config_tags)) {
-				from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
-				ret = fill_config_variant(&from, config_tags[api->config_index]);
+				*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+				ret = fill_config_variant(from, config_tags[api->config_index]);
 				if (ret == 0) {
 					return emit_frame(
-						api, &from,
+						api, from,
 						(api->config_index + 1U >= ARRAY_SIZE(config_tags))
 							? MESHTASTIC_PHONEAPI_CONFIG_MODULES
 							: MESHTASTIC_PHONEAPI_CONFIG_CONFIGS,
@@ -313,11 +320,11 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 					: MESHTASTIC_PHONEAPI_CONFIG_OTHER_NODEINFOS;
 
 			while (api->config_index < ARRAY_SIZE(module_tags)) {
-				from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
-				ret = fill_module_variant(&from, module_tags[api->config_index]);
+				*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+				ret = fill_module_variant(from, module_tags[api->config_index]);
 				if (ret == 0) {
 					return emit_frame(
-						api, &from,
+						api, from,
 						(api->config_index + 1U >= ARRAY_SIZE(module_tags))
 							? after_modules
 							: MESHTASTIC_PHONEAPI_CONFIG_MODULES,
@@ -339,12 +346,12 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 			while (api->config_index < meshtastic_nodedb_count()) {
 				struct meshtastic_nodedb_node node;
 
-				from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+				*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
 				if (meshtastic_nodedb_get_by_index(api->config_index, &node) == 0 &&
 				    node.num != meshtastic_get_node_id()) {
-					fill_other_node_info(&from, &node);
+					fill_other_node_info(from, &node);
 					return emit_frame(
-						api, &from,
+						api, from,
 						MESHTASTIC_PHONEAPI_CONFIG_OTHER_NODEINFOS,
 						(uint8_t)(api->config_index + 1U), frame);
 				}
@@ -364,22 +371,22 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 			api->config_index = 0U;
 			break;
 		case MESHTASTIC_PHONEAPI_CONFIG_QUEUE_STATUS:
-			from.id = meshtastic_next_fromradio_id();
-			from.which_payload_variant = meshtastic_FromRadio_queueStatus_tag;
-			from.queueStatus.res = 0;
-			from.queueStatus.free = (api->count >= api->queue_size)
+			from->id = meshtastic_next_fromradio_id();
+			from->which_payload_variant = meshtastic_FromRadio_queueStatus_tag;
+			from->queueStatus.res = 0;
+			from->queueStatus.free = (api->count >= api->queue_size)
 							? 0U
 							: (api->queue_size - api->count);
-			from.queueStatus.maxlen = api->queue_size;
-			from.queueStatus.mesh_packet_id = 0U;
-			return emit_frame(api, &from, MESHTASTIC_PHONEAPI_CONFIG_COMPLETE, 0U,
+			from->queueStatus.maxlen = api->queue_size;
+			from->queueStatus.mesh_packet_id = 0U;
+			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_COMPLETE, 0U,
 					  frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_COMPLETE:
 			LOG_INF("%s config_complete_id=%u emitted", api->name, api->config_request_id);
-			from.id = meshtastic_next_fromradio_id();
-			from.which_payload_variant = meshtastic_FromRadio_config_complete_id_tag;
-			from.config_complete_id = api->config_request_id;
-			return emit_frame(api, &from, MESHTASTIC_PHONEAPI_CONFIG_IDLE, 0U, frame);
+			from->id = meshtastic_next_fromradio_id();
+			from->which_payload_variant = meshtastic_FromRadio_config_complete_id_tag;
+			from->config_complete_id = api->config_request_id;
+			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_IDLE, 0U, frame);
 		default:
 			api->config_state = MESHTASTIC_PHONEAPI_CONFIG_IDLE;
 			api->config_index = 0U;

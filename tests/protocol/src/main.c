@@ -3119,13 +3119,15 @@ ZTEST(protocol_stack, test_mqtt_borne_admin_refused_on_legacy_admin_channel)
  * registration (there is no unregister) never dangles across tests. */
 static struct meshtastic_phoneapi_frame getcap_q[8];
 static struct meshtastic_phoneapi getcap_api;
+static meshtastic_ToRadio getcap_to_scratch;
+static meshtastic_FromRadio getcap_from_scratch;
 static bool getcap_registered;
 
 static void getcap_reset(void)
 {
 	if (!getcap_registered) {
 		meshtastic_phoneapi_init(&getcap_api, "getcap", getcap_q, ARRAY_SIZE(getcap_q), NULL,
-					 NULL, NULL, NULL);
+					 NULL, NULL, NULL, &getcap_to_scratch, &getcap_from_scratch);
 		meshtastic_phoneapi_register(&getcap_api);
 		getcap_registered = true;
 	}
@@ -3929,13 +3931,16 @@ ZTEST(protocol_stack, test_phone_config_handshake_full)
 	static struct meshtastic_phoneapi_frame q[4];
 	struct meshtastic_phoneapi api;
 	struct meshtastic_phoneapi_frame frame;
+	meshtastic_ToRadio to_scratch;
+	meshtastic_FromRadio from_scratch;
 	const uint32_t nonce = 0x1234ABCDU; /* not a special nonce -> full dump */
 	pb_size_t first = 0U, last = 0U;
 	uint32_t complete_id = 0U;
 	bool saw_metadata = false, saw_region = false, saw_channel = false, saw_complete = false;
 	int frames = 0;
 
-	meshtastic_phoneapi_init(&api, "cfgtest", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL);
+	meshtastic_phoneapi_init(&api, "cfgtest", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL,
+				 &to_scratch, &from_scratch);
 	meshtastic_phoneapi_enqueue_phone_config(&api, nonce);
 
 	while (meshtastic_phoneapi_next_config_frame(&api, &frame) == 0) {
@@ -3970,12 +3975,15 @@ ZTEST(protocol_stack, test_phone_config_handshake_only_nodes)
 	static struct meshtastic_phoneapi_frame q[4];
 	struct meshtastic_phoneapi api;
 	struct meshtastic_phoneapi_frame frame;
+	meshtastic_ToRadio to_scratch;
+	meshtastic_FromRadio from_scratch;
 	pb_size_t first = 0U, last = 0U;
 	uint32_t complete_id = 0U;
 	bool saw_metadata = false, saw_config = false, saw_complete = false;
 	int frames = 0;
 
-	meshtastic_phoneapi_init(&api, "cfgtest", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL);
+	meshtastic_phoneapi_init(&api, "cfgtest", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL,
+				 &to_scratch, &from_scratch);
 	meshtastic_phoneapi_enqueue_phone_config(&api, PHONEAPI_NONCE_ONLY_NODES);
 
 	while (meshtastic_phoneapi_next_config_frame(&api, &frame) == 0) {
