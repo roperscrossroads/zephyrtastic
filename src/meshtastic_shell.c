@@ -1417,6 +1417,7 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 
 	if (argc >= 2U && strcmp(argv[1], "reset") == 0) {
 		meshtastic_sched_stats_reset();
+		meshtastic_radio_cad_agc_stats_reset();
 		shell_print(sh, "sched stats reset");
 		return 0;
 	}
@@ -1441,6 +1442,23 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "dedup TTL expiries: %u", st.dedup_expired);
 	shell_print(sh, "reliable delivery: %u acked, %u failed", st.reliable_acked,
 		    st.reliable_failed);
+
+	/* CAD (listen-before-talk) and periodic AGC-reset outcomes -- driver-owned
+	 * counters (sx126x.c), zero on a build without CONFIG_LORA_SX126X. A
+	 * nonzero "timeout" here specifically is worth watching: it is the exact
+	 * symptom of the DIO1/irq_work race G-3 fixed (2026-08-06) -- see
+	 * meshtastic_radio.c and zephyr/patches/0005-*. */
+	shell_print(sh, "CAD: clear %u  busy %u  timeout %u  error %u",
+		    meshtastic_radio_cad_clear_count(), meshtastic_radio_cad_busy_count(),
+		    meshtastic_radio_cad_timeout_count(), meshtastic_radio_cad_error_count());
+	shell_print(sh, "AGC reset: ok %u  fail %u", meshtastic_radio_agc_reset_ok_count(),
+		    meshtastic_radio_agc_reset_fail_count());
+	if (meshtastic_radio_agc_reset_skipped_count() > 0U ||
+	    meshtastic_radio_agc_patch_fail_count() > 0U) {
+		shell_print(sh, "  skipped (TX in flight) %u  sensitivity-patch re-apply failed %u",
+			    meshtastic_radio_agc_reset_skipped_count(),
+			    meshtastic_radio_agc_patch_fail_count());
+	}
 
 	/* Flood redundancy: how many of our relays a peer also relayed, and how
 	 * soon after ours theirs arrived. Gaps inside a plausible contention window

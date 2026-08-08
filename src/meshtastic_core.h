@@ -66,6 +66,10 @@ struct meshtastic_context {
 	 * republished to MQTT by any gateway that hears it. Stamped into every
 	 * packet we originate. */
 	bool config_ok_to_mqtt;
+	/* config.lora.sx126x_rx_boosted_gain: pushed to the radio driver at boot
+	 * (meshtastic_radio_init) — a LoRaConfig change already requires a reboot
+	 * to take effect (F-1), so there is no live-apply path to wire. */
+	bool rx_boosted_gain;
 	const char *channel_name;
 	const char *long_name;
 	const char *short_name;
@@ -150,6 +154,61 @@ int meshtastic_radio_init(void);
 void meshtastic_radio_disarm_dio1_wake(void);
 #else
 static inline void meshtastic_radio_disarm_dio1_wake(void)
+{
+}
+#endif
+
+/*
+ * CAD (listen-before-talk) and periodic AGC-reset diagnostic counters,
+ * surfaced on `meshtastic sched stats`. Chip-agnostic wrapper over the
+ * sx126x driver's own counters (see sx126x.c) -- callers never need their
+ * own CONFIG_LORA_SX126X guard; on a build without that radio these read as
+ * a flat 0 rather than needing to be skipped.
+ */
+#if defined(CONFIG_LORA_SX126X)
+uint32_t meshtastic_radio_cad_clear_count(void);
+uint32_t meshtastic_radio_cad_busy_count(void);
+uint32_t meshtastic_radio_cad_timeout_count(void);
+uint32_t meshtastic_radio_cad_error_count(void);
+uint32_t meshtastic_radio_agc_reset_ok_count(void);
+uint32_t meshtastic_radio_agc_reset_fail_count(void);
+uint32_t meshtastic_radio_agc_reset_skipped_count(void);
+uint32_t meshtastic_radio_agc_patch_fail_count(void);
+void meshtastic_radio_cad_agc_stats_reset(void);
+#else
+static inline uint32_t meshtastic_radio_cad_clear_count(void)
+{
+	return 0U;
+}
+static inline uint32_t meshtastic_radio_cad_busy_count(void)
+{
+	return 0U;
+}
+static inline uint32_t meshtastic_radio_cad_timeout_count(void)
+{
+	return 0U;
+}
+static inline uint32_t meshtastic_radio_cad_error_count(void)
+{
+	return 0U;
+}
+static inline uint32_t meshtastic_radio_agc_reset_ok_count(void)
+{
+	return 0U;
+}
+static inline uint32_t meshtastic_radio_agc_reset_fail_count(void)
+{
+	return 0U;
+}
+static inline uint32_t meshtastic_radio_agc_reset_skipped_count(void)
+{
+	return 0U;
+}
+static inline uint32_t meshtastic_radio_agc_patch_fail_count(void)
+{
+	return 0U;
+}
+static inline void meshtastic_radio_cad_agc_stats_reset(void)
 {
 }
 #endif

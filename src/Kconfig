@@ -142,4 +142,20 @@ config MESHTASTIC_TX_BUSY_BACKOFF_MAX_MS
 
 endmenu
 
+menu "SX126x AGC reset"
+
+config MESHTASTIC_AGC_RESET_INTERVAL_MS
+	int "Periodic AGC reset interval (ms)"
+	depends on LORA_SX126X
+	range 1000 3600000
+	default 60000
+	help
+	  Interval between periodic radio AGC resets (a warm-sleep power-cycle
+	  of the analog frontend + RX sensitivity register patch). Matches
+	  upstream Meshtastic's AGC_RESET_INTERVAL_MS: the SX126x's internal
+	  AGC can get stuck and RX sensitivity silently degrades without this,
+	  and does not recover on its own until reboot.
+
+endmenu
+
 endif # MESHTASTIC

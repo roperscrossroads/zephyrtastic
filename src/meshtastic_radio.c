@@ -228,7 +228,14 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	mt_lora_cfg.tx_power = mt.tx_power;
 	mt_lora_cfg.tx = true;
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_LBT;
-	mt_lora_cfg.cad.symbol_num = LORA_CAD_SYMB_2;
+	/* 0 = "driver default" (documented in lora.h) -- the sx126x driver
+	 * resolves this to RadioLib's own SX1262 CAD defaults (4 symbols,
+	 * detPeak=SF+13, detMin=10), the same library upstream Meshtastic
+	 * runs, rather than this being a second, possibly-diverging
+	 * source of truth for those numbers. Previously hardcoded to
+	 * LORA_CAD_SYMB_2, which didn't match either upstream's real
+	 * default (4) or anything the driver used to honor at all. */
+	mt_lora_cfg.cad.symbol_num = 0;
 
 	/* Steer any RF front-end to its TX path before keying the transmitter. */
 	meshtastic_radio_fem_set_tx(true);
@@ -370,6 +377,110 @@ static const struct gpio_dt_spec mt_dio1 = GPIO_DT_SPEC_GET(DT_NODELABEL(lora0),
  * Takes the radio device because the native sx126x driver builds for two compatibles. */
 extern void sx126x_poll_dio1(const struct device *dev);
 
+/* RX gain boost override (G-2) — data->rx_boosted, not the devicetree default,
+ * is what sx126x_lora_config() applies on every call, so this survives every
+ * subsequent TX/RX reconfigure rather than being clobbered back. Called once
+ * at boot from meshtastic_radio_init(); a LoRaConfig change already requires
+ * a reboot to take effect (F-1), so there is no live-apply path to wire. */
+extern int sx126x_set_rx_boosted_gain(const struct device *dev, bool boosted);
+
+/* Chip-level AGC reset (warm-sleep cycle + RX sensitivity register patch) —
+ * parity: upstream Meshtastic RadioLibInterface::resetAGC(). The driver
+ * function only does the chip-level cycle; pausing/resuming continuous RX
+ * around it is this file's job, same as it already is for a TX. */
+extern int sx126x_reset_agc(const struct device *dev);
+
+/* CAD and AGC-reset diagnostic counters (driver-owned; see sx126x.c). */
+extern uint32_t sx126x_cad_clear_count_get(void);
+extern uint32_t sx126x_cad_busy_count_get(void);
+extern uint32_t sx126x_cad_timeout_count_get(void);
+extern uint32_t sx126x_cad_error_count_get(void);
+extern uint32_t sx126x_agc_reset_ok_count_get(void);
+extern uint32_t sx126x_agc_reset_fail_count_get(void);
+extern uint32_t sx126x_agc_reset_skipped_count_get(void);
+extern uint32_t sx126x_agc_patch_fail_count_get(void);
+extern void sx126x_cad_agc_stats_reset(void);
+
+uint32_t meshtastic_radio_cad_clear_count(void)
+{
+	return sx126x_cad_clear_count_get();
+}
+
+uint32_t meshtastic_radio_cad_busy_count(void)
+{
+	return sx126x_cad_busy_count_get();
+}
+
+uint32_t meshtastic_radio_cad_timeout_count(void)
+{
+	return sx126x_cad_timeout_count_get();
+}
+
+uint32_t meshtastic_radio_cad_error_count(void)
+{
+	return sx126x_cad_error_count_get();
+}
+
+uint32_t meshtastic_radio_agc_reset_ok_count(void)
+{
+	return sx126x_agc_reset_ok_count_get();
+}
+
+uint32_t meshtastic_radio_agc_reset_fail_count(void)
+{
+	return sx126x_agc_reset_fail_count_get();
+}
+
+uint32_t meshtastic_radio_agc_reset_skipped_count(void)
+{
+	return sx126x_agc_reset_skipped_count_get();
+}
+
+uint32_t meshtastic_radio_agc_patch_fail_count(void)
+{
+	return sx126x_agc_patch_fail_count_get();
+}
+
+void meshtastic_radio_cad_agc_stats_reset(void)
+{
+	sx126x_cad_agc_stats_reset();
+}
+
+static void mt_agc_reset_work_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(mt_agc_reset_work, mt_agc_reset_work_fn);
+
+/*
+ * Periodic AGC reset (parity: upstream's AGC_RESET_INTERVAL_MS, default 60s —
+ * see sx126x_reset_agc() for why this exists at all). Mirrors the TX-prep
+ * pattern exactly: take mt_radio_sem, stop continuous async RX before
+ * touching the radio, do the operation, re-arm RX, release the semaphore —
+ * so this can never race a send.
+ */
+static void mt_agc_reset_work_fn(struct k_work *work)
+{
+	int ret;
+
+	ARG_UNUSED(work);
+
+	(void)k_sem_take(&mt_radio_sem, K_FOREVER);
+
+	(void)lora_recv_async(mt.lora_dev, NULL, NULL);
+	mt.radio_rx_armed = false;
+	meshtastic_powermon_clear(MESHTASTIC_PM_LORA_RX);
+
+	ret = sx126x_reset_agc(mt.lora_dev);
+	if (ret < 0 && ret != -EBUSY) {
+		LOG_WRN("Periodic AGC reset failed (%d)", ret);
+	}
+
+	(void)mt_radio_arm_rx();
+
+	(void)k_sem_give(&mt_radio_sem);
+
+	(void)k_work_reschedule(&mt_agc_reset_work,
+				K_MSEC(CONFIG_MESHTASTIC_AGC_RESET_INTERVAL_MS));
+}
+
 /*
  * Disarm the DIO1 EXT1 wake before deep sleep. GPIO_INT_WAKEUP arms EXT1 whenever
  * CONFIG_PM || CONFIG_POWEROFF, so without this an incoming frame would also wake a
@@ -435,6 +546,12 @@ int meshtastic_radio_init(void)
 	mt_lora_cfg.tx_power = mt.tx_power;
 	mt_lora_cfg.tx = false;
 
+#if defined(CONFIG_LORA_SX126X)
+	/* Stage the config-derived RX gain override before the first
+	 * lora_config() call, which is what actually pushes it to the chip. */
+	(void)sx126x_set_rx_boosted_gain(mt.lora_dev, mt.rx_boosted_gain);
+#endif
+
 	ret = lora_config(mt.lora_dev, &mt_lora_cfg);
 	if (ret < 0) {
 		LOG_ERR("Initial lora_config failed (%d)", ret);
@@ -463,6 +580,10 @@ int meshtastic_radio_init(void)
 	(void)k_sem_take(&mt_radio_sem, K_FOREVER);
 	(void)mt_radio_arm_rx();
 	(void)k_sem_give(&mt_radio_sem);
+
+#if defined(CONFIG_LORA_SX126X)
+	(void)k_work_schedule(&mt_agc_reset_work, K_MSEC(CONFIG_MESHTASTIC_AGC_RESET_INTERVAL_MS));
+#endif
 
 	return 0;
 }

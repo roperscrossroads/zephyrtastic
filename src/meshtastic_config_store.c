@@ -461,6 +461,12 @@ static void seed_config_defaults(const struct meshtastic_config *cfg)
 	store.configs[idx].payload_variant.lora.hop_limit = mt.hop_limit;
 	store.configs[idx].payload_variant.lora.tx_enabled = true;
 	store.configs[idx].payload_variant.lora.tx_power = mt.tx_power;
+	/* Matches the reference's NodeDB.cpp default and this port's own prior
+	 * (hardcoded, unconditional) board devicetree default -- without this,
+	 * a fresh config would decode the field at its unset proto zero-value
+	 * (false) and a never-configured node would silently lose RX sensitivity
+	 * the moment the field actually starts being applied (G-2). */
+	store.configs[idx].payload_variant.lora.sx126x_rx_boosted_gain = true;
 
 	idx = index_for_config_tag(meshtastic_Config_bluetooth_tag);
 	store.configs[idx].payload_variant.bluetooth.enabled = IS_ENABLED(CONFIG_MESHTASTIC_BLE);
@@ -673,6 +679,8 @@ int meshtastic_config_store_apply_core(void)
 			(void)meshtastic_preset_to_params(lora.modem_preset, false, &mt.modem);
 		}
 	}
+
+	mt.rx_boosted_gain = lora.sx126x_rx_boosted_gain;
 
 	if (lora.override_frequency > 0.0f) {
 		uint32_t hz = (uint32_t)(lora.override_frequency * 1000000.0f);

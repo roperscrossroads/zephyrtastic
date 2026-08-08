@@ -1,0 +1,200 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+index b7df2d7..d699cbb 100644
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -731,6 +731,77 @@ static int sx126x_ensure_ready(const struct device *dev)
+ 	return 0;
+ }
+ 
++/*
++ * Diagnostic counters for the CAD (listen-before-talk) and AGC-reset
++ * mechanisms below. Plain module-scope counters, matching the existing
++ * sx126x_busy_streak precedent (sx126x_hal_common.c) rather than atomics --
++ * these are soak-test visibility, not synchronization state, and every
++ * increment site already runs under data->lock. Exported via plain accessor
++ * + reset functions in the same style as
++ * sx126x_hal_busy_timeout_streak()/_reset(), consumed by meshtastic_radio.c
++ * and surfaced on `meshtastic sched stats`.
++ */
++static uint32_t sx126x_cad_clear_count;
++static uint32_t sx126x_cad_busy_count;
++static uint32_t sx126x_cad_timeout_count;
++static uint32_t sx126x_cad_error_count;
++static uint32_t sx126x_agc_reset_ok_count;
++static uint32_t sx126x_agc_reset_fail_count;
++static uint32_t sx126x_agc_reset_skipped_count;
++static uint32_t sx126x_agc_patch_fail_count;
++
++uint32_t sx126x_cad_clear_count_get(void)
++{
++	return sx126x_cad_clear_count;
++}
++
++uint32_t sx126x_cad_busy_count_get(void)
++{
++	return sx126x_cad_busy_count;
++}
++
++uint32_t sx126x_cad_timeout_count_get(void)
++{
++	return sx126x_cad_timeout_count;
++}
++
++uint32_t sx126x_cad_error_count_get(void)
++{
++	return sx126x_cad_error_count;
++}
++
++uint32_t sx126x_agc_reset_ok_count_get(void)
++{
++	return sx126x_agc_reset_ok_count;
++}
++
++uint32_t sx126x_agc_reset_fail_count_get(void)
++{
++	return sx126x_agc_reset_fail_count;
++}
++
++uint32_t sx126x_agc_reset_skipped_count_get(void)
++{
++	return sx126x_agc_reset_skipped_count;
++}
++
++uint32_t sx126x_agc_patch_fail_count_get(void)
++{
++	return sx126x_agc_patch_fail_count;
++}
++
++void sx126x_cad_agc_stats_reset(void)
++{
++	sx126x_cad_clear_count = 0U;
++	sx126x_cad_busy_count = 0U;
++	sx126x_cad_timeout_count = 0U;
++	sx126x_cad_error_count = 0U;
++	sx126x_agc_reset_ok_count = 0U;
++	sx126x_agc_reset_fail_count = 0U;
++	sx126x_agc_reset_skipped_count = 0U;
++	sx126x_agc_patch_fail_count = 0U;
++}
++
+ /*
+  * Periodic AGC reset (parity: upstream Meshtastic RadioLibInterface::resetAGC(),
+  * called every AGC_RESET_INTERVAL_MS = 60s). Empirically necessary, not
+@@ -760,6 +831,7 @@ int sx126x_reset_agc(const struct device *dev)
+ 
+ 	if (atomic_get(&data->state) == SX126X_STATE_TX) {
+ 		k_mutex_unlock(&data->lock);
++		sx126x_agc_reset_skipped_count++;
+ 		return -EBUSY;
+ 	}
+ 
+@@ -784,12 +856,20 @@ int sx126x_reset_agc(const struct device *dev)
+ 	}
+ 	if (ret < 0) {
+ 		LOG_WRN("AGC reset: RX sensitivity patch re-apply failed (%d)", ret);
++		sx126x_agc_patch_fail_count++;
+ 		ret = 0;
+ 	}
+ 
+ out:
+ 	sx126x_set_sleep(dev);
+ 	k_mutex_unlock(&data->lock);
++
++	if (ret < 0) {
++		sx126x_agc_reset_fail_count++;
++	} else {
++		sx126x_agc_reset_ok_count++;
++	}
++
+ 	return ret;
+ }
+ 
+@@ -1164,33 +1244,54 @@ static int sx126x_do_cad(const struct device *dev, const struct lora_modem_confi
+ 	params[5] = 0U;
+ 	params[6] = 0U;
+ 
++	/* Disable the DIO1 edge callback for the duration of the CAD window --
++	 * mirrors sx126x_set_sleep()'s identical reasoning for its own
++	 * SPI-sensitive window. Without this, dio1_isr() fires on the same
++	 * CAD_DONE edge this function polls for and queues
++	 * sx126x_irq_work_handler() on the system workqueue -- which takes no
++	 * lock at all, so it can run concurrently with this function and clobber
++	 * the CAD-only DIO1 mask back to the standard TX/RX one before CAD_DONE
++	 * is ever observed here, or race the IRQ-status read/clear below.
++	 * Observed on hardware 2026-08-06: one -ETIMEDOUT per node on the very
++	 * first TX after boot (a stale queued irq_work item from the boot-time
++	 * mode transition was the likely trigger), self-recovering after and not
++	 * recurring -- consistent with a narrow, rare boot-time race rather than
++	 * a persistent one, but a real race regardless of how often it loses. */
++	ret = sx126x_hal_set_dio1_callback(dev, NULL);
++	if (ret < 0) {
++		sx126x_cad_error_count++;
++		return ret;
++	}
++
+ 	ret = sx126x_hal_write_cmd(dev, SX126X_CMD_SET_CAD_PARAMS, params, sizeof(params));
+ 	if (ret < 0) {
+-		return ret;
++		goto restore_mask;
+ 	}
+ 
+ 	ret = sx126x_set_dio_irq_params(
+ 		dev, SX126X_IRQ_CAD_DONE | SX126X_IRQ_CAD_ACTIVITY_DETECTED,
+ 		SX126X_IRQ_CAD_DONE | SX126X_IRQ_CAD_ACTIVITY_DETECTED, 0, 0);
+ 	if (ret < 0) {
+-		return ret;
++		goto restore_mask;
+ 	}
+ 
+ 	ret = sx126x_clear_irq_status(dev, SX126X_IRQ_ALL);
+ 	if (ret < 0) {
+-		return ret;
++		goto restore_mask;
+ 	}
+ 
+ 	ret = sx126x_hal_write_cmd(dev, SX126X_CMD_SET_CAD, NULL, 0);
+ 	if (ret < 0) {
+-		return ret;
++		goto restore_mask;
+ 	}
+ 
+ 	/* Poll DIO1 directly rather than routing through the IRQ+workqueue
+ 	 * pipeline: CAD is a short, synchronous, blocking check that runs
+ 	 * inline before a TX, not an async operation needing its own
+ 	 * completion callback (mirrors sx126x_poll_dio1()'s direct GPIO read,
+-	 * and RadioLib's own scanChannel(), a plain digitalRead() loop). */
++	 * and RadioLib's own scanChannel(), a plain digitalRead() loop). The
++	 * DIO1 callback is disabled for this whole window (above), so there is
++	 * no concurrent consumer of the pin/IRQ-status register to race. */
+ 	deadline = k_uptime_get() + SX126X_CAD_TIMEOUT_MS;
+ 	while (gpio_pin_get_dt(&hal_config->dio1) == 0) {
+ 		if (k_uptime_get() >= deadline) {
+@@ -1215,11 +1316,27 @@ restore_mask:
+ 					  SX126X_IRQ_RX_TX_TIMEOUT | SX126X_IRQ_CRC_ERR,
+ 				  0, 0);
+ 
++	/* Re-enable unconditionally, mirroring sx126x_ensure_ready()'s own
++	 * re-enable after sx126x_set_sleep() -- every path from here on
++	 * (SetTx next, or back to continuous RX) needs a live DIO1 callback. */
++	(void)sx126x_hal_set_dio1_callback(dev, sx126x_dio1_callback);
++
+ 	if (ret < 0) {
++		if (ret == -ETIMEDOUT) {
++			sx126x_cad_timeout_count++;
++		} else {
++			sx126x_cad_error_count++;
++		}
+ 		return ret;
+ 	}
+ 
+-	return (status & SX126X_IRQ_CAD_ACTIVITY_DETECTED) ? -EBUSY : 0;
++	if (status & SX126X_IRQ_CAD_ACTIVITY_DETECTED) {
++		sx126x_cad_busy_count++;
++		return -EBUSY;
++	}
++
++	sx126x_cad_clear_count++;
++	return 0;
+ }
+ 
+ static int sx126x_lora_send_async(const struct device *dev,

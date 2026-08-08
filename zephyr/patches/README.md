@@ -30,6 +30,36 @@ The `sha256sum` in `patches.yml` must match the file, or `west patch apply`
 refuses it. Verify a patch matches the current tree without a destructive
 clean/apply cycle: `cd zephyr && git apply --reverse --check ../main/zephyr/patches/<file>`.
 
+**If any of `<files>` already has an earlier carried patch applied** (check
+`grep -l <file> *.patch` in this dir first), a plain `git diff <files>` is
+**wrong** — it captures the earlier patch's content *and* the new change
+merged into one diff, which then double-applies (or conflicts) when
+`west patch apply` tries to layer it on top of the already-applied earlier
+patch. `zephyr/`'s working tree has no commit boundary between "pristine",
+"pristine + earlier patches", and "+ your new edit" to diff against directly
+— reconstruct the middle state instead (found the hard way writing 0005,
+which touched files 0002/0003/0004 already covered):
+
+```bash
+# 1. Pristine copies of just the files you touched, at the pinned commit
+#    (git -C zephyr log -1 -- <file>, or the version twister prints).
+git -C zephyr show <pinned-sha>:<path> > /tmp/a/<path>   # per file
+
+# 2. Apply every EARLIER patch touching those files, in patch-number order
+#    (grep -l <file> main/zephyr/patches/*.patch to find which ones)
+cd /tmp/a && patch -p1 < .../000N-earlier.patch   # repeat per earlier patch
+
+# 3. Diff the reconstructed baseline against the CURRENT live file -- this
+#    isolates exactly your new change, nothing from the earlier patches
+git diff --no-index --src-prefix= --dst-prefix= /tmp/a/<path> zephyr/<path>
+
+# 4. Sanity-check before trusting it: does the new patch apply cleanly on a
+#    freshly-reconstructed pristine+earlier-patches tree, and does the
+#    result match the live working tree byte-for-byte?
+```
+Files with no earlier patch (check the same `grep -l`) need none of this —
+a plain `git diff <file>` is already exactly right for those.
+
 ## Current patches
 
 ### 0001-adc-esp32-skip-disruptive-gpio-disconnect.patch
@@ -140,4 +170,121 @@ radio (BUSY stuck) is bounded to a few seconds instead of hanging forever. The a
 
 `upstreamable: true` — generic driver-correctness fixes, no board coupling.
 
-`upstreamable: true` — a generic driver-correctness fix, no board coupling.
+### 0005-sx126x-cad-pa-clamp-agc-reset-rx-boost.patch
+
+Four radio-reliability fixes, found auditing this driver against upstream
+Meshtastic/RadioLib **source** rather than re-reading the datasheet in
+isolation. Each closes a gap where the driver's config *looked* correct but
+was silently a no-op or missing entirely.
+
+**(1) CAD** (`sx126x_do_cad`, wired into `sx126x_lora_send_async` before
+`SetTx`). The driver's `lora_modem_config.cad.mode = LORA_CAD_MODE_LBT`
+contract ("`lora_send()` performs CAD before transmitting and returns
+`-EBUSY` if the channel is busy") was accepted but never implemented — the
+app (`meshtastic_radio.c`) had been setting `cad.mode = LBT` believing it got
+real hardware listen-before-talk; every TX actually went out with **zero**
+channel sensing. Implements the real `SetCadParams(0x88)`/`SetCad(0xC5)`
+sequence with `CAD_DONE`/`CAD_ACTIVITY_DETECTED` IRQ handling — polling DIO1
+directly (matching RadioLib's own `scanChannel()`) rather than the async
+IRQ+workqueue pipeline, since this is a short, synchronous, inline check, not
+an operation needing its own completion callback. Auto-derived parameters
+(`symbol_num`/`detection_peak`/`detection_minimum = 0`) resolve to RadioLib's
+own SX1262 defaults — confirmed against RadioLib source 2026-08-06, not
+assumed: 4-symbol window, `detPeak = spreadingFactor + 13` (SF-dependent),
+`detMin = 10`, always exits to `STDBY_RC`. Restores the driver's standard
+TX/RX/timeout/CRC-err DIO1 mask afterward regardless of result — `SetCadParams`
+own IRQ config otherwise displaces it, and the subsequent `SetTx`'s `TX_DONE`
+IRQ depends on it.
+
+**(2) PA-clamping errata fix** (`sx126x_hal_fix_pa_clamping`, `sx126x_hal.c`).
+The SX1262/SX1268 datasheet (ch. 15 "Known Limitations" §15.2) documents an
+overly-eager PA over-current clamp that silently caps actual TX power below
+what's configured — worse at high power / antenna mismatch, no error raised
+anywhere. RadioLib applies this unconditionally for every SX1262
+(`fixPaClamping()`). This exact fix **already existed** in this same driver
+tree's STM32WL HAL variant (`sx126x_hal_stm32wl.c`) but was never ported to
+the discrete-chip path Heltec V4 and similar boards actually use.
+
+**(3) Periodic AGC reset** (`sx126x_reset_agc` + a `meshtastic_radio.c`
+timer, 60 s default via new `CONFIG_MESHTASTIC_AGC_RESET_INTERVAL_MS`).
+Upstream Meshtastic runs this every `AGC_RESET_INTERVAL_MS` because — per
+upstream's own commit history — the SX126x's internal AGC can get stuck and
+RX sensitivity silently degrades, never recovering until reboot. A plain
+standby cycle does not reset it; only a warm-sleep power-cycle does, which
+this driver already had via `sx126x_set_sleep()`/`sx126x_ensure_ready()`
+(`SLEEP_WARM_START` retains config, so this is cheap) — just never invoked
+for this purpose. Also re-applies the RX-sensitivity register patch (`0x8B5`
+bit 0) upstream sets alongside its own reset. The app owns pausing/resuming
+continuous async RX around the chip-level cycle, the same pattern already
+used around a TX.
+
+**(4) RX-boosted-gain runtime control** (`sx126x_set_rx_boosted_gain`). The
+driver only ever read the devicetree `rx-boosted` default
+(`hal_config->rx_boosted`); `config.lora.sx126x_rx_boosted_gain` — a real,
+phone-app-settable proto field, present in this port's `config.proto` but
+never read anywhere in the app layer either — had no effect whatsoever.
+Fixed at both ends: the app now reads it (`meshtastic_config_store.c`) and
+pushes it at boot (`meshtastic_radio_init`; a LoRaConfig change already
+requires a reboot to take effect, so no live-apply path is needed); the
+driver now tracks it in persistent runtime state (`data->rx_boosted`) rather
+than the devicetree constant, since `sx126x_lora_config()` re-applies
+whichever one is the source of truth on **every** call (before every TX) — a
+one-shot override without this would have been silently clobbered back on
+the very next transmit.
+
+> **Verified:** 220/220 native_sim protocol tests green (unaffected, as
+> expected — native_sim doesn't compile this driver); real ESP32-S3 builds
+> for both `heltec-v4` and `heltec-v4r8` (`v4-unified` profile) succeed
+> cleanly with zero warnings in any changed file. **Not yet verified on-air**
+> — CAD/AGC/PA-clamp/RX-boost all need real RF to prove out (`native_sim` has
+> no PHY).
+
+`upstreamable: true` — all four are generic driver-correctness/completeness
+fixes citing upstream RadioLib/Meshtastic source and the Semtech datasheet,
+no board-specific coupling.
+
+### 0006-sx126x-cad-agc-diagnostic-counters.patch
+
+Diagnostic counters for the CAD and periodic AGC-reset mechanisms 0005
+added, requested for the live bench soak of 0005 itself — there was
+previously no way to answer "how often does CAD find the channel busy, has
+the DIO1/irq_work timeout race recurred, has AGC-reset ever failed" except
+grepping node logs by hand.
+
+Eight module-scope `uint32_t` counters (`sx126x.c`), matching the existing
+`sx126x_busy_streak` precedent (`sx126x_hal_common.c`) rather than atomics —
+every increment site already runs under `data->lock`, and these are
+soak-test visibility, not synchronization state:
+
+- `cad_clear` / `cad_busy` / `cad_timeout` / `cad_error` — `sx126x_do_cad()`'s
+  four possible outcomes, incremented at its single classification point
+  (channel clear, activity detected, DIO1 poll timeout — the exact symptom
+  0005's own fix closed, kept counted specifically to watch for recurrence —
+  or an SPI/comms error before CAD completed).
+- `agc_reset_ok` / `agc_reset_fail` / `agc_reset_skipped` / `agc_patch_fail`
+  — `sx126x_reset_agc()`'s outcomes: skipped means a TX was already in
+  flight (not a failure, matching how the caller already treats it as
+  benign); patch-fail is the sensitivity-register-patch soft-failure that
+  0005 already logs a warning for and swallows — now also counted, since
+  "ok" still increments alongside it (the core cycle did succeed).
+
+Exported via plain accessor + reset functions (`sx126x_*_count_get()`,
+`sx126x_cad_agc_stats_reset()`), in the same style as
+`sx126x_hal_busy_timeout_streak()`/`_reset()`. Wired through a
+`CONFIG_LORA_SX126X`-gated chip-agnostic wrapper in `meshtastic_radio.c`
+(`meshtastic_radio_cad_clear_count()` etc. — a build without this radio
+reads a flat 0 rather than needing its own guard), surfaced as two new
+lines on `meshtastic sched stats` and reset by `sched stats reset`
+alongside the existing counters.
+
+> **Verified:** 220/220 native_sim protocol tests green (these counters are
+> inert there — `CONFIG_LORA_SX126X` unset, wrapper reads back 0); real
+> ESP32-S3 builds for both `heltec-v4` and `heltec-v4r8` succeed cleanly with
+> zero warnings; live-queried via `meshtastic sched stats` over telnet on all
+> three bench nodes post-flash — CAD/AGC counts increment correctly,
+> `sched stats reset` zeroes them correctly.
+
+`upstreamable: false` — these counters and their shell surface are specific
+to 0005's own CAD/AGC-reset implementation, which itself isn't upstream
+(upstream Meshtastic runs on RadioLib against a different driver entirely;
+there's no equivalent counter surface to align with).
