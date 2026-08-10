@@ -1,0 +1,35 @@
+/*
+ * Give uart0 (the header-pin UART, GPIO43/44 -- separate from the
+ * native-USB console/shell on &usb_serial) a second interactive shell
+ * instance, doubling as its log backend. uart0 is already `status = "okay"`
+ * on this board and otherwise unused by the default v4-unified profile
+ * (it's only claimed by CONFIG_MESHTASTIC_SERIAL / overlay-serial-local.conf
+ * -- the netserial variant -- which is NOT part of this build; this
+ * board-scoped overlay applies regardless of variant, so a V4 netserial
+ * build would need to disable CONFIG_MESHTASTIC_SHELL_UART0 to avoid two
+ * consumers fighting over the same physical UART).
+ *
+ * Added 2026-08-09: the native USB-CDC console has proven unreliable for
+ * capturing early boot output under WSL2's USB passthrough (drops under
+ * load, and cat/pyserial sessions have intermittently lost the connection
+ * mid-boot) -- see docs/KNOWN-ISSUES.md and the friction log. A dedicated
+ * FTDI-TTL cable on the uart0 header pins sidesteps all of that.
+ *
+ * First cut (same day) used a log-only backend (CONFIG_LOG_BACKEND_UART +
+ * a `zephyr,log-uart` chosen node) instead of a shell. Replaced by this
+ * shell instance because a real interactive shell was wanted here too, and
+ * a plain log backend can't share the peripheral with one: log_backend_uart.c
+ * writes via uart_poll_out() (synchronous polling), while the shell
+ * transport (shell_uart.c) drives the same UART via uart_irq_tx_enable() /
+ * uart_fifo_fill() (interrupt-driven) -- mixing the two access patterns on
+ * one physical UART is not something Zephyr's driver model arbitrates
+ * safely. A shell instance's own log_backend=true parameter (see
+ * meshtastic_shell_uart0.c) already gives full log output through the same,
+ * single, interrupt-driven owner, so the separate log-only backend is gone.
+ */
+
+/ {
+	chosen {
+		zephyr,meshtastic-shell-uart0 = &uart0;
+	};
+};

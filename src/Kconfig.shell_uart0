@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_SHELL_UART0
+	bool "Second interactive shell instance on the uart0 chosen node"
+	default y
+	depends on SHELL
+	help
+	  Register a second shell instance (transport: shell_uart.c, the same
+	  code the primary native-USB console shell already uses) bound to
+	  whichever device a board overlay names via the
+	  `zephyr,meshtastic-shell-uart0` chosen node -- currently just
+	  heltec_wifi_lora32_v4's uart0 (the header-pin UART, GPIO43/44). Boards
+	  without that chosen node compile this to nothing (see
+	  meshtastic_shell_uart0.c).
+
+	  Gives the header-pin UART both a full interactive shell (same command
+	  tree as the native-USB console and telnet) and log output (via the
+	  shell's own log_backend=true registration) through one owner, on
+	  hardware that's proven immune to the native USB-CDC console's
+	  WSL2-passthrough flakiness (drops under load, lost connections
+	  mid-boot -- see docs/KNOWN-ISSUES.md and the friction log) and to the
+	  telnet shell's single-client + PM-doze limitations.
+
+	  Superseded the same day: a first cut used a log-only backend
+	  (CONFIG_LOG_BACKEND_UART) instead. That can't safely coexist with an
+	  interactive shell on the same physical UART -- log_backend_uart.c
+	  writes via synchronous uart_poll_out(), while the shell transport
+	  drives the UART via interrupt-driven uart_irq_tx_enable() /
+	  uart_fifo_fill(); mixing the two access patterns on one UART isn't
+	  something Zephyr's driver model arbitrates. This shell instance's own
+	  log backend replaces that mechanism outright, matching how the
+	  existing native-USB and telnet shells already double as their own log
+	  backends. See docs/uart0-console-investigation.md.
