@@ -1,0 +1,32 @@
+diff --git a/drivers/watchdog/wdt_esp32.c b/drivers/watchdog/wdt_esp32.c
+index bab133c73b..c13b6b82d8 100644
+--- a/drivers/watchdog/wdt_esp32.c
++++ b/drivers/watchdog/wdt_esp32.c
+@@ -22,6 +22,7 @@
+ #include <zephyr/drivers/clock_control.h>
+ #include <zephyr/drivers/interrupt_controller/intc_esp32.h>
+ #include <zephyr/device.h>
++#include <zephyr/sys/clock.h>
+ 
+ #if CONFIG_ESP32_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP && SOC_MWDT_SUPPORT_SLEEP_RETENTION
+ #define WDT_SLEEP_RETENTION_ENABLED 1
+@@ -128,7 +129,18 @@ static int wdt_esp32_install_timeout(const struct device *dev,
+ 		return -EINVAL;
+ 	}
+ 
+-	data->timeout = cfg->window.max;
++	/*
++	 * window.max is milliseconds (see struct wdt_timeout_cfg), but
++	 * wdt_hal_config_stage() takes MWDT ticks. MWDT_TICK_PRESCALER above is
++	 * the vendor's pre-calculated prescaler for a MWDT_TICKS_PER_US-microsecond
++	 * tick, so convert rather than passing milliseconds as if they were ticks
++	 * -- which made every timeout MWDT_TICKS_PER_US/1000 of what the caller
++	 * asked for (a factor of two at the current 500 us tick).
++	 *
++	 * 64-bit intermediate so a large-but-legal millisecond timeout cannot
++	 * overflow the multiply before the divide.
++	 */
++	data->timeout = (uint32_t)(((uint64_t)cfg->window.max * USEC_PER_MSEC) / MWDT_TICKS_PER_US);
+ 	data->callback = cfg->callback;
+ 
+ 	/* Set mode of watchdog and callback */

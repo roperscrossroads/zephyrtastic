@@ -234,3 +234,53 @@ patches:
       zero warnings; live-queried via `meshtastic sched stats` over telnet on
       all three bench nodes post-flash -- CAD/AGC counts increment correctly,
       `sched stats reset` zeroes them correctly.
+  - path: 0007-wdt-esp32-convert-timeout-ms-to-mwdt-ticks.patch
+    sha256sum: 5a5754bb6bf6df65babae59308208ccdc1577ebbfb13cd7cfbaf79bf24f544b4
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-08-10"
+    upstreamable: true
+    comments: |
+      wdt_esp32: convert window.max from milliseconds to MWDT ticks. Zephyr's
+      watchdog API documents struct wdt_timeout_cfg's window.max in
+      milliseconds, but wdt_esp32_install_timeout() stored it verbatim and
+      wdt_esp32_set_config() passed it straight to wdt_hal_config_stage(),
+      which takes ticks. The driver's own MWDT_TICK_PRESCALER (40000) is the
+      vendor's pre-calculated prescaler for a 500 us tick -- and the file
+      already carried the matching `#define MWDT_TICKS_PER_US 500`, defined
+      and never used. So every timeout came out at half the requested value,
+      on every ESP32 SoC this driver serves.
+
+      Found via subsys/task_wdt's hardware fallback, where the error is
+      unusually dangerous: task_wdt sizes the hardware timeout as
+      CONFIG_TASK_WDT_MIN_TIMEOUT + CONFIG_TASK_WDT_HW_FALLBACK_DELAY and
+      feeds it from a background channel whose period is MIN_TIMEOUT, so the
+      whole safety margin is HW_FALLBACK_DELAY. Halving the deadline eats the
+      margin from the wrong end: at MIN_TIMEOUT=10000 with the Kconfig-default
+      DELAY of 20, the MWDT's stage 0 (interrupt) landed at 5.01 s and stage 1
+      (SoC reset) at 10.02 s against a 10.00 s feed -- 20 ms of margin, i.e.
+      a single late k_timer expiry resets the SoC. Observed on Heltec V4 /
+      V4-R8 (ESP32-S3) bench nodes as repeated resets with WATCHDOG cause and
+      no software fault, plus a stage-0 interrupt firing in 100% of sampled
+      windows.
+
+      Fix mirrors ESP-IDF's own conversion (esp_task_wdt.c does the same
+      ms -> ticks arithmetic against the same two constants), with a 64-bit
+      intermediate so a large-but-legal millisecond timeout cannot overflow
+      the multiply. zephyr/sys/clock.h is included explicitly for
+      USEC_PER_MSEC rather than relied on transitively.
+
+      Verified: 220/220 native_sim tests green (inert there -- native_sim has
+      no MWDT); both ESP32-S3 board builds link clean; and on Heltec V4 +
+      V4-R8 bench nodes the stage-0 interrupt count reads zero across sampled
+      heartbeat windows with the task_wdt values restored to plain
+      milliseconds, where the pre-fix configuration fired in 100% of them.
+
+      Note on that last figure: pre-fix, stage 0 firing was arithmetic rather
+      than jitter -- a 5.01 s halved deadline against a 10 s feed period can
+      never be fed in time -- so it demonstrates the halving, not the margin.
+      The margin claim rests on the arithmetic: stage 1 at 10.02 s against a
+      10.00 s feed leaves 20 ms. The stage-0 timing has NOT been measured
+      directly against a stopped feed; that would need a deliberate
+      feed-starvation test.
