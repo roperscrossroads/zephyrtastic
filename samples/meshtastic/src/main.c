@@ -84,11 +84,31 @@ static void log_reset_cause_line(const char *prefix, uint32_t boot_num, uint32_t
 		(cause & RESET_BROWNOUT) ? " BROWNOUT" : "");
 }
 
+static const char *fatal_reason_name(uint32_t reason)
+{
+	switch (reason) {
+	case K_ERR_CPU_EXCEPTION:
+		return "CPU exception";
+	case K_ERR_SPURIOUS_IRQ:
+		return "unhandled interrupt";
+	case K_ERR_STACK_CHK_FAIL:
+		return "stack overflow";
+	case K_ERR_KERNEL_OOPS:
+		return "kernel oops";
+	case K_ERR_KERNEL_PANIC:
+		return "kernel panic";
+	default:
+		return "unknown";
+	}
+}
+
 static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 				  struct net_if *iface)
 {
 	static bool logged;
-	struct meshtastic_watchdog_crash_info crash;
+	struct meshtastic_watchdog_crash_info wdt_crash;
+	struct meshtastic_hw_watchdog_crash_info hw_wdt_crash;
+	struct meshtastic_fatal_crash_info fatal_crash;
 	uint32_t i;
 
 	ARG_UNUSED(cb);
@@ -113,11 +133,34 @@ static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mg
 	 * this fills in what the bare cause code above can't -- see
 	 * meshtastic_watchdog_take_last_crash() for why RTC-persistent memory
 	 * rather than the coredump/log path. One-shot: reported here, then gone. */
-	if (meshtastic_watchdog_take_last_crash(&crash)) {
-		LOG_INF("Watchdog crash info: %u ms since last check-in, heap free=%u "
-			"allocated=%u max_allocated=%u, interrupted thread \"%s\"",
-			crash.since_checkin_ms, crash.heap_free, crash.heap_allocated,
-			crash.heap_max_allocated, crash.thread_name);
+	if (meshtastic_watchdog_take_last_crash(&wdt_crash)) {
+		LOG_INF("Watchdog crash info: channel \"%s\" timed out, heap free=%u "
+			"allocated=%u max_allocated=%u, running thread \"%s\"",
+			wdt_crash.channel, wdt_crash.heap_free, wdt_crash.heap_allocated,
+			wdt_crash.heap_max_allocated, wdt_crash.thread_name);
+	}
+
+	/* Same idea, for the last-resort hardware-ISR path: fires independently
+	 * of the scheduler, so a breadcrumb here with NO corresponding entry
+	 * above means task_wdt's own software channel timeout never got a
+	 * chance to run at all -- the scheduler itself was unresponsive, a
+	 * strictly more severe condition than any single channel going unfed.
+	 * See meshtastic_watchdog.c's hw_wdt_stage0_callback(). */
+	if (meshtastic_hw_watchdog_take_last_crash(&hw_wdt_crash)) {
+		LOG_INF("HW watchdog crash info (scheduler-independent path): uptime=%u ms, "
+			"running thread \"%s\"",
+			hw_wdt_crash.uptime_ms, hw_wdt_crash.thread_name);
+	}
+
+	/* Same idea, for the other crash path: a genuine software-detected fault
+	 * (assert, stack-canary failure, CPU exception) reaching
+	 * k_sys_fatal_error_handler() -- see meshtastic_fatal.c. */
+	if (meshtastic_fatal_take_last_crash(&fatal_crash)) {
+		LOG_INF("Fatal error crash info: %s (%u), heap free=%u allocated=%u "
+			"max_allocated=%u, faulting thread \"%s\"",
+			fatal_reason_name(fatal_crash.reason), fatal_crash.reason,
+			fatal_crash.heap_free, fatal_crash.heap_allocated,
+			fatal_crash.heap_max_allocated, fatal_crash.thread_name);
 	}
 }
 

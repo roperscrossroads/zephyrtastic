@@ -1,16 +1,25 @@
 # SPDX-License-Identifier: GPL-3.0
 
 config MESHTASTIC_WATCHDOG
-	bool "Hardware watchdog (force-reset a wedged system)"
+	bool "Task-level software watchdog (force-reset a wedged system)"
 	default y
 	select WATCHDOG
+	select TASK_WDT
 	help
-	  Arms the SoC's hardware watchdog timer (wdt0) at boot and feeds it
-	  periodically, but ONLY while meshtastic_watchdog_checkin() keeps landing
-	  (wired to meshtastic_powermon_set(), which fires on every LoRa TX/RX
-	  power-state transition — driven both by real RF activity and by the
-	  unconditional periodic AGC-reset timer, so it ticks at least once every
-	  CONFIG_MESHTASTIC_AGC_RESET_INTERVAL_MS regardless of mesh traffic).
+	  Uses Zephyr's task_wdt (subsys/task_wdt) -- independent channels per
+	  subsystem, each fed on its own schedule, with the SoC's hardware
+	  watchdog timer (wdt0) wired as task_wdt's own fallback in case the
+	  software layer itself wedges. Two channels today:
+	    - "radio": fed by meshtastic_watchdog_checkin(), wired to
+	      meshtastic_powermon_set() -- every LoRa TX/RX power-state
+	      transition, plus the unconditional periodic AGC-reset timer, so it
+	      ticks at least once every CONFIG_MESHTASTIC_AGC_RESET_INTERVAL_MS
+	      regardless of mesh traffic.
+	    - "sysworkq": fed by a periodic work item on the system workqueue,
+	      independently of the radio -- catches a hang in that thread even
+	      if the radio subsystem keeps ticking fine (a lot of Zephyr's own
+	      net/mgmt glue also dispatches through the system workqueue, so
+	      this indirectly covers more than its name alone suggests).
 
 	  This exists for a specific, observed gap: every silent-hang outage seen
 	  on the bench (a node goes dark with zero log activity, no assert, no
@@ -18,31 +27,43 @@ config MESHTASTIC_WATCHDOG
 	  CONFIG_DEBUG_COREDUMP/CONFIG_RESET_ON_FATAL_ERROR to catch, because
 	  those only fire on a software fault Zephyr's own detection can see (a
 	  CPU exception, an assert, a stack overflow). A watchdog doesn't care
-	  *why* the radio-power-state machine stopped ticking, only that it did —
-	  so it catches the class of hang nothing else here can, at the cost of
-	  turning "dead until someone finds it and power-cycles it" into
-	  "auto-recovers within one timeout window."
+	  *why* a channel stopped ticking, only that it did — so it catches the
+	  class of hang nothing else here can, at the cost of turning "dead
+	  until someone finds it and power-cycles it" into "auto-recovers
+	  within one timeout window," and now tells you *which* channel went
+	  quiet rather than just "something did."
 
 if MESHTASTIC_WATCHDOG
 
 config MESHTASTIC_WATCHDOG_TIMEOUT_MS
-	int "Watchdog timeout (ms)"
+	int "Per-channel watchdog timeout (ms)"
 	default 180000
 	range 60000 600000
 	help
-	  How long without a check-in before the hardware forces a reset. Set
-	  generously above the guaranteed once-per-AGC-reset-interval tick
-	  (default 60 s) to leave real margin for scheduling jitter, PM
-	  light-sleep wake latency, or a legitimately slow admin/OTA operation —
-	  this is a last-resort backstop, not a tight liveness probe.
+	  How long a channel can go unfed before its timeout callback fires
+	  (writes the RTC crash breadcrumb, then reboots). Both channels share
+	  this value. Set generously above the guaranteed once-per-AGC-reset-
+	  interval tick (default 60 s) to leave real margin for scheduling
+	  jitter, PM light-sleep wake latency, or a legitimately slow admin/OTA
+	  operation — this is a last-resort backstop, not a tight liveness
+	  probe.
+
+	  Deliberately a different number from CONFIG_TASK_WDT_MIN_TIMEOUT
+	  (which sizes the underlying *hardware* watchdog's own timeout, and is
+	  capped at 10 s by its own Kconfig range) -- that's correct, not a
+	  mismatch to fix: it gives the hardware fallback a much tighter trigger
+	  than any one channel's own grace period, in case the software task_wdt
+	  layer itself wedges.
 
 config MESHTASTIC_WATCHDOG_FEED_INTERVAL_MS
-	int "Watchdog feed-check interval (ms)"
+	int "sysworkq heartbeat interval (ms)"
 	default 30000
 	range 5000 60000
 	help
-	  How often the feed worker wakes up to decide whether to feed the
-	  watchdog. Must be well under the timeout (several checks per window)
-	  so a hang is caught within roughly one timeout period, not two.
+	  How often the "sysworkq" channel's heartbeat work item runs — it feeds
+	  that channel, logs system-heap stats, and refreshes the CAD/AGC
+	  statistics mirror (see meshtastic_watchdog.c). Must be well under
+	  MESHTASTIC_WATCHDOG_TIMEOUT_MS (several beats per window) so a hang is
+	  caught within roughly one timeout period, not two.
 
 endif # MESHTASTIC_WATCHDOG

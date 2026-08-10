@@ -16,17 +16,18 @@
 #if defined(CONFIG_MESHTASTIC_WATCHDOG)
 
 /**
- * Arm the hardware watchdog and start the periodic feed worker. Safe to call
- * once at boot; if the board has no wdt0 alias, logs a warning and continues
- * without one rather than failing boot.
+ * Arm the task watchdog (radio + sysworkq channels) and the hardware
+ * watchdog wired as its fallback. Safe to call once at boot; if the board
+ * has no wdt0 alias, logs a warning and continues without one rather than
+ * failing boot.
  */
 void meshtastic_watchdog_init(void);
 
 /**
- * Record "the system is alive" right now. The feed worker only feeds the
- * watchdog if a check-in landed recently enough; otherwise it lets the
- * timeout run out. Cheap enough to call from any thread context that already
- * has a natural periodic pulse — see meshtastic_powermon_set()'s call site.
+ * Record "the radio subsystem is alive" right now — feeds the "radio"
+ * task_wdt channel immediately (no deferred decision). Thread context only
+ * (task_wdt_feed() is not ISR-safe) — see meshtastic_powermon_set()'s call
+ * site, the only caller today.
  */
 void meshtastic_watchdog_checkin(void);
 
