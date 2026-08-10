@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_THREAD_SUMMARY
+	bool "Periodic condensed per-thread stack/CPU summary"
+	default y
+	depends on THREAD_ANALYZER
+	help
+	  Own periodic thread that calls the same public thread_analyzer_run()
+	  API upstream's CONFIG_THREAD_ANALYZER_AUTO uses, but with a condensed
+	  callback: batches 3 threads per LOG_INF line ("name stack%/cpu%"
+	  triplets) instead of upstream's own two-lines-per-thread format
+	  (a "STACK: ..." line and a separate "Total CPU cycles used: ..."
+	  line for every thread).
+
+	  Exists because CONFIG_THREAD_ANALYZER_AUTO's built-in dump -- left
+	  as CONFIG_THREAD_ANALYZER_AUTO=y in prj.conf until 2026-08-09 -- is
+	  genuinely large: ~29 threads on this build (see `kernel thread
+	  stacks`) x 2 lines = ~58 near-simultaneous LOG_INF calls every
+	  interval, which regularly overran the deferred-log ring buffer
+	  ("--- N messages dropped ---" in the console/netlog output). This
+	  reports the same two numbers that actually flag a problem at a
+	  glance -- a climbing stack% signals encroaching overflow risk (the
+	  same class of near-miss STABILITY-2, 2026-08-05, caught); a stuck-
+	  high cpu% signals a runaway or starved thread -- and drops the
+	  absolute cycles-used counter, which isn't actionable without a
+	  second reading to diff against anyway.
+
+	  Mutually exclusive with CONFIG_THREAD_ANALYZER_AUTO in spirit (both
+	  can technically be on at once, but that just doubles the reporting
+	  this exists to reduce) -- prj.conf leaves AUTO off by default now.
+
+if MESHTASTIC_THREAD_SUMMARY
+
+config MESHTASTIC_THREAD_SUMMARY_INTERVAL
+	int "Interval between summaries (seconds)"
+	default 300
+	help
+	  Matches the interval CONFIG_THREAD_ANALYZER_AUTO_INTERVAL used to be
+	  set to here (5 min) -- enough to catch a trend without spamming.
+
+config MESHTASTIC_THREAD_SUMMARY_STACK_SIZE
+	int "Stack size for the summary thread"
+	default 2048
+	help
+	  Matches the stack size CONFIG_THREAD_ANALYZER_AUTO_STACK_SIZE used
+	  to be set to here -- this thread walks and formats every other
+	  thread's info, doubled from the Zephyr default during an earlier
+	  soak that measured this exact job as the tightest margin on the
+	  bench (STABILITY-2 investigation, 2026-08-05).
+
+endif # MESHTASTIC_THREAD_SUMMARY

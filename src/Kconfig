@@ -112,6 +112,7 @@ rsource "Kconfig.ota"
 rsource "Kconfig.display"
 rsource "Kconfig.powermon"
 rsource "Kconfig.watchdog"
+rsource "Kconfig.thread_summary"
 rsource "Kconfig.power"
 
 menu "LoRa transmit retry"
