@@ -56,11 +56,20 @@ real headroom — it just cannot absorb the things `dram0_0_seg` is short of.
 
 - **Static (link-time):** what the linker reserves in `dram0_0_seg` — the 92.39%
   figure. `.bss` / `.noinit` / `.data`. This is what makes an image *fit*.
-- **Runtime (heap):** `kheap__system_heap` (`CONFIG_HEAP_MEM_POOL_SIZE`, ~55 KB)
-  is itself a static reservation, but it is *consumed* at runtime by BT, WiFi,
-  mbedTLS, and now our dynamic stacks. Freeing memory *to the heap* (e.g. lever
-  #1) doesn't shrink the static image; it relieves runtime pressure and can
-  enable a smaller static heap.
+- **Runtime (heap):** `kheap__system_heap` (`CONFIG_HEAP_MEM_POOL_SIZE`, 49,152 B
+  as currently set in `overlay-v4-unified.conf`, ~49.2 KB measured with `k_heap`
+  overhead) is itself a static reservation, but it is *consumed* at runtime by
+  BT (BLE-mode only, `CONFIG_ESP_BT_HEAP_SYSTEM`), the WiFi/HAL blob's
+  `heap_caps_malloc()` calls (routed straight to `k_malloc` on this port
+  regardless of the `caps` bitfield requested — ~25 KB observed even with
+  `CONFIG_ESP_WIFI_HEAP_SPIRAM=y`, see the CFB-heap note below), and our own
+  dynamic TCP thread stack. **Correction, 2026-08-09:** mbedTLS does *not*
+  compete for this heap in the current config — `CONFIG_MBEDTLS_ENABLE_HEAP` is
+  unset, so `mbedtls_calloc`/`free` resolve to plain libc `calloc`/`free`,
+  which draw from a *separate* ~90 KB Picolibc heap arena (`z_malloc_heap`,
+  sized from the linker's `_end` to `_heap_sentry`), not `_system_heap`. Freeing
+  memory *to the heap* (e.g. lever #1) doesn't shrink the static image; it
+  relieves runtime pressure and can enable a smaller static heap.
 
 Some levers cut static, some cut runtime — noted per lever.
 
@@ -68,7 +77,7 @@ Some levers cut static, some cut runtime — noted per lever.
 
 | Symbol | Bytes | Section | Notes |
 |---|---:|---|---|
-| `kheap__system_heap` | 55,460 | noinit | shared runtime heap (both stacks draw from it) |
+| `kheap__system_heap` | 49,244 (was 55,460 when `CONFIG_HEAP_MEM_POOL_SIZE` was larger; re-measured 2026-08-09 against the current 49,152 setting) | noinit | shared runtime heap — WiFi HAL (~25 KB) + our dynamic TCP thread stack (16 KB) account for essentially all of the observed ~83% steady-state fill; BT adds on top only in BLE mode |
 | `tcp_thread_stack` | 16,384 | noinit | **now dynamic** (WiFi-mode only) |
 | `mt_stack` | 8,192 | noinit | meshtastic main thread (both modes) |
 | `_k_mem_slab_buf_tcp_conns_slab` | 7,440 | noinit | TCP conn contexts (`NET_MAX_CONN`) |
