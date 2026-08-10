@@ -17,4 +17,4 @@ config MESHTASTIC_POWERMON
 	  from that constrained context).
 
 	  Raise just this module's verbosity at the bench with
-	  "log level dbg meshtastic_powermon" (state changes log at INF by default).
+	  "log level dbg powermon" (state changes log at INF by default).

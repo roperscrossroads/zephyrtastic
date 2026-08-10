@@ -22,10 +22,13 @@
 
 #include <zephyr/logging/log.h>
 /* Own log module so its verbosity can be raised at the bench ("log level dbg
- * meshtastic_powermon") without touching the rest of the stack. Changes log at
- * INF, so they are visible by default whenever PowerMon is enabled.
+ * powermon") without touching the rest of the stack. Changes log at INF, so
+ * they are visible by default whenever PowerMon is enabled. Registered as
+ * "powermon", not "meshtastic_powermon", to keep the line prefix short on an
+ * 80-column console -- see meshtastic_netlog_filter.c's restricted_modules[]
+ * for the matching string if this ever needs to change again.
  */
-LOG_MODULE_REGISTER(meshtastic_powermon, CONFIG_MESHTASTIC_LOG_LEVEL);
+LOG_MODULE_REGISTER(powermon, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 static atomic_t pm_state = ATOMIC_INIT(0);
 

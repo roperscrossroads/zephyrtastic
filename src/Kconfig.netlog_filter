@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_NETLOG_FILTER
+	bool "Restrict noisy modules to WRN+ on the net syslog backend only"
+	default y
+	depends on LOG_BACKEND_NET
+	depends on LOG_RUNTIME_FILTERING
+	help
+	  Zephyr's runtime log filtering (log_filter_set()) is genuinely
+	  per-(backend, module): a message can be created at the compiled
+	  ceiling (CONFIG_<MODULE>_LOG_LEVEL) but only actually SENT to a
+	  given backend if that backend's own per-module filter allows it.
+	  This restricts a curated list of driver/protocol-internals modules
+	  to WRN-or-worse on log_backend_net specifically -- the shell/console
+	  backend is untouched and keeps seeing whatever each module is
+	  compiled at.
+
+	  Exists because CONFIG_LOG_BACKEND_NET has repeatedly caused real
+	  stability problems at volume: a resolved net_pkt/net_buf exhaustion
+	  bug (DEBUG-level LoRa+meshtastic logging saturated the TX pool), a
+	  resolved GNSS UART-overrun flood implicated in household WiFi
+	  interference (the bench WiFi shares a radio with the house WiFi),
+	  and a heap-alloc trace that lost ~85% of its own output to the same
+	  flood class. All three were DIFFERENT modules getting loud at
+	  DIFFERENT times -- this exists to hold a standing, curated ceiling
+	  on the modules most likely to do that again, rather than reactively
+	  chasing the next one.
+
+	  Deliberately does NOT touch modules the bench's own passive netlog
+	  tooling depends on (meshtastic, meshtastic_sample, meshtastic_sntp,
+	  thread_analyzer) -- see meshtastic_netlog_filter.c for the exact
+	  list and the reasoning per module, including meshtastic_powermon,
+	  which is a real judgment call (fires every RX/TX state transition;
+	  restricted here since it's real volume, but it was also this
+	  session's main "is this node radio-active" signal -- easy to move
+	  back to the keep list if that visibility is missed more than the
+	  bandwidth is).
