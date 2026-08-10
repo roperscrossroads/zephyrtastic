@@ -34,6 +34,7 @@
 #include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
 #include "meshtastic_sched.h"
+#include "meshtastic_heap_trace.h"
 #include "meshtastic_watchdog.h"
 
 #include "meshtastic_settings.h"
@@ -392,6 +393,11 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	 * firmware_version. */
 	LOG_INF("meshtastic build %s (built %s UTC)", meshtastic_build_id(),
 		meshtastic_build_time());
+
+	/* Arm heap tracing before anything else allocates, so boot-time draws
+	 * (WiFi HAL init, our dynamic TCP thread stack) are captured too, not
+	 * just steady-state churn. No-op unless CONFIG_MESHTASTIC_HEAP_TRACE. */
+	meshtastic_heap_trace_init();
 
 	/* Arm early: a hang during the rest of init is exactly the kind of thing
 	 * this exists to catch. meshtastic_watchdog_checkin() lands well before

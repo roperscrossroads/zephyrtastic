@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_HEAP_TRACE
+	bool "Trace every _system_heap alloc/free to the log (diagnostic)"
+	default n
+	select SYS_HEAP_LISTENER
+	help
+	  Registers a Zephyr heap_listener on _system_heap (the general k_malloc
+	  pool sized by CONFIG_HEAP_MEM_POOL_SIZE) and logs every allocation and
+	  free with its size, pointer, and a running total maintained locally in
+	  the listener (not by re-querying the heap, which would deadlock: the
+	  listener callback runs with the heap's own spinlock held).
+
+	  Built to answer a specific question: the periodic heap heartbeat
+	  (meshtastic_watchdog.c) showed a flat steady-state allocated total but
+	  a max_allocated (peak-since-boot) that drifted by a couple of KB
+	  between boot sessions on the same board/build, with no per-event
+	  visibility into what caused it. This turns that "peak observed
+	  eventually" signal into an event-by-event timeline: what allocated,
+	  how big, and when, correlated against boot time via the existing
+	  network log timestamps.
+
+	  Diagnostic only -- off by default. Adds one heap_listener struct pair
+	  (~80 B) and a LOG_INF call on every heap event; leave off for normal
+	  operation once the question above is answered, since a busy heap
+	  (frequent MQTT reconnects, PhoneAPI churn) could log a lot.
