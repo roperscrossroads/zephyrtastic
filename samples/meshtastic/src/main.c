@@ -29,6 +29,7 @@
 #include <esp_attr.h>
 
 #include <zephyr/meshtastic/diagnostics.h>
+#include <zephyr/meshtastic/logring.h>
 #include <zephyr/meshtastic/meshtastic.h>
 
 LOG_MODULE_REGISTER(meshtastic_sample, LOG_LEVEL_INF);
@@ -162,6 +163,12 @@ static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mg
 			fatal_crash.heap_free, fatal_crash.heap_allocated,
 			fatal_crash.heap_max_allocated, fatal_crash.thread_name);
 	}
+
+	/* Last, and deliberately so: the breadcrumbs above are one-line summaries
+	 * of machine state, and this is the raw log tail leading up to whatever
+	 * happened. Reading the summary first and then the narrative is the useful
+	 * order. Also one-shot -- see meshtastic_logring_dump(). */
+	meshtastic_logring_dump();
 }
 
 static const char *packet_channel_name(const struct meshtastic_packet *packet)

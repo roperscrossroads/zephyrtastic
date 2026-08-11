@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_LOGRING
+	bool "Keep the last few KB of log in RTC memory across a reset"
+	default y
+	select LOG_OUTPUT
+	help
+	  Registers a log backend that mirrors the log stream into a byte ring in
+	  RTC-persistent memory, and dumps whatever was there from before the last
+	  reset on the next boot.
+
+	  Added 2026-08-11. Every other diagnostic here depends on the network:
+	  log_backend_net is the only backend on the shipping profile, so a node
+	  that loses WiFi is silent by construction, and -- worse -- that backend
+	  unconditionally no-ops once LOG_PANIC() runs, which is exactly when the
+	  output matters. The crash breadcrumbs exist because of that gap, but a
+	  breadcrumb says what state the node was in, not what it was doing. This
+	  keeps the actual last log lines.
+
+	  Survives every warm reset (watchdog stage 0/1, software reboot, fatal
+	  error) -- which is every failure class the bench has seen. A true power
+	  cycle clears RTC memory; the magic check then starts fresh rather than
+	  printing garbage.
+
+	  Deliberately NOT flash-backed: an ESP32 flash write disables the
+	  instruction cache and blocks non-IRAM ISRs, which is the same
+	  interrupt-masking mechanism currently suspected in the 2026-08-11
+	  all-three-nodes stall. RTC memory is plain stores.
+
+if MESHTASTIC_LOGRING
+
+config MESHTASTIC_LOGRING_SIZE
+	int "Ring size in bytes (RTC memory)"
+	default 4096
+	range 512 8192
+	help
+	  Lives in .rtc_noinit, i.e. the 8 KB rtc_slow_seg, which was 2.88% used
+	  before this. 4 KB is roughly 30-50 formatted lines -- enough to cover
+	  the seconds before a stall without crowding the existing RTC-persistent
+	  crash breadcrumbs and reset-cause history that share the segment.
+
+	  NOTE: an equal-sized buffer is also allocated in DRAM, to snapshot the
+	  ring at boot before this boot's own logging overwrites it. Budget 2x
+	  this value.
+
+config MESHTASTIC_LOGRING_LINE_MAX
+	int "Formatting buffer for one log line"
+	default 128
+	range 64 256
+	help
+	  Bounds the memcpy done under irq_lock. Longer lines are written in
+	  several chunks; only their tail survives if a line exceeds the ring.
+
+config MESHTASTIC_LOGRING_LOG_LEVEL
+	int "Log level for the ring module itself"
+	default 3
+	range 0 4
+
+endif # MESHTASTIC_LOGRING
