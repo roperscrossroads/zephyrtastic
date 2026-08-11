@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_WIFI_DIAG
+	bool "WiFi/network event logging + periodic link snapshot"
+	depends on WIFI && NET_L2_WIFI_MGMT && NET_MGMT_EVENT
+	default y if WIFI
+	help
+	  Logs WiFi connect/disconnect/signal-change events with their reason
+	  codes, and periodically snapshots the link (state, RSSI, channel,
+	  BSSID) over the existing netlog pipe.
+
+	  Added 2026-08-11 after all three bench nodes hardware-watchdog reset
+	  inside a 20-second window with no preceding anomaly in any log, and
+	  none of them leaving a stage-0 breadcrumb -- meaning the IRAM watchdog
+	  ISR never ran, i.e. interrupts were masked for the whole window. All
+	  three were associated to the SAME BSSID, making the AP the one shared
+	  dependency capable of hitting every node simultaneously.
+
+	  The bench was effectively blind to this: CONFIG_WIFI_LOG_LEVEL was ERR,
+	  so the ESP32 driver's own LOG_DBG("Disconnect reason: %d") never
+	  emitted, and no net statistics were compiled in at all.
+
+	  This CANNOT capture the stall itself -- nothing logs while interrupts
+	  are masked. It captures the lead-up: a disconnect storm, an RSSI
+	  collapse, a BSSID roam, a reconnect loop. A clean lead-up on all nodes
+	  would itself be informative, pointing away from WiFi.
+
+if MESHTASTIC_WIFI_DIAG
+
+config MESHTASTIC_WIFI_DIAG_SNAPSHOT_SEC
+	int "Seconds between periodic link snapshots (0 = events only)"
+	default 300
+	help
+	  Matches the thread-summary cadence (5 min) so the two interleave
+	  predictably in the netlog and can be read side by side. Set 0 to log
+	  only on events and drop the snapshot thread entirely.
+
+config MESHTASTIC_WIFI_DIAG_STACK_SIZE
+	int "Stack size for the snapshot thread"
+	default 1536
+	help
+	  Only ever calls net_mgmt() for an iface-status query and one LOG_INF.
+	  net_mgmt dispatches into the WiFi L2 handler on the caller's stack,
+	  so this is not as small as the work suggests.
+
+config MESHTASTIC_WIFI_DIAG_LOG_LEVEL
+	int "Log level for the WiFi diagnostics module"
+	default 3
+	range 0 4
+	help
+	  Disconnects log at WRN so they survive per-backend throttling; the
+	  periodic snapshot logs at INF.
+
+endif # MESHTASTIC_WIFI_DIAG
