@@ -39,13 +39,18 @@
 };
 
 /*
- * R8 has no ADC_CTRL gate: drop the power-domain node the common dtsi defines
- * and un-gate the battery divider so it reads directly.
+ * R8 has no ADC_CTRL gate at all -- confirmed against HTIT-WBR8H_V4.3.2.pdf,
+ * where ADC_Ctrl appears nowhere on the sheet and R27 390k / R28 100k sit
+ * straight across VBAT (GPIO33-37 are consumed by this board's octal PSRAM).
+ * So the divider is permanently connected and reads directly; un-gate it.
+ *
+ * The common dtsi used to define a separate `adc_ctrl` power-domain node that
+ * this file deleted. That node is gone (the gate is now the divider's own
+ * `power-gpios` property -- see the comment there), so there is nothing left
+ * to delete, only the property to drop.
  */
-/delete-node/ &adc_ctrl;
-
 &vbatt {
-	/delete-property/ power-domains;
+	/delete-property/ power-gpios;
 };
 
 /*
@@ -67,7 +72,7 @@
  *                                        which this board does not include)
  *   GPIO35  white LED  -> GPIO46        (&led0 and &ledc0_default below)
  *   GPIO36  Vext       -> GPIO40        (vext_ctrl above)
- *   GPIO37  ADC_CTRL   -> gone entirely (/delete-node/ &adc_ctrl above)
+ *   GPIO37  ADC_CTRL   -> gone entirely (&vbatt power-gpios dropped above)
  *
  * Anything added to the shared -common.dtsi / -pinctrl.dtsi in the 33..37 range
  * from now on must be overridden here too.
