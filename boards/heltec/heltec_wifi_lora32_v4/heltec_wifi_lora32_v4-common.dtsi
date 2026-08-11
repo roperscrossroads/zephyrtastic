@@ -81,7 +81,7 @@
 	/*
 	 * Battery sense: plain resistor divider on GPIO1 (ADC1 ch0), same as V3.
 	 * The V4 has NO fuel-gauge IC. Schematic-confirmed against
-	 * WiFi_LoRa_32_V4.2.pdf: R27 390k (upper) / R26 100k (lower) = 4.9, tapped
+	 * WiFi_LoRa_32_V4.2.pdf: R27 390k (upper) / R28 100k (lower) = 4.9, tapped
 	 * at ADC_IN -> GPIO1.
 	 *
 	 * ADC_CTRL (GPIO37) gates it: the pin drives Q6 (S9013 NPN) through R25,
