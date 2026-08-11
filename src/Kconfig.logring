@@ -4,6 +4,7 @@ config MESHTASTIC_LOGRING
 	bool "Keep the last few KB of log in RTC memory across a reset"
 	default y
 	select LOG_OUTPUT
+	select LOG_BACKEND_SUPPORTS_FORMAT_TIMESTAMP
 	help
 	  Registers a log backend that mirrors the log stream into a byte ring in
 	  RTC-persistent memory, and dumps whatever was there from before the last

@@ -48,6 +48,7 @@
 #include <zephyr/logging/log_output.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/shell/shell.h>
+#include <string.h>
 
 #include <zephyr/meshtastic/logring.h>
 
@@ -88,6 +89,14 @@ static bool prev_valid;
 /* Set while dumping so the dump's own output is not fed straight back into the
  * ring, which would otherwise overwrite the tail as we print it. */
 static bool dumping;
+
+/* The automatic boot dump is one-shot; the SNAPSHOT ITSELF is retained for the
+ * life of the boot so `logring prev` can re-read it later. That distinction
+ * matters now that netlog does not autostart: the boot dump goes to whatever
+ * backends happen to be live at IPv4-up, which with remote syslog off may be
+ * nobody at all. Discarding the data at that point would mean a reboot's
+ * evidence existed only in a log line nobody received. */
+static bool dumped_once;
 
 static uint8_t out_buf[CONFIG_MESHTASTIC_LOGRING_LINE_MAX];
 
@@ -198,9 +207,14 @@ bool meshtastic_logring_have_previous(void)
 
 void meshtastic_logring_dump(void)
 {
+	if (dumped_once) {
+		return;
+	}
+
 	if (!meshtastic_logring_have_previous()) {
 		LOG_INF("Log ring: nothing from a previous boot "
 			"(cold start, or first boot with this feature)");
+		dumped_once = true;
 		return;
 	}
 
@@ -227,10 +241,11 @@ void meshtastic_logring_dump(void)
 
 	dumping = false;
 
-	/* One-shot, like the crash breadcrumbs: a later, unrelated boot must not
-	 * re-report a stale tail as if it were fresh. */
-	prev_valid = false;
-	prev_len = 0U;
+	/* One-shot for the AUTOMATIC dump only -- a later, unrelated boot must not
+	 * re-report a stale tail as if it were fresh. prev_buf itself is kept so
+	 * `logring prev` can still retrieve it; it is cleared at the next boot's
+	 * latch, which is the correct lifetime. */
+	dumped_once = true;
 }
 
 /* Snapshot RTC memory into DRAM before this boot's own logging overwrites it.
@@ -291,8 +306,27 @@ static int cmd_logring(const struct shell *sh, size_t argc, char **argv)
 {
 	uint32_t len, start;
 
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
+	/* `logring prev` -- the tail recovered from BEFORE the last reset. Kept
+	 * readable for the whole boot precisely because, with netlog no longer
+	 * autostarting, the automatic boot dump may reach no backend at all. This
+	 * is how a monitor retrieves a reboot's evidence after the fact. */
+	if (argc >= 2 && strcmp(argv[1], "prev") == 0) {
+		if (!prev_valid || prev_len == 0U) {
+			shell_print(sh, "log ring: no pre-reset tail (cold start)");
+			return 0;
+		}
+		shell_print(sh, "--- log ring: %u bytes recovered from before the last reset ---",
+			    (unsigned int)prev_len);
+		for (uint32_t i = 0; i < prev_len; i++) {
+			char c = prev_buf[i];
+
+			if (c != '\r') {
+				shell_fprintf(sh, SHELL_NORMAL, "%c", c);
+			}
+		}
+		shell_print(sh, "\n--- end ---");
+		return 0;
+	}
 
 	if (ring_magic != LOGRING_MAGIC) {
 		shell_print(sh, "log ring: empty");
@@ -315,6 +349,8 @@ static int cmd_logring(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-SHELL_CMD_REGISTER(logring, NULL, "Dump the RTC-persistent log ring (current boot)",
+SHELL_CMD_REGISTER(logring, NULL,
+		   "Dump the RTC log ring. `logring` = this boot, `logring prev` = "
+		   "the tail recovered from before the last reset.",
 		   cmd_logring);
 #endif /* CONFIG_SHELL */

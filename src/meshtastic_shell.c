@@ -37,6 +37,10 @@
 #include "meshtastic_sched.h"
 #include "meshtastic_settings.h"
 
+#if defined(CONFIG_LOG_BACKEND_NET) && !defined(CONFIG_LOG_BACKEND_NET_AUTOSTART)
+#include <zephyr/logging/log_backend_net.h>
+#endif
+
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 enum shell_work_op {
@@ -1955,6 +1959,29 @@ static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 #endif
 }
 
+#if defined(CONFIG_LOG_BACKEND_NET) && !defined(CONFIG_LOG_BACKEND_NET_AUTOSTART)
+/* Remote syslog no longer starts itself -- see the rationale on
+ * CONFIG_LOG_BACKEND_NET_AUTOSTART in overlay-v4-unified.conf. It stays compiled
+ * so a soak that genuinely wants continuous remote capture can turn it on for
+ * that boot without a reflash. Deliberately NOT persisted: the default has to
+ * stay "off" across a reset, or the reasons it was turned off quietly reassert
+ * themselves the next time a node reboots unattended.
+ */
+static int cmd_netlog(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc < 2 || strcmp(argv[1], "on") != 0) {
+		shell_print(sh, "usage: meshtastic netlog on");
+		shell_print(sh, "  (off by default; not persisted across a reboot)");
+		return 0;
+	}
+
+	log_backend_net_start();
+	shell_print(sh, "netlog: started for this boot only");
+
+	return 0;
+}
+#endif
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
@@ -2001,6 +2028,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #endif
 #if defined(CONFIG_MESHTASTIC_GNSS)
 	SHELL_CMD(gnss, &meshtastic_gnss_cmds, SHELL_HELP("GNSS commands.", NULL), NULL),
+#if defined(CONFIG_LOG_BACKEND_NET) && !defined(CONFIG_LOG_BACKEND_NET_AUTOSTART)
+	SHELL_CMD(netlog, NULL,
+		  SHELL_HELP("Start the remote syslog backend for this boot.",
+			     "netlog on"),
+		  cmd_netlog),
+#endif
 #endif
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
 	SHELL_CMD(metrics, &meshtastic_metrics_cmds, SHELL_HELP("Device metrics commands.", NULL),
