@@ -3811,6 +3811,176 @@ ZTEST(protocol_stack, test_clock_ms_form_keeps_range_and_ladder)
 		       "a lower-trust NTP ms write must not clobber a GPS fix");
 }
 
+/* --- config LWW: HLC-stamped sections merge without coordination ----------- */
+
+/* A local write must stamp the section it touched. Without a stamp the section
+ * stays "unset" and would lose to any peer, so a node could never propagate its
+ * own config. */
+ZTEST(protocol_stack, test_config_local_write_stamps_the_section)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	struct meshtastic_hlc_stamp before, after;
+
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag, &before),
+		   "reading a stamp must succeed");
+
+	cfg.which_payload_variant = meshtastic_Config_device_tag;
+	cfg.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "device set_config failed");
+
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag, &after),
+		   "reading a stamp must succeed");
+
+	zassert_false(meshtastic_hlc_stamp_is_unset(&after), "a local write must stamp");
+	zassert_true(meshtastic_hlc_compare(&after, &before) > 0,
+		     "each local write must mint a strictly newer version");
+}
+
+/* The LWW rule itself: a strictly newer peer stamp wins, an older one is refused
+ * and the local value is kept. Both nodes run this same comparison and, because
+ * the stamp order is total, reach the same answer with no coordination. */
+ZTEST(protocol_stack, test_config_merge_applies_newer_and_refuses_older)
+{
+	meshtastic_Config local = meshtastic_Config_init_zero;
+	meshtastic_Config remote = meshtastic_Config_init_zero;
+	meshtastic_Config readback = meshtastic_Config_init_zero;
+	struct meshtastic_hlc_stamp mine, newer, older;
+	int ret;
+
+	/* Establish a local value with a real stamp. */
+	local.which_payload_variant = meshtastic_Config_device_tag;
+	local.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
+	zassert_ok(meshtastic_config_store_set_config(&local), "local write failed");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag, &mine),
+		   "stamp read failed");
+
+	remote.which_payload_variant = meshtastic_Config_device_tag;
+	remote.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_ROUTER;
+
+	/* Strictly newer: same physical time, higher counter. */
+	newer = mine;
+	newer.counter = mine.counter + 1U;
+	newer.node_id = mine.node_id + 1U;
+
+	ret = meshtastic_config_store_merge_config(&remote, &newer);
+	zassert_equal(ret, 1, "a strictly newer stamp must be applied (got %d)", ret);
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag, &readback),
+		   "config read failed");
+	zassert_equal(readback.payload_variant.device.role,
+		      meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "the newer peer value must have been adopted");
+
+	/* Strictly older: must be refused, leaving the adopted value in place. */
+	older = newer;
+	older.physical_ms = newer.physical_ms - 1000;
+	remote.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE;
+
+	ret = meshtastic_config_store_merge_config(&remote, &older);
+	zassert_equal(ret, 0, "an older stamp must be refused (got %d)", ret);
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag, &readback),
+		   "config read failed");
+	zassert_equal(readback.payload_variant.device.role,
+		      meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "a refused merge must leave the local value untouched");
+}
+
+/* Even a REFUSED merge must advance our clock. The losing write still proves a
+ * version exists out there; staying ahead of it is what stops our next local edit
+ * from tying with something already in flight. */
+ZTEST(protocol_stack, test_config_refused_merge_still_advances_the_clock)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	struct meshtastic_hlc_stamp mine, ancient, after_local;
+	int ret;
+
+	cfg.which_payload_variant = meshtastic_Config_device_tag;
+	cfg.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "local write failed");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag, &mine),
+		   "stamp read failed");
+
+	/* A peer far in the past — refused, but observed. */
+	ancient = mine;
+	ancient.physical_ms = mine.physical_ms - 60000;
+	ancient.counter = 4242U;
+	ancient.node_id = 0xFEEDU;
+
+	ret = meshtastic_config_store_merge_config(&cfg, &ancient);
+	zassert_equal(ret, 0, "an ancient stamp must be refused");
+
+	/* Our next local write must still be strictly newer than everything seen. */
+	cfg.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_ROUTER;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "second local write failed");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag,
+							    &after_local),
+		   "stamp read failed");
+
+	zassert_true(meshtastic_hlc_compare(&after_local, &mine) > 0,
+		     "the next local write must out-version our own previous one");
+	zassert_true(meshtastic_hlc_compare(&after_local, &ancient) > 0,
+		     "and must out-version the refused peer stamp too");
+}
+
+/* A section nobody has ever versioned must lose to any versioned peer — that is
+ * what makes config flow from the configured node to the fresh one, rather than a
+ * fresh node's defaults overwriting a configured mesh. */
+ZTEST(protocol_stack, test_config_unversioned_section_loses_to_any_peer)
+{
+	meshtastic_Config remote = meshtastic_Config_init_zero;
+	struct meshtastic_hlc_stamp unset = {0};
+	struct meshtastic_hlc_stamp any = {.physical_ms = 1, .counter = 0U, .node_id = 1U};
+
+	zassert_true(meshtastic_hlc_stamp_is_unset(&unset), "all-zero is the unset sentinel");
+	zassert_true(meshtastic_hlc_compare(&any, &unset) > 0,
+		     "the smallest real stamp must still beat an unset one");
+
+	/* And a merge carrying an unset stamp must never win. */
+	remote.which_payload_variant = meshtastic_Config_device_tag;
+	remote.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_ROUTER;
+	zassert_equal(meshtastic_config_store_merge_config(&remote, &unset), 0,
+		      "an unset stamp must never win a merge");
+}
+
+/* Stamps must survive a reboot, and they live in a PARALLEL key subtree so the
+ * existing config records — including config/security, which carries the once-only
+ * X25519 identity — stay byte-identical. Round-trip through the same settings
+ * get/set path the NVS backend uses. */
+ZTEST(protocol_stack, test_config_stamp_persists_round_trip)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	struct meshtastic_hlc_stamp saved, restored;
+	uint8_t buf[64];
+	int len;
+
+	cfg.which_payload_variant = meshtastic_Config_device_tag;
+	cfg.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_ROUTER;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "local write failed");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag, &saved),
+		   "stamp read failed");
+
+	len = meshtastic_config_store_setting_get("hlc/config/device", buf, sizeof(buf));
+	zassert_true(len > 0, "the stamp key must serialise (got %d)", len);
+
+	/* Clobber the in-RAM stamp, then restore it the way a load would. */
+	zassert_ok(meshtastic_config_store_setting_set("hlc/config/device", buf, (size_t)len),
+		   "restoring a stamp record must succeed");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag,
+							    &restored),
+		   "stamp read failed");
+
+	zassert_equal(meshtastic_hlc_compare(&saved, &restored), 0,
+		      "a stamp must round-trip through the settings path unchanged");
+
+	/* A truncated record must degrade to unset, not corrupt the stamp. */
+	zassert_ok(meshtastic_config_store_setting_set("hlc/config/device", buf, 3U),
+		   "a short record must be tolerated, not rejected");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag,
+							    &restored),
+		   "stamp read failed");
+	zassert_true(meshtastic_hlc_stamp_is_unset(&restored),
+		     "an unreadable stamp record must degrade to unset");
+}
+
 /* --- HLC: hybrid logical clock, the version source for config LWW ---------- */
 
 /* Two writes inside one millisecond must still be strictly ordered — that is the

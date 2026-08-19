@@ -18,6 +18,7 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_ext_ram.h"
+#include "meshtastic_hlc.h"
 #include "meshtastic_settings.h"
 
 #include <zephyr/logging/log.h>
@@ -57,6 +58,22 @@ struct store_position_fixed_record {
 	int32_t latitude_i;
 	int32_t longitude_i;
 	int32_t altitude;
+} __packed;
+
+/* Persisted HLC stamp for one config/module section. A flat record like the owner
+ * and fixed-position ones, in a PARALLEL key subtree ("hlc/config/<sec>") rather
+ * than appended to the config record itself. That is deliberate: the config record
+ * framing is shared with config/security, which carries the once-only X25519
+ * identity, and decode_record() warns that a framing misstep there silently reverts
+ * to compile-time defaults and regenerates the identity — breaking PKC with every
+ * peer that cached the old key. A separate subtree leaves every existing record
+ * byte-identical, so an upgrade cannot touch the identity at all, and a device
+ * downgraded to older firmware simply ignores keys it does not know. */
+struct store_hlc_record {
+	uint8_t version;
+	int64_t physical_ms;
+	uint32_t counter;
+	uint32_t node_id;
 } __packed;
 
 struct named_config {
@@ -109,6 +126,12 @@ static struct {
 	meshtastic_ModuleConfig modules[ARRAY_SIZE(module_names)];
 	bool has_fixed_position;
 	meshtastic_Position fixed_position;
+	/* LWW versioning (docs/CONFIG-CONVERGENCE.md). An all-zero stamp means "never
+	 * versioned" and loses to every real one, so a node upgraded from firmware
+	 * without this adopts a versioned peer's config rather than the reverse. */
+	struct meshtastic_hlc hlc;
+	struct meshtastic_hlc_stamp config_stamps[ARRAY_SIZE(config_names)];
+	struct meshtastic_hlc_stamp module_stamps[ARRAY_SIZE(module_names)];
 	/* EXT_RAM_BSS_ATTR goes AFTER the declarator (below) — after the anonymous struct '}'
 	 * it would bind to the TYPE and be ignored (stay in internal DRAM). */
 } store MESHTASTIC_EXT_RAM_BSS_ATTR; /* ~9.2 KB -> PSRAM on V4 (no-op on V3); records are
@@ -127,6 +150,25 @@ static void store_lock(void)
 static void store_unlock(void)
 {
 	k_mutex_unlock(&store.lock);
+}
+
+/* Mint a version for a LOCAL write. Caller holds store_lock().
+ *
+ * Only genuine local edits stamp. The NVS load path restores the persisted stamp
+ * instead, and seeding defaults leaves the stamp unset on purpose — a fresh node's
+ * defaults must LOSE to a configured peer, which an unset stamp guarantees. */
+static void stamp_local(struct meshtastic_hlc_stamp *slot)
+{
+	meshtastic_hlc_local(&store.hlc, mt.node_id, slot);
+}
+
+/* Fold a stamp we have seen into our clock, so we stay causally ahead of it.
+ * Caller holds store_lock(). Used on both the merge path and the NVS load path —
+ * on load it is what stops a reboot re-minting a version we already used, without
+ * having to persist the clock itself. */
+static void observe_stamp(const struct meshtastic_hlc_stamp *seen)
+{
+	(void)meshtastic_hlc_observe(&store.hlc, seen);
 }
 
 static void copy_string(char *dst, size_t dst_len, const char *src)
@@ -226,6 +268,49 @@ static int encode_record(const pb_msgdesc_t *fields, const void *msg, void *buf,
 	sys_put_le16((uint16_t)stream.bytes_written, (uint8_t *)buf + 2);
 
 	return (int)(stream.bytes_written + STORE_RECORD_HEADER_LEN);
+}
+
+static int encode_hlc_record(const struct meshtastic_hlc_stamp *stamp, void *buf, size_t buf_len)
+{
+	struct store_hlc_record rec = {
+		.version = STORE_RECORD_VERSION,
+		.physical_ms = stamp->physical_ms,
+		.counter = stamp->counter,
+		.node_id = stamp->node_id,
+	};
+
+	if (buf == NULL || buf_len < sizeof(rec)) {
+		return -EINVAL;
+	}
+
+	memcpy(buf, &rec, sizeof(rec));
+
+	return (int)sizeof(rec);
+}
+
+/* Decode into @p out. A short or wrong-version record leaves the stamp UNSET
+ * rather than failing the load: an unreadable version is indistinguishable from
+ * never having had one, and both should lose to a versioned peer. Refusing the
+ * load instead would strand the section's config as well, which is worse. */
+static void decode_hlc_record(const void *buf, size_t len, struct meshtastic_hlc_stamp *out)
+{
+	struct store_hlc_record rec;
+
+	*out = (struct meshtastic_hlc_stamp){0};
+
+	if (buf == NULL || len < sizeof(rec)) {
+		return;
+	}
+
+	memcpy(&rec, buf, sizeof(rec));
+
+	if (rec.version < STORE_RECORD_VERSION_MIN || rec.version > STORE_RECORD_VERSION) {
+		return;
+	}
+
+	out->physical_ms = rec.physical_ms;
+	out->counter = rec.counter;
+	out->node_id = rec.node_id;
 }
 
 static int decode_record(const pb_msgdesc_t *fields, const void *buf, size_t len, void *msg)
@@ -826,6 +911,7 @@ int meshtastic_config_store_set_config(const meshtastic_Config *config)
 
 	store_lock();
 	store.configs[idx] = *config;
+	stamp_local(&store.config_stamps[idx]);
 	store_unlock();
 
 	ret = meshtastic_config_store_apply_core();
@@ -924,10 +1010,115 @@ int meshtastic_config_store_set_module(const meshtastic_ModuleConfig *module)
 
 	store_lock();
 	store.modules[idx] = *module;
+	stamp_local(&store.module_stamps[idx]);
 	store_unlock();
 
 	store_schedule_save();
 	return 0;
+}
+
+int meshtastic_config_store_get_config_stamp(pb_size_t tag, struct meshtastic_hlc_stamp *out)
+{
+	int idx = index_for_config_tag(tag);
+
+	if (out == NULL || idx < 0) {
+		return -EINVAL;
+	}
+
+	store_lock();
+	*out = store.config_stamps[idx];
+	store_unlock();
+
+	return 0;
+}
+
+int meshtastic_config_store_get_module_stamp(pb_size_t tag, struct meshtastic_hlc_stamp *out)
+{
+	int idx = index_for_module_tag(tag);
+
+	if (out == NULL || idx < 0) {
+		return -EINVAL;
+	}
+
+	store_lock();
+	*out = store.module_stamps[idx];
+	store_unlock();
+
+	return 0;
+}
+
+int meshtastic_config_store_merge_config(const meshtastic_Config *config,
+					 const struct meshtastic_hlc_stamp *stamp)
+{
+	int idx;
+	bool applied;
+
+	if (config == NULL || stamp == NULL || !config_is_valid(config)) {
+		return -EINVAL;
+	}
+
+	idx = index_for_config_tag(config->which_payload_variant);
+	if (idx < 0) {
+		return -EINVAL;
+	}
+
+	store_lock();
+
+	/* Observe unconditionally, apply conditionally. Even a losing write tells us
+	 * a version exists out there, and staying ahead of it is what stops our next
+	 * local edit from tying with something already in flight. */
+	observe_stamp(stamp);
+
+	applied = meshtastic_hlc_newer(stamp, &store.config_stamps[idx]);
+	if (applied) {
+		store.configs[idx] = *config;
+		store.config_stamps[idx] = *stamp;
+	}
+
+	store_unlock();
+
+	if (!applied) {
+		return 0;
+	}
+
+	(void)meshtastic_config_store_apply_core();
+	store_schedule_save();
+
+	return 1;
+}
+
+int meshtastic_config_store_merge_module(const meshtastic_ModuleConfig *module,
+					 const struct meshtastic_hlc_stamp *stamp)
+{
+	int idx;
+	bool applied;
+
+	if (module == NULL || stamp == NULL || !module_is_valid(module)) {
+		return -EINVAL;
+	}
+
+	idx = index_for_module_tag(module->which_payload_variant);
+	if (idx < 0) {
+		return -EINVAL;
+	}
+
+	store_lock();
+	observe_stamp(stamp);
+
+	applied = meshtastic_hlc_newer(stamp, &store.module_stamps[idx]);
+	if (applied) {
+		store.modules[idx] = *module;
+		store.module_stamps[idx] = *stamp;
+	}
+	store_unlock();
+
+	if (!applied) {
+		return 0;
+	}
+
+	store_schedule_save();
+
+	return 1;
 }
 
 int meshtastic_config_store_get_device_ui(meshtastic_DeviceUIConfig *device_ui)
@@ -1152,6 +1343,30 @@ int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_l
 		return ret;
 	}
 
+	if (strncmp(key, "hlc/config/", strlen("hlc/config/")) == 0) {
+		idx = index_for_config_name(key + strlen("hlc/config/"));
+		if (idx < 0) {
+			return idx;
+		}
+
+		store_lock();
+		ret = encode_hlc_record(&store.config_stamps[idx], buf, buf_len);
+		store_unlock();
+		return ret;
+	}
+
+	if (strncmp(key, "hlc/module/", strlen("hlc/module/")) == 0) {
+		idx = index_for_module_name(key + strlen("hlc/module/"));
+		if (idx < 0) {
+			return idx;
+		}
+
+		store_lock();
+		ret = encode_hlc_record(&store.module_stamps[idx], buf, buf_len);
+		store_unlock();
+		return ret;
+	}
+
 	if (strncmp(key, "config/", strlen("config/")) == 0) {
 		idx = index_for_config_name(key + strlen("config/"));
 		if (idx < 0) {
@@ -1215,6 +1430,43 @@ int meshtastic_config_store_setting_set(const char *key, const void *buf, size_t
 		channel.index = (int8_t)index;
 		store_lock();
 		store.channels[index] = channel;
+		store_unlock();
+		return 0;
+	}
+
+	if (strncmp(key, "hlc/config/", strlen("hlc/config/")) == 0) {
+		struct meshtastic_hlc_stamp stamp;
+
+		idx = index_for_config_name(key + strlen("hlc/config/"));
+		if (idx < 0) {
+			return idx;
+		}
+
+		decode_hlc_record(buf, len, &stamp);
+
+		store_lock();
+		store.config_stamps[idx] = stamp;
+		/* Restoring is also an observation: it lifts the clock to at least what
+		 * we minted before the reboot, so the next local write cannot re-mint a
+		 * version already in use. That is why the clock itself needs no record. */
+		observe_stamp(&stamp);
+		store_unlock();
+		return 0;
+	}
+
+	if (strncmp(key, "hlc/module/", strlen("hlc/module/")) == 0) {
+		struct meshtastic_hlc_stamp stamp;
+
+		idx = index_for_module_name(key + strlen("hlc/module/"));
+		if (idx < 0) {
+			return idx;
+		}
+
+		decode_hlc_record(buf, len, &stamp);
+
+		store_lock();
+		store.module_stamps[idx] = stamp;
+		observe_stamp(&stamp);
 		store_unlock();
 		return 0;
 	}
@@ -1310,6 +1562,26 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 
 	for (size_t i = 0; i < ARRAY_SIZE(module_names); i++) {
 		snprintk(name, sizeof(name), "module/%s", module_names[i].name);
+		ret = export_one(export_func, name);
+		if (ret < 0) {
+			return ret;
+		}
+	}
+
+	/* The LWW stamps. meshtastic_settings_wipe() iterates this same list, so
+	 * adding them here is also what makes a factory reset clear them — a wiped
+	 * node must come back unversioned, not carrying stamps for config it no
+	 * longer has. */
+	for (size_t i = 0; i < ARRAY_SIZE(config_names); i++) {
+		snprintk(name, sizeof(name), "hlc/config/%s", config_names[i].name);
+		ret = export_one(export_func, name);
+		if (ret < 0) {
+			return ret;
+		}
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(module_names); i++) {
+		snprintk(name, sizeof(name), "hlc/module/%s", module_names[i].name);
 		ret = export_one(export_func, name);
 		if (ret < 0) {
 			return ret;

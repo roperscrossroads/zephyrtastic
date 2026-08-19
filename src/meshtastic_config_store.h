@@ -15,6 +15,8 @@
 
 #include <zephyr/meshtastic/meshtastic.h>
 
+#include "meshtastic_hlc.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -52,6 +54,38 @@ int meshtastic_config_store_get_fixed_position(meshtastic_Position *pos);
 
 int meshtastic_config_store_get_module(pb_size_t tag, meshtastic_ModuleConfig *module);
 int meshtastic_config_store_set_module(const meshtastic_ModuleConfig *module);
+
+/**
+ * @brief Read the LWW version currently attached to a config/module section.
+ *
+ * An all-zero stamp (see meshtastic_hlc_stamp_is_unset) means the section has
+ * never been versioned — a fresh node's defaults, or one upgraded from firmware
+ * that predates this. Such a section loses to any versioned peer, which is what
+ * makes config flow from the configured node to the unconfigured one.
+ *
+ * @return 0 on success, -EINVAL on an unknown tag or NULL @p out.
+ */
+int meshtastic_config_store_get_config_stamp(pb_size_t tag, struct meshtastic_hlc_stamp *out);
+int meshtastic_config_store_get_module_stamp(pb_size_t tag, struct meshtastic_hlc_stamp *out);
+
+/**
+ * @brief Merge a peer's config section under last-writer-wins.
+ *
+ * Applies @p config only if @p stamp is strictly newer than the stamp already
+ * held for that section. The remote stamp is folded into our clock either way —
+ * even a losing write proves a version exists out there, and staying ahead of it
+ * stops our next local edit from tying with something already in flight.
+ *
+ * There is no quorum and no leader: because the stamp order is total, every node
+ * that sees the same pair of writes picks the same winner independently.
+ *
+ * @return 1 if applied, 0 if the local value was newer and was kept, negative
+ *         errno on a NULL/invalid argument.
+ */
+int meshtastic_config_store_merge_config(const meshtastic_Config *config,
+					 const struct meshtastic_hlc_stamp *stamp);
+int meshtastic_config_store_merge_module(const meshtastic_ModuleConfig *module,
+					 const struct meshtastic_hlc_stamp *stamp);
 
 int meshtastic_config_store_get_device_ui(meshtastic_DeviceUIConfig *device_ui);
 

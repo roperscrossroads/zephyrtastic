@@ -141,8 +141,12 @@ static int settings_wipe_one(const char *name, const void *val, size_t val_len)
 	ARG_UNUSED(val);
 	ARG_UNUSED(val_len);
 
-	/* Keep the X25519 identity on a config-only factory reset. */
-	if (wipe_preserve_security && strcmp(name, "config/security") == 0) {
+	/* Keep the X25519 identity on a config-only factory reset — and its LWW
+	 * stamp with it. Dropping the stamp while keeping the value would leave the
+	 * identity looking unversioned, so the next peer to gossip a security
+	 * section would win and overwrite the one record this reset exists to save. */
+	if (wipe_preserve_security && (strcmp(name, "config/security") == 0 ||
+				       strcmp(name, "hlc/config/security") == 0)) {
 		return 0;
 	}
 
