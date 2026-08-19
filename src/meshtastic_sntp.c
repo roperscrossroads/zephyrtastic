@@ -8,8 +8,12 @@
  * leaving timestamps at the epoch floor. On a WiFi build we query an SNTP
  * server whenever the interface gets an IPv4 lease (boot or reconnect) and
  * re-sync periodically to correct crystal drift, seeding
- * meshtastic_clock_set_epoch() so NodeInfo.last_heard, Position.time and
- * message timestamps report real Unix epoch seconds.
+ * meshtastic_clock_set_epoch_ms() so NodeInfo.last_heard, Position.time and
+ * message timestamps report real Unix epoch time.
+ *
+ * The response's sub-second fraction and measured path delay are both used (see
+ * meshtastic_sntp.h): seeding on whole seconds alone left the anchor with up to
+ * a second of error, frozen at sync time and different on every node.
  *
  * The query runs on a dedicated workqueue: sntp_simple() blocks on DNS + UDP
  * for up to the configured timeout, and the system workqueue must stay free to
@@ -25,6 +29,7 @@
 #include <zephyr/net/sntp.h>
 
 #include "meshtastic_clock.h"
+#include "meshtastic_sntp.h"
 
 LOG_MODULE_REGISTER(meshtastic_sntp, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -45,8 +50,15 @@ static void sntp_do_sync(struct k_work *work)
 	int rc = sntp_simple(SNTP_SERVER, SNTP_TIMEOUT_MS, &ts);
 
 	if (rc == 0 && ts.seconds != 0U) {
-		meshtastic_clock_set_epoch((uint32_t)ts.seconds, MESHTASTIC_CLOCK_QUALITY_NTP);
-		LOG_INF("SNTP sync ok: epoch=%u", (uint32_t)ts.seconds);
+		int32_t sub_ms = meshtastic_sntp_subsecond_ms(ts.fraction, ts.rsp_delay_us);
+		int64_t epoch_ms = (int64_t)ts.seconds * 1000 + sub_ms;
+
+		meshtastic_clock_set_epoch_ms(epoch_ms, MESHTASTIC_CLOCK_QUALITY_NTP);
+		/* Log the parts, not just the sum: a wrong fraction (e.g. someone enabling
+		 * CONFIG_SNTP_UNCERTAINTY without revisiting the conversion) shows up here
+		 * as an implausible sub-second value rather than silently skewing time. */
+		LOG_INF("SNTP sync ok: epoch=%u +%dms (path delay %uus)", (uint32_t)ts.seconds,
+			sub_ms, ts.rsp_delay_us);
 #if CONFIG_MESHTASTIC_SNTP_RESYNC_HOURS > 0
 		k_work_schedule_for_queue(&sntp_wq, &resync_work,
 					  K_HOURS(CONFIG_MESHTASTIC_SNTP_RESYNC_HOURS));

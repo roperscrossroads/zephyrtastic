@@ -19,6 +19,7 @@
 #include "meshtastic_admin_session.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
+#include "meshtastic_sntp.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_mqtt.h"
 #include "meshtastic_phoneapi.h"
@@ -3740,6 +3741,105 @@ ZTEST(protocol_stack, test_clock_quality_ladder_blocks_downgrade)
 	zassert_within(meshtastic_clock_now_epoch(), gps_epoch2, 5U,
 		       "a fresh GPS fix must re-apply and update the clock");
 }
+
+/* --- T-E: millisecond clock anchor (sub-second sources) ------------------- */
+
+/* The anchor is held in ms so a source that knows its sub-second part keeps it.
+ * The old seconds anchor computed boot_epoch = epoch - k_uptime_seconds(), which
+ * truncated BOTH sides: the stored offset carried frac(epoch) - frac(uptime), an
+ * error in (-1s, +1s) frozen at sync time. SNTP is the source that actually has
+ * the fraction (see meshtastic_sntp_subsecond_ms), so this is what makes its
+ * precision reachable at all. */
+ZTEST(protocol_stack, test_clock_ms_anchor_preserves_subsecond)
+{
+	const int64_t epoch_ms = 1700000000LL * 1000 + 250; /* 2023-11-14T22:13:20.250Z */
+	int64_t now_ms;
+
+	/* GPS: top of the ladder, so this is order-independent w.r.t. other tests. */
+	meshtastic_clock_set_epoch_ms(epoch_ms, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_true(meshtastic_clock_valid(), "an in-window ms epoch must seed the clock");
+
+	now_ms = meshtastic_clock_now_epoch_ms();
+
+	/* 100 ms tolerance covers the uptime that elapses between seed and read.
+	 * A whole-second anchor could not land inside this window except by luck. */
+	zassert_within(now_ms, epoch_ms, 100,
+		       "ms anchor must preserve the sub-second part; got %lld want ~%lld",
+		       (long long)now_ms, (long long)epoch_ms);
+
+	/* And the seconds view of the same instant must still floor, not round. */
+	zassert_equal(meshtastic_clock_now_epoch(), 1700000000U,
+		      "the seconds reader must floor the ms anchor, not round it");
+}
+
+/* The seconds entry point is now a wrapper over the ms one. It must behave
+ * exactly as before for every existing caller (GNSS, admin set_time_only). */
+ZTEST(protocol_stack, test_clock_seconds_form_is_ms_form)
+{
+	const uint32_t sec = 1700000000U;
+
+	meshtastic_clock_set_epoch(sec, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_within(meshtastic_clock_now_epoch(), sec, 5U, "seconds form must still seed");
+	zassert_within(meshtastic_clock_now_epoch_ms(), (int64_t)sec * 1000, 100,
+		       "seconds form must anchor at exactly .000 of that second");
+}
+
+/* The ms entry point must enforce the same [2020, ~2060] window and the same
+ * source-quality ladder as the seconds form — it is the same gate, not a bypass. */
+ZTEST(protocol_stack, test_clock_ms_form_keeps_range_and_ladder)
+{
+	const int64_t good_ms = 1700000000LL * 1000;
+
+	meshtastic_clock_set_epoch_ms(good_ms, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U, "baseline seed");
+
+	/* Out of range, both ends, plus a negative — all refused, clock unchanged. */
+	meshtastic_clock_set_epoch_ms(4000000000LL * 1000, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U,
+		       "far-future ms epoch must be rejected");
+	meshtastic_clock_set_epoch_ms(1000000000LL * 1000, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U,
+		       "pre-floor ms epoch must be rejected");
+	meshtastic_clock_set_epoch_ms(-1, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U,
+		       "negative ms epoch must be rejected");
+
+	/* Ladder still applies: NTP must not clobber a live GPS fix. */
+	meshtastic_clock_set_epoch_ms(1600000000LL * 1000, MESHTASTIC_CLOCK_QUALITY_NTP);
+	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U,
+		       "a lower-trust NTP ms write must not clobber a GPS fix");
+}
+
+/* The SNTP fraction conversion. Pure arithmetic, so it is testable here without
+ * the network stack — which is exactly why it lives in meshtastic_sntp.h.
+ *
+ * This exercises the CONFIG_SNTP_UNCERTAINTY=n branch, which is what this project
+ * builds (confirmed in the v4r8 .config) and therefore what ships: `fraction` is
+ * the raw NTP 32-bit binary fraction, units of 2^-32 s. */
+ZTEST(protocol_stack, test_sntp_subsecond_conversion)
+{
+	/* Exact binary fractions convert exactly. */
+	zassert_equal(meshtastic_sntp_subsecond_ms(0x00000000U, 0U), 0, "0.0 -> 0ms");
+	zassert_equal(meshtastic_sntp_subsecond_ms(0x40000000U, 0U), 250, "0.25 -> 250ms");
+	zassert_equal(meshtastic_sntp_subsecond_ms(0x80000000U, 0U), 500, "0.5 -> 500ms");
+	zassert_equal(meshtastic_sntp_subsecond_ms(0xC0000000U, 0U), 750, "0.75 -> 750ms");
+
+	/* The top of the range must floor to 999, never reach 1000 (which would carry
+	 * into the second and double-count it). This is the case that overflows if the
+	 * 64-bit intermediate is dropped: 0xFFFFFFFF * 1000 does not fit in 32 bits. */
+	zassert_equal(meshtastic_sntp_subsecond_ms(0xFFFFFFFFU, 0U), 999,
+		      "the maximum fraction must floor to 999ms, not wrap");
+
+	/* rsp_delay_us is already the SINGLE-sided path delay (zephyr sntp.c halves the
+	 * round trip), so it is added whole. 12000us = 12ms. */
+	zassert_equal(meshtastic_sntp_subsecond_ms(0x80000000U, 12000U), 512,
+		      "one-way path delay must be added whole, not halved again");
+
+	/* Sub-millisecond delay truncates rather than rounding — a deliberate floor,
+	 * consistent with the fraction conversion above. */
+	zassert_equal(meshtastic_sntp_subsecond_ms(0U, 999U), 0, "sub-ms delay floors to 0");
+}
+
 
 /* The rejection must be specific to ADMIN_APP — ordinary downlink traffic is
  * the whole point of the feature and has to keep working. */

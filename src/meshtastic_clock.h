@@ -1,9 +1,18 @@
 /* SPDX-License-Identifier: GPL-3.0
  *
  * Wall-clock helper. The port's timestamps are otherwise k_uptime-relative;
- * this establishes a Unix epoch once a real time source is available (GNSS UTC
- * or the phone's set_time_only admin message) so uptime-relative values can be
- * reported to the app as epoch seconds (e.g. NodeInfo.last_heard, Position.time).
+ * this establishes a Unix epoch once a real time source is available (GNSS UTC,
+ * SNTP, or the phone's set_time_only admin message) so uptime-relative values can
+ * be reported to the app as epoch seconds (e.g. NodeInfo.last_heard,
+ * Position.time).
+ *
+ * The anchor is held in MILLISECONDS. The seconds-taking entry point remains the
+ * common case (GNSS and the phone only ever offer whole seconds), but a source
+ * that knows better — SNTP carries a sub-second fraction — should use the _ms
+ * form: anchoring on whole seconds quantises the clock by up to 1 s, and because
+ * the residual is frozen at sync time it differs per node and per resync. Two
+ * nodes both "NTP-synced" could then sit ~2 s apart, which is fine for a
+ * last_heard display and not fine for anything that has to agree on *when*.
  */
 #ifndef MESHTASTIC_CLOCK_H_
 #define MESHTASTIC_CLOCK_H_
@@ -38,6 +47,19 @@ enum meshtastic_clock_quality {
  */
 void meshtastic_clock_set_epoch(uint32_t epoch_now, enum meshtastic_clock_quality quality);
 
+/**
+ * Millisecond-resolution form of @ref meshtastic_clock_set_epoch, and the one the
+ * seconds form is implemented on top of. Same range check (applied to the derived
+ * second) and same source-quality ladder.
+ *
+ * Prefer this wherever the source actually knows the sub-second part; passing
+ * `sec * 1000` here is exactly equivalent to the seconds form and costs nothing.
+ *
+ * @param epoch_ms Unix epoch in milliseconds. Negative values are ignored.
+ * @param quality  Trust level of the source (see @ref meshtastic_clock_quality).
+ */
+void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quality quality);
+
 /** Trust level of the source that last set the clock (NONE if never set). */
 enum meshtastic_clock_quality meshtastic_clock_get_quality(void);
 
@@ -46,6 +68,16 @@ bool meshtastic_clock_valid(void);
 
 /** Current wall-clock time in Unix epoch seconds, or 0 if not yet seeded. */
 uint32_t meshtastic_clock_now_epoch(void);
+
+/**
+ * Current wall-clock time in Unix epoch MILLISECONDS, or 0 if not yet seeded.
+ *
+ * Monotonic between seeds (it is the ms anchor plus k_uptime_get()), so it is
+ * also the right source for anything that needs to schedule against absolute
+ * time rather than merely display it. Note the *resolution* is milliseconds but
+ * the *accuracy* is only ever as good as the source that last seeded it.
+ */
+int64_t meshtastic_clock_now_epoch_ms(void);
 
 /** Convert a k_uptime-relative second count to epoch seconds, 0 if unseeded. */
 uint32_t meshtastic_clock_uptime_to_epoch(uint32_t uptime_sec);
