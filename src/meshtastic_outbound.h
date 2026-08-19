@@ -44,6 +44,18 @@ int meshtastic_radio_send_wire_wait_prio(const uint8_t *pkt, uint32_t pkt_len, u
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len);
 
 /**
+ * @brief Push mt.frequency + mt.modem to the radio and re-arm RX.
+ *
+ * The live-reconfigure step of a preset switch (meshtastic_preset.c). Tears down
+ * continuous async RX first — the SX126x driver rejects lora_config() while it is
+ * running — and re-arms afterwards even if the config failed, since a deaf radio
+ * is worse than a misconfigured one.
+ *
+ * @return 0 on success, negative errno from lora_config().
+ */
+int meshtastic_radio_retune(void);
+
+/**
  * @brief Queue a frame that must not go out for at least @p delay_ms.
  *
  * The contention window (see meshtastic_contention.h). The frame occupies a

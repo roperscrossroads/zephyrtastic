@@ -64,6 +64,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_hlc.c
     meshtastic_modules.c
     meshtastic_packet.c
+    meshtastic_preset.c
     meshtastic_radio.c
     meshtastic_outbound.c
     meshtastic_contention.c

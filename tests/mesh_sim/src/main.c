@@ -20,6 +20,7 @@
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
+#include "meshtastic_preset.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_reliable.h"
 #include "meshtastic_sched.h"
@@ -384,12 +385,16 @@ ZTEST(mesh_sim, test_sim_models_preset_orthogonality)
 		   "the tuning-agnostic inject must still always deliver");
 }
 
-/* LongFast and ShortTurbo specifically — ~20 MHz and 4 spreading factors apart.
- * The sim node comes up on LongFast (verified: SF11 / BW250 / 906.875 MHz), so
- * ShortTurbo must be completely inaudible to it, and vice versa. This is the
- * concrete case the preset bridge in docs/MULTI-PRESET-OPERATION.md §6 exists to
- * cross, and the reason crossing it needs time-division rather than just listening
- * harder. */
+/* LongFast and ShortTurbo are ~20 MHz and 4 spreading factors apart on a default
+ * channel. Whatever this node is tuned to, a radio on the OTHER preset's settings
+ * must be inaudible — and each axis (frequency, SF) must be sufficient on its own.
+ *
+ * Deliberately relative rather than absolute: this fixture's meshtastic_init()
+ * takes an explicit .frequency, whereas a real boot derives it from the region
+ * plan (meshtastic_config_store.c:713) the same way meshtastic_preset_switch()
+ * does. Hardcoding a frequency here would pin a fixture artifact rather than the
+ * behaviour under test.
+ */
 ZTEST(mesh_sim, test_sim_longfast_and_shortturbo_are_mutually_deaf)
 {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
@@ -400,34 +405,189 @@ ZTEST(mesh_sim, test_sim_longfast_and_shortturbo_are_mutually_deaf)
 	build_peer_text(0x3004U, "deaf", wire, &wire_len);
 	zassert_ok(lora_sim_get_tuning(lora_dev, &freq, &sf, &bw), "radio must be configured");
 
-	/* Pin the default. If this ever changes, the assertions below become
-	 * meaningless rather than merely wrong, so fail loudly and say why. */
-	zassert_equal(freq, LONGFAST_HZ,
-		      "sim node expected on LongFast (%u Hz), found %u — update this test",
-		      LONGFAST_HZ, freq);
-	zassert_equal(sf, 11U, "LongFast is SF11, found SF%u", sf);
+	/* Our own tuning: heard. */
+	zassert_ok(lora_sim_inject_on(lora_dev, freq, sf, bw, wire, (uint8_t)wire_len, -50, 7),
+		   "a frame on our own tuning must be received");
 
-	/* Our own preset: heard. */
-	zassert_ok(lora_sim_inject_on(lora_dev, LONGFAST_HZ, 11U, bw, wire,
-				      (uint8_t)wire_len, -50, 7),
-		   "a LongFast frame must reach a LongFast node");
-
-	/* ShortTurbo: different frequency AND different SF — deaf on both axes, so
-	 * neither one alone is carrying the result. */
+	/* Both LongFast and ShortTurbo canonical frequencies differ from ours in at
+	 * least one axis, and each mismatch alone is disqualifying. */
 	zassert_equal(lora_sim_inject_on(lora_dev, SHORTTURBO_HZ, 7U, bw, wire,
 					 (uint8_t)wire_len, -50, 7),
-		      -ENOTCONN, "ShortTurbo must be inaudible to a LongFast node");
-
-	/* Same SF as ShortTurbo but on our frequency: still deaf, proving the SF axis
-	 * is checked and not just the frequency. */
+		      -ENOTCONN, "ShortTurbo params must be inaudible");
 	zassert_equal(lora_sim_inject_on(lora_dev, LONGFAST_HZ, 7U, bw, wire,
 					 (uint8_t)wire_len, -50, 7),
-		      -ENOTCONN, "SF7 on our frequency must still be inaudible at SF11");
+		      -ENOTCONN, "SF7 must be inaudible whatever the frequency");
 
-	/* And our SF on ShortTurbo's frequency: deaf, proving the frequency axis too. */
-	zassert_equal(lora_sim_inject_on(lora_dev, SHORTTURBO_HZ, 11U, bw, wire,
+	/* Frequency axis alone: our exact SF and bandwidth, one slot away. */
+	zassert_equal(lora_sim_inject_on(lora_dev, freq + 250000U, sf, bw, wire,
 					 (uint8_t)wire_len, -50, 7),
-		      -ENOTCONN, "our SF on another frequency must still be inaudible");
+		      -ENOTCONN, "one slot away must be inaudible even at our own SF");
+
+	/* SF axis alone: our exact frequency and bandwidth, one SF away. */
+	zassert_equal(lora_sim_inject_on(lora_dev, freq, (uint8_t)(sf + 1U), bw, wire,
+					 (uint8_t)wire_len, -50, 7),
+		      -ENOTCONN, "one SF away must be inaudible even on our own frequency");
+}
+
+/* --- the preset switch primitive -------------------------------------------
+ *
+ * A preset change has to move FOUR things together: modem params, every channel
+ * hash, the frequency slot, and the radio itself. The silent failure mode is a
+ * PARTIAL switch — new SF/BW left on the old frequency, say — which looks
+ * perfectly healthy locally and is simply inaudible to everyone else.
+ *
+ * ⚠️ This node's primary channel carries a LITERAL name ("LongFast", see
+ * mesh_sim_setup), not an empty one. That matters more than it looks:
+ *
+ *   empty name  -> resolves to the PRESET's display name, so the djb2 frequency
+ *                  slot moves with the preset (LongFast 906.875, MediumFast
+ *                  913.125, ShortTurbo 926.750).
+ *   literal name-> the slot is djb2("LongFast") for every preset, so the
+ *                  frequency only moves when the SLOT WIDTH changes, i.e. when
+ *                  the bandwidth changes. LongFast/MediumFast/MediumSlow are all
+ *                  BW250k and therefore share ONE frequency, differing only by
+ *                  spreading factor. ShortTurbo (BW500k) does move.
+ *
+ * So these tests assert on INVARIANTS (the radio matches what the switch
+ * reported; deaf to the old tuning; hearing the new) rather than on hardcoded
+ * frequencies, and the named-channel consequence gets its own test below.
+ */
+
+/* The core contract: after a switch, everything moved together and the radio
+ * agrees with the bookkeeping. */
+ZTEST(mesh_sim, test_preset_switch_moves_everything_together)
+{
+	struct meshtastic_preset_result res = {0};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t old_freq = 0U, new_freq = 0U;
+	uint8_t old_sf = 0U, old_bw = 0U, new_sf = 0U, new_bw = 0U;
+	uint8_t old_hash;
+
+	/* Start from a known preset rather than trusting suite order. */
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "baseline switch failed");
+	zassert_ok(lora_sim_get_tuning(lora_dev, &old_freq, &old_sf, &old_bw), "radio unconfigured");
+	old_hash = mt.ch_hash;
+	zassert_equal(old_sf, 11U, "LongFast is SF11, got SF%u", old_sf);
+
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
+					    &res), "preset switch failed");
+
+	/* (a) the RADIO got exactly what the switch says it resolved — not just our
+	 * own bookkeeping, which is the half-switch failure mode. */
+	zassert_ok(lora_sim_get_tuning(lora_dev, &new_freq, &new_sf, &new_bw), "radio unconfigured");
+	zassert_equal(new_freq, res.frequency_hz, "the radio must carry the resolved frequency");
+	zassert_equal(new_sf, res.spread_factor, "the radio must carry the resolved SF");
+	zassert_equal(res.spread_factor, 7U, "ShortTurbo is SF7, got SF%u", res.spread_factor);
+	zassert_equal(res.bandwidth_hz, 500000U, "ShortTurbo is BW500k, got %u", res.bandwidth_hz);
+
+	/* (b) the frequency moved: ShortTurbo's 500k bandwidth halves the slot count,
+	 * so even a literally-named channel lands somewhere new. */
+	zassert_not_equal(new_freq, old_freq,
+			  "a bandwidth change must move the frequency slot (both %u)", new_freq);
+
+	/* (c) the channel hash followed the preset. */
+	zassert_equal(mt.ch_hash, res.channel_hash, "the reported hash must match reality");
+
+	/* (d) it is real on the air: deaf to where we were, hearing where we are. */
+	build_peer_text(0x4004U, "after switch", wire, &wire_len);
+	zassert_equal(lora_sim_inject_on(lora_dev, old_freq, old_sf, old_bw, wire,
+					 (uint8_t)wire_len, -50, 7),
+		      -ENOTCONN, "must be DEAF to the preset we left");
+	zassert_ok(lora_sim_inject_on(lora_dev, new_freq, new_sf, new_bw, wire,
+				      (uint8_t)wire_len, -50, 7),
+		   "must HEAR the preset we moved to");
+
+	/* Restore, so suite order stays independent. */
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "switch back failed");
+	zassert_ok(lora_sim_get_tuning(lora_dev, &new_freq, &new_sf, &new_bw), "radio unconfigured");
+	zassert_equal(new_freq, old_freq, "switching back must restore the frequency");
+	zassert_equal(mt.ch_hash, old_hash, "switching back must restore the channel hash");
+}
+
+/* ⚠️ The named-channel consequence, pinned because it is genuinely surprising and
+ * it shapes the LongFast<->MediumFast time-slicing design: on a channel with a
+ * literal name these two presets share ONE frequency and differ only by spreading
+ * factor. They remain mutually deaf — SF alone is enough — but a switch between
+ * them never retunes the radio. */
+ZTEST(mesh_sim, test_named_channel_keeps_frequency_across_same_bandwidth_presets)
+{
+	struct meshtastic_preset_result lf = {0}, mf = {0};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    &lf), "LongFast switch failed");
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST,
+					    &mf), "MediumFast switch failed");
+
+	zassert_equal(lf.bandwidth_hz, mf.bandwidth_hz, "both presets are BW250k");
+	zassert_equal(lf.frequency_hz, mf.frequency_hz,
+		      "a LITERALLY-named channel keeps one frequency across equal-bandwidth "
+		      "presets (LongFast %u vs MediumFast %u)", lf.frequency_hz, mf.frequency_hz);
+	zassert_not_equal(lf.spread_factor, mf.spread_factor,
+			  "...but the spreading factor must still differ (SF%u)", lf.spread_factor);
+
+	/* Same frequency, different SF — still completely deaf. SF alone carries the
+	 * orthogonality here, so a switch that only retuned frequency would be wrong. */
+	build_peer_text(0x4005U, "same freq", wire, &wire_len);
+	zassert_equal(lora_sim_inject_on(lora_dev, lf.frequency_hz, lf.spread_factor,
+					 (uint8_t)0, wire, (uint8_t)wire_len, -50, 7),
+		      -ENOTCONN, "LongFast must be inaudible from MediumFast despite equal freq");
+
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "restore failed");
+}
+
+/* A round trip must land exactly where it started — every derived value, not just
+ * the frequency. Drift here would mean the derivation is order-dependent. */
+ZTEST(mesh_sim, test_preset_switch_round_trip_is_exact)
+{
+	struct meshtastic_preset_result a = {0}, b = {0};
+
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST, &a),
+		   "baseline switch failed");
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
+					    NULL), "switch away failed");
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST, &b),
+		   "switch back failed");
+
+	zassert_equal(a.frequency_hz, b.frequency_hz, "frequency must round-trip exactly");
+	zassert_equal(a.spread_factor, b.spread_factor, "SF must round-trip exactly");
+	zassert_equal(a.bandwidth_hz, b.bandwidth_hz, "bandwidth must round-trip exactly");
+	zassert_equal(a.channel_hash, b.channel_hash, "channel hash must round-trip exactly");
+}
+
+/* An unknown preset must change NOTHING.
+ *
+ * This one nearly shipped broken: meshtastic_preset_to_params() returns 0 for an
+ * unknown preset, folding it into the LongFast default row to mirror the
+ * reference's `default:` branch. Right for decoding a peer's config; very wrong
+ * as a switch, where it would silently move the node to LongFast — a
+ * fleet-partitioning event. The switch gates on the display name instead. */
+ZTEST(mesh_sim, test_preset_switch_rejects_unknown_atomically)
+{
+	uint32_t freq_before = 0U, freq_after = 0U;
+	uint8_t sf_before = 0U, bw_before = 0U, sf_after = 0U, bw_after = 0U;
+	uint8_t hash_before;
+
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "baseline switch failed");
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq_before, &sf_before, &bw_before),
+		   "radio unconfigured");
+	hash_before = mt.ch_hash;
+
+	zassert_equal(meshtastic_preset_switch((meshtastic_Config_LoRaConfig_ModemPreset)999, NULL),
+		      -EINVAL, "an unknown preset must be refused with -EINVAL");
+
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq_after, &sf_after, &bw_after),
+		   "radio unconfigured");
+	zassert_equal(freq_after, freq_before, "a refused switch must not move the frequency");
+	zassert_equal(sf_after, sf_before, "a refused switch must not move the SF");
+	zassert_equal(bw_after, bw_before, "a refused switch must not move the bandwidth");
+	zassert_equal(mt.ch_hash, hash_before, "a refused switch must not move the channel hash");
 }
 
 ZTEST_SUITE(mesh_sim, NULL, mesh_sim_setup, mesh_sim_before, NULL, NULL);

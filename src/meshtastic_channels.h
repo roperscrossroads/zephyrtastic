@@ -183,6 +183,16 @@ uint8_t meshtastic_channels_resolve_send_index(uint32_t dest, uint8_t channel_in
 uint8_t meshtastic_channels_primary_hash(void);
 
 /**
+ * @brief Re-derive every channel hash and the cached primary key/hash/name.
+ *
+ * Needed after the active modem preset changes: a channel that stores an EMPTY
+ * name resolves it to the preset's display name, so the preset feeds both the
+ * XOR wire hash and the djb2 frequency slot. Call before resolving a new
+ * frequency — the frequency plan reads the resolved primary name.
+ */
+void meshtastic_channels_refresh_derived(void);
+
+/**
  * @brief Display name of the primary channel slot.
  *
  * @return Same rules as @ref meshtastic_channels_get_name for @c primary_index.

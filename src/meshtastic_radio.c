@@ -200,6 +200,42 @@ __weak void meshtastic_radio_fem_set_tx(bool tx)
 	ARG_UNUSED(tx);
 }
 
+int meshtastic_radio_retune(void)
+{
+	int ret;
+
+	/* Same sequence, and the same lock order (radio sem then mt.lock), as the
+	 * TX path below — the SX126x driver rejects lora_config() while continuous
+	 * async RX is running, so RX must be torn down first and re-armed after. */
+	(void)k_sem_take(&mt_radio_sem, K_FOREVER);
+
+	(void)lora_recv_async(mt.lora_dev, NULL, NULL);
+	mt.radio_rx_armed = false;
+	meshtastic_powermon_clear(MESHTASTIC_PM_LORA_RX);
+
+	k_mutex_lock(&mt.lock, K_FOREVER);
+	mt_lora_cfg.frequency = mt.frequency;
+	apply_modem_params();
+	mt_lora_cfg.tx_power = mt.tx_power;
+	mt_lora_cfg.tx = false;
+	mt_lora_cfg.cad.mode = LORA_CAD_MODE_NONE;
+	mt_lora_cfg.cad.symbol_num = 0;
+	ret = lora_config(mt.lora_dev, &mt_lora_cfg);
+	k_mutex_unlock(&mt.lock);
+
+	if (ret < 0) {
+		LOG_ERR("retune: lora_config failed (%d)", ret);
+	}
+
+	/* Re-arm regardless: leaving RX down would make the node deaf until the
+	 * processing thread's periodic re-arm notices, and a failed config is more
+	 * recoverable with a listening radio than a silent one. */
+	(void)mt_radio_arm_rx();
+	(void)k_sem_give(&mt_radio_sem);
+
+	return ret;
+}
+
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 {
 	int ret;

@@ -396,6 +396,26 @@ uint8_t meshtastic_channels_resolve_send_index(uint32_t dest, uint8_t channel_in
 	return primary_index;
 }
 
+void meshtastic_channels_refresh_derived(void)
+{
+	struct meshtastic_channel_key key;
+
+	/* Every slot, not just the primary: any channel storing an empty name
+	 * resolves to the active preset's display name, so a preset change moves
+	 * all of their hashes at once. Missing a secondary here would leave the
+	 * node unable to decrypt its own secondary channel after a switch. */
+	for (uint8_t i = 0; i < MESHTASTIC_MAX_CHANNELS; i++) {
+		channel_fixup(i);
+	}
+
+	if (meshtastic_channels_primary_key(&key) == 0) {
+		mt.psk_len = key.len;
+		memcpy(mt.psk, key.bytes, key.len);
+	}
+	mt.ch_hash = meshtastic_channels_primary_hash();
+	mt.channel_name = meshtastic_channels_primary_name();
+}
+
 uint8_t meshtastic_channels_primary_hash(void)
 {
 	return channel_hashes[primary_index];
