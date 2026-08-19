@@ -61,6 +61,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_clock.c
     meshtastic_config_store.c
     meshtastic_fatal.c
+    meshtastic_hlc.c
     meshtastic_modules.c
     meshtastic_packet.c
     meshtastic_radio.c

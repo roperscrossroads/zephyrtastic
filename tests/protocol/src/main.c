@@ -20,6 +20,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
 #include "meshtastic_sntp.h"
+#include "meshtastic_hlc.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_mqtt.h"
 #include "meshtastic_phoneapi.h"
@@ -3808,6 +3809,167 @@ ZTEST(protocol_stack, test_clock_ms_form_keeps_range_and_ladder)
 	meshtastic_clock_set_epoch_ms(1600000000LL * 1000, MESHTASTIC_CLOCK_QUALITY_NTP);
 	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U,
 		       "a lower-trust NTP ms write must not clobber a GPS fix");
+}
+
+/* --- HLC: hybrid logical clock, the version source for config LWW ---------- */
+
+/* Two writes inside one millisecond must still be strictly ordered — that is the
+ * whole reason the counter exists. Without it, LWW would have to break the tie
+ * arbitrarily and two nodes could pick different winners. */
+ZTEST(protocol_stack, test_hlc_orders_within_one_millisecond)
+{
+	struct meshtastic_hlc hlc = {0};
+	struct meshtastic_hlc_stamp a, b, c;
+
+	meshtastic_hlc_local_at(&hlc, 0x1111U, 1000, &a);
+	meshtastic_hlc_local_at(&hlc, 0x1111U, 1000, &b);
+	meshtastic_hlc_local_at(&hlc, 0x1111U, 1000, &c);
+
+	zassert_equal(a.physical_ms, 1000, "physical must track the supplied clock");
+	zassert_true(meshtastic_hlc_compare(&b, &a) > 0, "second write must order after first");
+	zassert_true(meshtastic_hlc_compare(&c, &b) > 0, "third write must order after second");
+	zassert_true(meshtastic_hlc_newer(&c, &a), "newer() must agree with compare()");
+
+	/* Once physical time genuinely advances the counter resets — otherwise it
+	 * would grow without bound and the physical part would stop being readable. */
+	meshtastic_hlc_local_at(&hlc, 0x1111U, 2000, &a);
+	zassert_equal(a.physical_ms, 2000, "physical must advance");
+	zassert_equal(a.counter, 0U, "counter must reset when physical advances");
+}
+
+/* An unseeded wall clock (now_ms == 0) must degrade to a Lamport clock rather than
+ * break: still strictly ordered, just with no physical component. A node with no
+ * time source has to keep working. */
+ZTEST(protocol_stack, test_hlc_unseeded_clock_degrades_to_lamport)
+{
+	struct meshtastic_hlc hlc = {0};
+	struct meshtastic_hlc_stamp prev, next;
+
+	meshtastic_hlc_local_at(&hlc, 0x2222U, 0, &prev);
+	zassert_equal(prev.physical_ms, 0, "an unseeded clock has no physical component");
+
+	/* Counter starts at 1, not 0 — see the header. That is what keeps an unseeded
+	 * stamp distinguishable from the all-zero "never set" sentinel. */
+	zassert_false(meshtastic_hlc_stamp_is_unset(&prev),
+		      "an unseeded stamp must not look like an unset one");
+
+	for (int i = 0; i < 32; i++) {
+		meshtastic_hlc_local_at(&hlc, 0x2222U, 0, &next);
+		zassert_true(meshtastic_hlc_compare(&next, &prev) > 0,
+			     "unseeded writes must still be strictly increasing (i=%d)", i);
+		prev = next;
+	}
+}
+
+/* The property the whole scheme rests on: if A's write influenced B (B saw it),
+ * B's subsequent write must order AFTER A's — even though B's physical clock is
+ * behind A's. A pure wall-clock version would get this backwards. */
+ZTEST(protocol_stack, test_hlc_preserves_causality_across_nodes)
+{
+	struct meshtastic_hlc a = {0}, b = {0};
+	struct meshtastic_hlc_stamp from_a, from_b;
+
+	/* Node A writes at t=5000. Node B's clock reads only 4000 — it is behind. */
+	meshtastic_hlc_local_at(&a, 0xAAAAU, 5000, &from_a);
+	(void)meshtastic_hlc_observe_at(&b, &from_a, 4000);
+	meshtastic_hlc_local_at(&b, 0xBBBBU, 4000, &from_b);
+
+	zassert_true(meshtastic_hlc_compare(&from_b, &from_a) > 0,
+		     "B's later write must beat A's despite B's slower clock");
+}
+
+/* A peer with a broken clock (GPS week rollover, bad NTP answer) must not be able
+ * to drag our clock permanently into the future. The stamp is still comparable —
+ * whether such a write WINS is an LWW-layer policy call, not the clock's. */
+ZTEST(protocol_stack, test_hlc_drift_guard_protects_our_clock)
+{
+	struct meshtastic_hlc hlc = {0};
+	struct meshtastic_hlc_stamp evil = {
+		.physical_ms = 1000LL * 365 * 24 * 3600 * 1000, /* ~year 2970 */
+		.counter = 0U,
+		.node_id = 0x9999U,
+	};
+	bool clamped;
+
+	clamped = meshtastic_hlc_observe_at(&hlc, &evil, 10000);
+
+	zassert_true(clamped, "a wildly-future stamp must be reported as clamped");
+	zassert_true(hlc.physical_ms <= 10000 + MESHTASTIC_HLC_MAX_DRIFT_MS,
+		     "our clock must not follow a broken peer into the future; got %lld",
+		     (long long)hlc.physical_ms);
+
+	/* An unseeded node has no standing to judge anyone's time, so it must NOT
+	 * clamp — clamping against a zero reference would reject every real peer. */
+	struct meshtastic_hlc unseeded = {0};
+	struct meshtastic_hlc_stamp ordinary = {.physical_ms = 1700000000000LL, .node_id = 1U};
+
+	zassert_false(meshtastic_hlc_observe_at(&unseeded, &ordinary, 0),
+		      "an unseeded node must not clamp a legitimate peer");
+}
+
+/* A hostile or corrupt peer sending counter == UINT32_MAX must not wrap our counter
+ * to 0 — that would move the clock BACKWARDS and break the one invariant everything
+ * else depends on. Spending a millisecond of physical time is the safe answer. */
+ZTEST(protocol_stack, test_hlc_counter_saturation_never_goes_backwards)
+{
+	struct meshtastic_hlc local = {.physical_ms = 9000, .counter = UINT32_MAX};
+	struct meshtastic_hlc remote_side = {.physical_ms = 9000, .counter = 0U};
+	struct meshtastic_hlc_stamp out;
+	struct meshtastic_hlc_stamp maxed = {
+		.physical_ms = 9000, .counter = UINT32_MAX, .node_id = 5U};
+
+	meshtastic_hlc_local_at(&local, 1U, 9000, &out);
+	zassert_equal(out.physical_ms, 9001, "local path must spend a ms rather than wrap");
+	zassert_equal(out.counter, 0U, "counter resets after spending a ms");
+
+	(void)meshtastic_hlc_observe_at(&remote_side, &maxed, 9000);
+	zassert_equal(remote_side.physical_ms, 9001,
+		      "observe path must also saturate forward, not wrap");
+	zassert_equal(remote_side.counter, 0U, "counter resets after spending a ms");
+}
+
+/* compare() must be a TOTAL order — never 0 for two distinct stamps — or two nodes
+ * could independently pick different winners for the same conflict and never
+ * converge. node_id is the final tiebreak that guarantees it. */
+ZTEST(protocol_stack, test_hlc_compare_is_a_total_order)
+{
+	struct meshtastic_hlc_stamp x = {.physical_ms = 1, .counter = 1, .node_id = 10U};
+	struct meshtastic_hlc_stamp y = {.physical_ms = 1, .counter = 1, .node_id = 11U};
+
+	zassert_true(meshtastic_hlc_compare(&y, &x) > 0, "node_id must break a full tie");
+	zassert_true(meshtastic_hlc_compare(&x, &y) < 0, "and must be antisymmetric");
+	zassert_equal(meshtastic_hlc_compare(&x, &x), 0, "a stamp equals itself");
+
+	/* Field precedence: physical outranks counter, counter outranks node_id. */
+	struct meshtastic_hlc_stamp hi_phys = {.physical_ms = 2, .counter = 0, .node_id = 0U};
+	struct meshtastic_hlc_stamp hi_ctr = {.physical_ms = 1, .counter = 99, .node_id = 99U};
+
+	zassert_true(meshtastic_hlc_compare(&hi_phys, &hi_ctr) > 0,
+		     "physical must outrank counter and node_id");
+
+	/* The unset sentinel loses to everything, which is what makes an unversioned
+	 * value adopt a versioned peer's rather than the reverse. */
+	struct meshtastic_hlc_stamp unset = {0};
+
+	zassert_true(meshtastic_hlc_stamp_is_unset(&unset), "all-zero is the unset sentinel");
+	zassert_true(meshtastic_hlc_compare(&x, &unset) > 0, "any real stamp beats unset");
+}
+
+/* Two nodes exchanging writes must converge on the same winner from either side.
+ * This is the property that lets every node decide independently with no quorum. */
+ZTEST(protocol_stack, test_hlc_both_sides_pick_the_same_winner)
+{
+	struct meshtastic_hlc a = {0}, b = {0};
+	struct meshtastic_hlc_stamp sa, sb;
+
+	meshtastic_hlc_local_at(&a, 0xA0U, 1000, &sa);
+	meshtastic_hlc_local_at(&b, 0xB0U, 1000, &sb);
+
+	/* Concurrent, same millisecond, neither saw the other: still a definite,
+	 * symmetric answer — and both sides compute the SAME one. */
+	zassert_true(meshtastic_hlc_compare(&sa, &sb) != 0, "concurrent writes must still order");
+	zassert_equal(meshtastic_hlc_compare(&sa, &sb), -meshtastic_hlc_compare(&sb, &sa),
+		      "the order must be the same seen from either side");
 }
 
 /* The SNTP fraction conversion. Pure arithmetic, so it is testable here without
