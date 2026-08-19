@@ -1284,6 +1284,57 @@ static int cmd_scan_dump(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_scan_presets(const struct shell *sh, size_t argc, char **argv)
+{
+	meshtastic_Config_LoRaConfig_ModemPreset list[MESHTASTIC_SCANNER_MAX_PRESETS];
+	int n;
+
+	if (argc == 1U) {
+		n = meshtastic_scanner_get_presets(list, ARRAY_SIZE(list));
+		if (n < 0) {
+			shell_error(sh, "get failed: %d", n);
+			return n;
+		}
+		shell_fprintf(sh, SHELL_NORMAL, "sweeping %d preset%s:", n, n == 1 ? "" : "s");
+		for (int i = 0; i < n; i++) {
+			shell_fprintf(sh, SHELL_NORMAL, " %s",
+				      meshtastic_preset_display_name(list[i], true));
+		}
+		shell_print(sh, "");
+		shell_print(sh, "('scan presets all' restores the full set)");
+		return 0;
+	}
+
+	if (argc == 2U && strcmp(argv[1], "all") == 0) {
+		(void)meshtastic_scanner_set_presets(NULL, 0U);
+		shell_print(sh, "sweeping the full preset set (stats cleared)");
+		return 0;
+	}
+
+	if (argc - 1U > ARRAY_SIZE(list)) {
+		shell_error(sh, "at most %u presets", (unsigned int)ARRAY_SIZE(list));
+		return -EINVAL;
+	}
+
+	for (size_t i = 1; i < argc; i++) {
+		if (shell_parse_modem_preset(argv[i], &list[i - 1U]) < 0) {
+			shell_error(sh, "unknown preset '%s'", argv[i]);
+			return -EINVAL;
+		}
+	}
+
+	if (meshtastic_scanner_set_presets(list, argc - 1U) < 0) {
+		shell_error(sh, "set failed");
+		return -EINVAL;
+	}
+
+	/* Narrowing the list shortens the cycle, so each remaining preset is listened
+	 * to a larger fraction of the time — say so, since that is the point. */
+	shell_print(sh, "sweeping %u presets (stats cleared; shorter cycle = higher capture "
+			"rate on each)", (unsigned int)(argc - 1U));
+	return 0;
+}
+
 static int cmd_scan_reset(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -1303,6 +1354,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  cmd_scan_stop),
 	SHELL_CMD(status, NULL, SHELL_HELP("Per-preset capture counts.", NULL), cmd_scan_status),
 	SHELL_CMD(dump, NULL, SHELL_HELP("Print captured headers.", "[count]"), cmd_scan_dump),
+	SHELL_CMD(presets, NULL,
+		  SHELL_HELP("Show or limit which presets are swept.",
+			     "[all | <name> ...]  e.g. scan presets LongFast ShortTurbo"),
+		  cmd_scan_presets),
 	SHELL_CMD(reset, NULL, SHELL_HELP("Clear captured records and stats.", NULL),
 		  cmd_scan_reset),
 	SHELL_SUBCMD_SET_END);

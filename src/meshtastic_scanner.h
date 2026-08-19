@@ -17,6 +17,7 @@
 #define MESHTASTIC_SCANNER_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "meshtastic/config.pb.h"
@@ -46,6 +47,32 @@ struct meshtastic_scan_stats {
 	uint32_t dwell_ms_total; /**< time actually spent listening here */
 	uint32_t visits;
 };
+
+/** Most presets a sweep can be limited to (the full US PROFILE_STD set). */
+#define MESHTASTIC_SCANNER_MAX_PRESETS 10
+
+/**
+ * @brief Restrict the sweep to a subset of presets.
+ *
+ * Narrowing the list raises the capture probability on each remaining preset,
+ * because the cycle gets shorter while each dwell stays the same: P = c/T, and T
+ * is the sum of the dwells actually visited. Four presets instead of ten roughly
+ * doubles P on each of them — worth doing when you already know which presets are
+ * in use and want a rate estimate rather than a discovery sweep.
+ *
+ * Takes effect at the next preset change, not mid-dwell.
+ *
+ * @param list  Presets to visit, in order. NULL or @p n == 0 restores the full set.
+ * @param n     How many, up to MESHTASTIC_SCANNER_MAX_PRESETS.
+ * @return 0, -EINVAL on too many or an unknown preset.
+ */
+int meshtastic_scanner_set_presets(const meshtastic_Config_LoRaConfig_ModemPreset *list, size_t n);
+
+/**
+ * @brief The presets currently being swept.
+ * @return number written to @p out, or negative errno.
+ */
+int meshtastic_scanner_get_presets(meshtastic_Config_LoRaConfig_ModemPreset *out, size_t max);
 
 /** @brief Begin cycling. Idempotent. @return 0, or -EALREADY if already running. */
 int meshtastic_scanner_start(void);
