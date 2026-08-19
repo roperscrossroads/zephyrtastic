@@ -1161,6 +1161,7 @@ static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 #if defined(CONFIG_MESHTASTIC_SCANNER)
+#include "meshtastic_packet.h"
 #include "meshtastic_scanner.h"
 
 /* Defined further down, alongside the `lora preset` command that also uses it.
@@ -1265,8 +1266,8 @@ static int cmd_scan_dump(const struct shell *sh, size_t argc, char **argv)
 		want = (uint32_t)strtoul(argv[1], NULL, 0);
 	}
 
-	shell_print(sh, "%-10s %-12s %-10s %-10s %5s %4s %4s %5s %4s", "epoch", "preset", "from",
-		    "to", "rssi", "snr", "hops", "chan", "len");
+	shell_print(sh, "%-10s %-12s %-10s %-10s %5s %4s %4s %5s %5s %5s %4s", "epoch", "preset",
+		    "from", "to", "rssi", "snr", "hops", "strt", "relay", "chan", "len");
 
 	while (done < want) {
 		int n = meshtastic_scanner_records(rec, ARRAY_SIZE(rec), from);
@@ -1275,14 +1276,16 @@ static int cmd_scan_dump(const struct shell *sh, size_t argc, char **argv)
 			break;
 		}
 		for (int i = 0; i < n && done < want; i++, done++) {
-			shell_print(sh, "%-10u %-12s 0x%08x 0x%08x %5d %4d %4u  0x%02x %4u",
+			shell_print(sh, "%-10u %-12s 0x%08x 0x%08x %5d %4d %4u %5u  0x%02x  0x%02x %4u",
 				    rec[i].epoch_sec,
 				    meshtastic_preset_display_name(
 					    (meshtastic_Config_LoRaConfig_ModemPreset)rec[i].preset,
 					    true),
 				    rec[i].from, rec[i].to, rec[i].rssi, rec[i].snr,
-				    (unsigned int)(rec[i].flags & 0x07U), rec[i].chan_hash,
-				    rec[i].payload_len);
+				    (unsigned int)(rec[i].flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK),
+				    (unsigned int)((rec[i].flags & MESHTASTIC_FLAGS_HOP_START_MASK) >>
+						   MESHTASTIC_FLAGS_HOP_START_SHIFT),
+				    rec[i].relay_node, rec[i].chan_hash, rec[i].payload_len);
 		}
 		from += (uint32_t)n;
 	}
