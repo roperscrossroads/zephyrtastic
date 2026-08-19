@@ -1,0 +1,70 @@
+diff --git a/drivers/gnss/gnss_nmea_generic.c b/drivers/gnss/gnss_nmea_generic.c
+index bef7989828..9ac0b9004c 100644
+--- a/drivers/gnss/gnss_nmea_generic.c
++++ b/drivers/gnss/gnss_nmea_generic.c
+@@ -22,7 +22,26 @@
+ #include <zephyr/logging/log.h>
+ LOG_MODULE_REGISTER(gnss_nmea_generic, CONFIG_GNSS_LOG_LEVEL);
+ 
+-#define UART_RX_BUF_SZ (256 + IS_ENABLED(CONFIG_GNSS_SATELLITES) * 512)
++/*
++ * zephyrtastic (2026-08-05): bumped 256 -> 1024 for the non-SATELLITES case. This
++ * buffer is split in half by modem_backend_uart into two ring buffers (double-
++ * buffered RX); the ISR fills the active half directly, and a workqueue item swaps
++ * to the other half once it's ~95% full. At our L76K's 9600 baud (~960 B/s), the old
++ * 128 B half-buffer left only ~6.4 B (~6.7 ms) of margin between "95% full, schedule
++ * swap" and "totally full, ISR can't accept more" -> a hard overrun
++ * ("modem_backend_uart_isr: Receive buffer overrun") whenever the swap workqueue got
++ * delayed past that window, which on a busy WiFi+LoRa+BLE unified image it reliably
++ * did during NMEA acquisition bursts (see docs/KNOWN-ISSUES.md, STABILITY-1 and its
++ * 2026-08-05 recurrence). A dedicated high-priority workqueue for the swap
++ * (CONFIG_MODEM_DEDICATED_WORKQUEUE, overlay-gnss.conf) narrowed but didn't close
++ * this — ISRs always preempt it regardless of thread priority. 1024 B (512 B/half)
++ * quadruples the margin to ~26.7 ms, which is the actual fix; the log-level cap in
++ * overlay-gnss.conf only silenced the WRN-flood *consequence* of an overrun, not the
++ * overrun itself. Local patch to this vendored Zephyr driver, uncommitted in this
++ * west-managed repo per this workspace's existing convention (see the sibling
++ * drivers/lora/native/sx126x/*.c and drivers/adc/adc_esp32.c local patches).
++ */
++#define UART_RX_BUF_SZ (1024 + IS_ENABLED(CONFIG_GNSS_SATELLITES) * 512)
+ #define UART_TX_BUF_SZ 64
+ #define CHAT_RECV_BUF_SZ 256
+ #define CHAT_ARGV_SZ 32
+@@ -179,6 +198,37 @@ static int gnss_nmea_generic_pm_action(const struct device *dev, enum pm_device_
+ #endif
+ 
+ #if DT_HAS_COMPAT_STATUS_OKAY(gnss_nmea_generic)
++/*
++ * zephyrtastic (2026-08-05): TRIED and REVERTED -- do not re-add without further
++ * investigation. This driver's init script is empty, so the L76K streams its
++ * factory-default NMEA set (GLL+RMC+VTG+GGA+GSA+GSV) even though only GGA/RMC are
++ * parsed (GSV needs CONFIG_GNSS_SATELLITES, which we don't enable) -- see the
++ * UART_RX_BUF_SZ comment above for the overrun this causes.
++ *
++ * Sent $PMTK314,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*28
++ * (MediaTek PMTK_API_SET_NMEA_OUTPUT, RMC+GGA only -- the well-known
++ * "PMTK_SET_NMEA_OUTPUT_RMCGGA" constant, checksum independently verified) as a
++ * fire-and-forget init command via MODEM_CHAT_SCRIPT_CMD_RESP_NONE. On-hardware
++ * (rzr3) this made things WORSE, not better: a NEW, different failure appeared --
++ * sustained 1 Hz "modem_chat: argv buffer overrun" (chat.c's chat_argv[32], not the
++ * UART ISR ring buffer) -- climbing without bound (219 lines in under 8 min) where
++ * the buffer-only fix (UART_RX_BUF_SZ 256->1024, still in place above) alone had
++ * produced only 3 isolated overruns in the same window. Root cause not understood:
++ * possibly the command TX interleaving with the concurrent unsolicited NMEA
++ * receive/match loop corrupts chat's parse state, or the L76K's ACK/response
++ * framing does something our fire-and-forget send doesn't handle. The failure
++ * persisted across an ESP32-side reflash+reboot (ruling out "stuck host thread"),
++ * which is consistent with either a wedged chat-parser state or the L76K module
++ * itself left in a bad output state that a Zephyr-side reset doesn't clear.
++ *
++ * Reverted to the empty script (MODEM_CHAT_SCRIPT_EMPTY_DEFINE) below. Next attempt
++ * should test in isolation (buffer bump alone, PMTK command alone -- not stacked),
++ * verify the L76K actually ACKs before assuming success, and confirm the module's
++ * own state clears the failure (vs. needing a real power-cycle) before another
++ * on-air test, given this hardware's guest WiFi shares a physical radio with the
++ * house's family WiFi (see docs/KNOWN-ISSUES.md, STABILITY-1, and
++ * ~/notes/local/infra/runbooks/friction-log.md).
++ */
+ MODEM_CHAT_SCRIPT_EMPTY_DEFINE(gnss_nmea_generic_init_chat_script);
+ #endif
+ 

@@ -1,0 +1,56 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+index d699cbb..12e3ed5 100644
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -608,12 +608,29 @@ static void sx126x_dio1_callback(const struct device *dev)
+  * status over SPI regardless of the (missed) GPIO edge. Takes the device
+  * explicitly because this driver instantiates for two compatibles (sx1261 /
+  * sx1262), so there is no single DEVICE_DT_INST_GET here.
++ *
++ * Must honor the same "callback disarmed" gate dio1_isr() does (data->hal.
++ * dio1_callback == NULL during sx126x_do_cad()'s synchronous poll and
++ * sx126x_set_sleep()'s SPI-sensitive window) -- otherwise a PM wake landing
++ * in that window submits sx126x_irq_work_handler() (which takes no lock)
++ * concurrently with CAD's own IRQ-status read/clear, the exact race
++ * sx126x_do_cad() disables the callback to prevent, just reached through
++ * this second, independent entry point instead of the edge ISR. The CAD
++ * poll loop doesn't need this path anyway: it already observes DIO1 by
++ * direct level read, immune to the missed-edge problem this function exists
++ * to work around. Observed on hardware 2026-08-07: rare (~1-2/board/day)
++ * exact-15s sx126x_lora_send() timeouts (the real TX_DONE IRQ silently
++ * eaten by a raced ClearIrqStatus) with none before CAD shipped.
+  */
+ void sx126x_poll_dio1(const struct device *dev)
+ {
+ 	const struct sx126x_hal_config *config = dev->config;
+ 	struct sx126x_data *data = dev->data;
+ 
++	if (data->hal.dio1_callback == NULL) {
++		return;
++	}
++
+ 	if (gpio_pin_get_dt(&config->dio1) > 0) {
+ 		k_work_submit(&data->irq_work);
+ 	}
+@@ -1002,6 +1019,21 @@ static void sx126x_irq_work_handler(struct k_work *work)
+ 	uint16_t irq_status = 0;
+ 	int ret;
+ 
++	/* This work item must never run while the driver holds exclusive DIO1/
++	 * IRQ-status ownership (sx126x_do_cad()'s synchronous poll,
++	 * sx126x_set_sleep()'s SPI-sensitive window) -- both disable the DIO1
++	 * callback for exactly that reason, and every path that submits this
++	 * work (the edge ISR, sx126x_poll_dio1()) is required to respect that
++	 * gate. Violating it races this function's unlocked SPI IRQ-status
++	 * read/clear against whichever of those owns the chip, which is
++	 * exactly the class of bug fixed 2026-08-07 (sx126x_poll_dio1() had a
++	 * second, ungated path to this same work item). A silently-eaten
++	 * TX_DONE/RX_DONE from a regression here is much harder to diagnose
++	 * than a loud coredump pointing straight at the violation.
++	 */
++	__ASSERT(data->hal.dio1_callback != NULL,
++		 "sx126x IRQ work ran with DIO1 callback disarmed (SPI-exclusive window)");
++
+ 	ret = sx126x_get_irq_status(dev, &irq_status);
+ 	if (ret < 0) {
+ 		LOG_ERR("Failed to get IRQ status");

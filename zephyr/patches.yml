@@ -284,3 +284,76 @@ patches:
       10.00 s feed leaves 20 ms. The stage-0 timing has NOT been measured
       directly against a stopped feed; that would need a deliberate
       feed-starvation test.
+  - path: 0008-sx126x-gate-poll-dio1-and-irq-work-on-armed-callback.patch
+    sha256sum: a18ec2190e49e365f6ec45b325f2a4a6a9ac3965502ff32624bae67c118e8309
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-08-07"
+    upstreamable: true
+    comments: |
+      drivers/lora/native/sx126x: make sx126x_poll_dio1() honor the same
+      "callback disarmed" gate the DIO1 edge ISR does, and assert the
+      invariant in the IRQ work handler.
+
+      sx126x_do_cad()'s synchronous poll and sx126x_set_sleep()'s
+      SPI-sensitive window both clear data->hal.dio1_callback to claim
+      exclusive ownership of the chip's IRQ-status register. The edge ISR
+      respects that; sx126x_poll_dio1() -- added by 0002 so a PM wake still
+      observes a DIO1 edge missed while the SoC slept -- did not, giving the
+      unlocked sx126x_irq_work_handler() a second, ungated path to run
+      concurrently with CAD's own read/clear. The race silently eats a real
+      TX_DONE, surfacing as a rare exact-15s sx126x_lora_send() timeout
+      (~1-2 per board per day on the Heltec V4 / V4-R8 bench nodes, none
+      before CAD shipped). The CAD poll loop does not need this path anyway:
+      it reads the DIO1 level directly, so it is immune to the missed-edge
+      problem sx126x_poll_dio1() exists to solve.
+
+      The __ASSERT in the work handler documents and enforces the invariant
+      for every future caller -- a loud coredump at the violation beats
+      diagnosing another silently-eaten IRQ.
+
+      PROVENANCE: this change was written and validated on hardware
+      2026-08-07 but was never captured as a carried patch -- it existed only
+      as an uncommitted edit in the zephyr/ working tree, where the next
+      `west update` or `west patch clean` would have discarded it and
+      reintroduced the TX-timeout bug. Found and captured 2026-08-19 while
+      reconstructing the patch baseline for 0009. The diff is that working
+      tree edit verbatim; pristine + 0002/0004/0005/0006 + this patch
+      reproduces the live file byte-for-byte.
+  - path: 0010-gnss-nmea-generic-enlarge-uart-rx-buffer.patch
+    sha256sum: 41fa89c7fa48627bcf6be2a8c0bbd22fd3593e1682c9bcbdd9bc8ec689c5f8a7
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-08-05"
+    upstreamable: false
+    comments: |
+      drivers/gnss/gnss_nmea_generic: UART_RX_BUF_SZ 256 -> 1024 for the
+      non-SATELLITES case, plus a recorded negative result on the PMTK
+      output-filtering approach that was tried and reverted.
+
+      modem_backend_uart splits this buffer in half (double-buffered RX): the
+      ISR fills the active half and a workqueue item swaps halves at ~95%
+      full. At the L76K's 9600 baud a 128-byte half left ~6.7 ms between
+      "schedule the swap" and "ISR has nowhere to put the next byte", which
+      the unified WiFi+LoRa+BLE image reliably missed during NMEA acquisition
+      bursts -> "modem_backend_uart_isr: Receive buffer overrun"
+      (docs/KNOWN-ISSUES.md STABILITY-1). 512-byte halves take the margin to
+      ~26.7 ms. CONFIG_MODEM_DEDICATED_WORKQUEUE narrows but cannot close the
+      gap -- an ISR preempts the workqueue at any thread priority -- and the
+      log-level cap in overlay-gnss.conf only silenced the symptom.
+
+      Not upstreamable as-is: the right upstream fix is a Kconfig for the
+      buffer size rather than a hardcoded bump, since the correct value is a
+      function of baud rate and the host's workqueue latency.
+
+      PROVENANCE: written 2026-08-05, never captured as a carried patch --
+      it existed only as an uncommitted edit in the zephyr/ working tree,
+      which the next `west update` / `west patch clean` would have reverted,
+      reintroducing the overrun. The in-file comment asserted that leaving it
+      uncommitted matched "this workspace's existing convention (see the
+      sibling sx126x/adc_esp32 local patches)", but those siblings are all
+      carried patches here -- the convention is this directory. Found and
+      captured 2026-08-19 during a full audit of modified files in zephyr/
+      against patches.yml.
