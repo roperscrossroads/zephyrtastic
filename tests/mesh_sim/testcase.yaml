@@ -9,3 +9,12 @@ common:
     - native_sim/native/64
 tests:
   meshtastic.mesh_sim.native_sim: {}
+  # Second config rather than folding the scanner into the base one: the scanner
+  # gates TX while sweeping, and every other test in this suite transmits. Keeping
+  # them separate means the base config stays a pure participant and cannot be
+  # perturbed by a sweep left running.
+  meshtastic.mesh_sim.scanner.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SCANNER=y
+      - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
+      - CONFIG_MESHTASTIC_SCANNER_DWELL_MS=1000

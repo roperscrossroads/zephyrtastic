@@ -11,7 +11,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
-#include "meshtastic_airtime.h"
+#include <zephyr/drivers/lora.h>
 #include "meshtastic_clock.h"
 #include "meshtastic_core.h"
 #include "meshtastic_ext_ram.h"
@@ -184,7 +184,7 @@ static void scan_thread_fn(void *p1, void *p2, void *p3)
 		 * caught AT ALL by a 5 s dwell, and the survey would confidently report
 		 * "nobody uses LongSlow". Adding ToA equalises capture probability at
 		 * c/T across every preset, which is what makes the rates comparable. */
-		dwell = meshtastic_airtime_packet_ms(MESHTASTIC_PKT_MAX) + (uint32_t)DWELL_C_MS;
+		dwell = lora_airtime(mt.lora_dev, MESHTASTIC_PKT_MAX) + (uint32_t)DWELL_C_MS;
 
 		scan_lock();
 		scan.stats[i].preset = scan_presets[i];

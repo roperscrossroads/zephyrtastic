@@ -21,6 +21,9 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+#include "meshtastic_scanner.h"
+#endif
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_reliable.h"
@@ -640,5 +643,114 @@ ZTEST(mesh_sim, test_tune_explicit_ignores_channel_name_derivation)
 	zassert_equal(freq, via_preset.frequency_hz,
 		      "the preset path must restore its own derived frequency");
 }
+
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+/* --- participant <-> scan toggle -------------------------------------------
+ *
+ * The safety property the whole scanner design rests on: while sweeping, the
+ * radio is parked on a frequency this node was never configured for, carrying a
+ * channel hash it did not derive. A transmission there is not a local bug — it
+ * is interference on someone else's channel. So TX must be refused for the WHOLE
+ * time the radio is away, including the restore window.
+ *
+ * This is testable precisely because the gate counts refusals instead of being
+ * compiled out: "nothing transmitted while scanning" is an assertion here rather
+ * than an assumption.
+ */
+ZTEST(mesh_sim, test_scan_mode_refuses_tx_and_restores)
+{
+	uint32_t freq_before = 0U, freq_after = 0U;
+	uint8_t sf_before = 0U, bw_before = 0U, sf_after = 0U, bw_after = 0U;
+	uint8_t hash_before;
+	struct lora_sim_frame f;
+
+	/* Baseline: a normal participant, transmitting happily. */
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "baseline switch failed");
+	zassert_false(meshtastic_scanner_active(), "must start as a participant");
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "before"),
+		   "a participant must be able to transmit");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "no TX captured before scanning");
+
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq_before, &sf_before, &bw_before),
+		   "radio unconfigured");
+	hash_before = mt.ch_hash;
+	meshtastic_scanner_reset();
+
+	/* Enter scan mode. */
+	zassert_ok(meshtastic_scanner_start(), "scan start failed");
+	zassert_true(meshtastic_scanner_active(), "TX must be gated while scanning");
+	zassert_equal(meshtastic_scanner_start(), -EALREADY, "starting twice must be refused");
+
+	/* THE assertion. A send now must be refused, and counted — the count is what
+	 * makes a stray transmit attempt visible instead of silent. */
+	zassert_not_equal(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "during"), 0,
+			  "transmitting while scanning must FAIL");
+	zassert_true(meshtastic_scanner_tx_blocked() > 0U,
+		     "a refused transmit must be counted, not silently dropped");
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(200)), 0,
+			  "nothing may reach the radio while scanning");
+
+	/* Leave scan mode. */
+	zassert_ok(meshtastic_scanner_stop(), "scan stop failed");
+	zassert_false(meshtastic_scanner_active(), "TX must be re-enabled after stopping");
+	zassert_equal(meshtastic_scanner_stop(), -EALREADY, "stopping twice must be refused");
+
+	/* The node is genuinely back where it was — not merely un-gated. Restoring
+	 * the gate without restoring the radio would let it transmit on a scan
+	 * frequency, which is the failure this ordering exists to prevent. */
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq_after, &sf_after, &bw_after),
+		   "radio unconfigured");
+	zassert_equal(freq_after, freq_before, "stop must restore the operating frequency");
+	zassert_equal(sf_after, sf_before, "stop must restore the operating SF");
+	zassert_equal(bw_after, bw_before, "stop must restore the operating bandwidth");
+	zassert_equal(mt.ch_hash, hash_before, "stop must restore the channel hash");
+
+	/* And it participates again. */
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "after"),
+		   "must be able to transmit again after stopping");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "no TX captured after stopping");
+}
+
+/* The survey captures headers from frames the normal stack would discard — a
+ * foreign mesh's channel hash, which we hold no key for. That is the whole point:
+ * the header is plaintext, so no keys and no channel setup are needed. */
+ZTEST(mesh_sim, test_scan_captures_foreign_headers)
+{
+	struct meshtastic_scan_record rec[4];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t freq = 0U;
+	uint8_t sf = 0U, bw = 0U;
+	int n;
+
+	meshtastic_scanner_reset();
+	zassert_ok(meshtastic_scanner_start(), "scan start failed");
+
+	/* Let the sweep tune somewhere, then inject on wherever it actually landed. */
+	k_sleep(K_MSEC(200));
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq, &sf, &bw), "sweep did not tune");
+
+	build_peer_text(0x6006U, "foreign", wire, &wire_len);
+	/* Stamp a channel hash we hold no key for — the frame is undecryptable to us
+	 * and the normal stack would drop it. The survey must still record it. */
+	wire[13] = 0xA5U;
+
+	zassert_ok(lora_sim_inject_on(lora_dev, freq, sf, bw, wire, (uint8_t)wire_len, -77, 3),
+		   "inject on the swept tuning failed");
+
+	zassert_true(meshtastic_scanner_total() > 0U, "an undecryptable frame must still be logged");
+
+	n = meshtastic_scanner_records(rec, ARRAY_SIZE(rec), 0U);
+	zassert_true(n > 0, "records must be readable");
+	zassert_equal(rec[0].chan_hash, 0xA5U, "the SENDER's channel hash must be recorded");
+	zassert_equal(rec[0].rssi, -77, "rssi must be recorded");
+	zassert_equal(rec[0].snr, 3, "snr must be recorded");
+	zassert_equal(rec[0].payload_len, (uint8_t)(wire_len - MESHTASTIC_HDR_LEN),
+		      "payload LENGTH is recorded (contents deliberately are not)");
+
+	zassert_ok(meshtastic_scanner_stop(), "scan stop failed");
+}
+#endif /* CONFIG_MESHTASTIC_SCANNER */
 
 ZTEST_SUITE(mesh_sim, NULL, mesh_sim_setup, mesh_sim_before, NULL, NULL);
