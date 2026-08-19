@@ -1,0 +1,29 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+index 12e3ed5..957d4a1 100644
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -941,7 +941,23 @@ static void sx126x_handle_irq_rx_done(const struct device *dev, uint16_t irq_sta
+ 		goto out;
+ 	}
+ 
+-	sx126x_get_packet_status(dev, &result.rssi, &result.snr);
++	/* Link metrics are advisory -- a packet whose payload reads back fine is
++	 * still a good packet, so a failed status read must not drop it. It must
++	 * not masquerade as a measurement either: `result` is zero-initialised, so
++	 * discarding this return code reports RSSI 0 / SNR 0, and 0 is precisely
++	 * the value the mesh stack reads as "not received over RF at all"
++	 * (reference: RadioLibInterface.cpp treats rx_snr == 0 && rx_rssi == 0 as a
++	 * locally-generated packet). Log it, so an unavailable reading stays
++	 * distinguishable from a signal that merely ran off the top of the scale:
++	 * RssiPkt is an unsigned -dBm/2 byte, so a transmitter a short bench
++	 * distance away (>= 0 dBm at the antenna) also reads back as exactly 0.
++	 */
++	ret = sx126x_get_packet_status(dev, &result.rssi, &result.snr);
++	if (ret < 0) {
++		LOG_WRN("Failed to get packet status (%d); RSSI/SNR unavailable", ret);
++		result.rssi = 0;
++		result.snr = 0;
++	}
+ 
+ 	if (irq_status & SX126X_IRQ_CRC_ERR) {
+ 		LOG_WRN("CRC error");

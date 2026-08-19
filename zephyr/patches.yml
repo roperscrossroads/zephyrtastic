@@ -321,6 +321,37 @@ patches:
       reconstructing the patch baseline for 0009. The diff is that working
       tree edit verbatim; pristine + 0002/0004/0005/0006 + this patch
       reproduces the live file byte-for-byte.
+  - path: 0009-sx126x-do-not-report-a-failed-packet-status-read-as-a-measurement.patch
+    sha256sum: 8219fa4f712f8fd6c31804b676df798f532d7e9a508de966e919dfd4256ca8b7
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-08-19"
+    upstreamable: true
+    comments: |
+      drivers/lora/native/sx126x: check sx126x_get_packet_status()'s return
+      code in the RX-done handler instead of discarding it.
+
+      struct sx126x_rx_result is zero-initialised, so a failed status read
+      (SPI error, or a BUSY timeout inside sx126x_hal_read_cmd()) delivered
+      the packet with RSSI 0 / SNR 0 and no indication anything had gone
+      wrong. 0/0 is not a neutral value: the Meshtastic stack reads it as
+      "this packet was generated locally, not received over RF" (reference
+      firmware, RadioLibInterface.cpp), and SNR 0 additionally feeds the
+      rebroadcast contention window.
+
+      The packet itself is still delivered -- link metrics are advisory and a
+      payload that read back cleanly is a good packet -- but the failure is
+      now logged, which is what makes an *unavailable* reading
+      distinguishable from a legitimately-zero one. That distinction has
+      practical teeth: RssiPkt is an unsigned -dBm/2 byte, so any signal at
+      or above 0 dBm at the antenna -- an ordinary +17 dBm bench node under a
+      metre away -- also reads back as exactly 0. Without this log the two
+      causes are indistinguishable in the field, which is what sent the
+      2026-08-19 "rssi 0 on relayed frames" investigation looking at the
+      relay path first.
+
+      No behaviour change on a healthy radio: the read does not fail.
   - path: 0010-gnss-nmea-generic-enlarge-uart-rx-buffer.patch
     sha256sum: 41fa89c7fa48627bcf6be2a8c0bbd22fd3593e1682c9bcbdd9bc8ec689c5f8a7
     module: zephyr
