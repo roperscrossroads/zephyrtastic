@@ -329,4 +329,105 @@ ZTEST(mesh_sim, test_decodes_real_stock_frame)
 	zassert_mem_equal(rx.payload, expect, strlen(expect), "decoded text mismatch");
 }
 
+/* --- preset orthogonality: the sim must model radios being deaf to each other --
+ *
+ * Everything in the multi-preset arc (docs/MULTI-PRESET-OPERATION.md) rests on one
+ * physical fact: a preset change moves BOTH the modem settings and the frequency,
+ * so a node on LongFast cannot hear a ShortTurbo node at all. Until the sim models
+ * that, a test cannot tell a correct preset switch from one that retuned the modem
+ * and forgot the frequency — which on hardware is silent until a second node fails
+ * to hear you.
+ */
+
+/* Frequencies/params are the resolved US PROFILE_STD values; see docs/preset_math.py. */
+#define LONGFAST_HZ    906875000U
+#define SHORTTURBO_HZ  926750000U
+
+ZTEST(mesh_sim, test_sim_models_preset_orthogonality)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t freq = 0U;
+	uint8_t sf = 0U, bw = 0U;
+	int ret;
+
+	build_peer_text(0x3003U, "orthogonality", wire, &wire_len);
+
+	/* Whatever the stack tuned to at init, read it back — the test asserts
+	 * against the node's ACTUAL tuning rather than assuming a preset. */
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq, &sf, &bw),
+		   "the radio must be configured after init");
+
+	/* Same tuning as the receiver: delivered. */
+	ret = lora_sim_inject_on(lora_dev, freq, sf, bw, wire, (uint8_t)wire_len, -50, 7);
+	zassert_ok(ret, "a frame on our own tuning must be received (got %d)", ret);
+
+	/* Right modem settings, wrong frequency — the exact failure mode of a switch
+	 * that updates SF/BW but forgets meshtastic_region_freq_plan(). */
+	ret = lora_sim_inject_on(lora_dev, freq + 1000000U, sf, bw, wire, (uint8_t)wire_len,
+				 -50, 7);
+	zassert_equal(ret, -ENOTCONN, "a frame on another frequency must NOT be heard");
+
+	/* Right frequency, wrong spreading factor — orthogonal in the other axis. */
+	ret = lora_sim_inject_on(lora_dev, freq, (uint8_t)(sf + 1U), bw, wire,
+				 (uint8_t)wire_len, -50, 7);
+	zassert_equal(ret, -ENOTCONN, "a frame at another SF must NOT be heard");
+
+	/* Right frequency and SF, wrong bandwidth. */
+	ret = lora_sim_inject_on(lora_dev, freq, sf, (uint8_t)(bw + 1U), wire,
+				 (uint8_t)wire_len, -50, 7);
+	zassert_equal(ret, -ENOTCONN, "a frame at another bandwidth must NOT be heard");
+
+	/* And the radio-agnostic form still delivers regardless — the existing tests
+	 * depend on that, and it must not have changed. */
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7),
+		   "the tuning-agnostic inject must still always deliver");
+}
+
+/* LongFast and ShortTurbo specifically — ~20 MHz and 4 spreading factors apart.
+ * The sim node comes up on LongFast (verified: SF11 / BW250 / 906.875 MHz), so
+ * ShortTurbo must be completely inaudible to it, and vice versa. This is the
+ * concrete case the preset bridge in docs/MULTI-PRESET-OPERATION.md §6 exists to
+ * cross, and the reason crossing it needs time-division rather than just listening
+ * harder. */
+ZTEST(mesh_sim, test_sim_longfast_and_shortturbo_are_mutually_deaf)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t freq = 0U;
+	uint8_t sf = 0U, bw = 0U;
+
+	build_peer_text(0x3004U, "deaf", wire, &wire_len);
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq, &sf, &bw), "radio must be configured");
+
+	/* Pin the default. If this ever changes, the assertions below become
+	 * meaningless rather than merely wrong, so fail loudly and say why. */
+	zassert_equal(freq, LONGFAST_HZ,
+		      "sim node expected on LongFast (%u Hz), found %u — update this test",
+		      LONGFAST_HZ, freq);
+	zassert_equal(sf, 11U, "LongFast is SF11, found SF%u", sf);
+
+	/* Our own preset: heard. */
+	zassert_ok(lora_sim_inject_on(lora_dev, LONGFAST_HZ, 11U, bw, wire,
+				      (uint8_t)wire_len, -50, 7),
+		   "a LongFast frame must reach a LongFast node");
+
+	/* ShortTurbo: different frequency AND different SF — deaf on both axes, so
+	 * neither one alone is carrying the result. */
+	zassert_equal(lora_sim_inject_on(lora_dev, SHORTTURBO_HZ, 7U, bw, wire,
+					 (uint8_t)wire_len, -50, 7),
+		      -ENOTCONN, "ShortTurbo must be inaudible to a LongFast node");
+
+	/* Same SF as ShortTurbo but on our frequency: still deaf, proving the SF axis
+	 * is checked and not just the frequency. */
+	zassert_equal(lora_sim_inject_on(lora_dev, LONGFAST_HZ, 7U, bw, wire,
+					 (uint8_t)wire_len, -50, 7),
+		      -ENOTCONN, "SF7 on our frequency must still be inaudible at SF11");
+
+	/* And our SF on ShortTurbo's frequency: deaf, proving the frequency axis too. */
+	zassert_equal(lora_sim_inject_on(lora_dev, SHORTTURBO_HZ, 11U, bw, wire,
+					 (uint8_t)wire_len, -50, 7),
+		      -ENOTCONN, "our SF on another frequency must still be inaudible");
+}
+
 ZTEST_SUITE(mesh_sim, NULL, mesh_sim_setup, mesh_sim_before, NULL, NULL);

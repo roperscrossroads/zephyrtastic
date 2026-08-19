@@ -222,13 +222,23 @@ static int lora_sim_cad(const struct device *dev, k_timeout_t timeout)
 
 /* ---- test control surface (drivers/../include/meshtastic/lora_sim.h) ------- */
 
-int lora_sim_inject(const struct device *dev, const uint8_t *data, uint8_t len,
-		    int16_t rssi, int8_t snr)
+/* Shared body. @p match_tuning selects whether the transmitter's settings have to
+ * agree with what this receiver is tuned to.
+ *
+ * The check is exact equality on all three of frequency, SF and bandwidth. Real
+ * LoRa is not quite that binary — an adjacent-channel signal is attenuated, not
+ * annihilated — but for the question these tests ask (did the switch retune
+ * everything, or only some of it?) a hard gate is the right model, and a partial
+ * switch shows up as a clean -ENOTCONN rather than a flaky near-miss. */
+static int lora_sim_inject_common(const struct device *dev, bool match_tuning, uint32_t freq_hz,
+				  uint8_t sf, uint8_t bw, const uint8_t *data, uint8_t len,
+				  int16_t rssi, int8_t snr)
 {
 	struct lora_sim_data *d = dev->data;
 	lora_recv_cb cb;
 	void *user;
 	uint8_t frame[256];
+	bool tuned_here = true;
 
 	if (len > sizeof(frame)) {
 		return -EMSGSIZE;
@@ -237,10 +247,21 @@ int lora_sim_inject(const struct device *dev, const uint8_t *data, uint8_t len,
 	k_mutex_lock(&d->lock, K_FOREVER);
 	cb   = d->rx_cb;
 	user = d->rx_user;
+	if (match_tuning) {
+		/* An unconfigured radio hears nothing: lora_config() has not run, so
+		 * there is no frequency to be on. */
+		tuned_here = d->cfg_valid && d->cfg.frequency == freq_hz &&
+			     (uint8_t)d->cfg.datarate == sf &&
+			     (uint8_t)d->cfg.bandwidth == bw;
+	}
 	k_mutex_unlock(&d->lock);
 
 	if (cb == NULL) {
 		return -EAGAIN; /* nobody listening */
+	}
+
+	if (!tuned_here) {
+		return -ENOTCONN; /* on the air, but not on OUR air */
 	}
 
 	/* Hand the callback a private, mutable copy, exactly as the real driver
@@ -249,6 +270,42 @@ int lora_sim_inject(const struct device *dev, const uint8_t *data, uint8_t len,
 	memcpy(frame, data, len);
 	cb(dev, frame, len, rssi, snr, user);
 	return 0;
+}
+
+int lora_sim_inject(const struct device *dev, const uint8_t *data, uint8_t len,
+		    int16_t rssi, int8_t snr)
+{
+	return lora_sim_inject_common(dev, false, 0U, 0U, 0U, data, len, rssi, snr);
+}
+
+int lora_sim_inject_on(const struct device *dev, uint32_t freq_hz, uint8_t sf, uint8_t bw,
+		       const uint8_t *data, uint8_t len, int16_t rssi, int8_t snr)
+{
+	return lora_sim_inject_common(dev, true, freq_hz, sf, bw, data, len, rssi, snr);
+}
+
+int lora_sim_get_tuning(const struct device *dev, uint32_t *freq_hz, uint8_t *sf, uint8_t *bw)
+{
+	struct lora_sim_data *d = dev->data;
+	int ret = 0;
+
+	k_mutex_lock(&d->lock, K_FOREVER);
+	if (!d->cfg_valid) {
+		ret = -EAGAIN;
+	} else {
+		if (freq_hz != NULL) {
+			*freq_hz = d->cfg.frequency;
+		}
+		if (sf != NULL) {
+			*sf = (uint8_t)d->cfg.datarate;
+		}
+		if (bw != NULL) {
+			*bw = (uint8_t)d->cfg.bandwidth;
+		}
+	}
+	k_mutex_unlock(&d->lock);
+
+	return ret;
 }
 
 int lora_sim_take_tx(const struct device *dev, struct lora_sim_frame *out, k_timeout_t timeout)

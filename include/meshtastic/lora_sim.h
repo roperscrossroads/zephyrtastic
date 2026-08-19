@@ -30,13 +30,51 @@ struct lora_sim_frame {
 };
 
 /**
- * @brief Deliver a frame to the node as if received over the air.
+ * @brief Deliver a frame to the node as if received over the air, on whatever
+ *        the node is currently tuned to.
+ *
+ * Radio-agnostic: the frame always reaches the receiver. Correct for the large
+ * majority of tests, which model one channel and never retune. Use
+ * @ref lora_sim_inject_on when the point of the test IS that two radios are on
+ * different settings.
  *
  * Calls the stack's registered receive callback synchronously.
  * @return 0 on success, -EAGAIN if no receiver is armed, -EMSGSIZE if too long.
  */
 int lora_sim_inject(const struct device *dev, const uint8_t *data, uint8_t len,
 		    int16_t rssi, int8_t snr);
+
+/**
+ * @brief Deliver a frame transmitted with specific modem settings.
+ *
+ * Models the property that makes multi-preset work possible at all: LoRa
+ * transmissions are only receivable by a radio tuned to the SAME frequency,
+ * spreading factor and bandwidth. A node on LongFast (906.875 MHz, SF11) is not
+ * "weakly hearing" a ShortTurbo node (926.750 MHz, SF7) — it is completely deaf
+ * to it. Without this, a sim test cannot tell a working preset switch from one
+ * that forgot to retune, which is precisely the silent failure mode.
+ *
+ * @param freq_hz Transmitter's centre frequency.
+ * @param sf      Transmitter's spreading factor (enum lora_datarate).
+ * @param bw      Transmitter's bandwidth (enum lora_signal_bandwidth).
+ *
+ * @return 0 if delivered, -ENOTCONN if the receiver is tuned elsewhere (the
+ *         interesting negative result), -EAGAIN if no receiver is armed,
+ *         -EMSGSIZE if too long.
+ */
+int lora_sim_inject_on(const struct device *dev, uint32_t freq_hz, uint8_t sf, uint8_t bw,
+		       const uint8_t *data, uint8_t len, int16_t rssi, int8_t snr);
+
+/**
+ * @brief Read back what the node is currently tuned to.
+ *
+ * Lets a test assert the *whole* switch happened — a preset change that updates
+ * SF/BW but forgets the frequency (or vice versa) is invisible on hardware until
+ * a second node fails to hear it.
+ *
+ * @return 0 on success, -EAGAIN if lora_config() has not been called yet.
+ */
+int lora_sim_get_tuning(const struct device *dev, uint32_t *freq_hz, uint8_t *sf, uint8_t *bw);
 
 /**
  * @brief Pop the next captured TX frame.
