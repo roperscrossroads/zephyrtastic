@@ -46,13 +46,27 @@ static const meshtastic_Config_LoRaConfig_ModemPreset scan_presets[] = {
 
 #define SCAN_N ARRAY_SIZE(scan_presets)
 
+static K_SEM_DEFINE(scan_wake, 0, 1);
+static K_SEM_DEFINE(scan_idle, 0, 1);
+
 static struct {
 	struct k_mutex lock;
 	bool lock_ready;
-	bool active;
+	/* Two flags, not one, and the distinction is load-bearing.
+	 *
+	 * `sweeping`  drives the thread.
+	 * `tx_closed` drives the TX gate, and must stay set until the radio is back
+	 *             on the operating preset. Clearing one flag for both would
+	 *             reopen the gate while still parked on a scan frequency — the
+	 *             exact "transmit on someone else's channel" outcome this whole
+	 *             design exists to prevent.
+	 */
+	bool sweeping;
+	bool tx_closed;
 	uint8_t cur;
 	uint32_t head;  /* next write slot; also the running count of writes */
-	uint32_t total; /* ever captured; keeps counting past the ring */
+	uint32_t total;      /* ever captured; keeps counting past the ring */
+	uint32_t tx_blocked; /* transmissions refused while sweeping */
 	struct meshtastic_scan_stats stats[SCAN_N];
 } scan;
 
@@ -87,7 +101,7 @@ void meshtastic_scanner_on_frame(const uint8_t *buf, uint16_t len, int16_t rssi,
 	hdr = (const struct meshtastic_wire_header *)buf;
 
 	scan_lock();
-	if (!scan.active) {
+	if (!scan.sweeping) {
 		scan_unlock();
 		return;
 	}
@@ -129,9 +143,12 @@ static void scan_thread_fn(void *p1, void *p2, void *p3)
 		uint8_t i;
 
 		scan_lock();
-		if (!scan.active) {
+		if (!scan.sweeping) {
 			scan_unlock();
-			k_sleep(K_MSEC(250));
+			/* Parked. Tell stop() the radio is ours no longer, then wait to
+			 * be woken rather than polling. */
+			k_sem_give(&scan_idle);
+			(void)k_sem_take(&scan_wake, K_FOREVER);
 			continue;
 		}
 		i = scan.cur;
@@ -180,7 +197,10 @@ static void scan_thread_fn(void *p1, void *p2, void *p3)
 			meshtastic_preset_display_name(scan_presets[i], true), plan.frequency_hz,
 			modem.spread_factor, modem.bandwidth_hz / 1000U, dwell);
 
-		k_sleep(K_MSEC(dwell));
+		/* Interruptible dwell: stop() gives scan_wake so a stop does not have
+		 * to wait out a full dwell — which on LongSlow is ~19 s of the node
+		 * being unable to transmit after the operator asked it to resume. */
+		(void)k_sem_take(&scan_wake, K_MSEC(dwell));
 
 		scan_lock();
 		scan.cur = (uint8_t)((i + 1U) % SCAN_N);
@@ -194,43 +214,101 @@ static struct k_thread scan_thread;
 int meshtastic_scanner_start(void)
 {
 	scan_lock();
-	if (scan.active) {
+	if (scan.sweeping) {
 		scan_unlock();
 		return -EALREADY;
 	}
-	scan.active = true;
+	/* Close the TX gate BEFORE the sweep thread can retune, so no frame can be
+	 * transmitted after the radio has left the operating preset. */
+	scan.tx_closed = true;
+	scan.sweeping = true;
 	scan.cur = 0U;
 	scan_unlock();
 
-	LOG_INF("scanner: sweeping %u presets, dwell = ToA + %ums", (unsigned int)SCAN_N,
-		(unsigned int)DWELL_C_MS);
+	k_sem_give(&scan_wake); /* un-park the thread */
+
+	LOG_INF("scanner: sweeping %u presets, dwell = ToA + %ums — TX refused until stop",
+		(unsigned int)SCAN_N, (unsigned int)DWELL_C_MS);
 	return 0;
 }
 
 int meshtastic_scanner_stop(void)
 {
+	int ret;
+
 	scan_lock();
-	if (!scan.active) {
+	if (!scan.sweeping) {
 		scan_unlock();
 		return -EALREADY;
 	}
-	scan.active = false;
+	scan.sweeping = false;
 	scan_unlock();
+
+	/* Wake the thread out of its dwell and wait for it to park, so it cannot
+	 * retune underneath the restore below. The timeout is a backstop: a missed
+	 * ack costs a redundant retune, never a transmit, because tx_closed is still
+	 * set until after the restore succeeds. */
+	k_sem_give(&scan_wake);
+	(void)k_sem_take(&scan_idle, K_MSEC(2000));
 
 	/* Return through the preset path rather than a hand-rolled tune: it
 	 * re-derives the channel hashes and keeps mt.modem_preset agreeing with the
 	 * radio, which an explicit tune deliberately does not. */
-	return meshtastic_preset_switch(mt.modem_preset, NULL);
+	ret = meshtastic_preset_switch(mt.modem_preset, NULL);
+
+	/* Reopen the TX gate ONLY once the radio is genuinely back on the operating
+	 * preset. On failure it stays shut: a node that cannot retune must not
+	 * transmit, because it is still sitting on a scan frequency. */
+	if (ret == 0) {
+		scan_lock();
+		scan.tx_closed = false;
+		scan_unlock();
+	} else {
+		LOG_ERR("scanner: restore failed (%d) — TX stays disabled, radio is not "
+			"on the operating preset", ret);
+	}
+
+	return ret;
 }
 
 bool meshtastic_scanner_active(void)
 {
-	bool a;
+	bool closed;
+
+	/* Deliberately reports the TX-GATE state, not the sweep state: this is what
+	 * the transmit path asks, and the honest answer to "may I transmit?" spans
+	 * the restore window too. */
+	scan_lock();
+	closed = scan.tx_closed;
+	scan_unlock();
+	return closed;
+}
+
+bool meshtastic_scanner_sweeping(void)
+{
+	bool s;
 
 	scan_lock();
-	a = scan.active;
+	s = scan.sweeping;
 	scan_unlock();
-	return a;
+	return s;
+}
+
+void meshtastic_scanner_note_tx_blocked(void)
+{
+	scan_lock();
+	scan.tx_blocked++;
+	scan_unlock();
+}
+
+uint32_t meshtastic_scanner_tx_blocked(void)
+{
+	uint32_t n;
+
+	scan_lock();
+	n = scan.tx_blocked;
+	scan_unlock();
+	return n;
 }
 
 uint32_t meshtastic_scanner_total(void)
@@ -248,6 +326,7 @@ void meshtastic_scanner_reset(void)
 	scan_lock();
 	scan.head = 0U;
 	scan.total = 0U;
+	scan.tx_blocked = 0U;
 	memset(scan.stats, 0, sizeof(scan.stats));
 	scan_unlock();
 }

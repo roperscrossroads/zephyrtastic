@@ -9,25 +9,35 @@ menuconfig MESHTASTIC_SCANNER
 	  Answers "which presets are actually in use around me" — information no
 	  ordinary node can gather, since each one only ever sees its own preset.
 
+	  Safe to enable in an ordinary node build: scanning is a RUNTIME mode
+	  (`meshtastic scan start` / `stop`), and while it is active every transmit
+	  is refused at the single choke point every TX already funnels through.
+	  The node stops participating for the duration and resumes afterwards.
+
 	  See docs/MULTI-PRESET-OPERATION.md §3.
 
 if MESHTASTIC_SCANNER
 
 config MESHTASTIC_SCANNER_RX_ONLY
-	bool "Compile out the transmit path"
-	default y
+	bool "Dedicated scanner: compile the transmit path out entirely"
+	default n
 	help
-	  Make the build structurally incapable of transmitting, rather than
-	  relying on a runtime flag.
+	  For a build that will ONLY ever scan. Removes the transmit path at
+	  compile time, so the image is structurally incapable of transmitting.
 
-	  A scanner spends its life on frequencies other meshes own, with a channel
-	  hash it did not derive. A stray transmission there is not a local bug: it
-	  is interference on somebody else's channel, on a frequency this node was
-	  never configured for. A runtime guard can be bypassed by any code path
-	  that reaches the radio; an absent code path cannot.
+	  This is not normally needed. Every transmission in the firmware funnels
+	  through exactly one function — meshtastic_radio_send_wire_now(), whose
+	  sole caller is the outbound queue drain — and the runtime gate sits
+	  there, so it covers relay, NodeInfo, position, telemetry, reliable
+	  retransmits, admin replies and phone-injected sends alike. There is no
+	  second path to the radio to slip through.
 
-	  Say n only to build a scanner that can also operate normally, and only if
-	  you have a specific reason.
+	  The runtime gate is also the more testable of the two: it COUNTS refused
+	  transmissions (see `meshtastic scan status`), so "nothing tried to
+	  transmit while scanning" becomes an assertion rather than an assumption.
+	  A compiled-out path cannot tell you that.
+
+	  Say y only for a permanently-dedicated scanner node.
 
 config MESHTASTIC_SCANNER_RING_RECORDS
 	int "Retained records"

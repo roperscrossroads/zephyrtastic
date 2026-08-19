@@ -264,18 +264,36 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	int busy_retries = 0;
 
 #if defined(CONFIG_MESHTASTIC_SCANNER_RX_ONLY)
-	/* A scanner build cannot transmit, structurally. It spends its life on
-	 * frequencies other meshes own, with a channel hash it did not derive — a
-	 * stray transmission there is not a local bug, it is interference on someone
-	 * else's channel on a frequency this node was never configured for. A
-	 * runtime guard could be bypassed by any path that reaches the radio; an
-	 * absent one cannot. See Kconfig.scanner. */
+	/* Dedicated scanner build: no transmit path at all. */
 	ARG_UNUSED(pkt);
 	ARG_UNUSED(pkt_len);
 	ARG_UNUSED(retries);
 	ARG_UNUSED(busy_retries);
 	return -EPERM;
 #else
+
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+	/* THE gate. While scanning, the radio is parked on a frequency this node
+	 * was never configured for, carrying a channel hash it did not derive — a
+	 * transmission there would be interference on someone else's channel, not
+	 * merely a local bug.
+	 *
+	 * One check suffices because this function is the single choke point:
+	 * lora_send() is called nowhere outside this file, and this function's only
+	 * caller is the outbound queue drain. Relay, NodeInfo, position, telemetry,
+	 * reliable retransmits, admin replies and phone-injected sends all arrive
+	 * here. There is no second path to slip through.
+	 *
+	 * Refusal is counted rather than silent, so "nothing tried to transmit while
+	 * scanning" is an assertion (see `meshtastic scan status`) instead of an
+	 * assumption. The drain has already dequeued the frame and simply propagates
+	 * this error to whoever enqueued it, so a refusal costs one dropped frame
+	 * and never a retry storm. */
+	if (meshtastic_scanner_active()) {
+		meshtastic_scanner_note_tx_blocked();
+		return -EPERM;
+	}
+#endif
 
 #if defined(CONFIG_MESHTASTIC_PACKET_HEXDUMP)
 	log_wire_tx(pkt, pkt_len);

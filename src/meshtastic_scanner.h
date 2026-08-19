@@ -58,8 +58,18 @@ int meshtastic_scanner_start(void);
  */
 int meshtastic_scanner_stop(void);
 
-/** @brief True while the sweep is running. */
+/**
+ * @brief True while transmission must be refused.
+ *
+ * This is what the TX path asks, and it deliberately spans more than the sweep
+ * itself: it stays true through the restore, and stays true forever if the
+ * restore fails — a node that could not get back to its operating preset is
+ * still sitting on a scan frequency and must not transmit there.
+ */
 bool meshtastic_scanner_active(void);
+
+/** @brief True while the sweep thread is actually cycling presets. */
+bool meshtastic_scanner_sweeping(void);
 
 /**
  * @brief Per-preset observations.
@@ -82,6 +92,19 @@ int meshtastic_scanner_records(struct meshtastic_scan_record *out, size_t max, u
 
 /** @brief Total records ever captured (may exceed what the ring retains). */
 uint32_t meshtastic_scanner_total(void);
+
+/**
+ * @brief Count a transmission refused because a sweep was running.
+ *
+ * Called from the TX choke point. Refusals are counted rather than silent so
+ * that "nothing tried to transmit while scanning" is an assertion rather than an
+ * assumption — a non-zero count means some path kept trying, which is a bug
+ * worth seeing rather than a silence worth trusting.
+ */
+void meshtastic_scanner_note_tx_blocked(void);
+
+/** @brief Transmissions refused since the last reset. Should be small; see above. */
+uint32_t meshtastic_scanner_tx_blocked(void);
 
 /** @brief Drop every retained record and reset the per-preset stats. */
 void meshtastic_scanner_reset(void);

@@ -1160,6 +1160,153 @@ static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
 }
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+#include "meshtastic_scanner.h"
+
+static int cmd_scan_start(const struct shell *sh, size_t argc, char **argv)
+{
+	int ret;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	ret = meshtastic_scanner_start();
+	if (ret == -EALREADY) {
+		shell_warn(sh, "already scanning");
+		return 0;
+	}
+	if (ret < 0) {
+		shell_error(sh, "scan start failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "scanning — this node is OFF its channel and cannot transmit");
+	shell_print(sh, "run 'meshtastic scan stop' to rejoin the mesh");
+	return 0;
+}
+
+static int cmd_scan_stop(const struct shell *sh, size_t argc, char **argv)
+{
+	int ret;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	ret = meshtastic_scanner_stop();
+	if (ret == -EALREADY) {
+		shell_warn(sh, "not scanning");
+		return 0;
+	}
+	if (ret < 0) {
+		shell_error(sh, "scan stop FAILED: %d — radio is not back on the operating "
+				"preset and TX stays disabled", ret);
+		return ret;
+	}
+
+	shell_print(sh, "rejoined: back on the operating preset, TX re-enabled");
+	return 0;
+}
+
+static int cmd_scan_status(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_scan_stats st[16];
+	uint32_t total;
+	uint32_t blocked;
+	int n;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	n = meshtastic_scanner_stats(st, ARRAY_SIZE(st));
+	if (n < 0) {
+		shell_error(sh, "stats failed: %d", n);
+		return n;
+	}
+	total = meshtastic_scanner_total();
+	blocked = meshtastic_scanner_tx_blocked();
+
+	shell_print(sh, "sweeping: %s   tx: %s", meshtastic_scanner_sweeping() ? "yes" : "no",
+		    meshtastic_scanner_active() ? "REFUSED (scanning)" : "allowed");
+	shell_print(sh, "captured: %u total", total);
+	if (blocked > 0U) {
+		/* Not cosmetic: a non-zero count means some path kept trying to
+		 * transmit while parked on a foreign frequency. The gate held, but
+		 * something upstream should not have been asking. */
+		shell_warn(sh, "tx refused while scanning: %u (expected 0 — investigate)",
+			   blocked);
+	}
+	shell_print(sh, "");
+	shell_print(sh, "%-12s %11s %8s %8s %10s", "preset", "freq", "heard", "visits", "listen_s");
+	for (int i = 0; i < n; i++) {
+		shell_print(sh, "%-12s %8u.%03u %8u %8u %10u",
+			    meshtastic_preset_display_name(st[i].preset, true),
+			    st[i].frequency_hz / 1000000U, (st[i].frequency_hz / 1000U) % 1000U,
+			    st[i].heard, st[i].visits, st[i].dwell_ms_total / 1000U);
+	}
+	return 0;
+}
+
+static int cmd_scan_dump(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_scan_record rec[8];
+	uint32_t from = 0U;
+	uint32_t want = 32U;
+	uint32_t done = 0U;
+
+	if (argc > 1) {
+		want = (uint32_t)strtoul(argv[1], NULL, 0);
+	}
+
+	shell_print(sh, "%-10s %-12s %-10s %-10s %5s %4s %4s %5s %4s", "epoch", "preset", "from",
+		    "to", "rssi", "snr", "hops", "chan", "len");
+
+	while (done < want) {
+		int n = meshtastic_scanner_records(rec, ARRAY_SIZE(rec), from);
+
+		if (n <= 0) {
+			break;
+		}
+		for (int i = 0; i < n && done < want; i++, done++) {
+			shell_print(sh, "%-10u %-12s 0x%08x 0x%08x %5d %4d %4u  0x%02x %4u",
+				    rec[i].epoch_sec,
+				    meshtastic_preset_display_name(
+					    (meshtastic_Config_LoRaConfig_ModemPreset)rec[i].preset,
+					    true),
+				    rec[i].from, rec[i].to, rec[i].rssi, rec[i].snr,
+				    (unsigned int)(rec[i].flags & 0x07U), rec[i].chan_hash,
+				    rec[i].payload_len);
+		}
+		from += (uint32_t)n;
+	}
+
+	shell_print(sh, "(%u shown of %u captured)", done, meshtastic_scanner_total());
+	return 0;
+}
+
+static int cmd_scan_reset(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_scanner_reset();
+	shell_print(sh, "scan records and stats cleared");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	meshtastic_scan_cmds,
+	SHELL_CMD(start, NULL,
+		  SHELL_HELP("Begin sweeping presets. Leaves the mesh; TX is refused.", NULL),
+		  cmd_scan_start),
+	SHELL_CMD(stop, NULL, SHELL_HELP("Stop sweeping and rejoin the mesh.", NULL),
+		  cmd_scan_stop),
+	SHELL_CMD(status, NULL, SHELL_HELP("Per-preset capture counts.", NULL), cmd_scan_status),
+	SHELL_CMD(dump, NULL, SHELL_HELP("Print captured headers.", "[count]"), cmd_scan_dump),
+	SHELL_CMD(reset, NULL, SHELL_HELP("Clear captured records and stats.", NULL),
+		  cmd_scan_reset),
+	SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_SCANNER */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodedb_cmds,
 			       SHELL_CMD(list, NULL, SHELL_HELP("List NodeDB entries.", NULL),
 					 cmd_nodedb_list),
@@ -2046,6 +2193,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_MESHTASTIC_NODEINFO)
 	SHELL_CMD(nodeinfo, &meshtastic_nodeinfo_cmds, SHELL_HELP("NodeInfo commands.", NULL),
 		  NULL),
+#endif
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+	SHELL_CMD(scan, &meshtastic_scan_cmds,
+		  SHELL_HELP("Multi-preset survey. Leaves the mesh while running.", NULL), NULL),
 #endif
 	SHELL_SUBCMD_SET_END);
 
