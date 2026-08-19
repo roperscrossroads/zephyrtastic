@@ -33,17 +33,39 @@
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-/* NodeInfoLite.bitfield bit indices (Meshtastic upstream layout). Only peer
- * public keys are persisted (see MESHTASTIC_NODEDB_PERSIST_KEYS); the bitfield
- * and everything else stays in RAM, so these indices are internal to this
- * firmware. */
-#define NODEINFO_BITFIELD_IS_FAVORITE_BIT         0
-#define NODEINFO_BITFIELD_IS_IGNORED_BIT          1
-#define NODEINFO_BITFIELD_VIA_MQTT_BIT            2
-#define NODEINFO_BITFIELD_HAS_USER_BIT            5
-#define NODEINFO_BITFIELD_IS_LICENSED_BIT         6
-#define NODEINFO_BITFIELD_IS_UNMESSAGABLE_BIT     7
-#define NODEINFO_BITFIELD_HAS_IS_UNMESSAGABLE_BIT 8
+/*
+ * NodeInfoLite.bitfield bit indices — the reference firmware's layout
+ * (firmware/src/mesh/NodeDB.h, NODEINFO_BITFIELD_*_SHIFT), reproduced exactly.
+ *
+ * Corrected 2026-08-19: IS_FAVORITE and IS_IGNORED used to sit at bits 0 and 1
+ * here, matching an older reference revision. The reference has since inserted
+ * IS_KEY_MANUALLY_VERIFIED and IS_MUTED at 0/1 and moved favorite/ignored to
+ * 3/4, so this firmware's "favorite" was the reference's "key manually
+ * verified" and its "ignored" was "muted". Bits 2 and 5-8 always agreed.
+ *
+ * The bitfield IS persisted — mtrec_durable_copy() keeps it (clearing only
+ * VIA_MQTT), so stored records written under the old layout would read back
+ * with "favorite" meaning "key manually verified" and "ignored" meaning
+ * "muted". MTREC_RECORD_VERSION is bumped alongside this change so those
+ * records are rejected at load and re-learned, rather than silently
+ * reinterpreted. (Do not confuse the two node subtrees: mtnode holds only
+ * last_seen + role + public key and is unaffected; mtrec holds the full
+ * NodeInfoLite.)
+ *
+ * The unused-here bits are still defined, so nobody claims one for something
+ * else and reintroduces exactly the divergence this comment records.
+ */
+#define NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT 0 /* not yet implemented */
+#define NODEINFO_BITFIELD_IS_MUTED_BIT                 1 /* not yet implemented */
+#define NODEINFO_BITFIELD_VIA_MQTT_BIT                 2
+#define NODEINFO_BITFIELD_IS_FAVORITE_BIT              3
+#define NODEINFO_BITFIELD_IS_IGNORED_BIT               4
+#define NODEINFO_BITFIELD_HAS_USER_BIT                 5
+#define NODEINFO_BITFIELD_IS_LICENSED_BIT              6
+#define NODEINFO_BITFIELD_IS_UNMESSAGABLE_BIT          7
+#define NODEINFO_BITFIELD_HAS_IS_UNMESSAGABLE_BIT      8
+#define NODEINFO_BITFIELD_HAS_XEDDSA_SIGNED_BIT        9  /* not yet implemented */
+#define NODEINFO_BITFIELD_HAS_SNR_BIT                  10 /* not yet implemented */
 
 /* Full-lean: the DB retains only the NodeInfoLite core (identity + pubkey).
  * Position / device+environment telemetry / status are report-and-forget (as in
@@ -713,7 +735,13 @@ SETTINGS_STATIC_HANDLER_DEFINE(mtnode, MTNODE_SUBTREE, NULL, nodekeys_set, NULL,
  * the store.
  */
 #define MTREC_SUBTREE         "mtrec"
-#define MTREC_RECORD_VERSION  1U
+/* 2 (2026-08-19): the NodeInfoLite bitfield layout changed to match the
+ * reference — IS_FAVORITE 0->3, IS_IGNORED 1->4 — and the bitfield is part of
+ * this record. A v1 record decodes cleanly but means something different, which
+ * is the worst kind of stale data, so the version gates it out: mtrec_decode()
+ * rejects any record whose first byte is not this value, the entry is simply
+ * re-learned from the air, and the reconcile pass prunes the orphan. */
+#define MTREC_RECORD_VERSION  2U
 #define MTREC_HEADER_LEN      4U /* version, reserved, LE16 payload length */
 #define MTREC_RECONCILE_BATCH 32U
 #define MTREC_BUF_LEN         (meshtastic_NodeInfoLite_size + MTREC_HEADER_LEN)
