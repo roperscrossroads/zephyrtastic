@@ -1163,6 +1163,13 @@ static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 #include "meshtastic_scanner.h"
 
+/* Defined further down, alongside the `lora preset` command that also uses it.
+ * Forward-declared rather than moved, so each stays next to its own command
+ * group; sharing the parser is the point — the accepted preset spellings must
+ * not drift between `lora preset` and `scan presets`. */
+static int shell_parse_modem_preset(const char *name,
+				    meshtastic_Config_LoRaConfig_ModemPreset *out);
+
 static int cmd_scan_start(const struct shell *sh, size_t argc, char **argv)
 {
 	int ret;

@@ -23,3 +23,13 @@ tests:
   meshtastic.shell.psk_hex.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_SHELL_PSK_HEX=y
+
+  # Compiles the shell WITH the scanner. Neither the base shell config nor the
+  # mesh_sim scanner config builds both, and that gap let a plain compile error
+  # ship: `scan presets` calls shell_parse_modem_preset(), which is defined
+  # further down the same file, and nothing in twister caught the missing forward
+  # declaration because no config had both symbols on at once.
+  meshtastic.shell.scanner.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SCANNER=y
+      - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
