@@ -47,7 +47,7 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
  * LoRaConfig on each switch rather than cached: an admin can change the region,
  * and a stale copy would put us on a legal-elsewhere frequency. UNSET keeps the
  * compile-time default, mirroring meshtastic_config_store.c. */
-static meshtastic_Config_LoRaConfig_RegionCode preset_region(void)
+meshtastic_Config_LoRaConfig_RegionCode meshtastic_preset_region(void)
 {
 	meshtastic_Config cfg;
 	meshtastic_Config_LoRaConfig_RegionCode region =
@@ -105,7 +105,7 @@ int meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset preset,
 	meshtastic_channels_refresh_derived();
 
 	/* (3) Resolve the frequency for the new preset + the refreshed channel name. */
-	ret = meshtastic_region_freq_plan(preset_region(), preset,
+	ret = meshtastic_region_freq_plan(meshtastic_preset_region(), preset,
 					  meshtastic_channels_primary_name(), mt.use_preset,
 					  &plan);
 	if (ret < 0) {

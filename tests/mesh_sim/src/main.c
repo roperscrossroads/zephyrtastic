@@ -21,6 +21,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
+#include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_reliable.h"
 #include "meshtastic_sched.h"
@@ -588,6 +589,56 @@ ZTEST(mesh_sim, test_preset_switch_rejects_unknown_atomically)
 	zassert_equal(sf_after, sf_before, "a refused switch must not move the SF");
 	zassert_equal(bw_after, bw_before, "a refused switch must not move the bandwidth");
 	zassert_equal(mt.ch_hash, hash_before, "a refused switch must not move the channel hash");
+}
+
+/* The scanner's tuning entry point. Deliberately separate from
+ * meshtastic_preset_switch(): that resolves frequency through the primary
+ * channel's name, so on a NAMED channel it would keep dragging a scanner back to
+ * that name's slot instead of visiting where a foreign mesh actually is
+ * (docs/MULTI-PRESET-OPERATION.md §3.1a). */
+ZTEST(mesh_sim, test_tune_explicit_ignores_channel_name_derivation)
+{
+	struct meshtastic_preset_result via_preset = {0};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t freq = 0U;
+	uint8_t sf = 0U, bw = 0U;
+
+	/* Where the preset path puts us — through this node's named channel. */
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    &via_preset), "baseline switch failed");
+
+	/* Now tune somewhere the name derivation would never choose: the CANONICAL
+	 * empty-name LongFast frequency, which differs from ours precisely because
+	 * our channel carries a literal name. */
+	zassert_ok(meshtastic_radio_tune_explicit(LONGFAST_HZ, 11U, 250000U, 5U),
+		   "explicit tune failed");
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq, &sf, &bw), "radio unconfigured");
+	zassert_equal(freq, LONGFAST_HZ, "explicit tune must land exactly where asked");
+	zassert_equal(sf, 11U, "explicit tune must set the requested SF");
+
+	/* And it really hears there — this is the scanner's whole job. */
+	build_peer_text(0x5005U, "canonical", wire, &wire_len);
+	zassert_ok(lora_sim_inject_on(lora_dev, LONGFAST_HZ, 11U, bw, wire,
+				      (uint8_t)wire_len, -50, 7),
+		   "must hear the frequency we explicitly tuned to");
+
+	/* Reject parameters the driver cannot represent, rather than half-applying. */
+	zassert_equal(meshtastic_radio_tune_explicit(LONGFAST_HZ, 11U, 999U, 5U), -EINVAL,
+		      "an unrepresentable bandwidth must be refused");
+	zassert_equal(meshtastic_radio_tune_explicit(LONGFAST_HZ, 11U, 250000U, 99U), -EINVAL,
+		      "an unrepresentable coding rate must be refused");
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq, &sf, &bw), "radio unconfigured");
+	zassert_equal(freq, LONGFAST_HZ, "a refused tune must not move the radio");
+
+	/* Resuming normal operation goes back through the preset path, which
+	 * re-derives everything — tuning "back" by hand would leave mt.modem_preset
+	 * disagreeing with the radio. */
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "restore failed");
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq, &sf, &bw), "radio unconfigured");
+	zassert_equal(freq, via_preset.frequency_hz,
+		      "the preset path must restore its own derived frequency");
 }
 
 ZTEST_SUITE(mesh_sim, NULL, mesh_sim_setup, mesh_sim_before, NULL, NULL);

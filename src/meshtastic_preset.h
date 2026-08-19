@@ -45,6 +45,15 @@ struct meshtastic_preset_result {
  *         has no frequency plan (rolled back), or a negative errno from the
  *         radio.
  */
+/**
+ * @brief The region the frequency plan should be resolved against.
+ *
+ * Read from the stored LoRaConfig on each call rather than cached: an admin can
+ * change the region, and a stale copy would put the node on a frequency that is
+ * legal somewhere else. UNSET keeps the compile-time default.
+ */
+meshtastic_Config_LoRaConfig_RegionCode meshtastic_preset_region(void);
+
 int meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset preset,
 			     struct meshtastic_preset_result *out);
 

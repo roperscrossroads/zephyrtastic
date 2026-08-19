@@ -56,6 +56,26 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len);
 int meshtastic_radio_retune(void);
 
 /**
+ * @brief Tune to exact parameters, deriving nothing.
+ *
+ * The scanner's entry point, and deliberately NOT meshtastic_preset_switch():
+ * that resolves the frequency through the primary channel's name, which is right
+ * for operating and wrong for scanning. A scanner has to visit the frequency a
+ * *foreign* mesh is on, and a named local channel would keep dragging it back to
+ * that name's slot (docs/MULTI-PRESET-OPERATION.md §3.1a).
+ *
+ * Sets no preset, touches no channel, re-derives no hash — it only moves the
+ * radio. That also means it leaves mt.modem_preset stale, so a caller that
+ * intends to resume normal operation must go back through
+ * meshtastic_preset_switch() rather than tuning "back" by hand.
+ *
+ * @return 0 on success, -EINVAL for a bandwidth or coding rate the driver cannot
+ *         represent, or a negative errno from the radio.
+ */
+int meshtastic_radio_tune_explicit(uint32_t frequency_hz, uint8_t spread_factor,
+				   uint32_t bandwidth_hz, uint8_t coding_rate);
+
+/**
  * @brief Queue a frame that must not go out for at least @p delay_ms.
  *
  * The contention window (see meshtastic_contention.h). The frame occupies a

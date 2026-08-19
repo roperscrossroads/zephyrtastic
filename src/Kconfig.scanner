@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_SCANNER
+	bool "Multi-preset RX-only survey (scanner)"
+	default n
+	help
+	  Cycle the radio across the region's presets and log the plaintext header
+	  of every frame heard, from any mesh, with no keys and no channel setup.
+	  Answers "which presets are actually in use around me" — information no
+	  ordinary node can gather, since each one only ever sees its own preset.
+
+	  See docs/MULTI-PRESET-OPERATION.md §3.
+
+if MESHTASTIC_SCANNER
+
+config MESHTASTIC_SCANNER_RX_ONLY
+	bool "Compile out the transmit path"
+	default y
+	help
+	  Make the build structurally incapable of transmitting, rather than
+	  relying on a runtime flag.
+
+	  A scanner spends its life on frequencies other meshes own, with a channel
+	  hash it did not derive. A stray transmission there is not a local bug: it
+	  is interference on somebody else's channel, on a frequency this node was
+	  never configured for. A runtime guard can be bypassed by any code path
+	  that reaches the radio; an absent code path cannot.
+
+	  Say n only to build a scanner that can also operate normally, and only if
+	  you have a specific reason.
+
+config MESHTASTIC_SCANNER_RING_RECORDS
+	int "Retained records"
+	default 2048
+	range 64 262144
+	help
+	  Ring capacity in records (28 bytes each). The default is deliberately
+	  modest so the feature fits on a board with no PSRAM at all.
+
+	  Measured ceilings on the R8 (8 MB octal PSRAM), both verified to build:
+	    v4-unified profile   100000 records (2.8 MB)  ~1.4 MB still spare
+	    bare samples build   150000 records (4.2 MB)  ~126 KB spare
+
+	  The budget is CONFIG_ESP_SPIRAM_SIZE minus the 4 MB shared-multi-heap
+	  pool minus the existing ~56 KB of .ext_ram.bss statics. Note the linker
+	  ASSERT that guards this ("External SPIRAM overflowed", esp32s3/default.ld)
+	  measures .ext_ram.data ONLY -- .ext_ram.dummy is address-window
+	  reservation for flash rodata, not PSRAM capacity, so a build whose
+	  ext_dram_seg total exceeds 8 MB can still be entirely legal.
+
+	  Oldest records are overwritten first. meshtastic_scanner_total() keeps
+	  counting past the ring, so a rate estimate stays correct even once
+	  records have been dropped.
+
+config MESHTASTIC_SCANNER_DWELL_MS
+	int "Dwell constant c, in milliseconds"
+	default 10000
+	range 1000 120000
+	help
+	  Each preset is visited for (its max time-on-air + c). Adding the ToA is
+	  what equalises capture probability across presets: a packet is only heard
+	  if its preamble starts while already listening, so a fixed dwell would
+	  give slow presets a much lower chance — LongSlow's 9.28 s max packet
+	  cannot be caught at all by a 5 s dwell. With D_i = ToA_i + c the capture
+	  probability is c/T on every preset, which is what makes the observed
+	  rates comparable.
+
+	  c=10000 gives a ~120 s sweep at ~8.3 % uniform capture.
+
+config MESHTASTIC_SCANNER_AUTOSTART
+	bool "Start sweeping at boot"
+	default n
+	help
+	  Otherwise the sweep is started explicitly (shell, or scanner_start()).
+
+config MESHTASTIC_SCANNER_STACK_SIZE
+	int "Sweep thread stack"
+	default 1536
+
+config MESHTASTIC_SCANNER_PRIORITY
+	int "Sweep thread priority"
+	default 10
+
+endif # MESHTASTIC_SCANNER

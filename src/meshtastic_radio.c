@@ -19,6 +19,9 @@
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+#include "meshtastic_scanner.h"
+#endif
 #include "meshtastic_router.h"
 #include "meshtastic_airtime.h"
 #include "meshtastic_powermon.h"
@@ -200,6 +203,24 @@ __weak void meshtastic_radio_fem_set_tx(bool tx)
 	ARG_UNUSED(tx);
 }
 
+int meshtastic_radio_tune_explicit(uint32_t frequency_hz, uint8_t spread_factor,
+				   uint32_t bandwidth_hz, uint8_t coding_rate)
+{
+	if (meshtastic_radio_bw_hz_to_code(bandwidth_hz) < 0 ||
+	    meshtastic_radio_cr_to_code(coding_rate) < 0) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&mt.lock, K_FOREVER);
+	mt.frequency = frequency_hz;
+	mt.modem.spread_factor = spread_factor;
+	mt.modem.bandwidth_hz = bandwidth_hz;
+	mt.modem.coding_rate = coding_rate;
+	k_mutex_unlock(&mt.lock);
+
+	return meshtastic_radio_retune();
+}
+
 int meshtastic_radio_retune(void)
 {
 	int ret;
@@ -241,6 +262,20 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	int ret;
 	int retries;
 	int busy_retries = 0;
+
+#if defined(CONFIG_MESHTASTIC_SCANNER_RX_ONLY)
+	/* A scanner build cannot transmit, structurally. It spends its life on
+	 * frequencies other meshes own, with a channel hash it did not derive — a
+	 * stray transmission there is not a local bug, it is interference on someone
+	 * else's channel on a frequency this node was never configured for. A
+	 * runtime guard could be bypassed by any path that reaches the radio; an
+	 * absent one cannot. See Kconfig.scanner. */
+	ARG_UNUSED(pkt);
+	ARG_UNUSED(pkt_len);
+	ARG_UNUSED(retries);
+	ARG_UNUSED(busy_retries);
+	return -EPERM;
+#else
 
 #if defined(CONFIG_MESHTASTIC_PACKET_HEXDUMP)
 	log_wire_tx(pkt, pkt_len);
@@ -308,6 +343,7 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	if (busy_retries > 0) {
 		LOG_DBG("TX deferred by CAD busy channel (%d retries)", busy_retries);
 	}
+#endif /* CONFIG_MESHTASTIC_SCANNER_RX_ONLY */
 
 	if (ret < 0) {
 		if (ret == -EBUSY) {
@@ -343,6 +379,14 @@ static void mt_rx_cb(const struct device *dev, uint8_t *data, uint16_t size, int
 	if (size == 0U || size > sizeof(slot.buf)) {
 		return;
 	}
+
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+	/* Survey hook, BEFORE the queue. The scanner must see frames the normal
+	 * stack discards — wrong channel, undecryptable, filtered — which is most of
+	 * what a foreign mesh produces, and the whole point of the survey. It reads
+	 * only the plaintext header and does not block. */
+	meshtastic_scanner_on_frame(data, size, rssi, snr);
+#endif
 
 	slot.len = size;
 	slot.rssi = rssi;
