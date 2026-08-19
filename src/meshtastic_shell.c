@@ -1227,7 +1227,8 @@ static int cmd_scan_status(const struct shell *sh, size_t argc, char **argv)
 
 	shell_print(sh, "sweeping: %s   tx: %s", meshtastic_scanner_sweeping() ? "yes" : "no",
 		    meshtastic_scanner_active() ? "REFUSED (scanning)" : "allowed");
-	shell_print(sh, "captured: %u total", total);
+	shell_print(sh, "captured: %u total   withheld from stack: %u", total,
+		    meshtastic_scanner_rx_dropped());
 	if (blocked > 0U) {
 		/* Not cosmetic: a non-zero count means some path kept trying to
 		 * transmit while parked on a foreign frequency. The gate held, but

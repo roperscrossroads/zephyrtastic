@@ -59,12 +59,15 @@ int meshtastic_scanner_start(void);
 int meshtastic_scanner_stop(void);
 
 /**
- * @brief True while transmission must be refused.
+ * @brief True while the node is OFF its operating preset.
  *
- * This is what the TX path asks, and it deliberately spans more than the sweep
- * itself: it stays true through the restore, and stays true forever if the
- * restore fails — a node that could not get back to its operating preset is
- * still sitting on a scan frequency and must not transmit there.
+ * The single condition governing both directions: while it holds, the node
+ * neither transmits nor lets received frames into the participant stack —
+ * anything it hears belongs to a mesh it is not a member of.
+ *
+ * It spans more than the sweep itself: it stays true through the restore, and
+ * stays true forever if the restore fails, because a node that could not get
+ * back to its operating preset is still sitting on a scan frequency.
  */
 bool meshtastic_scanner_active(void);
 
@@ -103,8 +106,19 @@ uint32_t meshtastic_scanner_total(void);
  */
 void meshtastic_scanner_note_tx_blocked(void);
 
-/** @brief Transmissions refused since the last reset. Should be small; see above. */
+/** @brief Transmissions refused since the last reset. Should be ZERO; see above. */
 uint32_t meshtastic_scanner_tx_blocked(void);
+
+/** @brief Count a received frame withheld from the participant stack. */
+void meshtastic_scanner_note_rx_dropped(void);
+
+/**
+ * @brief Frames surveyed but not passed on, since the last reset.
+ *
+ * Expected to be non-zero and roughly the capture count — unlike tx_blocked,
+ * this is normal operation rather than an alarm.
+ */
+uint32_t meshtastic_scanner_rx_dropped(void);
 
 /** @brief Drop every retained record and reset the per-preset stats. */
 void meshtastic_scanner_reset(void);

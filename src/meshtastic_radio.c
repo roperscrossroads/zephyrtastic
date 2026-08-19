@@ -404,6 +404,26 @@ static void mt_rx_cb(const struct device *dev, uint8_t *data, uint16_t size, int
 	 * what a foreign mesh produces, and the whole point of the survey. It reads
 	 * only the plaintext header and does not block. */
 	meshtastic_scanner_on_frame(data, size, rssi, snr);
+
+	/* ...and then the frame STOPS here. A scanning node is an observer, not a
+	 * participant: it is parked on someone else's frequency, so anything it
+	 * hears belongs to a mesh it is not a member of.
+	 *
+	 * Letting those frames continue was a real defect, caught on rzr3 on
+	 * 2026-08-19. The nodedb module takes ALL_PACKETS, so a 10-minute sweep
+	 * learned 43 foreign nodes and generated 4 NodeInfo requests for them —
+	 * refused by the TX gate, but they should never have been produced. Without
+	 * that gate the node would have announced itself onto two foreign meshes on
+	 * a frequency it was never configured for.
+	 *
+	 * Gated on the same condition as TX, deliberately: while the node is off its
+	 * operating preset it neither transmits nor ingests. One rule, both
+	 * directions — and it covers the restore window, where a frame could belong
+	 * to either tuning. */
+	if (meshtastic_scanner_active()) {
+		meshtastic_scanner_note_rx_dropped();
+		return;
+	}
 #endif
 
 	slot.len = size;

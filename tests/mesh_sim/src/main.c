@@ -751,6 +751,57 @@ ZTEST(mesh_sim, test_scan_captures_foreign_headers)
 
 	zassert_ok(meshtastic_scanner_stop(), "scan stop failed");
 }
+
+/* A scanning node is an observer, not a participant: a surveyed frame must NOT
+ * continue into the normal stack.
+ *
+ * Regression test for a defect found on rzr3 (2026-08-19). The nodedb module
+ * takes ALL_PACKETS, so letting foreign frames through meant a 10-minute sweep
+ * learned 43 strangers and generated NodeInfo requests for them — refused by the
+ * TX gate, but they should never have been produced at all. tx_blocked is the
+ * assertion that matters: it must stay ZERO across a sweep in which frames were
+ * heard, because nothing should even try to respond. */
+ZTEST(mesh_sim, test_scan_does_not_feed_the_participant_stack)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t freq = 0U;
+	uint8_t sf = 0U, bw = 0U;
+
+	meshtastic_scanner_reset();
+	k_sem_reset(&rx.sem);
+
+	zassert_ok(meshtastic_scanner_start(), "scan start failed");
+	k_sleep(K_MSEC(200));
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq, &sf, &bw), "sweep did not tune");
+
+	/* A perfectly decodable frame on OUR key — the strongest case, because a
+	 * foreign undecryptable one would be dropped later anyway. If even this does
+	 * not reach the app, nothing does. */
+	build_peer_text(0x7007U, "not for us", wire, &wire_len);
+	zassert_ok(lora_sim_inject_on(lora_dev, freq, sf, bw, wire, (uint8_t)wire_len, -50, 7),
+		   "inject failed");
+
+	/* Surveyed... */
+	zassert_true(meshtastic_scanner_total() > 0U, "the survey must still record it");
+	zassert_true(meshtastic_scanner_rx_dropped() > 0U, "the frame must be counted as withheld");
+
+	/* ...but never delivered to the application. */
+	zassert_not_equal(k_sem_take(&rx.sem, K_MSEC(300)), 0,
+			  "a frame heard while scanning must NOT reach the app");
+
+	/* And nothing tried to answer it. This is the assertion the rzr3 run failed. */
+	zassert_equal(meshtastic_scanner_tx_blocked(), 0U,
+		      "nothing should attempt to transmit in response to a surveyed frame");
+
+	zassert_ok(meshtastic_scanner_stop(), "scan stop failed");
+
+	/* Back to participating: the same frame now does reach the app. */
+	build_peer_text(0x7008U, "for us", wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)),
+		   "after stopping, frames must reach the app again");
+}
 #endif /* CONFIG_MESHTASTIC_SCANNER */
 
 ZTEST_SUITE(mesh_sim, NULL, mesh_sim_setup, mesh_sim_before, NULL, NULL);

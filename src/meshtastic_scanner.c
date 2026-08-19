@@ -66,7 +66,8 @@ static struct {
 	uint8_t cur;
 	uint32_t head;  /* next write slot; also the running count of writes */
 	uint32_t total;      /* ever captured; keeps counting past the ring */
-	uint32_t tx_blocked; /* transmissions refused while sweeping */
+	uint32_t tx_blocked; /* transmissions refused while off our preset */
+	uint32_t rx_dropped; /* frames surveyed but withheld from the stack */
 	struct meshtastic_scan_stats stats[SCAN_N];
 } scan;
 
@@ -311,6 +312,23 @@ uint32_t meshtastic_scanner_tx_blocked(void)
 	return n;
 }
 
+void meshtastic_scanner_note_rx_dropped(void)
+{
+	scan_lock();
+	scan.rx_dropped++;
+	scan_unlock();
+}
+
+uint32_t meshtastic_scanner_rx_dropped(void)
+{
+	uint32_t n;
+
+	scan_lock();
+	n = scan.rx_dropped;
+	scan_unlock();
+	return n;
+}
+
 uint32_t meshtastic_scanner_total(void)
 {
 	uint32_t t;
@@ -327,6 +345,7 @@ void meshtastic_scanner_reset(void)
 	scan.head = 0U;
 	scan.total = 0U;
 	scan.tx_blocked = 0U;
+	scan.rx_dropped = 0U;
 	memset(scan.stats, 0, sizeof(scan.stats));
 	scan_unlock();
 }
