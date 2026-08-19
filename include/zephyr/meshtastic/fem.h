@@ -20,6 +20,8 @@
 #define ZEPHYR_INCLUDE_MESHTASTIC_FEM_H_
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +37,40 @@ extern "C" {
  *           returning to receive.
  */
 void meshtastic_radio_fem_set_tx(bool tx);
+
+/**
+ * @brief Convert a desired radiated power into a transceiver drive level.
+ *
+ * `LoRaConfig.tx_power` is the power at the ANTENNA (reference semantics). A
+ * board whose FEM adds gain on transmit must therefore drive the transceiver
+ * below that figure. The radio layer calls this whenever it programs the
+ * radio; the default implementation is a weak identity, correct for any board
+ * with no transmit gain between transceiver and antenna.
+ *
+ * A board overrides it with a strong definition, normally by handing its
+ * per-drive-level gain table to @ref meshtastic_fem_gain_convert.
+ *
+ * @param radiated_dbm desired power at the antenna, dBm
+ * @return the drive level to program into the transceiver, dBm (the caller
+ *         clamps it to the radio's settable range)
+ */
+int8_t meshtastic_radio_fem_tx_power_conversion(int8_t radiated_dbm);
+
+/**
+ * @brief Map a desired radiated power onto a transceiver drive level.
+ *
+ * The search a board's @ref meshtastic_radio_fem_tx_power_conversion normally
+ * delegates to: walk the FEM's per-drive-level gain table and take the first
+ * level whose (drive + gain) exceeds the request — or the last level, if none
+ * does — then subtract that level's gain from the request. Reproduces the
+ * reference firmware's `LoRaFEMInterface::powerConversion()`.
+ *
+ * @param gain    gain in dB at drive level 0, 1, 2 ... (index == drive dBm)
+ * @param n       entries in @p gain; 0 or NULL @p gain returns @p desired
+ * @param desired desired radiated power, dBm
+ * @return the drive level to program, dBm
+ */
+int8_t meshtastic_fem_gain_convert(const uint8_t *gain, size_t n, int8_t desired);
 
 #ifdef __cplusplus
 }

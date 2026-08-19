@@ -20,6 +20,7 @@
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_hlc.h"
 #include "meshtastic_settings.h"
+#include "meshtastic_tx_power.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -707,31 +708,24 @@ int meshtastic_config_store_apply_core(void)
 		mt.hop_limit = (uint8_t)lora.hop_limit;
 	}
 
-	if (lora.tx_power != 0) {
-		mt.tx_power = lora.tx_power;
-	}
-
-	/* Clamp TX power to the region's limit unless the operator is licensed,
-	 * mirroring the reference (RadioInterface.cpp: power > powerLimit &&
-	 * !is_licensed). This matters more now that regions other than US are
-	 * selectable: their limits are markedly lower — 30 dBm in the US against
-	 * 27 in EU_868, 14 in ANZ_433, 10 in EU_433.
+	/* Resolve tx_power to a radiated-dBm figure the way the reference does:
+	 * 0 means "as much as this region allows", and an over-limit request from
+	 * an unlicensed operator is clamped to the region's limit. Those limits
+	 * differ sharply — 30 dBm in the US against 27 in EU_868, 14 in ANZ_433,
+	 * 10 in EU_433 — so the region has to be in hand before the number means
+	 * anything. What finally reaches the transceiver is this minus the board
+	 * FEM's gain (meshtastic_tx_power_chip_drive(), applied in the radio
+	 * layer), so a board with a PA no longer radiates ~11 dB hot.
 	 */
 	{
-		struct meshtastic_region_info info;
-		meshtastic_Config_LoRaConfig_RegionCode region = lora.region;
+		int8_t resolved = meshtastic_tx_power_resolve(lora.tx_power, lora.region,
+							      store.is_licensed);
 
-		if (region == meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
-			region = (meshtastic_Config_LoRaConfig_RegionCode)
-				CONFIG_MESHTASTIC_DEFAULT_REGION;
-		}
-		if (meshtastic_region_info(region, &info) == 0 &&
-		    info.power_limit_dbm > 0 && mt.tx_power > info.power_limit_dbm &&
-		    !store.is_licensed) {
+		if ((lora.tx_power != 0) && (resolved != lora.tx_power)) {
 			LOG_WRN("TX power %d dBm exceeds region %d limit; clamping to %d",
-				mt.tx_power, (int)region, info.power_limit_dbm);
-			mt.tx_power = info.power_limit_dbm;
+				lora.tx_power, (int)lora.region, resolved);
 		}
+		mt.tx_power = resolved;
 	}
 
 	/* Resolve the modem preset. wide_lora is hardcoded false: it is a

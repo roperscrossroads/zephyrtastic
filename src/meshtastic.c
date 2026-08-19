@@ -27,6 +27,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_contention.h"
+#include "meshtastic_tx_power.h"
 #include "meshtastic_core.h"
 #include "meshtastic_modules.h"
 #include "meshtastic_outbound.h"
@@ -459,7 +460,12 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 
 	mt.hop_limit = (cfg->hop_limit == 0U) ? (uint8_t)CONFIG_MESHTASTIC_DEFAULT_HOP_LIMIT
 					      : cfg->hop_limit;
-	mt.tx_power = (cfg->tx_power == 0) ? (int8_t)CONFIG_MESHTASTIC_TX_POWER : cfg->tx_power;
+	/* Radiated dBm, reference semantics: 0 means "as much as the region
+	 * allows". The region is not known until the config store loads, so this
+	 * seeds from the build default and meshtastic_config_store_apply() redoes
+	 * it against the stored region. */
+	mt.tx_power = meshtastic_tx_power_resolve(
+		cfg->tx_power, meshtastic_Config_LoRaConfig_RegionCode_UNSET, false);
 	mt.long_name = (cfg->long_name != NULL) ? cfg->long_name : CONFIG_MESHTASTIC_NODE_LONG_NAME;
 	mt.short_name =
 		(cfg->short_name != NULL) ? cfg->short_name : CONFIG_MESHTASTIC_NODE_SHORT_NAME;

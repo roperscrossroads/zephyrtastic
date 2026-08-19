@@ -159,12 +159,38 @@ config MESHTASTIC_DEFAULT_OK_TO_MQTT
 	  A later admin or phone-app change overrides this seed.
 
 config MESHTASTIC_TX_POWER
-	int "Default TX power (dBm)"
+	int "Fallback TX power for a region with no declared limit (dBm)"
 	default 17
 	help
-	  Default LoRa transmit power used when meshtastic_config.tx_power is
-	  zero.  Most LoRa modules support 2–20 dBm; consult your hardware
-	  datasheet for the allowed range.
+	  Radiated power, in dBm, used only when the configured tx_power is 0
+	  AND the region has no regulatory power limit to fall back on.
+
+	  This is NOT the default for a normal region. A tx_power of 0 means
+	  "as much as this region allows", so a US node resolves to 30 dBm and
+	  an EU_868 node to 27 — matching the reference firmware, where 17 is
+	  likewise only the no-valid-limit fallback (RadioInterface.cpp).
+
+	  This value is power at the ANTENNA. On a board with a transmit PA the
+	  transceiver is driven below it by the FEM's gain; see
+	  meshtastic_tx_power.h.
+
+config MESHTASTIC_RADIO_MAX_TX_POWER
+	int "Maximum transceiver drive level (dBm)"
+	default 22
+	help
+	  Ceiling for the value programmed into the transceiver, AFTER any FEM
+	  gain conversion. 22 dBm is the SX1262's high-power PA maximum and
+	  matches the reference's SX126X_MAX_POWER.
+
+	  This bounds the drive level, not the radiated power: on a board with a
+	  PA front-end the antenna sees this plus the FEM's gain.
+
+config MESHTASTIC_RADIO_MIN_TX_POWER
+	int "Minimum transceiver drive level (dBm)"
+	default -9
+	help
+	  Floor for the value programmed into the transceiver. -9 dBm is the
+	  SX1262's minimum with the high-power PA selected.
 
 config MESHTASTIC_DUP_CACHE_SIZE
 	int "Duplicate-packet cache size (entries)"

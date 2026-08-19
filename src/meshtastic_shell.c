@@ -34,6 +34,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_region_presets.h"
 #include "meshtastic_powermon.h"
+#include "meshtastic_tx_power.h"
 #include "meshtastic_sched.h"
 #include "meshtastic_settings.h"
 
@@ -2086,6 +2087,27 @@ static void cmd_lora_show(const struct shell *sh)
 	shell_print(sh, "region:       %d", (int)cfg.payload_variant.lora.region);
 	shell_print(sh, "primary chan: name=\"%s\" hash=0x%02x",
 		    meshtastic_channels_get_name(pi), meshtastic_channels_get_hash(pi));
+
+	/* Both numbers, because on a board with a PA front-end they differ and the
+	 * difference is the whole point: tx power is what leaves the ANTENNA (the
+	 * reference's units, and what the phone and admin API show), drive is what
+	 * the transceiver is programmed with. A stored 0 means "as much as the
+	 * region allows", so show what that resolved to rather than the 0. */
+	{
+		bool licensed = false;
+		int8_t radiated;
+		int8_t drive;
+
+		meshtastic_config_store_get_owner_flags(&licensed, NULL);
+		radiated = meshtastic_tx_power_resolve(cfg.payload_variant.lora.tx_power,
+						       cfg.payload_variant.lora.region, licensed);
+		drive = meshtastic_tx_power_chip_drive(radiated);
+
+		shell_print(sh, "tx power:     %d dBm at the antenna%s (radio drive %d dBm%s)",
+			    radiated,
+			    (cfg.payload_variant.lora.tx_power == 0) ? " [region default]" : "",
+			    drive, (drive != radiated) ? ", FEM makes up the rest" : "");
+	}
 }
 
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)

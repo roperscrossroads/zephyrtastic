@@ -52,6 +52,32 @@ LOG_MODULE_REGISTER(heltec_v4_fem, LOG_LEVEL_INF);
 static const struct device *fem_mode_port;
 static gpio_pin_t fem_mode_pin;
 
+/*
+ * Transmit gain of each fitted front-end, in dB, indexed by the SX1262 drive
+ * level in dBm (index 0 == drive 0 dBm). Straight from the reference firmware
+ * (firmware/src/mesh/LoRaFEMInterface.cpp, powerConversion()) — the gain falls
+ * off at the top because the PA compresses.
+ *
+ * These are what make `tx_power` mean power at the ANTENNA, as it does on stock
+ * firmware: a request of 20 dBm on a KCT8103L board becomes drive level 7,
+ * because 7 + 13 = 20. Programming the request straight into the transceiver
+ * instead — which this port did until 2026-08-19 — radiates the FEM's gain on
+ * top of it, i.e. ~11 dB hot at any setting below the maximum.
+ */
+static const uint8_t fem_gain_gc1109[] = {
+	11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 10, 10, 9, 9, 8, 7,
+};
+static const uint8_t fem_gain_kct8103l[] = {
+	13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 12, 12, 11, 11, 10, 9, 8, 7,
+};
+
+/* The detected front-end's gain table, or NULL when detection failed (in which
+ * case the conversion below degrades to the identity — the same behaviour as a
+ * board with no FEM at all, and the safer direction to fail in: it under-drives
+ * rather than over-radiates). */
+static const uint8_t *fem_gain_table;
+static size_t fem_gain_len;
+
 static int heltec_v4_fem_init(void)
 {
 	const struct device *const gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
@@ -86,10 +112,14 @@ static int heltec_v4_fem_init(void)
 		LOG_INF("Detected KCT8103L LoRa FEM (V4 rev 4.3 / R8)");
 		fem_mode_port = gpio0;
 		fem_mode_pin = FEM_KCT_CTX_PIN;
+		fem_gain_table = fem_gain_kct8103l;
+		fem_gain_len = ARRAY_SIZE(fem_gain_kct8103l);
 	} else {
 		LOG_INF("Detected GC1109 LoRa FEM (V4 rev 4.2)");
 		fem_mode_port = gpio1;
 		fem_mode_pin = FEM_GC1109_CPS_PIN;
+		fem_gain_table = fem_gain_gc1109;
+		fem_gain_len = ARRAY_SIZE(fem_gain_gc1109);
 	}
 
 	gpio_pin_configure(fem_mode_port, fem_mode_pin, GPIO_OUTPUT_LOW);
@@ -110,6 +140,17 @@ void meshtastic_radio_fem_set_tx(bool tx)
 	}
 
 	gpio_pin_set_raw(fem_mode_port, fem_mode_pin, tx ? 1 : 0);
+}
+
+/*
+ * Strong override of the radio layer's weak power-conversion hook: turn the
+ * operator's requested antenna power into an SX1262 drive level, using the
+ * detected front-end's gain table. The caller clamps the result to the radio's
+ * settable range.
+ */
+int8_t meshtastic_radio_fem_tx_power_conversion(int8_t radiated_dbm)
+{
+	return meshtastic_fem_gain_convert(fem_gain_table, fem_gain_len, radiated_dbm);
 }
 
 /* After the GPIO drivers (PRE_KERNEL) and before the LoRa driver

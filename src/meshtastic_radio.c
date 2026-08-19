@@ -24,6 +24,7 @@
 #endif
 #include "meshtastic_router.h"
 #include "meshtastic_airtime.h"
+#include "meshtastic_tx_power.h"
 #include "meshtastic_powermon.h"
 
 #include <zephyr/logging/log.h>
@@ -203,6 +204,16 @@ __weak void meshtastic_radio_fem_set_tx(bool tx)
 	ARG_UNUSED(tx);
 }
 
+/*
+ * Default transmit-power conversion: identity. Correct for any board with no
+ * transmit gain between the transceiver and the antenna — the configured dBm
+ * IS the drive level there. A board with a PA front-end overrides this.
+ */
+__weak int8_t meshtastic_radio_fem_tx_power_conversion(int8_t radiated_dbm)
+{
+	return radiated_dbm;
+}
+
 int meshtastic_radio_tune_explicit(uint32_t frequency_hz, uint8_t spread_factor,
 				   uint32_t bandwidth_hz, uint8_t coding_rate)
 {
@@ -237,7 +248,7 @@ int meshtastic_radio_retune(void)
 	k_mutex_lock(&mt.lock, K_FOREVER);
 	mt_lora_cfg.frequency = mt.frequency;
 	apply_modem_params();
-	mt_lora_cfg.tx_power = mt.tx_power;
+	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power);
 	mt_lora_cfg.tx = false;
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_NONE;
 	mt_lora_cfg.cad.symbol_num = 0;
@@ -314,7 +325,7 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 
 	mt_lora_cfg.frequency = mt.frequency;
 	apply_modem_params();
-	mt_lora_cfg.tx_power = mt.tx_power;
+	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power);
 	mt_lora_cfg.tx = true;
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_LBT;
 	/* 0 = "driver default" (documented in lora.h) -- the sx126x driver
@@ -661,7 +672,7 @@ int meshtastic_radio_init(void)
 
 	mt_lora_cfg.frequency = mt.frequency;
 	apply_modem_params();
-	mt_lora_cfg.tx_power = mt.tx_power;
+	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power);
 	mt_lora_cfg.tx = false;
 
 #if defined(CONFIG_LORA_SX126X)

@@ -68,6 +68,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_radio.c
     meshtastic_outbound.c
     meshtastic_contention.c
+    meshtastic_tx_power.c
     meshtastic_sched.c
     meshtastic_router.c
     meshtastic_routing.c
