@@ -11,10 +11,12 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/lora.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/ztest.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
+#include <zephyr/meshtastic/nodedb.h>
 #include <meshtastic/lora_sim.h>
 
 #include "meshtastic/mesh.pb.h"
@@ -805,3 +807,193 @@ ZTEST(mesh_sim, test_scan_does_not_feed_the_participant_stack)
 #endif /* CONFIG_MESHTASTIC_SCANNER */
 
 ZTEST_SUITE(mesh_sim, NULL, mesh_sim_setup, mesh_sim_before, NULL, NULL);
+
+/* ==========================================================================
+ * Multi-hop relay (INTEROP-TEST-MATRIX 2.9)
+ *
+ * The on-air version of this row wants three radios with A and B out of each
+ * other's range and C between them. That is not achievable on this bench and
+ * cannot be faked with transmit power: ShortTurbo (SF7/BW500) decodes to about
+ * -117 dBm, the measured bench link sits at -5 dBm, and the whole tx_power
+ * range is ~16 dB against a ~112 dB margin. Range separation needs distance or
+ * an attenuator, not firmware.
+ *
+ * What IS testable here — and is the part that can regress silently — is this
+ * node's own behaviour at each position in the chain. The sim gives exact
+ * control over what it hears and exact capture of what it says, so each role is
+ * checked against the frame it must produce:
+ *
+ *   as C (the middle hop)  — rebroadcast with hop_limit-1, hop_start intact,
+ *                            relay_node stamped as us, everything else verbatim
+ *   as B (two hops away)   — deliver, and record the sender as 2 hops away
+ *   at the edge of the flood — refuse to relay a spent frame
+ *
+ * Together those are what makes a real A->C->B delivery work; the on-air row
+ * stays UNVERIFIED until someone separates two nodes physically.
+ */
+
+/* Build a frame as some ORIGIN node, with explicit hop counts and relayer, so a
+ * frame that has already travelled can be handed to the node under test. */
+static void build_relayed_text(uint32_t origin, uint32_t id, const char *text, uint8_t hop_limit,
+			       uint8_t hop_start, uint8_t relay_node, uint8_t *wire,
+			       uint32_t *wire_len)
+{
+	struct meshtastic_wire_header *hdr;
+	struct meshtastic_packet packet = {
+		.from          = origin,
+		.to            = MESHTASTIC_NODE_BROADCAST,
+		.id            = id,
+		.portnum       = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload       = (const uint8_t *)text,
+		.payload_len   = strlen(text),
+		.hop_limit     = hop_limit,
+		.hop_start     = hop_start,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	zassert_ok(meshtastic_build_wire_packet(&packet, wire, wire_len),
+		   "build_wire_packet failed");
+
+	/* The encoder has no relay_node input — it is stamped by whoever transmits.
+	 * Patch it in so the frame looks like C's rebroadcast rather than A's
+	 * original. */
+	hdr = (struct meshtastic_wire_header *)wire;
+	hdr->relay_node = relay_node;
+}
+
+/*
+ * True if a rebroadcast of exactly this frame is transmitted within @window.
+ *
+ * "Did we transmit anything at all" is the wrong question: hearing an unknown
+ * node legitimately makes the stack emit a NodeInfo request, so a bare
+ * take_tx() would catch that and call it a relay. A relay is identified by
+ * carrying the ORIGINATOR's src and the original packet id — that is precisely
+ * what makes it a relay rather than a new packet of our own.
+ */
+static bool saw_relay_of(uint32_t origin, uint32_t id, k_timeout_t window)
+{
+	struct lora_sim_frame f;
+
+	while (lora_sim_take_tx(lora_dev, &f, window) == 0) {
+		const struct meshtastic_wire_header *h =
+			(const struct meshtastic_wire_header *)f.data;
+
+		if (f.len >= MESHTASTIC_HDR_LEN && sys_le32_to_cpu(h->src) == origin &&
+		    sys_le32_to_cpu(h->id) == id) {
+			return true;
+		}
+		window = K_MSEC(100); /* keep draining anything else briefly */
+	}
+
+	return false;
+}
+
+/*
+ * Position C: we are the middle hop. A's broadcast must go back out with
+ * exactly one hop spent, our own stamp on it, and nothing else disturbed —
+ * the id in particular, since B's duplicate suppression keys on (src, id) and
+ * a rewritten id would let a flood circulate forever.
+ */
+ZTEST(mesh_sim, test_relay_forwards_with_one_hop_spent_and_our_stamp)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct lora_sim_frame f;
+	const struct meshtastic_wire_header *out;
+	const uint32_t origin = 0x0C0C0C0CU;
+	const uint32_t id = 0x5150U;
+	uint8_t out_hop_limit, out_hop_start;
+
+	build_relayed_text(origin, id, "two hops", 3U, 3U, 0xEEU, wire, &wire_len);
+
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -70, 6), "inject failed");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(2000)), "frame was not relayed");
+
+	out = (const struct meshtastic_wire_header *)f.data;
+	out_hop_limit = out->flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK;
+	out_hop_start = (out->flags & MESHTASTIC_FLAGS_HOP_START_MASK) >>
+			MESHTASTIC_FLAGS_HOP_START_SHIFT;
+
+	zassert_equal(2U, out_hop_limit, "hop_limit must spend exactly one hop, got %u",
+		      out_hop_limit);
+	zassert_equal(3U, out_hop_start,
+		      "hop_start must survive the relay — it is what lets the far end compute "
+		      "distance (got %u)",
+		      out_hop_start);
+	zassert_equal((uint8_t)(TEST_NODE_ID & 0xFFU), out->relay_node,
+		      "we must stamp ourselves as the relayer, got 0x%02x", out->relay_node);
+	zassert_equal(origin, sys_le32_to_cpu(out->src),
+		      "the originator must be preserved, not replaced by us");
+	zassert_equal(id, sys_le32_to_cpu(out->id),
+		      "the packet id must be preserved or downstream dedup breaks");
+	zassert_equal(wire_len, f.len, "relayed frame changed length");
+	zassert_mem_equal(wire + MESHTASTIC_HDR_LEN, f.data + MESHTASTIC_HDR_LEN,
+			  wire_len - MESHTASTIC_HDR_LEN, "relayed payload was modified");
+}
+
+/*
+ * The edge of the flood. A frame arriving with no hops left is the last copy
+ * that should ever exist; relaying it is what turns a mesh into a broadcast
+ * storm. Delivery to the app still has to happen — being un-relayable says
+ * nothing about being un-readable.
+ */
+ZTEST(mesh_sim, test_spent_frame_is_delivered_but_not_relayed)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	build_relayed_text(0x0C0C0C0DU, 0x5151U, "last hop", 0U, 3U, 0xEEU, wire, &wire_len);
+
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -70, 6), "inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)),
+		   "a spent frame must still reach the application");
+	zassert_false(saw_relay_of(0x0C0C0C0DU, 0x5151U, K_MSEC(400)),
+		      "a frame with hop_limit 0 was relayed — floods would not terminate");
+}
+
+/*
+ * Position B: the far end of an A->C->B chain. A started with hop_start 3 and
+ * the frame arrives with 1 left, so A is two hops away. That figure is what a
+ * client shows as distance and what routing decisions lean on, and it is
+ * derived purely from the two counters — which is why the relay above must not
+ * touch hop_start.
+ */
+ZTEST(mesh_sim, test_two_hop_sender_is_recorded_two_hops_away)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_nodedb_node node;
+	const uint32_t origin = 0x0C0C0C0EU;
+
+	build_relayed_text(origin, 0x5152U, "far end", 1U, 3U, 0xEEU, wire, &wire_len);
+
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -70, 6), "inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "two-hop frame not delivered");
+	k_sleep(K_MSEC(50)); /* module hooks run on the mesh thread, after the app callback */
+
+	zassert_ok(meshtastic_nodedb_get(origin, &node), "two-hop sender was not learned");
+	zassert_true(node.has_hops_away, "distance to a two-hop sender was not recorded");
+	zassert_equal(2U, node.hops_away, "expected 2 hops away, got %u", node.hops_away);
+}
+
+/*
+ * A direct neighbour must still read as zero hops away, or "2 hops" above would
+ * be meaningless — this pins the other end of the same derivation.
+ */
+ZTEST(mesh_sim, test_direct_sender_is_recorded_zero_hops_away)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_nodedb_node node;
+	const uint32_t origin = 0x0C0C0C0FU;
+
+	build_relayed_text(origin, 0x5153U, "next door", 3U, 3U, 0x00U, wire, &wire_len);
+
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -70, 6), "inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "direct frame not delivered");
+	k_sleep(K_MSEC(50)); /* module hooks run on the mesh thread, after the app callback */
+
+	zassert_ok(meshtastic_nodedb_get(origin, &node), "direct sender was not learned");
+	zassert_true(node.has_hops_away, "distance to a direct sender was not recorded");
+	zassert_equal(0U, node.hops_away, "expected 0 hops away, got %u", node.hops_away);
+}
