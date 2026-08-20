@@ -12,6 +12,8 @@
 
 #include <zephyr/meshtastic/fem.h>
 
+#include <zephyr/meshtastic/nodedb.h>
+
 #include "meshtastic_tx_power.h"
 
 /* The reference firmware's tables (LoRaFEMInterface.cpp), indexed by drive dBm. */
@@ -117,3 +119,50 @@ ZTEST(txpower, test_chip_drive_clamped_to_radio_range)
 }
 
 ZTEST_SUITE(txpower, NULL, NULL, NULL, NULL, NULL);
+
+/* --- NodeInfoLite SNR persistence (Q4) -----------------------------------
+ *
+ * SNR used to be dropped entirely when a node record was written, so a reboot
+ * blanked the link-quality column until every peer was heard again. It is now
+ * persisted as the Q4 integer the reference uses; these pin that conversion,
+ * which is the part that can silently lose sign or precision.
+ *
+ * Comparisons stay in the integer domain on purpose: Q4's defining property is
+ * that a quarter-dB step IS an integer, so a float compare would be testing the
+ * test rather than the encoding.
+ */
+
+ZTEST(txpower, test_snr_q4_round_trips_at_quarter_db)
+{
+	for (int q = -80; q <= 80; q++) {
+		float db = meshtastic_snr_from_q4(q);
+
+		zassert_equal(q, meshtastic_snr_to_q4(db),
+			      "q4 %d -> dB -> q4 did not come back to %d", q, q);
+	}
+}
+
+/* Negative SNR is the normal case on a real link and must not truncate toward
+ * zero: a node at -7.5 dB has to persist as -30, not -29. */
+ZTEST(txpower, test_snr_q4_handles_negative_values)
+{
+	zassert_equal(-30, meshtastic_snr_to_q4(-7.5f));
+	zassert_equal(-30, meshtastic_snr_to_q4(meshtastic_snr_from_q4(-30)));
+}
+
+/* Off-grid values round to nearest in both directions, rather than toward zero
+ * (which would bias every negative reading upward). */
+ZTEST(txpower, test_snr_q4_rounds_to_nearest)
+{
+	zassert_equal(51, meshtastic_snr_to_q4(12.7f));
+	zassert_equal(-51, meshtastic_snr_to_q4(-12.7f));
+}
+
+/* The range a LoRa radio actually reports (~ -20..+13 dB) maps to |q4| <= 80,
+ * which zigzag-encodes in one or two bytes -- the reason to persist this rather
+ * than the 5-byte float. */
+ZTEST(txpower, test_snr_q4_typical_readings_stay_small)
+{
+	zassert_equal(52, meshtastic_snr_to_q4(13.0f));
+	zassert_equal(-80, meshtastic_snr_to_q4(-20.0f));
+}

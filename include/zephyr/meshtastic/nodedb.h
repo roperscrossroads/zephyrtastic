@@ -11,6 +11,7 @@
 #define ZEPHYR_INCLUDE_MESHTASTIC_NODEDB_H_
 
 #include <stddef.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -230,6 +231,24 @@ int meshtastic_nodedb_remove(uint32_t node_num);
  * No-op when NodeDB support is not enabled (weak stub).
  */
 void meshtastic_nodedb_reset(bool keep_favorites);
+
+/**
+ * @brief Encode an SNR in dB as the Q4 integer used on the wire and on disk.
+ *
+ * dB x 4, rounded to nearest — the same convention RouteDiscovery uses, and
+ * what NodeInfoLite.snr_q4 persists. Halves the record's SNR cost against a
+ * float and keeps the stored representation integral.
+ */
+static inline int32_t meshtastic_snr_to_q4(float snr_db)
+{
+	return (int32_t)lroundf(snr_db * 4.0f);
+}
+
+/** @brief Inverse of @ref meshtastic_snr_to_q4. */
+static inline float meshtastic_snr_from_q4(int32_t snr_q4)
+{
+	return (float)snr_q4 / 4.0f;
+}
 
 #ifdef __cplusplus
 }

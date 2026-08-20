@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -758,16 +759,35 @@ static void mtrec_note_evicted(void)
 }
 
 /* Copy @in, zeroing the volatile per-hearing fields that must not be persisted.
- * last_heard is set separately by mtrec_encode, as a durable wall-clock epoch. */
+ * last_heard is set separately by mtrec_encode, as a durable wall-clock epoch.
+ *
+ * snr and hops_away are NOT in that volatile set, despite having been treated as
+ * such until 2026-08-19. They are what the phone shows as a peer's link quality
+ * and distance, and dropping them meant a reboot blanked both columns until
+ * every node happened to be heard again — hours on a quiet mesh. The reference
+ * persists both. SNR travels as the Q4 integer rather than the float (1-2 bytes
+ * against 5, and no float in the on-disk record), with a presence bit so a
+ * genuine 0 dB reading is distinguishable from "never measured".
+ *
+ * channel and next_hop stay volatile here, deliberately: next_hop is a learned
+ * route that self-corrects and is actively misleading while stale, and channel
+ * is re-derived from the next packet at no cost.
+ */
 static void mtrec_durable_copy(const meshtastic_NodeInfoLite *in, meshtastic_NodeInfoLite *out)
 {
 	*out = *in;
-	out->snr = 0.0f;
 	out->channel = 0U;
 	out->next_hop = 0U;
-	out->has_hops_away = false;
-	out->hops_away = 0U;
 	WRITE_BIT(out->bitfield, NODEINFO_BITFIELD_VIA_MQTT_BIT, 0);
+
+	/* Q4 on disk; the float is in-memory only (reference: NodeInfoLite.snr is
+	 * "always zeroed before encode"). */
+	out->snr = 0.0f;
+	if (IS_BIT_SET(in->bitfield, NODEINFO_BITFIELD_HAS_SNR_BIT)) {
+		out->snr_q4 = meshtastic_snr_to_q4(in->snr);
+	} else {
+		out->snr_q4 = 0;
+	}
 }
 
 static int mtrec_encode(const struct nodedb_entry *e, uint8_t *buf, size_t buf_len)
@@ -818,6 +838,15 @@ static int mtrec_decode(const uint8_t *buf, size_t len, meshtastic_NodeInfoLite 
 		LOG_WRN("NodeDB record decode failed: %s", PB_GET_ERROR(&stream));
 		return -EINVAL;
 	}
+
+	/* Rehydrate the in-memory float from the Q4 integer that was persisted. Only
+	 * when the presence bit says a reading was actually taken — otherwise leave
+	 * snr at 0 with the bit clear, which every consumer reads as "not heard yet"
+	 * rather than as a 0 dB link. */
+	if (IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_HAS_SNR_BIT)) {
+		node->snr = meshtastic_snr_from_q4(node->snr_q4);
+	}
+	node->snr_q4 = 0;
 
 	return 0;
 }
@@ -1071,6 +1100,9 @@ static void apply_basic_packet(struct nodedb_entry *entry, const struct meshtast
 
 	entry->node.last_heard = now_sec;
 	entry->node.snr = mesh ? mesh->rx_snr : (float)packet->snr;
+	/* Mark the reading present so a persisted 0 dB — a real and unremarkable
+	 * value on a short link — is not indistinguishable from "never heard". */
+	WRITE_BIT(entry->node.bitfield, NODEINFO_BITFIELD_HAS_SNR_BIT, 1);
 	entry->node.channel =
 		(channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID) ? channel_index : 0U;
 	/* node.next_hop is the *learned route to reach this node* (next-hop router),

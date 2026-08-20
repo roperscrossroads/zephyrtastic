@@ -55,6 +55,17 @@ message NodeInfoLite {
   HardwareModel hw_model = 16;
   Config.DeviceConfig.Role role = 17;
   bytes public_key = 18;
+
+  /*
+   * Q4-encoded SNR: dB x 4, sint32 zigzag. Matches the RouteDiscovery convention.
+   * Encode: snr_q4 = (int32_t)lroundf(snr * 4.0f). Decode: snr = snr_q4 / 4.0f.
+   *
+   * The float `snr` above is in-memory only and is always zeroed before encode;
+   * this field carries all persisted SNR, at 1-2 bytes against the float's 5.
+   * A stored 0 does not by itself mean "unknown" - the NODEINFO_BITFIELD_HAS_SNR
+   * presence bit separates a genuine 0 dB reading from "never measured".
+   */
+  sint32 snr_q4 = 19;
 }
 
 message NodePositionEntry {
