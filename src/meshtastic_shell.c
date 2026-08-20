@@ -34,6 +34,8 @@
 #include "meshtastic_core.h"
 #include "meshtastic_region_presets.h"
 #include "meshtastic_powermon.h"
+#include <zephyr/meshtastic/fem.h>
+
 #include "meshtastic_tx_power.h"
 #include "meshtastic_sched.h"
 #include "meshtastic_settings.h"
@@ -2107,6 +2109,24 @@ static void cmd_lora_show(const struct shell *sh)
 			    radiated,
 			    (cfg.payload_variant.lora.tx_power == 0) ? " [region default]" : "",
 			    drive, (drive != radiated) ? ", FEM makes up the rest" : "");
+	}
+
+	/* The other two knobs a config tool can set that change what the radio
+	 * does. Shown because "stored but not doing anything" is exactly the
+	 * failure these two used to have. */
+	shell_print(sh, "tx enabled:   %s",
+		    cfg.payload_variant.lora.tx_enabled ? "yes" : "NO — receive only");
+	switch (cfg.payload_variant.lora.fem_lna_mode) {
+	case meshtastic_Config_LoRaConfig_FEM_LNA_Mode_ENABLED:
+		shell_print(sh, "fem lna:      enabled%s",
+			    meshtastic_radio_fem_lna_can_control() ? "" : " (but not controllable)");
+		break;
+	case meshtastic_Config_LoRaConfig_FEM_LNA_Mode_DISABLED:
+		shell_print(sh, "fem lna:      DISABLED (receive path bypasses the amplifier)");
+		break;
+	default:
+		shell_print(sh, "fem lna:      not present on this hardware");
+		break;
 	}
 }
 
