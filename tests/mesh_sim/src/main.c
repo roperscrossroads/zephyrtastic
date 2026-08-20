@@ -1065,3 +1065,20 @@ ZTEST(mesh_sim, test_fem_lna_mode_normalizes_when_hardware_cannot_control_it)
 		      cfg.payload_variant.lora.fem_lna_mode,
 		      "an unhonourable fem_lna_mode must be normalized, not echoed back");
 }
+
+/*
+ * FEM_LNA_Mode_DISABLED is 0, so an unset fem_lna_mode reads as "bypass the
+ * LNA". A node that has never been configured must not come up deliberately
+ * deaf, which is the same trap sx126x_rx_boosted_gain documents one field
+ * along. The seeded default has to describe the hardware, not the proto zero.
+ */
+ZTEST(mesh_sim, test_fem_lna_mode_default_is_never_the_proto_zero)
+{
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "could not read the lora config");
+	zassert_not_equal(meshtastic_Config_LoRaConfig_FEM_LNA_Mode_DISABLED,
+			  cfg.payload_variant.lora.fem_lna_mode,
+			  "a freshly seeded node must not default to bypassing its LNA");
+}

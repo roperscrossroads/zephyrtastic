@@ -556,6 +556,16 @@ static void seed_config_defaults(const struct meshtastic_config *cfg)
 	 * the moment the field actually starts being applied (G-2). */
 	store.configs[idx].payload_variant.lora.sx126x_rx_boosted_gain = true;
 
+	/* Same trap as the line above, one field along: FEM_LNA_Mode_DISABLED is 0,
+	 * so an unset fem_lna_mode means "bypass the LNA" the moment the field starts
+	 * being applied — a fresh node would come up deliberately deaf. Seed it the
+	 * way the reference does (NodeDB.cpp: ENABLED where a FEM is present,
+	 * NOT_PRESENT otherwise) so the stored value describes the hardware. */
+	store.configs[idx].payload_variant.lora.fem_lna_mode =
+		meshtastic_radio_fem_lna_can_control()
+			? meshtastic_Config_LoRaConfig_FEM_LNA_Mode_ENABLED
+			: meshtastic_Config_LoRaConfig_FEM_LNA_Mode_NOT_PRESENT;
+
 	idx = index_for_config_tag(meshtastic_Config_bluetooth_tag);
 	store.configs[idx].payload_variant.bluetooth.enabled = IS_ENABLED(CONFIG_MESHTASTIC_BLE);
 #if defined(CONFIG_MESHTASTIC_BLE_FIXED_PASSKEY)
