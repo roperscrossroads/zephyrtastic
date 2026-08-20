@@ -4294,6 +4294,7 @@ ZTEST(protocol_stack, test_lora_custom_modem_params)
 	struct meshtastic_modem_params preset;
 
 	cfg.which_payload_variant = meshtastic_Config_lora_tag;
+	cfg.payload_variant.lora.tx_enabled = true;
 	cfg.payload_variant.lora.region = meshtastic_Config_LoRaConfig_RegionCode_US;
 	cfg.payload_variant.lora.use_preset = false;
 

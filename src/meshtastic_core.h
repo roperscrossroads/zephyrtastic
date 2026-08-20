@@ -70,6 +70,9 @@ struct meshtastic_context {
 	 * (meshtastic_radio_init) — a LoRaConfig change already requires a reboot
 	 * to take effect (F-1), so there is no live-apply path to wire. */
 	bool rx_boosted_gain;
+	/* config.lora.tx_enabled: false makes the node receive-only. Enforced at
+	 * the single TX choke point in meshtastic_radio.c. Defaults true. */
+	bool tx_enabled;
 	const char *channel_name;
 	const char *long_name;
 	const char *short_name;

@@ -464,6 +464,10 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	 * allows". The region is not known until the config store loads, so this
 	 * seeds from the build default and meshtastic_config_store_apply() redoes
 	 * it against the stored region. */
+	/* Transmitting is the default; only an explicit stored tx_enabled=false
+	 * turns it off (config_store applies that). Seeded here so a node with no
+	 * stored lora config is not silently mute. */
+	mt.tx_enabled = true;
 	mt.tx_power = meshtastic_tx_power_resolve(
 		cfg->tx_power, meshtastic_Config_LoRaConfig_RegionCode_UNSET, false);
 	mt.long_name = (cfg->long_name != NULL) ? cfg->long_name : CONFIG_MESHTASTIC_NODE_LONG_NAME;

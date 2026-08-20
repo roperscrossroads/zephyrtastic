@@ -16,11 +16,13 @@
 #include <zephyr/ztest.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
+#include <zephyr/meshtastic/fem.h>
 #include <zephyr/meshtastic/nodedb.h>
 #include <meshtastic/lora_sim.h>
 
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
 #if defined(CONFIG_MESHTASTIC_SCANNER)
@@ -996,4 +998,70 @@ ZTEST(mesh_sim, test_direct_sender_is_recorded_zero_hops_away)
 	zassert_ok(meshtastic_nodedb_get(origin, &node), "direct sender was not learned");
 	zassert_true(node.has_hops_away, "distance to a direct sender was not recorded");
 	zassert_equal(0U, node.hops_away, "expected 0 hops away, got %u", node.hops_away);
+}
+
+/* ==========================================================================
+ * config.lora.tx_enabled — the "receive only" switch every config tool offers
+ *
+ * The reference honours this; this port stored it and transmitted anyway, so a
+ * phone, web client or python CLI could set it, read it back set, and still
+ * have a node on air. Enforced at the same single choke point as the scanner
+ * gate, so it covers relay, NodeInfo, telemetry, retries and phone-injected
+ * sends alike.
+ */
+ZTEST(mesh_sim, test_tx_enabled_false_makes_the_node_receive_only)
+{
+	meshtastic_Config cfg;
+	struct lora_sim_frame f;
+
+	/* Get-modify-set, the way a real client does it: every other field of the
+	 * LoRaConfig has to survive, or this would be testing a wiped config. */
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "could not read the lora config");
+	cfg.payload_variant.lora.tx_enabled = false;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config write failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "config apply failed");
+
+	zassert_not_equal(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "should not go"), 0,
+			  "send was accepted while tx_enabled was false");
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(400)), 0,
+			  "a frame reached the radio while tx_enabled was false");
+
+	/* Restore, and prove the gate is the reason rather than a broken stack. */
+	cfg.payload_variant.lora.tx_enabled = true;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config restore failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "config re-apply failed");
+
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "should go"),
+		   "send refused after tx_enabled was restored");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(2000)),
+		   "nothing transmitted after tx_enabled was restored");
+}
+
+/*
+ * config.lora.fem_lna_mode — normalization, not silent acceptance.
+ *
+ * native_sim has no front-end, so this board reports "cannot control". The
+ * reference does not simply ignore the field there; it rewrites the stored
+ * value to NOT_PRESENT so a tool reading its config back learns the setting
+ * has no effect on this hardware, rather than seeing its own value echoed.
+ */
+ZTEST(mesh_sim, test_fem_lna_mode_normalizes_when_hardware_cannot_control_it)
+{
+	meshtastic_Config cfg;
+
+	zassert_false(meshtastic_radio_fem_lna_can_control(),
+		      "native_sim should report no controllable FEM LNA");
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "could not read the lora config");
+	cfg.payload_variant.lora.fem_lna_mode = meshtastic_Config_LoRaConfig_FEM_LNA_Mode_ENABLED;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config write failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "config apply failed");
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "could not re-read the lora config");
+	zassert_equal(meshtastic_Config_LoRaConfig_FEM_LNA_Mode_NOT_PRESENT,
+		      cfg.payload_variant.lora.fem_lna_mode,
+		      "an unhonourable fem_lna_mode must be normalized, not echoed back");
 }

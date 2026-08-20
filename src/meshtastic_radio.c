@@ -214,6 +214,20 @@ __weak int8_t meshtastic_radio_fem_tx_power_conversion(int8_t radiated_dbm)
 	return radiated_dbm;
 }
 
+/*
+ * Default FEM LNA control: absent. A board whose front-end can switch its
+ * receive path between the LNA and a bypass overrides both of these.
+ */
+__weak bool meshtastic_radio_fem_lna_can_control(void)
+{
+	return false;
+}
+
+__weak void meshtastic_radio_fem_lna_set(bool enable)
+{
+	ARG_UNUSED(enable);
+}
+
 int meshtastic_radio_tune_explicit(uint32_t frequency_hz, uint8_t spread_factor,
 				   uint32_t bandwidth_hz, uint8_t coding_rate)
 {
@@ -305,6 +319,16 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 		return -EPERM;
 	}
 #endif
+
+	/* config.lora.tx_enabled. The reference exposes this to every config tool
+	 * as "receive only" and honours it; we used to store it and transmit
+	 * anyway, so a tool could set it, read it back set, and still be on air.
+	 * Checked at the same choke point as the scanner gate, and for the same
+	 * reason: every transmit in the firmware funnels through here. */
+	if (!mt.tx_enabled) {
+		LOG_DBG("TX refused: tx_enabled is off (receive-only)");
+		return -EPERM;
+	}
 
 #if defined(CONFIG_MESHTASTIC_PACKET_HEXDUMP)
 	log_wire_tx(pkt, pkt_len);

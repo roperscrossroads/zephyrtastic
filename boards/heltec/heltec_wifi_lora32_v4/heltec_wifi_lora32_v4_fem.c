@@ -78,6 +78,20 @@ static const uint8_t fem_gain_kct8103l[] = {
 static const uint8_t *fem_gain_table;
 static size_t fem_gain_len;
 
+/*
+ * Whether the fitted part lets software choose the receive path, and which path
+ * is currently selected.
+ *
+ * Only the KCT8103L (rev 4.3 / R8) exposes this: its CTX pin selects LNA vs
+ * bypass on receive, which is exactly what config.lora.fem_lna_mode controls.
+ * On the GC1109 (rev 4.2) the mode pin is a transmit PA-mode select and there
+ * is no receive-path choice, so that board reports "cannot control" and the
+ * config store normalizes the stored value to NOT_PRESENT — the reference does
+ * the same rather than leave a setting that quietly does nothing.
+ */
+static bool fem_lna_controllable;
+static bool fem_lna_enabled = true;
+
 static int heltec_v4_fem_init(void)
 {
 	const struct device *const gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
@@ -114,6 +128,7 @@ static int heltec_v4_fem_init(void)
 		fem_mode_pin = FEM_KCT_CTX_PIN;
 		fem_gain_table = fem_gain_kct8103l;
 		fem_gain_len = ARRAY_SIZE(fem_gain_kct8103l);
+		fem_lna_controllable = true; /* CTX selects RX LNA vs RX bypass */
 	} else {
 		LOG_INF("Detected GC1109 LoRa FEM (V4 rev 4.2)");
 		fem_mode_port = gpio1;
@@ -139,7 +154,29 @@ void meshtastic_radio_fem_set_tx(bool tx)
 		return;
 	}
 
-	gpio_pin_set_raw(fem_mode_port, fem_mode_pin, tx ? 1 : 0);
+	/* HIGH for TX. On RX the level is the receive-path select: LOW engages the
+	 * KCT8103L's LNA, HIGH bypasses it. Honour the configured mode there rather
+	 * than always assuming the LNA, so fem_lna_mode is a real control and not
+	 * decoration. ("Don't care" on the GC1109, which has no RX path choice.) */
+	gpio_pin_set_raw(fem_mode_port, fem_mode_pin,
+			 tx ? 1 : (fem_lna_enabled ? 0 : 1));
+}
+
+bool meshtastic_radio_fem_lna_can_control(void)
+{
+	return fem_lna_controllable;
+}
+
+void meshtastic_radio_fem_lna_set(bool enable)
+{
+	fem_lna_enabled = enable;
+
+	/* Apply immediately if we are sitting in receive, so the change takes
+	 * effect without waiting for the next transmit to cycle the pin. */
+	if (fem_mode_port != NULL) {
+		gpio_pin_set_raw(fem_mode_port, fem_mode_pin, enable ? 0 : 1);
+	}
+	LOG_INF("LoRa FEM receive path: %s", enable ? "LNA" : "bypass");
 }
 
 /*

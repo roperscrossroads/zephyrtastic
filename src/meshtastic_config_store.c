@@ -20,6 +20,8 @@
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_hlc.h"
 #include "meshtastic_settings.h"
+#include <zephyr/meshtastic/fem.h>
+
 #include "meshtastic_tx_power.h"
 
 #include <zephyr/logging/log.h>
@@ -760,6 +762,28 @@ int meshtastic_config_store_apply_core(void)
 	}
 
 	mt.rx_boosted_gain = lora.sx126x_rx_boosted_gain;
+	mt.tx_enabled = lora.tx_enabled;
+
+	/* config.lora.fem_lna_mode. Apply it where the front-end actually has a
+	 * switchable receive path; where it does not, say so rather than keep a
+	 * stored value that does nothing — a config tool that writes a setting and
+	 * reads it back unchanged is entitled to believe it took effect. Mirrors the
+	 * reference (AdminModule.cpp: apply when isLnaCanControl(), else normalize to
+	 * NOT_PRESENT with a warning). */
+	if (meshtastic_radio_fem_lna_can_control()) {
+		meshtastic_radio_fem_lna_set(
+			lora.fem_lna_mode != meshtastic_Config_LoRaConfig_FEM_LNA_Mode_DISABLED);
+	} else if (lora.fem_lna_mode != meshtastic_Config_LoRaConfig_FEM_LNA_Mode_NOT_PRESENT) {
+		LOG_WRN("fem_lna_mode set but this front-end has no LNA control; "
+			"normalizing to NOT_PRESENT");
+		int lora_idx = index_for_config_tag(meshtastic_Config_lora_tag);
+
+		lora.fem_lna_mode = meshtastic_Config_LoRaConfig_FEM_LNA_Mode_NOT_PRESENT;
+		if (lora_idx >= 0) {
+			store.configs[lora_idx].payload_variant.lora.fem_lna_mode =
+				meshtastic_Config_LoRaConfig_FEM_LNA_Mode_NOT_PRESENT;
+		}
+	}
 
 	if (lora.override_frequency > 0.0f) {
 		uint32_t hz = (uint32_t)(lora.override_frequency * 1000000.0f);

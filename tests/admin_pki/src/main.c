@@ -263,6 +263,10 @@ static size_t encode_admin_set_lora_preset(meshtastic_Config_LoRaConfig_ModemPre
 	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
 	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_lora_tag;
 	lora = &am.payload_variant.set_config.payload_variant.lora;
+	/* A real client always get-modify-sets, so every LoRaConfig on the wire
+	 * carries tx_enabled. Built from zero here, so set it explicitly — a
+	 * proto3 bool defaults to false, which now genuinely means receive-only. */
+	lora->tx_enabled = true;
 	lora->use_preset = true;
 	lora->modem_preset = preset;
 	lora->region = meshtastic_Config_LoRaConfig_RegionCode_US;
@@ -649,6 +653,7 @@ ZTEST(admin_pki, test_lora_config_change_schedules_reboot)
 		meshtastic_Config lora = meshtastic_Config_init_zero;
 
 		lora.which_payload_variant = meshtastic_Config_lora_tag;
+		lora.payload_variant.lora.tx_enabled = true;
 		lora.payload_variant.lora.use_preset = true;
 		lora.payload_variant.lora.modem_preset =
 			meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
