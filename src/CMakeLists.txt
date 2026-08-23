@@ -88,7 +88,10 @@ if(CONFIG_MESHTASTIC)
     meshtastic_admin.c
     meshtastic_admin_session.c
   )
-  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE meshtastic_ble.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE
+    meshtastic_ble.c
+    meshtastic_ble_registry.c
+  )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SERIAL meshtastic_serial.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_TCP meshtastic_tcp.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SCANNER meshtastic_scanner.c)

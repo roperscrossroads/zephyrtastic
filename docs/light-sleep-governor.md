@@ -99,6 +99,16 @@ preempt path closes-then-accepts, so the count stays balanced. A failed BLE
 `connected(err)` early-returns before its note, and Zephyr only calls
 `disconnected()` for a connection that connected — so those stay balanced too.
 
+On the BLE side balance no longer relies on `CONFIG_BT_MAX_CONN=1`: whether a
+given connection charged the phone note is recorded per-connection in
+`meshtastic_ble_registry.c` (keyed by `bt_conn_index()`), and `disconnected()`
+releases the note iff that connection's record says it took one — never
+re-derived. A non-phone connection (a future BLE peer link) can therefore come
+and go without touching the phone's inhibit or tearing down the PhoneAPI
+session. The registry is BT-free and its ledger property (every note taken is
+returned exactly once, under any interleaving) is unit-tested in
+`tests/ble_reg/`.
+
 ## Value-0 semantics
 
 `min_wake_secs == 0` → `ACTIVITY` is never engaged (the activity notes no-op);

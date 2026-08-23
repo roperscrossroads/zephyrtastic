@@ -15,6 +15,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include "meshtastic_ble_registry.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_phoneapi.h"
 
@@ -367,20 +368,41 @@ static K_WORK_DEFINE(adv_restart_work, adv_restart_fn);
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
+	bool is_phone;
+	int ret;
+
 	if (err != 0U) {
 		LOG_WRN("BLE connection failed: 0x%02x", err);
 		return;
 	}
 
+	/*
+	 * The first connection owns the phone session (this node is only ever a
+	 * peripheral toward a phone). Whether the phone PM inhibitor was charged
+	 * is recorded per-connection in the registry, and the disconnect path
+	 * keys off that record — never re-derived — so the refcount stays
+	 * balanced for any interleaving once CONFIG_BT_MAX_CONN > 1.
+	 */
 	k_mutex_lock(&ble.lock, K_FOREVER);
-	if (ble.conn == NULL) {
+	is_phone = (ble.conn == NULL);
+	ret = meshtastic_ble_reg_connect(bt_conn_index(conn), is_phone);
+	if (ret == 0 && is_phone) {
 		ble.conn = bt_conn_ref(conn);
 	}
 	k_mutex_unlock(&ble.lock);
 
-	meshtastic_set_ble_connected(true);
-	meshtastic_power_note_phone_connected();
-	meshtastic_emit_event(MESHTASTIC_EVENT_BLE_CONNECTED, 0, NULL);
+	if (ret < 0) {
+		/* A live conn's index cannot collide; refuse rather than let a
+		 * stale slot duplicate or absorb a PM note. */
+		LOG_ERR("BLE conn registry rejected slot %u (%d)", bt_conn_index(conn), ret);
+		return;
+	}
+
+	if (is_phone) {
+		meshtastic_set_ble_connected(true);
+		meshtastic_power_note_phone_connected();
+		meshtastic_emit_event(MESHTASTIC_EVENT_BLE_CONNECTED, 0, NULL);
+	}
 
 	/*
 	 * Do not call bt_conn_set_security() here. Official Meshtastic firmware
@@ -392,21 +414,28 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
+	bool was_phone;
+
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	was_phone = meshtastic_ble_reg_disconnect(bt_conn_index(conn));
 	if (ble.conn == conn) {
-		k_mutex_lock(&ble.lock, K_FOREVER);
 		bt_conn_unref(ble.conn);
 		ble.conn = NULL;
-		k_mutex_unlock(&ble.lock);
 	}
+	k_mutex_unlock(&ble.lock);
 
-	ble_invalidate_delivery(&ble.api);
-	meshtastic_phoneapi_reset(&ble.api);
-	(void)k_work_cancel(&ble.fromradio_work);
+	/* Tear down the phone session and release its PM inhibitor only when it
+	 * was the phone's own connection that went away. */
+	if (was_phone) {
+		ble_invalidate_delivery(&ble.api);
+		meshtastic_phoneapi_reset(&ble.api);
+		(void)k_work_cancel(&ble.fromradio_work);
 
-	meshtastic_set_ble_connected(false);
-	meshtastic_power_note_phone_disconnected();
-	meshtastic_emit_event(MESHTASTIC_EVENT_BLE_DISCONNECTED, 0, NULL);
-	LOG_INF("BLE disconnected: 0x%02x", reason);
+		meshtastic_set_ble_connected(false);
+		meshtastic_power_note_phone_disconnected();
+		meshtastic_emit_event(MESHTASTIC_EVENT_BLE_DISCONNECTED, 0, NULL);
+	}
+	LOG_INF("BLE disconnected: 0x%02x%s", reason, was_phone ? " (phone)" : "");
 
 	/* Re-arm connectable advertising so the phone can reconnect without a reboot
 	 * (see adv_restart_fn). Deferred off the BT callback context. */
