@@ -77,6 +77,19 @@ int lora_sim_inject_on(const struct device *dev, uint32_t freq_hz, uint8_t sf, u
 int lora_sim_get_tuning(const struct device *dev, uint32_t *freq_hz, uint8_t *sf, uint8_t *bw);
 
 /**
+ * @brief Read back the drive level most recently programmed into the radio.
+ *
+ * This is what actually reached `lora_config()` -- i.e. the value after the
+ * stack's region-limit resolution (meshtastic_tx_power_resolve) and FEM gain
+ * conversion (meshtastic_tx_power_chip_drive) have both been applied. Lets a
+ * test pin the *whole* tx_power pipeline against the driver, not just its
+ * pieces in isolation.
+ *
+ * @return 0 on success, -EAGAIN if lora_config() has not been called yet.
+ */
+int lora_sim_get_tx_power(const struct device *dev, int8_t *tx_power_dbm);
+
+/**
  * @brief Pop the next captured TX frame.
  * @return 0 on success; -ENOMSG (K_NO_WAIT) or -EAGAIN (timeout) if none.
  */

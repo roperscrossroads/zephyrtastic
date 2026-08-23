@@ -97,6 +97,59 @@ static void quiesce(void)
 	lora_sim_reset(lora_dev);
 }
 
+/* ==========================================================================
+ * Test doubles for the board FEM hooks (<zephyr/meshtastic/fem.h>).
+ *
+ * No board FEM source (e.g. heltec_wifi_lora32_v4_fem.c) is linked into
+ * native_sim, so meshtastic_radio.c's __weak defaults would otherwise apply
+ * everywhere -- which is exactly what the existing fem_lna_mode tests above
+ * assert (can_control() == false). These strong overrides replace those
+ * defaults for the whole suite, but every field defaults to the SAME
+ * behaviour the weak versions gave (no LNA control, identity power
+ * conversion, no-op TX steering), so nothing changes for a test that never
+ * touches fem_spy. A test that wants the "board WITH a controllable
+ * front-end" branch sets the relevant field and reads the rest back.
+ */
+static struct {
+	bool     lna_can_control;
+	bool     lna_last_set_value;
+	uint32_t lna_set_count;
+
+	int8_t tx_power_gain_db; /* subtracted from every requested radiated dBm */
+
+	bool     tx_calls[8];
+	uint32_t tx_call_count;
+} fem_spy;
+
+static void fem_spy_reset(void)
+{
+	memset(&fem_spy, 0, sizeof(fem_spy));
+}
+
+bool meshtastic_radio_fem_lna_can_control(void)
+{
+	return fem_spy.lna_can_control;
+}
+
+void meshtastic_radio_fem_lna_set(bool enable)
+{
+	fem_spy.lna_last_set_value = enable;
+	fem_spy.lna_set_count++;
+}
+
+int8_t meshtastic_radio_fem_tx_power_conversion(int8_t radiated_dbm)
+{
+	return (int8_t)(radiated_dbm - fem_spy.tx_power_gain_db);
+}
+
+void meshtastic_radio_fem_set_tx(bool tx)
+{
+	if (fem_spy.tx_call_count < ARRAY_SIZE(fem_spy.tx_calls)) {
+		fem_spy.tx_calls[fem_spy.tx_call_count] = tx;
+	}
+	fem_spy.tx_call_count++;
+}
+
 /* Encode a valid text-message wire frame originated by a fake neighbour. */
 static void build_peer_text(uint32_t id, const char *text, uint8_t *wire, uint32_t *wire_len)
 {
@@ -154,6 +207,7 @@ static void mesh_sim_before(void *fixture)
 	lora_sim_reset(lora_dev);
 	memset(&rx, 0, sizeof(rx));
 	k_sem_init(&rx.sem, 0, 1);
+	fem_spy_reset();
 }
 
 /* TX seam: an originated text reaches the sim driver as a decodable wire frame,
@@ -1081,4 +1135,193 @@ ZTEST(mesh_sim, test_fem_lna_mode_default_is_never_the_proto_zero)
 	zassert_not_equal(meshtastic_Config_LoRaConfig_FEM_LNA_Mode_DISABLED,
 			  cfg.payload_variant.lora.fem_lna_mode,
 			  "a freshly seeded node must not default to bypassing its LNA");
+}
+
+/*
+ * config.lora.fem_lna_mode -- the other half of the normalization test above.
+ * On a board that CAN control its LNA, apply_core must actually DRIVE it per
+ * the operator's setting, not merely accept the stored value. Mirrors the
+ * reference (AdminModule.cpp: isLnaCanControl() -> femInterface lna
+ * enable/disable).
+ */
+ZTEST(mesh_sim, test_fem_lna_mode_applied_when_hardware_can_control_it)
+{
+	meshtastic_Config cfg;
+
+	fem_spy.lna_can_control = true;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "could not read the lora config");
+
+	/* meshtastic_config_store_set_config() applies internally (it is what a
+	 * real config write does), so each call below is one apply and must move
+	 * the spy's count by exactly one -- not the explicit-apply_core() dance
+	 * the tx_enabled/normalization tests above use, which would double-count
+	 * here. */
+	cfg.payload_variant.lora.fem_lna_mode = meshtastic_Config_LoRaConfig_FEM_LNA_Mode_ENABLED;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config write failed");
+	zassert_equal(1U, fem_spy.lna_set_count, "fem_lna_set was not called for ENABLED");
+	zassert_true(fem_spy.lna_last_set_value, "ENABLED must drive the LNA on");
+
+	cfg.payload_variant.lora.fem_lna_mode = meshtastic_Config_LoRaConfig_FEM_LNA_Mode_DISABLED;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config write failed");
+	zassert_equal(2U, fem_spy.lna_set_count, "fem_lna_set was not called for DISABLED");
+	zassert_false(fem_spy.lna_last_set_value, "DISABLED must bypass the LNA");
+
+	/* And unlike the cannot-control branch, a controllable LNA keeps the
+	 * operator's own setting -- there is nothing to normalize away. */
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "could not re-read the lora config");
+	zassert_equal(meshtastic_Config_LoRaConfig_FEM_LNA_Mode_DISABLED,
+		      cfg.payload_variant.lora.fem_lna_mode,
+		      "a controllable LNA must keep the operator's setting, not normalize it");
+
+	/* Restore: fem_spy resets before the next test (mesh_sim_before), but the
+	 * config STORE is not test-scoped, so a later test reading fem_lna_mode
+	 * (e.g. the default-is-never-DISABLED test above) must not see this
+	 * test's DISABLED left behind. */
+	cfg.payload_variant.lora.fem_lna_mode = meshtastic_Config_LoRaConfig_FEM_LNA_Mode_ENABLED;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config restore failed");
+}
+
+/* ==========================================================================
+ * FEM TX/RX gating and the tx_power pipeline
+ *
+ * The two remaining pieces of the FEM contract that the resolution-only tests
+ * in tests/protocol/src/txpower.c cannot reach: that the radio layer actually
+ * calls the board hooks around a real transmit, and that the value those hooks
+ * produce is what actually gets programmed into the transceiver -- not just
+ * what the conversion functions return in isolation.
+ */
+
+/*
+ * meshtastic_radio_fem_set_tx -- the hook a FEM-equipped board (e.g. Heltec
+ * V4) uses to steer its PA/LNA mode pin. Reference: SX126xInterface's
+ * setTransmitEnable(true/false), called immediately before keying the
+ * transmitter and again once it has returned to receive
+ * (LoRaFEMInterface::setTxModeEnable / setRxModeEnable). This proves the CALL
+ * sequence around one send is exactly [true, false] -- a board with no FEM
+ * sees the same calls land on its own no-op override.
+ */
+ZTEST(mesh_sim, test_fem_set_tx_gates_around_a_real_transmit)
+{
+	struct lora_sim_frame f;
+
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "fem gated"),
+		   "send_text failed");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "no TX captured");
+
+	zassert_equal(2U, fem_spy.tx_call_count,
+		      "expected exactly one TX-enable and one RX-enable call, got %u",
+		      fem_spy.tx_call_count);
+	zassert_true(fem_spy.tx_calls[0], "the first call must steer the front-end to TX");
+	zassert_false(fem_spy.tx_calls[1], "the second call must return the front-end to RX");
+}
+
+/*
+ * TX power, end to end. config.lora.tx_power is radiated dBm (reference
+ * semantics); what must reach lora_config() is that figure resolved against
+ * the region limit (meshtastic_tx_power_resolve) and THEN reduced by the
+ * board's FEM gain (meshtastic_radio_fem_tx_power_conversion), clamped to the
+ * radio's settable range. 13 dB is close to the reference's real KCT8103L
+ * table at drive levels near 20 dBm (tests/protocol/src/txpower.c pins the
+ * table itself); this test pins that the two stages actually compose, on the
+ * live send path, rather than each independently returning the right number.
+ */
+ZTEST(mesh_sim, test_tx_power_pipeline_reaches_the_driver)
+{
+	meshtastic_Config cfg;
+	struct lora_sim_frame f;
+	int8_t programmed;
+
+	fem_spy.tx_power_gain_db = 13;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "could not read the lora config");
+	cfg.payload_variant.lora.tx_power = 20; /* radiated dBm; well under the US limit */
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config write failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "config apply failed");
+
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "power pipeline"),
+		   "send_text failed");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "no TX captured");
+
+	zassert_ok(lora_sim_get_tx_power(lora_dev, &programmed), "no tx_power recorded");
+	zassert_equal(7, programmed,
+		      "20 dBm radiated through a 13 dB FEM must program drive 7, got %d",
+		      programmed);
+
+	/* Restore, so a later test in this file sees the default region-limit
+	 * tx_power rather than this one's 20 dBm. */
+	cfg.payload_variant.lora.tx_power = 0;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config restore failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "config re-apply failed");
+}
+
+/*
+ * The same pipeline, reached from the OTHER caller of apply_modem_params():
+ * meshtastic_radio_retune(), which every preset switch runs. A preset switch
+ * has nothing to do with tx_power -- it changes SF/BW/frequency -- but
+ * meshtastic_radio.c programs tx_power on every lora_config() call, retune
+ * included, so a bug that only reprogrammed it on the SEND path (as the test
+ * above alone would miss) would still leave a stale drive level on the radio
+ * after every plain preset change.
+ */
+ZTEST(mesh_sim, test_tx_power_pipeline_survives_a_retune)
+{
+	meshtastic_Config cfg;
+	int8_t programmed;
+
+	fem_spy.tx_power_gain_db = 13;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "could not read the lora config");
+	cfg.payload_variant.lora.tx_power = 20; /* radiated dBm; well under the US limit */
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config write failed");
+
+	/* Start from a known preset rather than trusting suite order, same as the
+	 * preset-switch tests above. */
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "baseline switch failed");
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
+					    NULL), "preset switch failed");
+
+	zassert_ok(lora_sim_get_tx_power(lora_dev, &programmed), "no tx_power recorded");
+	zassert_equal(7, programmed,
+		      "a retune must still program the FEM-converted drive level, got %d",
+		      programmed);
+
+	/* Restore. */
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "preset restore failed");
+	cfg.payload_variant.lora.tx_power = 0;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config restore failed");
+}
+
+/*
+ * config.lora.sx126x_rx_boosted_gain -- the RX sensitivity boost every config
+ * tool can toggle. meshtastic_radio_init() pushes mt.rx_boosted_gain to the
+ * driver once at boot (G-2, see the seed-default comment in
+ * meshtastic_config_store.c); this pins the half of the story that changes on
+ * every config apply after that -- mt.rx_boosted_gain must track the stored
+ * config rather than freeze at whatever the seed default was.
+ */
+ZTEST(mesh_sim, test_rx_boosted_gain_tracks_config)
+{
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "could not read the lora config");
+	zassert_true(mt.rx_boosted_gain,
+		     "a freshly seeded node must default to RX gain boosted (G-2)");
+
+	cfg.payload_variant.lora.sx126x_rx_boosted_gain = false;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config write failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "config apply failed");
+	zassert_false(mt.rx_boosted_gain, "apply_core did not clear rx_boosted_gain");
+
+	cfg.payload_variant.lora.sx126x_rx_boosted_gain = true;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config write failed");
+	zassert_ok(meshtastic_config_store_apply_core(), "config apply failed");
+	zassert_true(mt.rx_boosted_gain, "apply_core did not restore rx_boosted_gain");
 }

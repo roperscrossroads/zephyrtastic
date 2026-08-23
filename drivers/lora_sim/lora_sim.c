@@ -308,6 +308,22 @@ int lora_sim_get_tuning(const struct device *dev, uint32_t *freq_hz, uint8_t *sf
 	return ret;
 }
 
+int lora_sim_get_tx_power(const struct device *dev, int8_t *tx_power_dbm)
+{
+	struct lora_sim_data *d = dev->data;
+	int ret = 0;
+
+	k_mutex_lock(&d->lock, K_FOREVER);
+	if (!d->cfg_valid) {
+		ret = -EAGAIN;
+	} else if (tx_power_dbm != NULL) {
+		*tx_power_dbm = d->cfg.tx_power;
+	}
+	k_mutex_unlock(&d->lock);
+
+	return ret;
+}
+
 int lora_sim_take_tx(const struct device *dev, struct lora_sim_frame *out, k_timeout_t timeout)
 {
 	struct lora_sim_data *d = dev->data;
