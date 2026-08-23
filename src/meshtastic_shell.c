@@ -28,6 +28,12 @@
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+#include <zephyr/bluetooth/addr.h>
+
+#include "meshtastic_ble_peer.h"
+#include "meshtastic_ble_registry.h"
+#endif
 #include "meshtastic_build.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
@@ -2237,6 +2243,222 @@ static int cmd_netlog(const struct shell *sh, size_t argc, char **argv)
 }
 #endif
 
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+/* ---- node-to-node BLE peer link (a4it.6) ---- */
+
+static const char *blepeer_kind_str(enum meshtastic_ble_conn_kind kind)
+{
+	switch (kind) {
+	case MESHTASTIC_BLE_CONN_UNCLASSIFIED:
+		return "unclassified";
+	case MESHTASTIC_BLE_CONN_PHONE:
+		return "phone";
+	case MESHTASTIC_BLE_CONN_PEER:
+		return "peer";
+	default:
+		return "free";
+	}
+}
+
+static int cmd_blepeer_status(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_ble_reg_stats rs;
+	struct meshtastic_ble_peer_stats ps;
+	struct meshtastic_ble_peer_link link;
+	unsigned int active;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_ble_reg_stats(&rs);
+	meshtastic_ble_peer_stats_get(&ps);
+	meshtastic_ble_peer_link_get(&link);
+	active = meshtastic_ble_reg_active();
+
+	shell_print(sh, "conn slots    : %u/%u used (%u free), advertising %s (starts %u)",
+		    active, CONFIG_BT_MAX_CONN, CONFIG_BT_MAX_CONN - active,
+		    meshtastic_ble_adv_active() ? "yes" : "NO", meshtastic_ble_adv_starts());
+	shell_print(sh, "config        : classify window %u ms, beat period %u ms",
+		    CONFIG_MESHTASTIC_BLE_PEER_CLASSIFY_WINDOW_MS,
+		    CONFIG_MESHTASTIC_BLE_PEER_BEAT_PERIOD_MS);
+	/* THE bench line: notes and unnotes converge to equal whenever no
+	 * phone is connected — the direct read-out of the PM-inhibit ledger. */
+	shell_print(sh, "PM ledger     : phone_notes=%u phone_unnotes=%u (in-flight %u)",
+		    rs.phone_notes, rs.phone_unnotes, rs.phone_notes - rs.phone_unnotes);
+	shell_print(sh, "classified    : peer/role=%u peer/hello=%u phone/traffic=%u phone/default=%u",
+		    rs.classified_peer_by_role, rs.classified_peer_by_hello,
+		    rs.classified_phone_by_traffic, rs.classified_phone_default);
+	if (rs.slot_index_out_of_range != 0U) {
+		shell_print(sh, "[!!] slot_index_out_of_range=%u — bt_conn_index invariant broken",
+			    rs.slot_index_out_of_range);
+	}
+	shell_print(sh, "beats         : hello_malformed=%u hello_rejected_late=%u tx notify=%u write=%u",
+		    ps.hello_malformed, ps.hello_rejected_late, ps.notify_tx_beats,
+		    ps.write_tx_beats);
+	shell_print(sh, "scan          : %s, adverts matched=%u reflections=%u",
+		    meshtastic_ble_peer_scan_armed() ? "armed" : "off", ps.adverts_matched,
+		    ps.reflections);
+	shell_print(sh, "connects      : attempted=%u failed=%u discovery_failures=%u",
+		    ps.connects_attempted, ps.connects_failed, ps.discovery_failures);
+	if (link.connected) {
+		shell_print(sh, "outbound      : 0x%08x %s (slot %u, tx beats %u)", link.node_num,
+			    link.ready ? "READY" : "connecting", link.index, link.tx_beats);
+	} else {
+		shell_print(sh, "outbound      : none");
+	}
+
+	for (unsigned int i = 0U; i < CONFIG_BT_MAX_CONN; i++) {
+		enum meshtastic_ble_conn_kind kind = meshtastic_ble_reg_kind(i);
+		struct meshtastic_ble_peer_rx rx;
+		char addr[BT_ADDR_LE_STR_LEN] = "?";
+		int64_t age_ms = 0;
+		int64_t last_ms = 0;
+
+		if (kind == MESHTASTIC_BLE_CONN_NONE) {
+			continue;
+		}
+		(void)meshtastic_ble_slot_info(i, addr, sizeof(addr), &age_ms);
+		if (meshtastic_ble_peer_rx_get(i, &rx, &last_ms)) {
+			shell_print(sh,
+				    "slot %u: %-12s %s age=%llds rx beats=%u lost=%u resyncs=%u "
+				    "from=0x%08x last=%llds ago",
+				    i, blepeer_kind_str(kind), addr,
+				    (long long)(age_ms / 1000), rx.beats, rx.lost, rx.resyncs,
+				    rx.last.node_num,
+				    (long long)((k_uptime_get() - last_ms) / 1000));
+		} else {
+			shell_print(sh, "slot %u: %-12s %s age=%llds%s", i, blepeer_kind_str(kind),
+				    addr, (long long)(age_ms / 1000),
+				    meshtastic_ble_reg_phone_noted(i) ? " (phone note held)" : "");
+		}
+	}
+	return 0;
+}
+
+static int cmd_blepeer_scan(const struct shell *sh, size_t argc, char **argv)
+{
+	int err;
+	bool on;
+
+	if (argc < 2) {
+		shell_print(sh, "peer scan %s", meshtastic_ble_peer_scan_armed() ? "armed" : "off");
+		return 0;
+	}
+	if (strcmp(argv[1], "on") == 0) {
+		on = true;
+	} else if (strcmp(argv[1], "off") == 0) {
+		on = false;
+	} else {
+		shell_error(sh, "usage: blepeer scan [on|off]");
+		return -EINVAL;
+	}
+
+	err = meshtastic_ble_peer_scan_set(on);
+	if (err != 0) {
+		shell_error(sh, "scan %s failed (%d)", argv[1], err);
+		return err;
+	}
+	shell_print(sh, "peer scan %s", on ? "armed" : "off");
+	return 0;
+}
+
+static int cmd_blepeer_list(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_ble_peer_seen seen;
+	unsigned int n = 0U;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	for (unsigned int i = 0U; meshtastic_ble_peer_seen_get(i, &seen); i++) {
+		shell_print(sh, "0x%08x  rssi=%-4d last=%llds ago", seen.node_num, seen.rssi,
+			    (long long)((k_uptime_get() - seen.last_ms) / 1000));
+		n++;
+	}
+	if (n == 0U) {
+		shell_print(sh, "no peer adverts seen%s",
+			    meshtastic_ble_peer_scan_armed() ? "" : " (scan is off)");
+	}
+	return 0;
+}
+
+static int cmd_blepeer_connect(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t node = 0U;
+	int err;
+
+	if (argc >= 2) {
+		node = (uint32_t)strtoul(argv[1], NULL, 16);
+		if (node == 0U) {
+			shell_error(sh, "bad node number (hex expected)");
+			return -EINVAL;
+		}
+	}
+
+	err = meshtastic_ble_peer_connect(node);
+	if (err == -EALREADY) {
+		shell_error(sh, "already connected — blepeer disconnect first");
+		return err;
+	}
+	if (err != 0) {
+		shell_error(sh, "connect failed (%d)", err);
+		return err;
+	}
+	if (node != 0U) {
+		shell_print(sh, "scanning for 0x%08x...", node);
+	} else {
+		shell_print(sh, "scanning for any peer...");
+	}
+	return 0;
+}
+
+static int cmd_blepeer_disconnect(const struct shell *sh, size_t argc, char **argv)
+{
+	int err;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	err = meshtastic_ble_peer_disconnect();
+	if (err == -ENOTCONN) {
+		shell_print(sh, "no outbound peer link");
+		return 0;
+	}
+	if (err != 0) {
+		shell_error(sh, "disconnect failed (%d)", err);
+		return err;
+	}
+	shell_print(sh, "disconnecting");
+	return 0;
+}
+
+static int cmd_blepeer_beat(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_ble_peer_beat_now();
+	shell_print(sh, "beat scheduled on every active link (none = no-op; see blepeer status)");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	meshtastic_blepeer_cmds,
+	SHELL_CMD(status, NULL, SHELL_HELP("Slots, ledger, classification and link counters.", NULL),
+		  cmd_blepeer_status),
+	SHELL_CMD(scan, NULL, SHELL_HELP("Arm/disarm the passive peer scanner.", "[on|off]"),
+		  cmd_blepeer_scan),
+	SHELL_CMD(list, NULL, SHELL_HELP("Peers heard advertising.", NULL), cmd_blepeer_list),
+	SHELL_CMD(connect, NULL,
+		  SHELL_HELP("Scan for and connect to a peer.", "[node-num-hex]"),
+		  cmd_blepeer_connect),
+	SHELL_CMD(disconnect, NULL, SHELL_HELP("Drop the outbound peer link.", NULL),
+		  cmd_blepeer_disconnect),
+	SHELL_CMD(beat, NULL, SHELL_HELP("Send one heartbeat now on every active link.", NULL),
+		  cmd_blepeer_beat),
+	SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_BLE_PEER */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
@@ -2305,6 +2527,26 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 	SHELL_CMD(scan, &meshtastic_scan_cmds,
 		  SHELL_HELP("Multi-preset survey. Leaves the mesh while running.", NULL), NULL),
+#endif
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+	SHELL_CMD(blepeer, &meshtastic_blepeer_cmds,
+		  SHELL_HELP("Node-to-node BLE peer link.", NULL), cmd_blepeer_status),
+#endif
+#if defined(CONFIG_MESHTASTIC_RF_PATH_REPORT) && defined(CONFIG_MESHTASTIC_RF_HIST)
+	/* Bare `meshtastic rf` runs the gain-path report; the subcommands cover
+	 * measurement. Both halves are independently configurable, hence three
+	 * cases rather than one. */
+	SHELL_CMD(rf, &meshtastic_rf_cmds,
+		  SHELL_HELP("Gain path in signal order, plus signal measurement.", NULL),
+		  cmd_rf_path),
+#elif defined(CONFIG_MESHTASTIC_RF_PATH_REPORT)
+	SHELL_CMD(rf, NULL,
+		  SHELL_HELP("Gain path in signal order: what the radio is REALLY doing.", NULL),
+		  cmd_rf_path),
+#elif defined(CONFIG_MESHTASTIC_RF_HIST)
+	SHELL_CMD(rf, &meshtastic_rf_cmds,
+		  SHELL_HELP("Signal measurement: distributions and per-peer rates.", NULL),
+		  NULL),
 #endif
 	SHELL_SUBCMD_SET_END);
 

@@ -31,8 +31,13 @@ int meshtastic_ble_peer_send_beat(void);
 bool meshtastic_ble_peer_notify_ready(void);
 
 /* Copy the receive-side accounting for the connection in registry slot
- * `index`. Returns true if that slot has received at least one beat. */
-bool meshtastic_ble_peer_rx_get(unsigned int index, struct meshtastic_ble_peer_rx *out);
+ * `index` (and the k_uptime of the last beat, if last_ms is non-NULL).
+ * Returns true if that slot has received at least one beat. */
+bool meshtastic_ble_peer_rx_get(unsigned int index, struct meshtastic_ble_peer_rx *out,
+				int64_t *last_ms);
+
+/* Poke the beat engine: one immediate beat on every active link. */
+void meshtastic_ble_peer_beat_now(void);
 
 /* Called from the BLE disconnect path for every connection: drops the slot's
  * beat accounting so a recycled bt_conn_index never inherits a dead link's
@@ -99,6 +104,13 @@ int meshtastic_ble_classify_peer_evidence(unsigned int index);
 
 /* The 16 bytes (LE) of the Meshtastic service UUID, for the scan filter. */
 const uint8_t *meshtastic_ble_service_uuid128(void);
+
+/* Peer address string + connection age for slot `index` (false if free). */
+bool meshtastic_ble_slot_info(unsigned int index, char *addr, size_t addr_len, int64_t *age_ms);
+
+/* Advertiser state, tracked in meshtastic_ble.c (a4it.2). */
+bool meshtastic_ble_adv_active(void);
+uint32_t meshtastic_ble_adv_starts(void);
 
 #else /* !CONFIG_MESHTASTIC_BLE_PEER */
 

@@ -85,6 +85,7 @@ static struct {
 	uint32_t tx_seq;
 	/* RX (write) side, per connection registry slot. */
 	struct meshtastic_ble_peer_rx rx[MESHTASTIC_BLE_REG_SLOTS];
+	int64_t rx_last_ms[MESHTASTIC_BLE_REG_SLOTS]; /* k_uptime at last beat */
 	struct meshtastic_ble_peer_stats stats;
 } peer;
 
@@ -146,6 +147,7 @@ static ssize_t write_beat(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	if (index < MESHTASTIC_BLE_REG_SLOTS) {
 		meshtastic_ble_peer_rx_account(&peer.rx[index], &beat);
+		peer.rx_last_ms[index] = k_uptime_get();
 	}
 	k_mutex_unlock(&peer_lock);
 
@@ -199,7 +201,8 @@ bool meshtastic_ble_peer_notify_ready(void)
 	return peer.notify_enabled;
 }
 
-bool meshtastic_ble_peer_rx_get(unsigned int index, struct meshtastic_ble_peer_rx *out)
+bool meshtastic_ble_peer_rx_get(unsigned int index, struct meshtastic_ble_peer_rx *out,
+				int64_t *last_ms)
 {
 	bool valid = false;
 
@@ -210,10 +213,19 @@ bool meshtastic_ble_peer_rx_get(unsigned int index, struct meshtastic_ble_peer_r
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	if (peer.rx[index].beats > 0U) {
 		*out = peer.rx[index];
+		if (last_ms != NULL) {
+			*last_ms = peer.rx_last_ms[index];
+		}
 		valid = true;
 	}
 	k_mutex_unlock(&peer_lock);
 	return valid;
+}
+
+/* Poke the beat engine: one immediate beat on every active link. */
+void meshtastic_ble_peer_beat_now(void)
+{
+	(void)k_work_schedule(&beat_work, K_NO_WAIT);
 }
 
 void meshtastic_ble_peer_conn_down(unsigned int index)
@@ -438,6 +450,7 @@ static uint8_t central_notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	if (index < MESHTASTIC_BLE_REG_SLOTS) {
 		meshtastic_ble_peer_rx_account(&peer.rx[index], &beat);
+		peer.rx_last_ms[index] = k_uptime_get();
 	}
 	k_mutex_unlock(&peer_lock);
 	return BT_GATT_ITER_CONTINUE;

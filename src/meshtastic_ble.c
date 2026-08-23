@@ -510,6 +510,21 @@ const uint8_t *meshtastic_ble_service_uuid128(void)
 {
 	return meshtastic_service_uuid.val;
 }
+
+/* Peer address + connection age for the blepeer shell. */
+bool meshtastic_ble_slot_info(unsigned int index, char *addr, size_t addr_len, int64_t *age_ms)
+{
+	bool ok = false;
+
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	if (index < MESHTASTIC_BLE_REG_SLOTS && ble.conns[index] != NULL) {
+		bt_addr_le_to_str(bt_conn_get_dst(ble.conns[index]), addr, addr_len);
+		*age_ms = k_uptime_get() - ble.conn_ms[index];
+		ok = true;
+	}
+	k_mutex_unlock(&ble.lock);
+	return ok;
+}
 #endif /* CONFIG_MESHTASTIC_BLE_PEER */
 
 static void connected(struct bt_conn *conn, uint8_t err)
