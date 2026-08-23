@@ -76,19 +76,52 @@ config MESHTASTIC_BLE_WORK_PRIORITY
 	help
 	  Priority for deferred ToRadio command handling.
 
-config MESHTASTIC_BLE_PEER
+menuconfig MESHTASTIC_BLE_PEER
 	bool "Node-to-node BLE peer link (experimental)"
 	default n
+	select BT_CENTRAL
+	select BT_GATT_CLIENT
 	help
 	  Expose this port's own peer GATT service (deliberately separate from
 	  the Meshtastic phone service, with its own UUID namespace) carrying a
-	  16-byte heartbeat, and add the node number to the advertisement as
-	  manufacturer-specific data so peers can identify each other. BLE
+	  16-byte heartbeat, add the node number to the advertisement as
+	  manufacturer-specific data, and enable the passive peer scanner and
+	  central role so this node can find and connect to other peers. BLE
 	  range sits entirely inside LoRa range, so this never extends reach —
 	  it is a fast local pipe between co-located nodes.
 
 	  Requires CONFIG_BT_MAX_CONN >= 2 (build-asserted) so a phone and a
 	  peer can be connected at once. A phone-only build (this symbol off)
-	  keeps today's advertisement byte-identical.
+	  keeps today's advertisement byte-identical and classifies incoming
+	  connections as the phone instantly, exactly as before.
+
+if MESHTASTIC_BLE_PEER
+
+config MESHTASTIC_BLE_PEER_CLASSIFY_WINDOW_MS
+	int "Incoming-connection classify window (ms)"
+	default 3000
+	help
+	  An incoming connection is ambiguous (an incoming peer central and a
+	  phone both arrive in the peripheral role). It is classified by
+	  evidence — PhoneAPI traffic makes it the phone, a valid peer beat
+	  makes it a peer — and after this window with no evidence it defaults
+	  to the phone. Phones normally produce traffic within a second of
+	  connecting, so the default only decides genuinely idle links.
+
+config MESHTASTIC_BLE_PEER_BEAT_PERIOD_MS
+	int "Heartbeat period (ms)"
+	default 1000
+	help
+	  How often the beat engine sends on each active peer link (notify
+	  toward a subscribed central, write toward a connected peripheral).
+
+config MESHTASTIC_BLE_PEER_SEEN_MAX
+	int "Peer advert table size"
+	default 8
+	help
+	  How many distinct advertising peers the passive scanner remembers
+	  for `meshtastic blepeer list`.
+
+endif # MESHTASTIC_BLE_PEER
 
 endif # MESHTASTIC_BLE

@@ -77,6 +77,12 @@ static struct {
 	 * (re)starts so a flapping advertiser is visible from the shell. */
 	bool adv_active;
 	uint32_t adv_starts;
+	/* Every live connection, by bt_conn_index() — the BT-side twin of the
+	 * registry slot. ble.conn above stays the PHONE session's connection;
+	 * these refs exist so classification (which may happen seconds after
+	 * connect) can still reach the conn object. */
+	struct bt_conn *conns[MESHTASTIC_BLE_REG_SLOTS];
+	int64_t conn_ms[MESHTASTIC_BLE_REG_SLOTS]; /* connect time, for the classify window */
 } ble;
 
 /* Statically reserved. NB: this stack must NOT be heap-allocated at bring-up: the
@@ -123,6 +129,7 @@ enum {
 
 static void notify_fromnum(void);
 static void schedule_fromradio_prepare(void);
+static void ble_note_phone_traffic(struct bt_conn *conn);
 
 static void ble_invalidate_delivery(struct meshtastic_phoneapi *api)
 {
@@ -214,9 +221,9 @@ static ssize_t read_fromnum(struct bt_conn *conn, const struct bt_gatt_attr *att
 {
 	uint8_t value[4];
 
-	ARG_UNUSED(conn);
 	ARG_UNUSED(attr);
 
+	ble_note_phone_traffic(conn);
 	sys_put_le32(meshtastic_phoneapi_from_num(&ble.api), value);
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(value));
 }
@@ -226,8 +233,9 @@ static ssize_t read_fromradio(struct bt_conn *conn, const struct bt_gatt_attr *a
 {
 	ssize_t ret;
 
-	ARG_UNUSED(conn);
 	ARG_UNUSED(attr);
+
+	ble_note_phone_traffic(conn);
 
 	if (offset == 0U) {
 		/*
@@ -309,8 +317,9 @@ static void to_radio_work_handler(struct k_work *work)
 static ssize_t write_toradio(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
 			     uint16_t len, uint16_t offset, uint8_t flags)
 {
-	ARG_UNUSED(conn);
 	ARG_UNUSED(attr);
+
+	ble_note_phone_traffic(conn);
 
 	if (offset + len > sizeof(ble.to_radio_buf)) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
@@ -373,9 +382,141 @@ static void adv_restart_fn(struct k_work *work)
 }
 static K_WORK_DEFINE(adv_restart_work, adv_restart_fn);
 
+/*
+ * Classification (a4it.5): whether the phone PM inhibitor was charged is
+ * recorded per-connection in the registry, and the disconnect path keys off
+ * that record — never re-derived — so the refcount stays balanced for any
+ * interleaving. A connection WE created is a peer immediately (this node never
+ * acts as central toward a phone). An incoming connection starts UNCLASSIFIED
+ * and becomes the phone on first PhoneAPI traffic, a peer on a valid beat, or
+ * the phone by default when the classify window expires. In a phone-only
+ * build (MESHTASTIC_BLE_PEER=n) incoming connections classify PHONE at
+ * connect, preserving the proven instant-session behaviour exactly.
+ */
+static bool ble_try_classify_phone(unsigned int index, enum meshtastic_ble_classify_reason r)
+{
+	bool ok = false;
+
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	if (meshtastic_ble_reg_classify(index, MESHTASTIC_BLE_CONN_PHONE, r) == 0) {
+		/* The registry granted the phone note (exactly once per slot);
+		 * we charge it below. First phone also owns the session conn. */
+		if (ble.conn == NULL && ble.conns[index] != NULL) {
+			ble.conn = bt_conn_ref(ble.conns[index]);
+		}
+		ok = true;
+	}
+	k_mutex_unlock(&ble.lock);
+
+	if (ok) {
+		meshtastic_set_ble_connected(true);
+		meshtastic_power_note_phone_connected();
+		meshtastic_emit_event(MESHTASTIC_EVENT_BLE_CONNECTED, 0, NULL);
+	}
+	return ok;
+}
+
+/* PhoneAPI traffic on an unclassified incoming connection is phone evidence.
+ * Called from the GATT handlers (BT RX thread); the unlocked pre-check keeps
+ * the steady-state cost of every ToRadio/FromRadio access to one enum read. */
+static void ble_note_phone_traffic(struct bt_conn *conn)
+{
+	unsigned int index;
+
+	if (!IS_ENABLED(CONFIG_MESHTASTIC_BLE_PEER) || conn == NULL) {
+		return;
+	}
+	index = bt_conn_index(conn);
+	if (meshtastic_ble_reg_kind(index) != MESHTASTIC_BLE_CONN_UNCLASSIFIED) {
+		return;
+	}
+	(void)ble_try_classify_phone(index, MESHTASTIC_BLE_CLASSIFY_TRAFFIC);
+}
+
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+/*
+ * Bounded backstop: an incoming connection that produced no evidence inside
+ * the window defaults to PHONE. The STATE is the guard — the sweep acts only
+ * on slots still UNCLASSIFIED — so this work item is never cancelled from BT
+ * callback context (which is what would deadlock).
+ */
+static void classify_backstop_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(classify_backstop_work, classify_backstop_fn);
+
+static void classify_backstop_fn(struct k_work *work)
+{
+	int64_t now = k_uptime_get();
+	int64_t next = -1;
+
+	ARG_UNUSED(work);
+
+	for (unsigned int i = 0U; i < MESHTASTIC_BLE_REG_SLOTS; i++) {
+		bool expired = false;
+
+		k_mutex_lock(&ble.lock, K_FOREVER);
+		if (meshtastic_ble_reg_kind(i) == MESHTASTIC_BLE_CONN_UNCLASSIFIED) {
+			int64_t deadline =
+				ble.conn_ms[i] + CONFIG_MESHTASTIC_BLE_PEER_CLASSIFY_WINDOW_MS;
+
+			if (now >= deadline) {
+				expired = true;
+			} else if (next < 0 || deadline < next) {
+				next = deadline;
+			}
+		}
+		k_mutex_unlock(&ble.lock);
+
+		if (expired) {
+			LOG_INF("BLE conn %u: no evidence in %u ms, defaulting to phone", i,
+				CONFIG_MESHTASTIC_BLE_PEER_CLASSIFY_WINDOW_MS);
+			(void)ble_try_classify_phone(i, MESHTASTIC_BLE_CLASSIFY_TIMER);
+		}
+	}
+
+	if (next >= 0) {
+		(void)k_work_reschedule(&classify_backstop_work, K_MSEC(next - now));
+	}
+}
+
+/* Peer evidence from meshtastic_ble_peer.c (a valid beat arrived). Returns 0
+ * on the transition, 1 if the slot is already a peer (duplicate beats are
+ * normal), -EBUSY if it is already the phone (evidence came too late), or
+ * -EINVAL for a dead slot. */
+int meshtastic_ble_classify_peer_evidence(unsigned int index)
+{
+	int ret;
+
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	switch (meshtastic_ble_reg_kind(index)) {
+	case MESHTASTIC_BLE_CONN_PEER:
+		ret = 1;
+		break;
+	case MESHTASTIC_BLE_CONN_PHONE:
+		ret = -EBUSY;
+		break;
+	case MESHTASTIC_BLE_CONN_UNCLASSIFIED:
+		ret = meshtastic_ble_reg_classify(index, MESHTASTIC_BLE_CONN_PEER,
+						  MESHTASTIC_BLE_CLASSIFY_HELLO);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+	k_mutex_unlock(&ble.lock);
+	return ret;
+}
+
+const uint8_t *meshtastic_ble_service_uuid128(void)
+{
+	return meshtastic_service_uuid.val;
+}
+#endif /* CONFIG_MESHTASTIC_BLE_PEER */
+
 static void connected(struct bt_conn *conn, uint8_t err)
 {
-	bool is_phone;
+	struct bt_conn_info info;
+	unsigned int index;
+	bool outbound;
 	bool slots_free;
 	int ret;
 
@@ -384,32 +525,44 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		return;
 	}
 
-	/*
-	 * The first connection owns the phone session (this node is only ever a
-	 * peripheral toward a phone). Whether the phone PM inhibitor was charged
-	 * is recorded per-connection in the registry, and the disconnect path
-	 * keys off that record — never re-derived — so the refcount stays
-	 * balanced for any interleaving once CONFIG_BT_MAX_CONN > 1.
-	 */
+	(void)bt_conn_get_info(conn, &info);
+	outbound = (info.role == BT_CONN_ROLE_CENTRAL);
+	index = bt_conn_index(conn);
+
 	k_mutex_lock(&ble.lock, K_FOREVER);
-	is_phone = (ble.conn == NULL);
-	ret = meshtastic_ble_reg_connect(bt_conn_index(conn), is_phone);
-	if (ret == 0 && is_phone) {
-		ble.conn = bt_conn_ref(conn);
+	ret = meshtastic_ble_reg_connect(index, outbound ? MESHTASTIC_BLE_CONN_PEER
+							 : MESHTASTIC_BLE_CONN_UNCLASSIFIED);
+	if (ret == 0) {
+		ble.conns[index] = bt_conn_ref(conn);
+		ble.conn_ms[index] = k_uptime_get();
 	}
 	k_mutex_unlock(&ble.lock);
 
 	if (ret < 0) {
 		/* A live conn's index cannot collide; refuse rather than let a
 		 * stale slot duplicate or absorb a PM note. */
-		LOG_ERR("BLE conn registry rejected slot %u (%d)", bt_conn_index(conn), ret);
+		LOG_ERR("BLE conn registry rejected slot %u (%d)", index, ret);
 		return;
 	}
 
-	if (is_phone) {
-		meshtastic_set_ble_connected(true);
-		meshtastic_power_note_phone_connected();
-		meshtastic_emit_event(MESHTASTIC_EVENT_BLE_CONNECTED, 0, NULL);
+	LOG_INF("BLE connected: slot %u %s", index, outbound ? "(outbound peer)" : "(incoming)");
+
+	if (!outbound) {
+		if (IS_ENABLED(CONFIG_MESHTASTIC_BLE_PEER)) {
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+			/* schedule (not reschedule): an earlier pending
+			 * deadline must not be pushed out; the sweep re-arms
+			 * for whatever is still unclassified. */
+			(void)k_work_schedule(
+				&classify_backstop_work,
+				K_MSEC(CONFIG_MESHTASTIC_BLE_PEER_CLASSIFY_WINDOW_MS));
+#endif
+		} else {
+			/* Phone-only build: no peers exist to wait for, so the
+			 * "default to phone" outcome applies immediately —
+			 * today's proven instant-session behaviour. */
+			(void)ble_try_classify_phone(index, MESHTASTIC_BLE_CLASSIFY_TIMER);
+		}
 	}
 
 	/*
@@ -439,19 +592,24 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
+	unsigned int index = bt_conn_index(conn);
 	bool was_phone;
 
 	k_mutex_lock(&ble.lock, K_FOREVER);
-	was_phone = meshtastic_ble_reg_disconnect(bt_conn_index(conn));
+	was_phone = meshtastic_ble_reg_disconnect(index);
 	if (ble.conn == conn) {
 		bt_conn_unref(ble.conn);
 		ble.conn = NULL;
+	}
+	if (ble.conns[index] != NULL) {
+		bt_conn_unref(ble.conns[index]);
+		ble.conns[index] = NULL;
 	}
 	k_mutex_unlock(&ble.lock);
 
 	/* Drop any peer-beat accounting for this slot before the index can be
 	 * recycled (no-op stub when the peer link is compiled out). */
-	meshtastic_ble_peer_conn_down(bt_conn_index(conn));
+	meshtastic_ble_peer_conn_down(index);
 
 	/* Tear down the phone session and release its PM inhibitor only when it
 	 * was the phone's own connection that went away. */
