@@ -70,6 +70,12 @@ static struct {
 	struct k_work_q work_q;
 	struct k_work to_radio_work;
 	struct k_work fromradio_work;
+	/* Advertiser bookkeeping (a4it.2): legacy connectable advertising stops on
+	 * connect and this Zephyr does not auto-resume it, so "is it advertising
+	 * right now" must be tracked, not inferred. adv_starts counts successful
+	 * (re)starts so a flapping advertiser is visible from the shell. */
+	bool adv_active;
+	uint32_t adv_starts;
 } ble;
 
 /* Statically reserved. NB: this stack must NOT be heap-allocated at bring-up: the
@@ -369,6 +375,7 @@ static K_WORK_DEFINE(adv_restart_work, adv_restart_fn);
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	bool is_phone;
+	bool slots_free;
 	int ret;
 
 	if (err != 0U) {
@@ -402,6 +409,23 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		meshtastic_set_ble_connected(true);
 		meshtastic_power_note_phone_connected();
 		meshtastic_emit_event(MESHTASTIC_EVENT_BLE_CONNECTED, 0, NULL);
+	}
+
+	/*
+	 * Legacy connectable advertising stopped the moment this connection was
+	 * accepted, and Zephyr does not auto-resume it (see adv_restart_fn). While
+	 * a conn slot remains free, re-arm it so the node stays discoverable to
+	 * peers — otherwise the phone connecting makes the node invisible and the
+	 * symptom ("peer never appears") points at the scanner, the wrong end
+	 * entirely (agents-a4it.2). With every slot taken, start_advertising()'s
+	 * own guard defers the restart to the next disconnect.
+	 */
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	ble.adv_active = false;
+	slots_free = meshtastic_ble_reg_active() < MESHTASTIC_BLE_REG_SLOTS;
+	k_mutex_unlock(&ble.lock);
+	if (slots_free && IS_ENABLED(CONFIG_MESHTASTIC_BLE_ADV)) {
+		(void)k_work_submit_to_queue(&ble.work_q, &adv_restart_work);
 	}
 
 	/*
@@ -589,12 +613,45 @@ static int start_advertising(void)
 			sizeof(CONFIG_MESHTASTIC_BLE_DEVICE_NAME) - 1U),
 	};
 
-	return bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+	int ret;
+
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	if (meshtastic_ble_reg_active() >= MESHTASTIC_BLE_REG_SLOTS) {
+		/* Every conn slot is taken: a connectable advert could only be
+		 * accepted into -ENOMEM. The next disconnect re-arms. */
+		ble.adv_active = false;
+		k_mutex_unlock(&ble.lock);
+		return 0;
+	}
+	k_mutex_unlock(&ble.lock);
+
+	ret = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+	if (ret == 0 || ret == -EALREADY) {
+		k_mutex_lock(&ble.lock, K_FOREVER);
+		ble.adv_active = true;
+		if (ret == 0) {
+			ble.adv_starts++;
+		}
+		k_mutex_unlock(&ble.lock);
+	}
+	return ret;
 }
 
 bool meshtastic_ble_is_connected(void)
 {
 	return ble.conn != NULL;
+}
+
+/* Advertiser observability for the (future) `meshtastic blepeer status` shell
+ * surface: tracked state, not inference (agents-a4it.2 / .6). */
+bool meshtastic_ble_adv_active(void)
+{
+	return ble.adv_active;
+}
+
+uint32_t meshtastic_ble_adv_starts(void)
+{
+	return ble.adv_starts;
 }
 
 int meshtastic_ble_init(void)
