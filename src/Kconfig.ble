@@ -76,4 +76,19 @@ config MESHTASTIC_BLE_WORK_PRIORITY
 	help
 	  Priority for deferred ToRadio command handling.
 
+config MESHTASTIC_BLE_PEER
+	bool "Node-to-node BLE peer link (experimental)"
+	default n
+	help
+	  Expose this port's own peer GATT service (deliberately separate from
+	  the Meshtastic phone service, with its own UUID namespace) carrying a
+	  16-byte heartbeat, and add the node number to the advertisement as
+	  manufacturer-specific data so peers can identify each other. BLE
+	  range sits entirely inside LoRa range, so this never extends reach —
+	  it is a fast local pipe between co-located nodes.
+
+	  Requires CONFIG_BT_MAX_CONN >= 2 (build-asserted) so a phone and a
+	  peer can be connected at once. A phone-only build (this symbol off)
+	  keeps today's advertisement byte-identical.
+
 endif # MESHTASTIC_BLE

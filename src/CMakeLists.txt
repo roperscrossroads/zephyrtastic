@@ -92,6 +92,10 @@ if(CONFIG_MESHTASTIC)
     meshtastic_ble.c
     meshtastic_ble_registry.c
   )
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE_PEER
+    meshtastic_ble_peer.c
+    meshtastic_ble_peer_codec.c
+  )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SERIAL meshtastic_serial.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_TCP meshtastic_tcp.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SCANNER meshtastic_scanner.c)
