@@ -15,6 +15,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include "meshtastic_ble_peer.h"
 #include "meshtastic_ble_registry.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_phoneapi.h"
@@ -448,6 +449,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	}
 	k_mutex_unlock(&ble.lock);
 
+	/* Drop any peer-beat accounting for this slot before the index can be
+	 * recycled (no-op stub when the peer link is compiled out). */
+	meshtastic_ble_peer_conn_down(bt_conn_index(conn));
+
 	/* Tear down the phone session and release its PM inhibitor only when it
 	 * was the phone's own connection that went away. */
 	if (was_phone) {
@@ -604,16 +609,47 @@ static int start_advertising(void)
 	static const uint8_t service_uuid[] = {
 		BT_UUID_MESHTASTIC_SERVICE_VAL,
 	};
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+	/*
+	 * Peer builds add the node number as manufacturer-specific data so two
+	 * nodes running the same image can tell each other apart (the scan
+	 * response's device name is a compile-time constant). File-static
+	 * mutable storage: the node num is a runtime value and the blob must
+	 * outlive bt_le_adv_start() and survive re-arms.
+	 *
+	 * Budget: 3 (flags) + 18 (128-bit UUID) + 2+7 (mfg blob) = 30 of 31
+	 * bytes. ONE byte spare — the next AD field overflows the advert and
+	 * bt_le_adv_start() returns -EINVAL, hence the assert.
+	 */
+	BUILD_ASSERT(3U + 18U + 2U + MESHTASTIC_BLE_PEER_ADV_LEN <= 31U,
+		     "BLE advertisement overflows 31 bytes");
+	static uint8_t peer_mfg_blob[MESHTASTIC_BLE_PEER_ADV_LEN];
+	static const struct bt_data ad[] = {
+		BT_DATA(BT_DATA_FLAGS, flags, sizeof(flags)),
+		BT_DATA(BT_DATA_UUID128_ALL, service_uuid, sizeof(service_uuid)),
+		BT_DATA(BT_DATA_MANUFACTURER_DATA, peer_mfg_blob, sizeof(peer_mfg_blob)),
+	};
+#else
+	/* Gated on MESHTASTIC_BLE_PEER so a phone-only build's advert stays
+	 * BYTE-IDENTICAL: the Meshtastic app filters on the service UUID and
+	 * this exact advert is proven against it. */
 	static const struct bt_data ad[] = {
 		BT_DATA(BT_DATA_FLAGS, flags, sizeof(flags)),
 		BT_DATA(BT_DATA_UUID128_ALL, service_uuid, sizeof(service_uuid)),
 	};
+#endif
 	static const struct bt_data sd[] = {
 		BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_MESHTASTIC_BLE_DEVICE_NAME,
 			sizeof(CONFIG_MESHTASTIC_BLE_DEVICE_NAME) - 1U),
 	};
 
 	int ret;
+
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+	/* Refreshed on every (re)start: node_id is settled long before BLE init,
+	 * but a re-arm after any later change keeps the advert truthful. */
+	meshtastic_ble_peer_adv_encode(peer_mfg_blob, mt.node_id);
+#endif
 
 	k_mutex_lock(&ble.lock, K_FOREVER);
 	if (meshtastic_ble_reg_active() >= MESHTASTIC_BLE_REG_SLOTS) {
