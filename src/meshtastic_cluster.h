@@ -69,6 +69,8 @@ struct meshtastic_cluster_stats {
 	/* The anti-entropy walk (M4b). */
 	uint32_t pull_started;	  /* exchanges we opened on a digest mismatch */
 	uint32_t pull_timed_out;  /* opened, no vector came back in time */
+	uint32_t pull_fruitless;  /* asked for entries, merged none */
+	uint32_t pull_held;	  /* suppressed by the fruitless-walk backoff */
 	uint32_t vector_tx;	  /* vector chunks we served */
 	uint32_t vector_rx;	  /* vector chunks we consumed */
 	uint32_t entry_tx;	  /* entries we served */
@@ -76,6 +78,7 @@ struct meshtastic_cluster_stats {
 	uint32_t entry_rx_stale;   /* arrived, ours was newer — LWW kept ours */
 	uint32_t entry_rx_refused;  /* secret boundary, D4 authorship, unknown owner */
 	uint32_t entry_rx_no_space; /* table full — the fleet outgrew MAX_ENTRIES */
+	uint32_t entry_rx_future;   /* stamped beyond the clock drift horizon */
 	uint32_t rx_unsolicited;   /* a reply we had not asked for */
 	uint32_t tx_busy;	   /* a peer asked while we were serving another */
 

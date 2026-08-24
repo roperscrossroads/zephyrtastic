@@ -3231,6 +3231,15 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "walk    : pulls=%u timed_out=%u vector tx=%u rx=%u entry tx=%u",
 		    st.pull_started, st.pull_timed_out, st.vector_tx, st.vector_rx,
 		    st.entry_tx);
+	/* fruitless climbing with applied flat is the signature of a mismatch
+	 * that cannot be resolved from here — usually a peer holding an entry
+	 * authored by a master this node does not trust. held>0 means the
+	 * backoff has taken over, which is the bound doing its job, not a
+	 * fault. */
+	shell_print(sh, "        : fruitless=%u held=%u%s", st.pull_fruitless, st.pull_held,
+		    st.pull_held ? "  (backing off — an unresolvable mismatch; check "
+				   "`admin trust` on both ends)"
+				 : "");
 	shell_print(sh, "merge   : applied=%u stale=%u REFUSED=%u unsolicited=%u busy=%u%s",
 		    st.entry_rx_applied, st.entry_rx_stale, st.entry_rx_refused,
 		    st.rx_unsolicited, st.tx_busy,
@@ -3242,8 +3251,11 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		    st.sections_held ? "  ** a fleet LoRa section is REPLICATED BUT HELD "
 				       "(applying it would re-key this radio; see §7.9) **"
 				     : "");
-	shell_print(sh, "rx      : wrong_channel=%u undecodable=%u not_implemented=%u",
-		    st.rx_wrong_channel, st.rx_undecodable, st.rx_not_implemented);
+	shell_print(sh, "rx      : wrong_channel=%u undecodable=%u not_implemented=%u%s",
+		    st.rx_wrong_channel, st.rx_undecodable, st.rx_not_implemented,
+		    st.entry_rx_future ? "  ** entries refused for being stamped beyond the "
+					 "clock drift horizon — someone's clock is wrong **"
+				       : "");
 
 	for (uint16_t i = 0U; meshtastic_cluster_entry_get(i, &e); i++) {
 		shell_print(sh, "  [%c/%08x/%u] %s%u B, stamp %lld.%u by 0x%08x",

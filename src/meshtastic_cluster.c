@@ -29,6 +29,35 @@
  *
  * The document logic lives in meshtastic_cluster_doc.c where it is
  * unit-testable without any of this.
+ *
+ * WHAT IS BOUNDED, AND BY WHAT. Level-triggered means "retry forever" is the
+ * normal state of affairs, so every loop in here needs a bound that does not
+ * depend on the other end cooperating. The complete list:
+ *
+ *   what could run away              bounded by
+ *   ------------------------------   ------------------------------------------
+ *   digests we send                  the Kconfig cadence
+ *   our pulls                        one exchange at a time + a timeout; and
+ *                                    consecutive FRUITLESS walks back off
+ *                                    exponentially to a cap, so a peer we can
+ *                                    never converge with costs a probe, not a
+ *                                    conversation
+ *   frames we serve on request       one walk at a time (never rewound) AND a
+ *                                    minimum interval between walks, so one
+ *                                    small request cannot buy unbounded airtime
+ *   rows we ask for                  the ClusterEntryReq key cap, and never for
+ *                                    a key a full table would refuse
+ *   entries the table accepts        the table cap, plus the owner-existence
+ *                                    gate so ids cannot be invented
+ *   how far ahead a stamp may be     the HLC drift horizon — without which one
+ *                                    far-future stamp wins permanently and no
+ *                                    honest write can ever beat it
+ *   flash writes                     everything above, transitively: a write
+ *                                    happens only when an entry is accepted
+ *   log output                       a throttle on the refusal paths, because
+ *                                    the log is shipped off-node over the
+ *                                    network and a frame flood must not become
+ *                                    a packet flood
  */
 
 #include <errno.h>
@@ -54,6 +83,7 @@
 #include <zephyr/meshtastic/nodedb.h>
 
 #include "meshtastic_channels.h"
+#include "meshtastic_clock.h"
 #include "meshtastic_cluster.h"
 #include "meshtastic_cluster_doc.h"
 #include "meshtastic_config_store.h"
@@ -122,7 +152,22 @@ static struct {
 	struct meshtastic_cluster_key ent_keys[CLUSTER_PULL_KEYS];
 	uint8_t ent_count;
 	uint8_t ent_next;
+
+	/* Bounds. */
+	int64_t serve_next_ms;	    /* no new reply walk before this */
+	int64_t pull_hold_until_ms; /* fruitless-walk backoff */
+	uint32_t pull_last_applied; /* entry_rx_applied when we last asked */
+	bool pull_asked_entries;    /* the last walk actually requested entries */
+	uint8_t pull_fruitless;	    /* consecutive walks that merged nothing */
+	int64_t refuse_log_next_ms; /* refusal-warning throttle */
+	uint32_t refuse_since_log;
 } cluster;
+
+/* Consecutive fruitless walks tolerated before backing off. Two is noise (a
+ * race with a peer mid-write); three is a pattern. */
+#define CLUSTER_FRUITLESS_THRESHOLD 3U
+/* Backoff ceiling, in digest periods. */
+#define CLUSTER_FRUITLESS_MAX_SHIFT 5U
 
 static void digest_work_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(digest_work, digest_work_fn);
@@ -191,6 +236,68 @@ static bool payload_is_its_section(uint16_t section, const uint8_t *payload, siz
 	probe = (meshtastic_Config)meshtastic_Config_init_zero;
 	return pb_decode(&is, meshtastic_Config_fields, &probe) &&
 	       probe.which_payload_variant == section;
+}
+
+/*
+ * THE DRIFT HORIZON — an LWW-layer policy the clock deliberately left to us.
+ *
+ * meshtastic_hlc.h is explicit: a stamp far beyond our own clock is not allowed
+ * to drag our physical component forward, but observe() does NOT reject it,
+ * because "whether such a write WINS is an LWW-layer policy decision, not a
+ * clock one". This is that decision, and without it the total order is a
+ * weapon: one entry stamped for the year 2100 wins every comparison, forever,
+ * and no honest write can ever beat it until real time catches up. Not
+ * rewritten config — UNBEATABLE config. It also gives an attacker an unbounded
+ * flash-write loop for free, since each ever-larger stamp is "newer" and every
+ * accepted entry is persisted.
+ *
+ * A node whose own clock is unseeded cannot judge, and says so by accepting:
+ * that is D12's designed degradation, not a hole to plug here — an unseeded
+ * node has no opinion about when anything happened.
+ */
+static bool stamp_within_horizon(const struct meshtastic_hlc_stamp *stamp)
+{
+	int64_t now = meshtastic_clock_now_epoch_ms();
+
+	if (now <= 0) {
+		return true;
+	}
+	return stamp->physical_ms <= now + MESHTASTIC_HLC_MAX_DRIFT_MS;
+}
+
+/*
+ * Count a refusal and warn about it — but not once per frame. The log stream is
+ * shipped off this node over the network, so an attacker who can make us refuse
+ * a frame can otherwise make us emit a packet, and a frame flood becomes a
+ * packet flood aimed at the collector. First one speaks, the rest are counted
+ * and summarised. Called with the lock NOT held.
+ */
+static void refuse_entry(const char *why, uint32_t detail)
+{
+	int64_t now = k_uptime_get();
+	uint32_t suppressed = 0U;
+	bool speak;
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	cluster.stats.entry_rx_refused++;
+	speak = (now >= cluster.refuse_log_next_ms);
+	if (speak) {
+		suppressed = cluster.refuse_since_log;
+		cluster.refuse_since_log = 0U;
+		cluster.refuse_log_next_ms = now + 60 * MSEC_PER_SEC;
+	} else {
+		cluster.refuse_since_log++;
+	}
+	k_mutex_unlock(&cluster_lock);
+
+	if (speak) {
+		if (suppressed > 0U) {
+			LOG_WRN("cluster: refused an entry (%s, 0x%08x); %u further refusals "
+				"were suppressed", why, detail, suppressed);
+		} else {
+			LOG_WRN("cluster: refused an entry (%s, 0x%08x)", why, detail);
+		}
+	}
 }
 
 /* ---- authorship (D4) ------------------------------------------------------ */
@@ -720,7 +827,11 @@ static uint32_t tx_next_locked(zephyrtastic_ClusterMessage *msg)
 		}
 		/* The exchange ends here from our side. Entries arrive when they
 		 * arrive; nothing waits on them, and whatever does not turn up
-		 * still differs at the next digest. */
+		 * still differs at the next digest. Remember that we ASKED,
+		 * though: the next pull judges this one by whether anything
+		 * actually merged in the meantime. */
+		cluster.pull_asked_entries = true;
+		cluster.pull_last_applied = cluster.stats.entry_rx_applied;
 		pull_reset_locked();
 		return dest;
 	}
@@ -863,9 +974,56 @@ static void digest_work_fn(struct k_work *work)
  * lock held. Returns false if one is already in flight (§3.3: one per node). */
 static bool pull_start_locked(uint32_t peer, uint32_t delay_ms)
 {
+	int64_t now = k_uptime_get();
+
 	if (cluster.pull_state != PULL_IDLE || peer == 0U ||
 	    peer == meshtastic_get_node_id()) {
 		return false;
+	}
+
+	/*
+	 * FRUITLESS-WALK BACKOFF — the bound on a conversation that can never
+	 * succeed.
+	 *
+	 * Level-triggering means a mismatch we cannot resolve is stated again
+	 * every digest period, forever. Usually that is the point: the next
+	 * round fixes it. But some mismatches are structural — a peer holding
+	 * an entry authored by a master WE do not trust, or one whose section
+	 * this build refuses — and those never resolve however many times we
+	 * ask. Without a bound the two nodes pull at each other for the life of
+	 * the deployment, achieving nothing and spending airtime to do it.
+	 *
+	 * So: count walks that asked for entries and merged none. Under the
+	 * threshold, keep trying (a couple of empty walks is ordinary — a race
+	 * with a peer mid-write). Over it, back off by doubling, capped, and
+	 * let exactly one probe through when the hold expires. Any successful
+	 * merge anywhere clears the whole thing (see on_entry), so recovery is
+	 * immediate the moment the situation changes — which matters, because
+	 * the usual cure is an operator adding a key, not the peer changing.
+	 */
+	if (cluster.pull_asked_entries) {
+		cluster.pull_asked_entries = false;
+		if (cluster.stats.entry_rx_applied == cluster.pull_last_applied) {
+			if (cluster.pull_fruitless < UINT8_MAX) {
+				cluster.pull_fruitless++;
+			}
+			cluster.stats.pull_fruitless++;
+		} else {
+			cluster.pull_fruitless = 0U;
+		}
+	}
+	if (cluster.pull_fruitless >= CLUSTER_FRUITLESS_THRESHOLD) {
+		uint32_t shift = MIN((uint32_t)cluster.pull_fruitless -
+					     CLUSTER_FRUITLESS_THRESHOLD,
+				     CLUSTER_FRUITLESS_MAX_SHIFT);
+
+		if (now < cluster.pull_hold_until_ms) {
+			cluster.stats.pull_held++;
+			return false;
+		}
+		cluster.pull_hold_until_ms =
+			now + (int64_t)CONFIG_MESHTASTIC_CLUSTER_DIGEST_PERIOD_SEC *
+				      MSEC_PER_SEC * (1 << shift);
 	}
 	cluster.pull_state = PULL_SEND_VECTOR_REQ;
 	cluster.pull_peer = peer;
@@ -930,26 +1088,51 @@ static void on_digest(uint32_t from, const zephyrtastic_ClusterDigest *d)
 	}
 }
 
+/*
+ * May we start serving a reply right now? Called with the lock held.
+ *
+ * Two bounds, and they answer different questions. IDLE answers "are we already
+ * mid-reply?" — a repeat request must not rewind a walk in flight, or one small
+ * frame resets our offset to zero and the walk never reaches the end of the
+ * document. The MINIMUM INTERVAL answers the question idleness cannot: a peer
+ * that simply waits for each walk to finish before asking again extracts a
+ * reply every time, indefinitely, and "one at a time" bounds concurrency but
+ * not rate. Serving a vector or an entry burst is by far the most expensive
+ * thing anyone can make this node do — tens of bytes in, most of a document
+ * out — so the rate is where the actual bound has to live.
+ *
+ * The floor is far below any legitimate cadence (peers pull once per digest
+ * period, which is minutes), so honest convergence never notices it.
+ */
+static bool may_serve_locked(void)
+{
+	if (k_uptime_get() < cluster.serve_next_ms) {
+		cluster.stats.tx_busy++;
+		return false;
+	}
+	return true;
+}
+
+static void serve_started_locked(void)
+{
+	cluster.serve_next_ms = k_uptime_get() +
+				CONFIG_MESHTASTIC_CLUSTER_SERVE_MIN_INTERVAL_MS;
+}
+
 static void on_vector_req(uint32_t from)
 {
 	bool serve;
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
-	/*
-	 * Only when idle — NOT when the requester is the peer we are already
-	 * serving. Serving a stamp vector is the most expensive thing a peer
-	 * can ask for: one ~30 byte request, up to a whole document in reply.
-	 * If a repeat request restarted the walk, a peer could reset our offset
-	 * to zero forever for the cost of one small frame each time, and the
-	 * walk would never finish. Refusing costs the requester one digest
-	 * period; the walk in flight is already answering it.
-	 */
 	serve = (cluster.vec_dest == 0U);
-	if (serve) {
+	if (!serve) {
+		cluster.stats.tx_busy++;
+	} else if (!may_serve_locked()) {
+		serve = false;
+	} else {
 		cluster.vec_dest = from;
 		cluster.vec_offset = 0U;
-	} else {
-		cluster.stats.tx_busy++;
+		serve_started_locked();
 	}
 	k_mutex_unlock(&cluster_lock);
 
@@ -993,8 +1176,10 @@ static void on_vector(uint32_t from, const zephyrtastic_ClusterVector *v)
 		}
 		key_from_pb(&row->key, &key);
 		stamp_from_pb(&row->stamp, &stamp);
-		if (!section_shareable(key.section)) {
-			continue; /* never spend a round trip fetching a banned section */
+		if (!section_shareable(key.section) || !stamp_within_horizon(&stamp)) {
+			/* Never spend a round trip on a row ingest would refuse
+			 * anyway — that is a request loop with extra steps. */
+			continue;
 		}
 		(void)meshtastic_hlc_observe(&cluster.hlc, &stamp);
 		if (meshtastic_cluster_doc_wants(&cluster.doc, &key, &stamp)) {
@@ -1028,10 +1213,12 @@ static void on_entry_req(uint32_t from, const zephyrtastic_ClusterEntryReq *r)
 	bool serve;
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
-	/* Idle only, for the same reason as the vector walk above: a repeat
-	 * request must not rewind a burst that is already being served. */
-	serve = (cluster.ent_dest == 0U);
+	/* Idle only AND rate-limited, for the same reasons as the vector walk
+	 * above: a repeat request must not rewind a burst already being served,
+	 * and "one at a time" bounds concurrency but not rate. */
+	serve = (cluster.ent_dest == 0U) && may_serve_locked();
 	if (serve) {
+		serve_started_locked();
 		cluster.ent_dest = from;
 		cluster.ent_count = 0U;
 		cluster.ent_next = 0U;
@@ -1044,8 +1231,8 @@ static void on_entry_req(uint32_t from, const zephyrtastic_ClusterEntryReq *r)
 			cluster.ent_dest = 0U;
 			serve = false;
 		}
-	} else {
-		cluster.stats.tx_busy++;
+	} else if (cluster.ent_dest != 0U) {
+		cluster.stats.tx_busy++; /* mid-burst; may_serve counts its own */
 	}
 	k_mutex_unlock(&cluster_lock);
 
@@ -1074,29 +1261,22 @@ static void on_entry(uint32_t from, const zephyrtastic_ClusterEntry *e)
 	 * and master-authored: this is the half of the ban that does not depend
 	 * on every peer in the fleet running correct code. */
 	if (!section_shareable(key.section)) {
-		k_mutex_lock(&cluster_lock, K_FOREVER);
-		cluster.stats.entry_rx_refused++;
-		k_mutex_unlock(&cluster_lock);
-		LOG_WRN("cluster: refused section %u from 0x%08x (not shareable)",
-			(unsigned int)key.section, from);
+		refuse_entry("not a shareable section", key.section);
 		return;
 	}
 	if (!entry_authorized(&key, &stamp)) {
+		refuse_entry("author is not a master", stamp.node_id);
+		return;
+	}
+	if (!stamp_within_horizon(&stamp)) {
 		k_mutex_lock(&cluster_lock, K_FOREVER);
-		cluster.stats.entry_rx_refused++;
+		cluster.stats.entry_rx_future++;
 		k_mutex_unlock(&cluster_lock);
-		LOG_WRN("cluster: refused %s entry authored by 0x%08x (not a master)",
-			key.layer == MESHTASTIC_CLUSTER_LAYER_BASE ? "base" : "node",
-			stamp.node_id);
+		refuse_entry("stamped beyond the clock drift horizon", stamp.node_id);
 		return;
 	}
 	if (key.layer == MESHTASTIC_CLUSTER_LAYER_NODE && !node_owner_is_known(key.node_id)) {
-		k_mutex_lock(&cluster_lock, K_FOREVER);
-		cluster.stats.entry_rx_refused++;
-		k_mutex_unlock(&cluster_lock);
-		LOG_WRN("cluster: refused an entry for unknown node 0x%08x — the table is "
-			"finite and never evicts, so entries for nodes that do not exist "
-			"would fill it permanently", key.node_id);
+		refuse_entry("owner is a node this mesh has never seen", key.node_id);
 		return;
 	}
 	/*
@@ -1118,11 +1298,7 @@ static void on_entry(uint32_t from, const zephyrtastic_ClusterEntry *e)
 	 */
 	if (!payload_is_its_section(key.section, e->payload.bytes, e->payload.size,
 				    e->tombstone)) {
-		k_mutex_lock(&cluster_lock, K_FOREVER);
-		cluster.stats.entry_rx_refused++;
-		k_mutex_unlock(&cluster_lock);
-		LOG_WRN("cluster: refused entry for section %u from 0x%08x — payload is not "
-			"that section", (unsigned int)key.section, from);
+		refuse_entry("payload is not the section its key claims", key.section);
 		return;
 	}
 
@@ -1133,6 +1309,10 @@ static void on_entry(uint32_t from, const zephyrtastic_ClusterEntry *e)
 	if (ret == 1) {
 		persist_entry(meshtastic_cluster_doc_find(&cluster.doc, &key));
 		cluster.stats.entry_rx_applied++;
+		/* Progress. Whatever we were backing off from, we are not any
+		 * more — one real result forgives the whole fruitless run. */
+		cluster.pull_fruitless = 0U;
+		cluster.pull_hold_until_ms = 0;
 		changed = true;
 	} else if (ret == 0) {
 		/* Replay defence, for free: a re-sent old entry carries its old

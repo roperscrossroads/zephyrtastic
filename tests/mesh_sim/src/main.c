@@ -30,6 +30,7 @@
 #include "meshtastic/config.pb.h"
 #include "zephyrtastic/cluster.pb.h"
 
+#include "meshtastic_clock.h"
 #include "meshtastic_cluster.h"
 #include "meshtastic_cluster_doc.h"
 #include "meshtastic_hlc.h"
@@ -1799,6 +1800,15 @@ ZTEST(mesh_sim, test_licence_change_refreshes_the_cached_tx_power)
  * ========================================================================== */
 
 #define CLUSTER_CH 2U
+/*
+ * A fixed "now" for every cluster test, and stamps expressed as small offsets
+ * from it. Before the drift horizon existed these tests used arbitrary
+ * far-future constants, which was only ever workable because nothing checked —
+ * a real fleet's stamps sit near real time, and now so do these. The offsets
+ * are allocated so that later-running tests (ztest orders by NAME) hold newer
+ * stamps than the leftovers they inherit.
+ */
+#define TEST_EPOCH_MS 1787600000000LL
 /* Any 32 bytes: the D4 gate is a memcmp of the NodeDB's stored key against
  * SecurityConfig.admin_key, so nothing here has to be a real X25519 point. */
 static const uint8_t peer_key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN] = {
@@ -1836,6 +1846,30 @@ static void cluster_channel(bool on)
 	}
 	zassert_ok(meshtastic_config_store_set_channel(CLUSTER_CH, &ch),
 		   "cluster channel set failed");
+	if (on) {
+		/* The drift horizon needs a clock to measure against; without
+		 * one this node has no opinion about when anything happened
+		 * (D12) and every stamp is accepted, which would make the
+		 * horizon tests vacuous. */
+		meshtastic_clock_set_epoch_ms(TEST_EPOCH_MS, MESHTASTIC_CLOCK_QUALITY_NTP);
+	}
+}
+
+/* The document's max stamp, scanned rather than assumed. A digest is a TRIPLE,
+ * so a test that fakes a "converged" digest has to state the real max — and
+ * hardcoding it makes the test hostage to whatever any other test leaves in the
+ * table (ztest orders by name, so there is always something). */
+static struct meshtastic_hlc_stamp doc_max_stamp(void)
+{
+	struct meshtastic_hlc_stamp max = {0};
+	struct meshtastic_cluster_entry e;
+
+	for (uint16_t i = 0U; meshtastic_cluster_entry_get(i, &e); i++) {
+		if (meshtastic_hlc_newer(&e.stamp, &max)) {
+			max = e.stamp;
+		}
+	}
+	return max;
 }
 
 /* Scan the document for a key, using the same accessor the shell uses. */
@@ -2046,7 +2080,7 @@ ZTEST(mesh_sim, test_cluster_walk_converges_and_applies)
 	 * NAME, so those run first and this walk must still WIN the merge rather
 	 * than quietly losing LWW to leftovers. */
 	struct meshtastic_hlc_stamp base_stamp = {
-		.physical_ms = 1950000000000LL, .counter = 0U, .node_id = PEER_NODE_ID};
+		.physical_ms = (TEST_EPOCH_MS + 200000), .counter = 0U, .node_id = PEER_NODE_ID};
 	struct meshtastic_hlc_stamp store_stamp;
 	uint32_t to = 0U;
 	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
@@ -2146,11 +2180,16 @@ ZTEST(mesh_sim, test_cluster_walk_converges_and_applies)
 	meshtastic_cluster_stats_get(&before_st);
 	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
 	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
-	msg.variant.digest.doc_hash = meshtastic_cluster_doc_hash_now();
-	msg.variant.digest.entry_count = meshtastic_cluster_entry_count();
-	msg.variant.digest.has_max_stamp = true;
-	msg.variant.digest.max_stamp.physical_ms = base_stamp.physical_ms;
-	msg.variant.digest.max_stamp.node_id = PEER_NODE_ID;
+	{
+		struct meshtastic_hlc_stamp max = doc_max_stamp();
+
+		msg.variant.digest.doc_hash = meshtastic_cluster_doc_hash_now();
+		msg.variant.digest.entry_count = meshtastic_cluster_entry_count();
+		msg.variant.digest.has_max_stamp = true;
+		msg.variant.digest.max_stamp.physical_ms = max.physical_ms;
+		msg.variant.digest.max_stamp.counter = max.counter;
+		msg.variant.digest.max_stamp.node_id = max.node_id;
+	}
 	inject_cluster(&msg, MESHTASTIC_NODE_BROADCAST, 0x7004U);
 	k_sleep(K_MSEC(200));
 
@@ -2195,7 +2234,7 @@ ZTEST(mesh_sim, test_cluster_base_entry_from_untrusted_author_refused)
 	msg.variant.entry.key.section = meshtastic_Config_display_tag;
 	msg.variant.entry.has_stamp = true;
 	/* Far in the future, so LWW would certainly have taken it. */
-	msg.variant.entry.stamp.physical_ms = 1900000000000LL;
+	msg.variant.entry.stamp.physical_ms = (TEST_EPOCH_MS + 1000);
 	msg.variant.entry.stamp.node_id = PEER_NODE_ID;
 	msg.variant.entry.payload.size = (pb_size_t)payload_len;
 	memcpy(msg.variant.entry.payload.bytes, payload, payload_len);
@@ -2289,7 +2328,7 @@ ZTEST(mesh_sim, test_cluster_hostile_frames_are_survived)
 	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
 	msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
 	msg.variant.entry.has_stamp = true;
-	msg.variant.entry.stamp.physical_ms = 1900000000000LL;
+	msg.variant.entry.stamp.physical_ms = (TEST_EPOCH_MS + 1000);
 	msg.variant.entry.stamp.node_id = PEER_NODE_ID;
 	msg.variant.entry.payload.size = (pb_size_t)good_len;
 	memcpy(msg.variant.entry.payload.bytes, good, good_len);
@@ -2307,18 +2346,18 @@ ZTEST(mesh_sim, test_cluster_hostile_frames_are_survived)
 
 	/* Structurally impossible keys: an owner on BASE, none on NODE. */
 	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_BASE,
-		     PEER_NODE_ID, 1900000000000LL, false, good, good_len, id++);
+		     PEER_NODE_ID, (TEST_EPOCH_MS + 1000), false, good, good_len, id++);
 	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_NODE, 0U,
-		     1900000000000LL, false, good, good_len, id++);
+		     (TEST_EPOCH_MS + 1000), false, good, good_len, id++);
 
 	/* A tombstone carrying a payload, and a value carrying none. */
 	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_NODE,
-		     TEST_NODE_ID, 1900000000000LL, true, good, good_len, id++);
+		     TEST_NODE_ID, (TEST_EPOCH_MS + 1000), true, good, good_len, id++);
 	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_BASE, 0U,
-		     1900000000000LL, false, NULL, 0U, id++);
+		     (TEST_EPOCH_MS + 1000), false, NULL, 0U, id++);
 
 	/* A section number that cannot be a Config tag at all. */
-	inject_entry(0xFFFFFFFFU, zephyrtastic_ClusterLayer_BASE, 0U, 1900000000000LL, false,
+	inject_entry(0xFFFFFFFFU, zephyrtastic_ClusterLayer_BASE, 0U, (TEST_EPOCH_MS + 1000), false,
 		     good, good_len, id++);
 
 	/* Bytes that are not a ClusterMessage. */
@@ -2356,7 +2395,7 @@ ZTEST(mesh_sim, test_cluster_hostile_frames_are_survived)
 	 * (correctly) be refused under a position key. */
 	good_len = encode_section(meshtastic_Config_position_tag, good, sizeof(good));
 	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_BASE, 0U,
-		     1900000000000LL, false, good, good_len, id++);
+		     (TEST_EPOCH_MS + 1000), false, good, good_len, id++);
 	k_sleep(K_MSEC(300));
 	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, meshtastic_Config_position_tag),
 		     "the module must still accept good frames after a hostile burst");
@@ -2391,7 +2430,7 @@ ZTEST(mesh_sim, test_cluster_entry_payload_must_match_its_claimed_section)
 	cfg.payload_variant.network.wifi_enabled = true;
 	zassert_true(pb_encode(&os, meshtastic_Config_fields, &cfg), "encode failed");
 	inject_entry(meshtastic_Config_display_tag, zephyrtastic_ClusterLayer_BASE, 0U,
-		     1900000000001LL, false, buf, os.bytes_written, 0x7301U);
+		     (TEST_EPOCH_MS + 1100), false, buf, os.bytes_written, 0x7301U);
 	k_sleep(K_MSEC(300));
 
 	zassert_equal(meshtastic_cluster_entry_count(), before_count,
@@ -2405,7 +2444,7 @@ ZTEST(mesh_sim, test_cluster_entry_payload_must_match_its_claimed_section)
 
 		memset(junk, 0xA5, sizeof(junk));
 		inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_BASE, 0U,
-			     1900000000002LL, false, junk, sizeof(junk), 0x7302U);
+			     (TEST_EPOCH_MS + 1200), false, junk, sizeof(junk), 0x7302U);
 	}
 	k_sleep(K_MSEC(300));
 	zassert_equal(meshtastic_cluster_entry_count(), before_count,
@@ -2450,7 +2489,7 @@ ZTEST(mesh_sim, test_cluster_lora_section_replicates_but_is_never_applied)
 	cfg.payload_variant.lora.tx_enabled = true;
 	zassert_true(pb_encode(&os, meshtastic_Config_fields, &cfg), "encode failed");
 	inject_entry(meshtastic_Config_lora_tag, zephyrtastic_ClusterLayer_BASE, 0U,
-		     1900000000003LL, false, buf, os.bytes_written, 0x7401U);
+		     (TEST_EPOCH_MS + 1300), false, buf, os.bytes_written, 0x7401U);
 	k_sleep(K_MSEC(400));
 
 	/* It REPLICATES — the document must still converge with the fleet. */
@@ -2501,7 +2540,7 @@ ZTEST(mesh_sim, test_cluster_vector_walk_cannot_be_restarted_mid_flight)
 		for (size_t i = 0; i < ARRAY_SIZE(secs); i++) {
 			len = encode_section(secs[i], buf, sizeof(buf));
 			inject_entry(secs[i], zephyrtastic_ClusterLayer_BASE, 0U,
-				     1900000001000LL + (int64_t)i, false, buf, len,
+				     (TEST_EPOCH_MS + 10000) + (int64_t)i, false, buf, len,
 				     0x7501U + (uint32_t)i);
 			k_sleep(K_MSEC(120));
 		}
@@ -2555,7 +2594,7 @@ ZTEST(mesh_sim, test_cluster_unsolicited_vector_is_ignored)
 	msg.variant.vector.entries[0].key.layer = zephyrtastic_ClusterLayer_BASE;
 	msg.variant.vector.entries[0].key.section = meshtastic_Config_display_tag;
 	msg.variant.vector.entries[0].has_stamp = true;
-	msg.variant.vector.entries[0].stamp.physical_ms = 1900000002000LL;
+	msg.variant.vector.entries[0].stamp.physical_ms = (TEST_EPOCH_MS + 12000);
 	msg.variant.vector.entries[0].stamp.node_id = PEER_NODE_ID;
 	msg.variant.vector.offset = 0U;
 	msg.variant.vector.total = 1U;
@@ -2611,7 +2650,7 @@ ZTEST(mesh_sim, test_cluster_entries_for_invented_nodes_cannot_fill_the_table)
 		msg.variant.entry.key.node_id = invented;
 		msg.variant.entry.key.section = meshtastic_Config_display_tag;
 		msg.variant.entry.has_stamp = true;
-		msg.variant.entry.stamp.physical_ms = 1900000003000LL + (int64_t)i;
+		msg.variant.entry.stamp.physical_ms = (TEST_EPOCH_MS + 20000) + (int64_t)i;
 		msg.variant.entry.stamp.node_id = invented; /* owner == author */
 		msg.variant.entry.payload.size = (pb_size_t)len;
 		memcpy(msg.variant.entry.payload.bytes, buf, len);
@@ -2644,7 +2683,7 @@ ZTEST(mesh_sim, test_cluster_entries_for_invented_nodes_cannot_fill_the_table)
 		 * bug, but it makes this test a landmine. */
 		msg.variant.entry.key.section = meshtastic_Config_bluetooth_tag;
 		msg.variant.entry.has_stamp = true;
-		msg.variant.entry.stamp.physical_ms = 1900000004000LL;
+		msg.variant.entry.stamp.physical_ms = (TEST_EPOCH_MS + 21000);
 		msg.variant.entry.stamp.node_id = TEST_NODE_ID;
 		len = encode_section(meshtastic_Config_bluetooth_tag, buf, sizeof(buf));
 		msg.variant.entry.payload.size = (pb_size_t)len;
@@ -2667,7 +2706,7 @@ ZTEST(mesh_sim, test_cluster_entries_for_invented_nodes_cannot_fill_the_table)
 		msg.variant.entry.key.node_id = PEER_NODE_ID;
 		msg.variant.entry.key.section = meshtastic_Config_bluetooth_tag;
 		msg.variant.entry.has_stamp = true;
-		msg.variant.entry.stamp.physical_ms = 1900000004100LL;
+		msg.variant.entry.stamp.physical_ms = (TEST_EPOCH_MS + 21100);
 		msg.variant.entry.stamp.node_id = PEER_NODE_ID;
 		msg.variant.entry.payload.size = (pb_size_t)len;
 		memcpy(msg.variant.entry.payload.bytes, buf, len);
@@ -2677,6 +2716,176 @@ ZTEST(mesh_sim, test_cluster_entries_for_invented_nodes_cannot_fill_the_table)
 	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_NODE, PEER_NODE_ID,
 			     meshtastic_Config_bluetooth_tag),
 		     "a node we have actually met must not be blocked by the gate");
+
+	cluster_channel(false);
+}
+
+
+/*
+ * THE DRIFT HORIZON. meshtastic_hlc.h is explicit that a stamp far beyond our
+ * own clock must not drag our physical component forward, but that whether such
+ * a write WINS is "an LWW-layer policy decision, not a clock one". This is that
+ * decision, and it is not a nicety: the stamp order is total, so one entry
+ * stamped for the next century wins every comparison forever and no honest
+ * write can beat it until real time catches up. Not rewritten config —
+ * UNBEATABLE config, from one frame. It also hands an attacker an unbounded
+ * flash-write loop, since every ever-larger stamp is "newer" and every accepted
+ * entry is persisted.
+ */
+ZTEST(mesh_sim, test_cluster_far_future_stamps_are_refused)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	int64_t now_ms = TEST_EPOCH_MS;
+	uint16_t before_count;
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	before_count = meshtastic_cluster_entry_count();
+	meshtastic_cluster_stats_get(&before_st);
+	len = encode_section(meshtastic_Config_power_tag, buf, sizeof(buf));
+
+	/* A century into the future, from a node we DO trust — authorship is
+	 * not what stops this. */
+	inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     now_ms + (int64_t)100 * 365 * 24 * 3600 * 1000, false, buf, len,
+		     0x7801U);
+	k_sleep(K_MSEC(400));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.entry_rx_future, before_st.entry_rx_future + 1U,
+		      "a stamp beyond the drift horizon must be refused as such");
+	zassert_equal(meshtastic_cluster_entry_count(), before_count,
+		      "and must never reach the table — it would be unbeatable there");
+
+	/* Just inside the horizon still wins normally: the bound protects
+	 * against nonsense, not against a peer whose clock is merely ahead. */
+	inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     now_ms + MESHTASTIC_HLC_MAX_DRIFT_MS / 2, false, buf, len, 0x7802U);
+	k_sleep(K_MSEC(400));
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, meshtastic_Config_power_tag),
+		     "a plausibly-ahead stamp must still be accepted");
+
+	cluster_channel(false);
+}
+
+/* Drive one complete walk that is guaranteed to merge nothing: we ask for a key
+ * we lack, and the entry that comes back is authored by a node we do not trust.
+ * Returns false if the walk did not run to completion. */
+static bool run_fruitless_walk(uint32_t seq)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	const uint32_t stranger = 0xBAD00000U + seq;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint32_t to = 0U;
+	size_t len;
+
+	/* A digest that cannot match anything we hold. */
+	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
+	msg.variant.digest.doc_hash = 0xBADBAD00U + seq;
+	msg.variant.digest.entry_count = 99U;
+	msg.variant.digest.has_max_stamp = true;
+	msg.variant.digest.max_stamp.physical_ms = (TEST_EPOCH_MS + 30000) + (int64_t)seq;
+	msg.variant.digest.max_stamp.node_id = PEER_NODE_ID;
+	inject_cluster_bearer(&msg, MESHTASTIC_NODE_BROADCAST, 0x7900U + seq * 8U);
+
+	if (!take_cluster_tx(&msg, &to) ||
+	    msg.which_variant != zephyrtastic_ClusterMessage_vector_req_tag) {
+		return false;
+	}
+
+	/* A row we lack, stamped by a stranger — wants() does not check
+	 * authorship, so we will go and ask for it. */
+	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	msg.which_variant = zephyrtastic_ClusterMessage_vector_tag;
+	msg.variant.vector.entries_count = 1U;
+	msg.variant.vector.entries[0].has_key = true;
+	msg.variant.vector.entries[0].key.layer = zephyrtastic_ClusterLayer_BASE;
+	msg.variant.vector.entries[0].key.section = meshtastic_Config_position_tag;
+	msg.variant.vector.entries[0].has_stamp = true;
+	msg.variant.vector.entries[0].stamp.physical_ms = (TEST_EPOCH_MS + 31000) + (int64_t)seq;
+	msg.variant.vector.entries[0].stamp.node_id = stranger;
+	msg.variant.vector.total = 1U;
+	inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7901U + seq * 8U);
+
+	if (!take_cluster_tx(&msg, &to) ||
+	    msg.which_variant != zephyrtastic_ClusterMessage_entry_req_tag) {
+		return false;
+	}
+
+	/* ...and the entry is refused, because the stranger is no master. */
+	len = encode_section(meshtastic_Config_position_tag, buf, sizeof(buf));
+	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+	msg.variant.entry.has_key = true;
+	msg.variant.entry.key.layer = zephyrtastic_ClusterLayer_BASE;
+	msg.variant.entry.key.section = meshtastic_Config_position_tag;
+	msg.variant.entry.has_stamp = true;
+	msg.variant.entry.stamp.physical_ms = (TEST_EPOCH_MS + 31000) + (int64_t)seq;
+	msg.variant.entry.stamp.node_id = stranger;
+	msg.variant.entry.payload.size = (pb_size_t)len;
+	memcpy(msg.variant.entry.payload.bytes, buf, len);
+	inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7902U + seq * 8U);
+	k_sleep(K_MSEC(300));
+	return true;
+}
+
+/*
+ * THE CONVERSATION THAT CAN NEVER SUCCEED. Level-triggering means an unresolved
+ * mismatch is restated every digest period forever — usually the point, because
+ * the next round fixes it. Some mismatches are structural, though: a peer
+ * holding an entry authored by a master WE do not trust never becomes
+ * resolvable however many times we ask. Unbounded, the two nodes pull at each
+ * other for the life of the deployment, achieving nothing and spending airtime
+ * to do it.
+ */
+ZTEST(mesh_sim, test_cluster_hopeless_pulls_back_off)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	meshtastic_cluster_stats_get(&before_st);
+
+	for (uint32_t i = 0U; i < 6U; i++) {
+		if (!run_fruitless_walk(i)) {
+			break; /* the backoff has started suppressing walks */
+		}
+	}
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.pull_fruitless > before_st.pull_fruitless,
+		     "a walk that asks for entries and merges none must be recognised");
+	zassert_true(after_st.pull_held > before_st.pull_held,
+		     "and after enough of them the pull must be SUPPRESSED — otherwise an "
+		     "unresolvable mismatch is an infinite conversation");
+	zassert_equal(after_st.entry_rx_applied, before_st.entry_rx_applied,
+		      "nothing should have merged; that is the premise");
+
+	/* Recovery must be immediate, because the usual cure is an operator
+	 * adding a key rather than the peer changing: one successful merge
+	 * anywhere clears the whole run. */
+	{
+		uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+		size_t len = encode_section(meshtastic_Config_power_tag, buf, sizeof(buf));
+
+		/* Newer than the horizon test's own power entry (+150000), which
+		 * runs earlier alphabetically — otherwise this "recovery" merge
+		 * quietly loses LWW and proves nothing. */
+		inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+			     (TEST_EPOCH_MS + 300000), false, buf, len, 0x7990U);
+		k_sleep(K_MSEC(300));
+	}
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.entry_rx_applied > before_st.entry_rx_applied,
+		     "the recovery merge must land");
+	zassert_true(run_fruitless_walk(9U),
+		     "one successful merge must clear the backoff immediately");
 
 	cluster_channel(false);
 }

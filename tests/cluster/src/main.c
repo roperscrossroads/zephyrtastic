@@ -284,18 +284,18 @@ ZTEST(cluster_doc, test_max_stamp_and_capacity)
  * ========================================================================== */
 
 /*
- * THE ENOSPC TRAP. A full table refuses new keys, but the diff predicate does
- * not know that: wants() still says "pull this", so the walk asks for a key
- * every round, is answered, fails to store it, and asks again forever. Nothing
- * crashes and nothing corrupts — but a fleet whose document outgrows one
- * member's table burns airtime on that member indefinitely, and the walk never
- * reports why.
+ * THE ENOSPC TRAP, closed.
  *
- * That is a property of the two functions together, so it belongs here rather
- * than in the module: if a future change makes wants() capacity-aware, this
- * test is what says so out loud.
+ * A full table refuses new keys. The diff predicate has to know that, because
+ * if it does not, the walk asks for a key every round, is answered, fails to
+ * store it, and asks again — forever, at one exchange per digest period, with
+ * nothing ever changing. Wanting what cannot be stored is not optimism, it is
+ * an unbounded request loop.
+ *
+ * The bound has to be here rather than in the module, because this is where
+ * "would accept() take it?" is actually knowable.
  */
-ZTEST(cluster_doc, test_full_table_still_wants_what_it_cannot_store)
+ZTEST(cluster_doc, test_full_table_stops_asking_for_what_it_cannot_store)
 {
 	struct meshtastic_hlc_stamp s;
 	uint8_t v[] = {1};
@@ -310,13 +310,25 @@ ZTEST(cluster_doc, test_full_table_still_wants_what_it_cannot_store)
 	struct meshtastic_cluster_key unseen = base_key(999);
 
 	s = at(500, NODE_B);
-	zassert_true(meshtastic_cluster_doc_wants(&doc, &unseen, &s),
-		     "a key we lack is wanted regardless of capacity");
-	zassert_equal(meshtastic_cluster_doc_accept(&doc, &unseen, &s, false, v, 1), -ENOSPC);
-	zassert_true(meshtastic_cluster_doc_wants(&doc, &unseen, &s),
-		     "KNOWN: still wanted after ENOSPC — the walk will re-request it every "
-		     "round with no way to store it. Bounded by the digest cadence, never "
-		     "resolved. Capacity-aware wants() is the fix if this ever bites.");
+	zassert_false(meshtastic_cluster_doc_wants(&doc, &unseen, &s),
+		      "a full table must stop asking for a key it can only refuse");
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &unseen, &s, false, v, 1), -ENOSPC,
+		      "and accept() still says why, for the node that offers it anyway");
+
+	/* But an UPDATE to a key already held needs no free slot, so a full
+	 * table must still track the fleet on everything it already knows —
+	 * otherwise "full" would silently mean "frozen". */
+	struct meshtastic_cluster_key held = base_key(0);
+
+	s = at(9999, NODE_B);
+	zassert_true(meshtastic_cluster_doc_wants(&doc, &held, &s),
+		     "capacity must not stop us updating a key we already hold");
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &held, &s, false, v, 1), 1);
+
+	/* And a row we already have at the same or a newer stamp is still not
+	 * wanted — capacity is an extra bound, not a replacement for LWW. */
+	s = at(100, NODE_A);
+	zassert_false(meshtastic_cluster_doc_wants(&doc, &held, &s));
 }
 
 /* Sorted insert under hostile orderings. The digest hashes rows in index order,

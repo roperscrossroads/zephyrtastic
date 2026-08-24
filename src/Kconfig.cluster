@@ -57,6 +57,21 @@ config MESHTASTIC_CLUSTER_TX_GAP_MS
 	  them leaves the peer airtime to answer instead of transmitting a
 	  whole reply into one contention window.
 
+config MESHTASTIC_CLUSTER_SERVE_MIN_INTERVAL_MS
+	int "Minimum interval between reply walks we serve (ms)"
+	default 5000
+	range 0 600000
+	help
+	  Serving a stamp vector or a burst of entries is the most expensive
+	  thing a peer can ask this node to do: tens of bytes in, most of a
+	  document out. Answering one at a time bounds concurrency but not
+	  RATE — a peer that waits for each walk to finish before asking again
+	  extracts a reply every time, indefinitely. This is the rate bound.
+
+	  Far below any legitimate cadence (peers pull once per digest period),
+	  so honest convergence never notices it. 0 disables the limit; only
+	  useful in tests.
+
 config MESHTASTIC_CLUSTER_SYNC_TIMEOUT_SEC
 	int "Give up on an unanswered pull after (seconds)"
 	default 60

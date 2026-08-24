@@ -177,8 +177,15 @@ bool meshtastic_cluster_doc_wants(const struct meshtastic_cluster_doc *doc,
 		return false;
 	}
 	mine = meshtastic_cluster_doc_find(doc, key);
-	/* No copy at all is the "newer than unset" case accept() also takes. */
-	return mine == NULL || meshtastic_hlc_newer(stamp, &mine->stamp);
+	if (mine != NULL) {
+		/* An update needs no free slot, so capacity never blocks it. */
+		return meshtastic_hlc_newer(stamp, &mine->stamp);
+	}
+	/* A new key is the "newer than unset" case accept() takes — but only if
+	 * there is somewhere to put it. Asking for a row a full table must
+	 * refuse turns the walk into a request loop that never terminates and
+	 * never achieves anything. */
+	return doc->count < doc->cap;
 }
 
 void meshtastic_cluster_doc_max_stamp(const struct meshtastic_cluster_doc *doc,

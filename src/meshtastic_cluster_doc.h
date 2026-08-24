@@ -111,6 +111,14 @@ void meshtastic_cluster_doc_max_stamp(const struct meshtastic_cluster_doc *doc,
  * Malformed keys (unknown layer, an owner on BASE or none on NODE) and unset
  * stamps return false — a row that meshtastic_cluster_doc_accept() would refuse
  * is not worth a round trip to fetch.
+ *
+ * CAPACITY IS PART OF THAT RULE. A NEW key on a full table returns false, because
+ * accept() would refuse it with -ENOSPC and asking again next round would refuse
+ * it again — forever, once per digest period, with nothing ever changing. Wanting
+ * what cannot be stored is not optimism, it is an unbounded request loop. An
+ * update to a key already held is still wanted: replacing an entry needs no free
+ * slot, so a full table still tracks the fleet on everything it already knows
+ * about.
  */
 bool meshtastic_cluster_doc_wants(const struct meshtastic_cluster_doc *doc,
 				  const struct meshtastic_cluster_key *key,
