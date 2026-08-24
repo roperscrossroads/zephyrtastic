@@ -59,7 +59,18 @@ struct meshtastic_watchdog_crash_info {
  * @retval true  A crash breadcrumb was present and @p out was populated.
  * @retval false No breadcrumb was present.
  */
+#if defined(CONFIG_MESHTASTIC_WATCHDOG)
 bool meshtastic_watchdog_take_last_crash(struct meshtastic_watchdog_crash_info *out);
+#else
+/* No watchdog compiled in (meshtastic_watchdog.c is not built) means no
+ * breadcrumb can exist -- the honest answer, and it keeps callers linkable on
+ * watchdog-less builds (e.g. the nRF52 bring-up images, operator preference). */
+static inline bool meshtastic_watchdog_take_last_crash(struct meshtastic_watchdog_crash_info *out)
+{
+	(void)out;
+	return false;
+}
+#endif
 
 /**
  * @brief Snapshot captured from the hardware watchdog's own interrupt stage —
@@ -112,7 +123,15 @@ struct meshtastic_hw_watchdog_crash_info {
  * @retval true  A crash breadcrumb was present and @p out was populated.
  * @retval false No breadcrumb was present.
  */
+#if defined(CONFIG_MESHTASTIC_WATCHDOG)
 bool meshtastic_hw_watchdog_take_last_crash(struct meshtastic_hw_watchdog_crash_info *out);
+#else
+static inline bool meshtastic_hw_watchdog_take_last_crash(struct meshtastic_hw_watchdog_crash_info *out)
+{
+	(void)out;
+	return false;
+}
+#endif
 
 /**
  * @brief Snapshot captured the moment a genuine software-detected fault

@@ -20,8 +20,13 @@ tests:
       - heltec_wifi_lora32_v4/esp32s3/procpu
       - heltec_wifi_lora32_v4_r8/esp32s3/procpu
       - arduino_giga_r1/stm32h747xx/m7
+      # The two 2026-08 bring-ups — in CI so the next regression is not found
+      # by hand on the bench (agents-sgs7.1):
+      - xiao_ble/nrf52840          # + wio_sx1262_xiao shield; the first nRF target
+      - sensecap_indicator_d1l/esp32s3/procpu
     extra_args:
       - platform:arduino_giga_r1/stm32h747xx/m7:SHIELD=semtech_sx1262mb2das
+      - platform:xiao_ble/nrf52840:SHIELD=wio_sx1262_xiao
   sample.meshtastic.settings:
     tags:
       - lora

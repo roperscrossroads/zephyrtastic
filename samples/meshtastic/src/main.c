@@ -88,8 +88,32 @@ static RTC_NOINIT_ATTR uint32_t rtc_history_next;
 static RTC_NOINIT_ATTR struct reset_history_entry rtc_history[RESET_HISTORY_LEN];
 #endif /* CONFIG_SOC_FAMILY_ESPRESSIF_ESP32 */
 
+#if defined(CONFIG_NET_MGMT_EVENT)
+/* On a networked build the report is deferred to the first IPv4 lease so it
+ * lands in the remote syslog, not just a serial console nobody is watching. */
 static struct net_mgmt_event_callback ipv4_ready_cb;
 
+static void log_boot_reset_cause(void);
+
+static void ipv4_ready_report(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
+			      struct net_if *iface)
+{
+	static bool logged;
+
+	ARG_UNUSED(cb);
+	ARG_UNUSED(iface);
+
+	if (mgmt_event != NET_EVENT_IPV4_ADDR_ADD || logged) {
+		return;
+	}
+	logged = true;
+	log_boot_reset_cause();
+}
+#endif /* CONFIG_NET_MGMT_EVENT */
+
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
+/* Decodes the Espressif reset-cause bits for the RTC history ring above --
+ * both are ESP32-only. */
 static void log_reset_cause_line(const char *prefix, uint32_t boot_num, uint32_t cause)
 {
 	LOG_INF("%sboot #%u: cause 0x%08x:%s%s%s%s%s%s", prefix, boot_num, cause,
@@ -100,6 +124,7 @@ static void log_reset_cause_line(const char *prefix, uint32_t boot_num, uint32_t
 		(cause & RESET_CPU_LOCKUP) ? " PANIC" : "",
 		(cause & RESET_BROWNOUT) ? " BROWNOUT" : "");
 }
+#endif /* CONFIG_SOC_FAMILY_ESPRESSIF_ESP32 */
 
 static const char *fatal_reason_name(uint32_t reason)
 {
@@ -119,21 +144,11 @@ static const char *fatal_reason_name(uint32_t reason)
 	}
 }
 
-static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
-				  struct net_if *iface)
+static void log_boot_reset_cause(void)
 {
-	static bool logged;
 	struct meshtastic_watchdog_crash_info wdt_crash;
 	struct meshtastic_hw_watchdog_crash_info hw_wdt_crash;
 	struct meshtastic_fatal_crash_info fatal_crash;
-
-	ARG_UNUSED(cb);
-	ARG_UNUSED(iface);
-
-	if (mgmt_event != NET_EVENT_IPV4_ADDR_ADD || logged) {
-		return;
-	}
-	logged = true;
 
 #if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
 	LOG_INF("Reset-cause history (RTC-persistent across warm resets, oldest first):");
@@ -266,13 +281,19 @@ int main(void)
 	rtc_history_next = (rtc_history_next + 1U) % RESET_HISTORY_LEN;
 #endif /* CONFIG_SOC_FAMILY_ESPRESSIF_ESP32 */
 
-	/* Registered on every board, RTC ring or not -- log_boot_reset_cause() also
-	 * reports the watchdog/fatal/logring crash info below, which isn't
-	 * ESP32-specific. It only ever fires once an IPv4 lease exists, so on a
-	 * board with no IP network (e.g. LoRa+BLE only, no WiFi) this simply never
-	 * triggers -- an accepted limitation, not a bug to chase here. */
-	net_mgmt_init_event_callback(&ipv4_ready_cb, log_boot_reset_cause, NET_EVENT_IPV4_ADDR_ADD);
+	/* The crash-info report runs on every board, RTC ring or not. On a
+	 * networked build it is deferred to the first IPv4 lease so it lands in
+	 * the remote syslog; a board with no IP network (LoRa+BLE only) would
+	 * otherwise NEVER report -- the earlier "accepted limitation" left every
+	 * nRF target blind to its own crashes (and made these three symbols
+	 * -Wunused on non-net builds, agents-sgs7.1) -- so there it reports
+	 * directly at boot, to the console/BLE log. */
+#if defined(CONFIG_NET_MGMT_EVENT)
+	net_mgmt_init_event_callback(&ipv4_ready_cb, ipv4_ready_report, NET_EVENT_IPV4_ADDR_ADD);
 	net_mgmt_add_event_callback(&ipv4_ready_cb);
+#else
+	log_boot_reset_cause();
+#endif
 
 	if (!device_is_ready(lora_dev)) {
 		LOG_ERR("LoRa device not ready");
