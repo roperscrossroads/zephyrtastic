@@ -321,6 +321,23 @@ ZTEST(meshtastic_shell, test_unmanaging_restores_config_write)
 		      "unmanaged node should accept the write");
 }
 
+/* `meshtastic time set` seeds the wall clock at NTP quality; a value outside
+ * the sane window is refused. No assertion on the pristine (unset) state —
+ * the clock is global and another test may have run first. */
+ZTEST(meshtastic_shell, test_time_set_and_readback)
+{
+	const char *out;
+
+	zassert_ok(run_cmd("meshtastic time set 1756000000", &out), "time set failed");
+	zassert_not_null(strstr(out, "epoch 1756"), "expected the epoch readback, got: %s", out);
+
+	zassert_ok(run_cmd("meshtastic time", &out), "time show failed");
+	zassert_not_null(strstr(out, "epoch 1756"), "clock should hold the epoch, got: %s", out);
+
+	zassert_not_equal(run_cmd("meshtastic time set 1000", &out), 0,
+			  "an epoch outside the sane window must be refused");
+}
+
 /* The fresh-node seed honours MESHTASTIC_TX_ENABLED_DEFAULT — the compile-time
  * half of the a4it.8 safety story: with =n the first boot after a flash is
  * already receive-only, no config-write window. Asserting against IS_ENABLED

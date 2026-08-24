@@ -7,18 +7,6 @@
 
 #include <zephyr/kernel.h>
 
-/* Sanity floor (2020-01-01 UTC): reject epochs below this as bogus (unfixed
- * GNSS, uninitialised phone clock). */
-#define MESHTASTIC_EPOCH_MIN 1577836800U
-
-/* Sanity ceiling (T-D): reject epochs more than ~40 years past the floor (≈2060)
- * as bogus — a GPS week-number rollover or garbage clock can present a wildly
- * far-future time that would otherwise be accepted and corrupt every
- * epoch-stamped field. Mirrors the reference's BUILD_EPOCH + FORTY_YEARS upper
- * bound; the port has no build epoch, so it anchors on the 2020 floor. Stays
- * within uint32 range (~2.84e9 < UINT32_MAX). */
-#define MESHTASTIC_EPOCH_MAX (MESHTASTIC_EPOCH_MIN + 40ULL * 365ULL * 24ULL * 60ULL * 60ULL)
-
 /*
  * epoch MILLISECONDS at k_uptime == 0. Lock-free by design: writers (GNSS
  * callback, SNTP, admin set_time) are rare and readers only use the value for

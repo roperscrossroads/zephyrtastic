@@ -28,6 +28,19 @@
  * set_time_only / SNTP (NTP) cannot clobber a live GPS fix — so a spoofed or
  * low-trust time can't silently rewind every epoch-stamped field.
  */
+/* Sanity floor (2020-01-01 UTC): epochs below are rejected as bogus (unfixed
+ * GNSS, uninitialised phone clock). In the header so a caller offering an
+ * operator-supplied value (the `meshtastic time set` shell command) can
+ * validate with exactly the bounds the setter enforces. */
+#define MESHTASTIC_EPOCH_MIN 1577836800U
+
+/* Sanity ceiling (T-D): ~40 years past the floor (≈2060) — a GPS week-number
+ * rollover or garbage clock can present a wildly far-future time that would
+ * otherwise corrupt every epoch-stamped field. Mirrors the reference's
+ * BUILD_EPOCH + FORTY_YEARS bound; the port has no build epoch, so it anchors
+ * on the 2020 floor. Stays within uint32 range (~2.84e9 < UINT32_MAX). */
+#define MESHTASTIC_EPOCH_MAX (MESHTASTIC_EPOCH_MIN + 40ULL * 365ULL * 24ULL * 60ULL * 60ULL)
+
 enum meshtastic_clock_quality {
 	MESHTASTIC_CLOCK_QUALITY_NONE = 0,   /**< No time set yet. */
 	MESHTASTIC_CLOCK_QUALITY_DEVICE = 1, /**< Onboard peripheral / battery-backed RTC. */

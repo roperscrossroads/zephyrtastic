@@ -39,6 +39,7 @@
 #endif
 #include "meshtastic_build.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_clock.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_region_presets.h"
@@ -279,6 +280,9 @@ static uint32_t scaled_fraction(int32_t scaled, int32_t divisor)
 
 static const char *shell_device_role_name(meshtastic_Config_DeviceConfig_Role role);
 static const char *shell_rebroadcast_mode_name(meshtastic_Config_DeviceConfig_RebroadcastMode mode);
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+static bool shell_config_write_refused(const struct shell *sh);
+#endif
 
 static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 {
@@ -292,6 +296,78 @@ static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "board:  %s", CONFIG_BOARD);
 	shell_print(sh, "zephyr: %s", KERNEL_VERSION_STRING);
 	return 0;
+}
+
+static const char *clock_quality_name(enum meshtastic_clock_quality q)
+{
+	switch (q) {
+	case MESHTASTIC_CLOCK_QUALITY_NONE:
+		return "NONE (never set)";
+	case MESHTASTIC_CLOCK_QUALITY_DEVICE:
+		return "device RTC";
+	case MESHTASTIC_CLOCK_QUALITY_NET:
+		return "mesh-relayed";
+	case MESHTASTIC_CLOCK_QUALITY_NTP:
+		return "NTP/operator";
+	case MESHTASTIC_CLOCK_QUALITY_GPS:
+		return "GPS";
+	default:
+		return "?";
+	}
+}
+
+/* Wall-clock bench surface. A BLE-only node has no SNTP and an indoor bench
+ * no GNSS fix, so without this the only time source is a paired phone — and
+ * every log/rx_time sits in 1970. `set` takes a Unix epoch (seconds; the
+ * operator's host clock) at NTP quality, the same trust class as a phone
+ * set_time_only, so a later GPS fix still outranks it and a mesh-relayed
+ * value cannot clobber it. */
+static int cmd_time(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 1U) {
+		uint32_t epoch = meshtastic_clock_now_epoch();
+		enum meshtastic_clock_quality q = meshtastic_clock_get_quality();
+
+		if (q == MESHTASTIC_CLOCK_QUALITY_NONE) {
+			shell_print(sh, "clock: UNSET (epoch 0; logs run on uptime) — "
+					"`meshtastic time set <unix-epoch-seconds>`");
+			return 0;
+		}
+		shell_print(sh, "clock: epoch %u, source %s", epoch, clock_quality_name(q));
+		return 0;
+	}
+	if (argc != 3U || strcmp(argv[1], "set") != 0) {
+		shell_error(sh, "usage: meshtastic time [set <unix-epoch-seconds>]");
+		return -EINVAL;
+	}
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	shell_error(sh, "refused: shell config writes are compiled out "
+			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
+	return -ENOTSUP;
+#else
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+
+	unsigned long epoch = strtoul(argv[2], NULL, 10);
+
+	/* Validate here with the setter's own bounds: the setter silently ignores
+	 * an out-of-window value, and "silently" is wrong for an interactive
+	 * command (the clock may still hold an older good value, so its quality
+	 * cannot reveal the rejection). */
+	if (epoch < MESHTASTIC_EPOCH_MIN || epoch >= MESHTASTIC_EPOCH_MAX) {
+		shell_error(sh, "rejected: outside the sane window [%u, %llu)",
+			    MESHTASTIC_EPOCH_MIN, (unsigned long long)MESHTASTIC_EPOCH_MAX);
+		return -EINVAL;
+	}
+
+	meshtastic_clock_set_epoch((uint32_t)epoch, MESHTASTIC_CLOCK_QUALITY_NTP);
+	/* The ladder may have kept a better source (e.g. a GPS fix) — report what
+	 * the clock actually holds rather than claiming the write won. */
+	shell_print(sh, "clock now: epoch %u, source %s", meshtastic_clock_now_epoch(),
+		    clock_quality_name(meshtastic_clock_get_quality()));
+	return 0;
+#endif
 }
 
 static int cmd_status(const struct shell *sh, size_t argc, char **argv)
@@ -2907,6 +2983,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
 	SHELL_CMD(version, NULL, SHELL_HELP("Show build id / firmware version.", NULL),
 		  cmd_version),
+	SHELL_CMD(time, NULL,
+		  SHELL_HELP("Show or set the wall clock.", "[set <unix-epoch-seconds>]"),
+		  cmd_time),
 #if defined(CONFIG_NETWORKING)
 	SHELL_CMD(netpause, NULL,
 		  SHELL_HELP("Take the network down for N seconds, then restore it. "
