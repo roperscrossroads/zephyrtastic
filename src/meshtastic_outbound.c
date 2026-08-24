@@ -17,6 +17,7 @@
 
 #include "meshtastic_packet.h"
 
+#include "meshtastic_ble_peer.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_sched.h"
@@ -177,7 +178,15 @@ static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 
 			k_sem_give(&ob_space); /* a slot opened up */
 
-			ret = meshtastic_radio_send_wire_now(cur.wire, cur.len);
+			/* TX divert (agents-xhli.2): a unicast this node
+			 * originated leaves over a live BLE peer link to its
+			 * destination instead of spending airtime. Anything
+			 * else — relays, broadcasts, unlinked destinations, a
+			 * failed BLE send — goes on the air as always. */
+			ret = meshtastic_ble_peer_tx_try_divert(cur.wire, cur.len);
+			if (ret != 0) {
+				ret = meshtastic_radio_send_wire_now(cur.wire, cur.len);
+			}
 
 			if (cur.result != NULL) {
 				*cur.result = ret;

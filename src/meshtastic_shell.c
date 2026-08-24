@@ -2824,8 +2824,9 @@ static int cmd_blepeer_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "connects      : attempted=%u failed=%u discovery_failures=%u",
 		    ps.connects_attempted, ps.connects_failed, ps.discovery_failures);
 	if (link.connected) {
-		shell_print(sh, "outbound      : 0x%08x %s (slot %u, tx beats %u)", link.node_num,
-			    link.ready ? "READY" : "connecting", link.index, link.tx_beats);
+		shell_print(sh, "outbound      : 0x%08x %s (slot %u, tx beats %u, frames %s)",
+			    link.node_num, link.ready ? "READY" : "connecting", link.index,
+			    link.tx_beats, link.frame_ready ? "ready" : "no");
 	} else {
 		shell_print(sh, "outbound      : none");
 	}

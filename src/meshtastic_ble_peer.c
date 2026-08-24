@@ -33,9 +33,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#include <zephyr/sys/byteorder.h>
+
 #include "meshtastic_ble_peer.h"
 #include "meshtastic_ble_registry.h"
 #include "meshtastic_core.h"
+#include "meshtastic_packet.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -191,11 +194,36 @@ static void frame_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	LOG_INF("BLE peer frame notify %s", value == BT_GATT_CCC_NOTIFY ? "on" : "off");
 }
 
+/* Shared RX tail for both directions of the frame channel: peripheral-side
+ * chunk-writes and central-side notifications land here. Returns the
+ * reassembler's verdict (1 frame complete, 0 accepted, <0 refused). */
+static int frame_chunk_ingest(unsigned int index, const void *buf, uint16_t len)
+{
+	size_t frame_len = 0U;
+	int ret;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	ret = meshtastic_ble_peer_reasm_ingest(&peer.frame_rx[index], buf, len, &frame_len);
+	if (ret == 1) {
+		peer.stats.frame_rx_frames++;
+		LOG_DBG("BLE peer frame rx: %zu bytes (conn %u)", frame_len, index);
+		if (peer.frame_cb != NULL) {
+			/* Contract (meshtastic_ble_peer.h): cb runs here with
+			 * the peer lock held and must only copy/queue. */
+			peer.frame_cb(index, peer.frame_rx[index].frame, frame_len);
+		}
+	} else if (ret < 0) {
+		peer.stats.frame_rx_rejected++;
+		LOG_WRN("BLE peer frame chunk rejected (%d, len=%u, conn %u)", ret, len, index);
+	}
+	k_mutex_unlock(&peer_lock);
+	return ret;
+}
+
 static ssize_t write_frame(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
 			   uint16_t len, uint16_t offset, uint8_t flags)
 {
 	unsigned int index = bt_conn_index(conn);
-	size_t frame_len = 0U;
 	int ret;
 
 	ARG_UNUSED(attr);
@@ -221,23 +249,7 @@ static ssize_t write_frame(struct bt_conn *conn, const struct bt_gatt_attr *attr
 		LOG_INF("BLE conn %u classified peer (frame chunk)", index);
 	}
 
-	k_mutex_lock(&peer_lock, K_FOREVER);
-	ret = meshtastic_ble_peer_reasm_ingest(&peer.frame_rx[index], buf, len, &frame_len);
-	if (ret == 1) {
-		peer.stats.frame_rx_frames++;
-		LOG_DBG("BLE peer frame rx: %zu bytes (conn %u)", frame_len, index);
-		if (peer.frame_cb != NULL) {
-			/* Contract (meshtastic_ble_peer.h): cb runs here with
-			 * the peer lock held and must only copy/queue. */
-			peer.frame_cb(index, peer.frame_rx[index].frame, frame_len);
-		}
-	} else if (ret < 0) {
-		peer.stats.frame_rx_rejected++;
-		LOG_WRN("BLE peer frame chunk rejected (%d, len=%u, conn %u)", ret, len, index);
-	}
-	k_mutex_unlock(&peer_lock);
-
-	if (ret < 0) {
+	if (frame_chunk_ingest(index, buf, len) < 0) {
 		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 	}
 	return len;
@@ -404,8 +416,13 @@ static struct {
 	uint32_t target_node; /* 0 = any peer */
 	struct bt_conn *conn; /* the one outbound link */
 	uint32_t conn_node;
-	bool link_ready; /* discovery + subscribe complete */
+	bool link_ready; /* beat discovery + subscribe complete */
 	uint16_t value_handle;
+	/* Frame channel on the outbound link (agents-xhli.2): discovered after
+	 * the beat chain. A peer without the characteristic (older image)
+	 * downgrades to a beat-only link — frame_ready simply stays false. */
+	bool frame_ready;
+	uint16_t frame_value_handle;
 	uint32_t tx_seq;
 	bool hello_pending;
 	struct meshtastic_ble_peer_seen seen[CONFIG_MESHTASTIC_BLE_PEER_SEEN_MAX];
@@ -413,8 +430,13 @@ static struct {
 
 static struct bt_gatt_discover_params central_disc;
 static struct bt_gatt_subscribe_params central_sub;
+static struct bt_gatt_subscribe_params central_frame_sub;
 static struct bt_uuid_128 central_disc_uuid128;
 static struct bt_uuid_16 central_disc_uuid16;
+/* Which characteristic the CHARACTERISTIC/DESCRIPTOR discovery stages are
+ * for: false = beat, true = frame. Only touched on the BT RX thread (the
+ * discovery callback chain) and at connect, before discovery starts. */
+static bool central_disc_frame;
 
 static void seen_note(uint32_t node_num, int8_t rssi)
 {
@@ -621,16 +643,45 @@ static uint8_t central_notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_
 	return BT_GATT_ITER_CONTINUE;
 }
 
+static uint8_t central_frame_notify_cb(struct bt_conn *conn,
+				       struct bt_gatt_subscribe_params *params, const void *data,
+				       uint16_t length)
+{
+	unsigned int index;
+
+	if (data == NULL) {
+		/* Unsubscribed (link going down); the disconnect path resets
+		 * the rest of the state. */
+		params->value_handle = 0U;
+		return BT_GATT_ITER_STOP;
+	}
+
+	index = bt_conn_index(conn);
+	if (index < MESHTASTIC_BLE_REG_SLOTS) {
+		(void)frame_chunk_ingest(index, data, length);
+	}
+	return BT_GATT_ITER_CONTINUE;
+}
+
 static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				   struct bt_gatt_discover_params *params)
 {
 	int err;
 
 	if (attr == NULL) {
-		LOG_WRN("BLE peer discovery: attribute not found (stage %u)", params->type);
-		k_mutex_lock(&peer_lock, K_FOREVER);
-		peer.stats.discovery_failures++;
-		k_mutex_unlock(&peer_lock);
+		if (central_disc_frame) {
+			/* No frame channel on this peer (older image): the beat
+			 * link stays up and useful; frames just cannot ride this
+			 * hop. A downgrade, not a discovery failure. */
+			LOG_WRN("BLE peer 0x%08x has no frame channel (stage %u)",
+				central.conn_node, params->type);
+		} else {
+			LOG_WRN("BLE peer discovery: attribute not found (stage %u)",
+				params->type);
+			k_mutex_lock(&peer_lock, K_FOREVER);
+			peer.stats.discovery_failures++;
+			k_mutex_unlock(&peer_lock);
+		}
 		(void)memset(params, 0, sizeof(*params));
 		return BT_GATT_ITER_STOP;
 	}
@@ -649,12 +700,16 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 		central_disc.uuid = &central_disc_uuid16.uuid;
 		central_disc.start_handle = attr->handle + 2U;
 		central_disc.type = BT_GATT_DISCOVER_DESCRIPTOR;
-		central_sub.value_handle = bt_gatt_attr_value_handle(attr);
+		if (central_disc_frame) {
+			central_frame_sub.value_handle = bt_gatt_attr_value_handle(attr);
+		} else {
+			central_sub.value_handle = bt_gatt_attr_value_handle(attr);
+		}
 		err = bt_gatt_discover(conn, &central_disc);
 		if (err != 0) {
 			LOG_WRN("BLE peer CCC discover failed (%d)", err);
 		}
-	} else {
+	} else if (!central_disc_frame) {
 		central_sub.notify = central_notify_cb;
 		central_sub.value = BT_GATT_CCC_NOTIFY;
 		central_sub.ccc_handle = attr->handle;
@@ -674,6 +729,36 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 			LOG_INF("BLE peer link to 0x%08x ready (beats every %u ms)",
 				central.conn_node, CONFIG_MESHTASTIC_BLE_PEER_BEAT_PERIOD_MS);
 			(void)k_work_schedule(&beat_work, K_NO_WAIT);
+
+			/* Beat chain done — continue into the frame channel,
+			 * which sits after the beat CCC in the service table
+			 * (BT_GATT_SERVICE_DEFINE order, ours on both ends). */
+			central_disc_frame = true;
+			memcpy(&central_disc_uuid128, &peer_frame_uuid,
+			       sizeof(central_disc_uuid128));
+			central_disc.uuid = &central_disc_uuid128.uuid;
+			central_disc.start_handle = attr->handle + 1U;
+			central_disc.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
+			central_disc.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+			err = bt_gatt_discover(conn, &central_disc);
+			if (err != 0) {
+				LOG_WRN("BLE peer frame char discover failed (%d)", err);
+			}
+		}
+		return BT_GATT_ITER_STOP;
+	} else {
+		central_frame_sub.notify = central_frame_notify_cb;
+		central_frame_sub.value = BT_GATT_CCC_NOTIFY;
+		central_frame_sub.ccc_handle = attr->handle;
+		err = bt_gatt_subscribe(conn, &central_frame_sub);
+		if (err != 0 && err != -EALREADY) {
+			LOG_WRN("BLE peer frame subscribe failed (%d)", err);
+		} else {
+			k_mutex_lock(&peer_lock, K_FOREVER);
+			central.frame_value_handle = central_frame_sub.value_handle;
+			central.frame_ready = true;
+			k_mutex_unlock(&peer_lock);
+			LOG_INF("BLE peer frame channel to 0x%08x ready", central.conn_node);
 		}
 		return BT_GATT_ITER_STOP;
 	}
@@ -760,6 +845,7 @@ static void peer_central_connected(struct bt_conn *conn, uint8_t err)
 
 	/* Outbound role CENTRAL: meshtastic_ble.c's connected() has already
 	 * registered this slot as a peer. Start the discovery chain. */
+	central_disc_frame = false;
 	memcpy(&central_disc_uuid128, &peer_service_uuid, sizeof(central_disc_uuid128));
 	central_disc.uuid = &central_disc_uuid128.uuid;
 	central_disc.func = central_discover_cb;
@@ -788,6 +874,8 @@ static void peer_central_disconnected(struct bt_conn *conn, uint8_t reason)
 	central.conn = NULL;
 	central.link_ready = false;
 	central.value_handle = 0U;
+	central.frame_ready = false;
+	central.frame_value_handle = 0U;
 	central.conn_node = 0U;
 	k_mutex_unlock(&peer_lock);
 
@@ -884,11 +972,118 @@ bool meshtastic_ble_peer_seen_get(unsigned int i, struct meshtastic_ble_peer_see
 	return valid;
 }
 
+/* Chunk-write one frame up the outbound link. The target check has already
+ * passed; conn/handle are re-read under the lock per chunk-loop entry. */
+static int central_send_frame(const uint8_t *frame, size_t len)
+{
+	uint8_t buf[MESHTASTIC_BLE_PEER_CHUNK_MTU23];
+	struct meshtastic_ble_peer_chunker ck;
+	struct bt_conn *conn;
+	uint16_t handle;
+	int n;
+	int ret;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	if (!central.frame_ready || central.conn == NULL) {
+		k_mutex_unlock(&peer_lock);
+		return -ENOTCONN;
+	}
+	conn = bt_conn_ref(central.conn);
+	handle = central.frame_value_handle;
+	k_mutex_unlock(&peer_lock);
+
+	ret = meshtastic_ble_peer_chunker_start(&ck, frame, len);
+	if (ret < 0) {
+		bt_conn_unref(conn);
+		return ret;
+	}
+
+	while ((n = meshtastic_ble_peer_chunker_next(&ck, buf, sizeof(buf))) > 0) {
+		ret = bt_gatt_write_without_response(conn, handle, buf, (uint16_t)n, false);
+		if (ret != 0) {
+			break;
+		}
+	}
+	bt_conn_unref(conn);
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	if (ret == 0) {
+		peer.stats.frame_tx_frames++;
+	} else {
+		peer.stats.frame_tx_failed++;
+	}
+	k_mutex_unlock(&peer_lock);
+	return ret;
+}
+
+int meshtastic_ble_peer_frame_send_to(uint32_t node_num, const uint8_t *frame, size_t len)
+{
+	bool via_central = false;
+	bool via_notify = false;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	if (central.frame_ready && central.conn != NULL && central.conn_node == node_num) {
+		via_central = true;
+	} else if (peer.frame_notify_enabled) {
+		/* Inbound link: the peer is OUR central. The notify targets
+		 * every frame-subscribed central (single-subscriber by design,
+		 * like the beat channel); requiring live beats from the target
+		 * keeps a stale subscription from swallowing frames. The
+		 * outbound conn's slot is excluded: its rx accounting holds the
+		 * node at the far end of OUR central link, which a notify on
+		 * our peripheral characteristic can never reach. */
+		unsigned int out_idx = (central.conn != NULL)
+					       ? bt_conn_index(central.conn)
+					       : MESHTASTIC_BLE_REG_SLOTS;
+
+		for (unsigned int i = 0U; i < MESHTASTIC_BLE_REG_SLOTS; i++) {
+			if (i != out_idx && peer.rx[i].beats > 0U &&
+			    peer.rx[i].last.node_num == node_num) {
+				via_notify = true;
+				break;
+			}
+		}
+	}
+	k_mutex_unlock(&peer_lock);
+
+	if (via_central) {
+		return central_send_frame(frame, len);
+	}
+	if (via_notify) {
+		return meshtastic_ble_peer_frame_notify(frame, len);
+	}
+	return -EHOSTUNREACH;
+}
+
+int meshtastic_ble_peer_tx_try_divert(const uint8_t *wire, uint32_t len)
+{
+	const struct meshtastic_wire_header *hdr;
+	uint32_t dest;
+
+	if (wire == NULL || len < MESHTASTIC_HDR_LEN) {
+		return -EINVAL;
+	}
+
+	hdr = (const struct meshtastic_wire_header *)wire;
+	dest = sys_le32_to_cpu(hdr->dest);
+
+	/* Only frames THIS node originates may leave over the peer link: a
+	 * relayed frame keeps its originator's src, and diverting it would
+	 * bridge LoRa onto BLE — the other half of the v1 link-local rule.
+	 * Broadcasts stay on the air: v1 is a point-to-point lane. */
+	if (sys_le32_to_cpu(hdr->src) != mt.node_id || dest == MESHTASTIC_NODE_BROADCAST) {
+		return -EHOSTUNREACH;
+	}
+
+	return meshtastic_ble_peer_frame_send_to(dest, wire, len);
+}
+
 void meshtastic_ble_peer_link_get(struct meshtastic_ble_peer_link *out)
 {
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	out->connected = (central.conn != NULL);
 	out->ready = central.link_ready;
+	out->frame_ready = central.frame_ready;
 	out->node_num = central.conn_node;
 	out->index = (central.conn != NULL) ? bt_conn_index(central.conn) : 0U;
 	out->tx_beats = peer.stats.write_tx_beats;

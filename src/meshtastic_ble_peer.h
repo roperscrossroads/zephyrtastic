@@ -3,6 +3,7 @@
 #ifndef MESHTASTIC_BLE_PEER_H_
 #define MESHTASTIC_BLE_PEER_H_
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -52,13 +53,29 @@ int meshtastic_ble_peer_frame_notify(const uint8_t *frame, size_t len);
  * channel. */
 bool meshtastic_ble_peer_frame_notify_ready(void);
 
-/* The M2 seam (bearer ingest): frames completed by peer chunk-writes land
- * here. The callback runs on the BT RX thread WITH the peer lock held — copy
- * or queue the bytes and return; never call back into blepeer APIs from it.
- * NULL (the default) means completed frames are counted and dropped. */
+/* The M2 seam (bearer ingest): frames completed on the frame channel — peer
+ * chunk-writes on the peripheral side, notifications on the central side —
+ * land here. The callback runs on the BT RX thread WITH the peer lock held —
+ * copy or queue the bytes and return; never call back into blepeer APIs from
+ * it. NULL (the default) means completed frames are counted and dropped. */
 typedef void (*meshtastic_ble_peer_frame_cb_t)(unsigned int index, const uint8_t *frame,
 					       size_t len);
 void meshtastic_ble_peer_frame_rx_register(meshtastic_ble_peer_frame_cb_t cb);
+
+/* Send one wire frame to the named node over whichever live BLE peer link
+ * reaches it: chunk-writes up the outbound (central) link, or notifications
+ * down the peripheral characteristic for an inbound central. Returns 0,
+ * -EHOSTUNREACH when no live link reaches that node, else the codec/GATT
+ * error. */
+int meshtastic_ble_peer_frame_send_to(uint32_t node_num, const uint8_t *frame, size_t len);
+
+/* TX divert (agents-xhli.2): called at the LoRa TX choke point with a queued
+ * wire frame. Sends it over a BLE peer link INSTEAD of the radio when — and
+ * only when — this node originated it (wire src is us; a relayed frame kept
+ * its originator's src and must never bridge onto BLE), it is a unicast, and
+ * a live link reaches the destination. Returns 0 when the frame left over
+ * BLE; any nonzero means "put it on the air as usual". */
+int meshtastic_ble_peer_tx_try_divert(const uint8_t *wire, uint32_t len);
 
 /* Called from the BLE disconnect path for every connection: drops the slot's
  * beat accounting so a recycled bt_conn_index never inherits a dead link's
@@ -94,6 +111,7 @@ bool meshtastic_ble_peer_seen_get(unsigned int i, struct meshtastic_ble_peer_see
 struct meshtastic_ble_peer_link {
 	bool connected;   /* outbound conn exists */
 	bool ready;       /* discovery + subscribe complete, beats flowing */
+	bool frame_ready; /* frame channel discovered + subscribed */
 	uint32_t node_num; /* peer's advertised node number */
 	unsigned int index; /* registry slot of the outbound conn */
 	uint32_t tx_beats;
@@ -142,6 +160,14 @@ uint32_t meshtastic_ble_adv_starts(void);
 static inline void meshtastic_ble_peer_conn_down(unsigned int index)
 {
 	(void)index;
+}
+
+/* No peer link in this image: every frame goes on the air. */
+static inline int meshtastic_ble_peer_tx_try_divert(const uint8_t *wire, uint32_t len)
+{
+	(void)wire;
+	(void)len;
+	return -ENOTSUP;
 }
 
 #endif /* CONFIG_MESHTASTIC_BLE_PEER */
