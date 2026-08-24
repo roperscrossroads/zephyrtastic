@@ -2814,6 +2814,10 @@ static int cmd_blepeer_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "beats         : hello_malformed=%u hello_rejected_late=%u tx notify=%u write=%u",
 		    ps.hello_malformed, ps.hello_rejected_late, ps.notify_tx_beats,
 		    ps.write_tx_beats);
+	shell_print(sh, "frames        : rx=%u rejected=%u tx=%u tx_failed=%u notify=%s",
+		    ps.frame_rx_frames, ps.frame_rx_rejected, ps.frame_tx_frames,
+		    ps.frame_tx_failed,
+		    meshtastic_ble_peer_frame_notify_ready() ? "on" : "off");
 	shell_print(sh, "scan          : %s, adverts matched=%u reflections=%u",
 		    meshtastic_ble_peer_scan_armed() ? "armed" : "off", ps.adverts_matched,
 		    ps.reflections);

@@ -39,6 +39,27 @@ bool meshtastic_ble_peer_rx_get(unsigned int index, struct meshtastic_ble_peer_r
 /* Poke the beat engine: one immediate beat on every active link. */
 void meshtastic_ble_peer_beat_now(void);
 
+/* ---- frame channel (agents-xhli.1, PEER-TRANSPORT-DESIGN.md §2) ---- */
+
+/* Notify one wire frame to the subscribed peer central, chunked at the
+ * guaranteed 20-byte ATT payload. Returns 0 once every chunk is queued,
+ * -ENOTCONN when nobody has enabled frame notifications, -EINVAL/-EMSGSIZE
+ * from the chunker, else the first bt_gatt_notify error (frame abandoned —
+ * the receiver's partial dies on the next FIRST chunk). */
+int meshtastic_ble_peer_frame_notify(const uint8_t *frame, size_t len);
+
+/* True while a connected central has notifications enabled on the frame
+ * channel. */
+bool meshtastic_ble_peer_frame_notify_ready(void);
+
+/* The M2 seam (bearer ingest): frames completed by peer chunk-writes land
+ * here. The callback runs on the BT RX thread WITH the peer lock held — copy
+ * or queue the bytes and return; never call back into blepeer APIs from it.
+ * NULL (the default) means completed frames are counted and dropped. */
+typedef void (*meshtastic_ble_peer_frame_cb_t)(unsigned int index, const uint8_t *frame,
+					       size_t len);
+void meshtastic_ble_peer_frame_rx_register(meshtastic_ble_peer_frame_cb_t cb);
+
 /* Called from the BLE disconnect path for every connection: drops the slot's
  * beat accounting so a recycled bt_conn_index never inherits a dead link's
  * counters. */
@@ -91,6 +112,10 @@ struct meshtastic_ble_peer_stats {
 	uint32_t write_tx_beats;     /* central -> peripheral */
 	uint32_t hello_malformed;    /* beat writes that failed decode */
 	uint32_t hello_rejected_late; /* peer evidence on an already-phone slot */
+	uint32_t frame_rx_frames;    /* frames completed from peer chunk-writes */
+	uint32_t frame_rx_rejected;  /* chunk-writes the reassembler refused */
+	uint32_t frame_tx_frames;    /* frames fully notified to the central */
+	uint32_t frame_tx_failed;    /* frames abandoned on a notify error */
 };
 
 void meshtastic_ble_peer_stats_get(struct meshtastic_ble_peer_stats *out);

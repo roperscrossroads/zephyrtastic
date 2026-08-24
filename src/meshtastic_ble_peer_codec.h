@@ -94,4 +94,86 @@ void meshtastic_ble_peer_rx_reset(struct meshtastic_ble_peer_rx *st);
 void meshtastic_ble_peer_rx_account(struct meshtastic_ble_peer_rx *st,
 				    const struct meshtastic_ble_peer_beat *beat);
 
+/*
+ * The frame channel (agents-xhli.1, PEER-TRANSPORT-DESIGN.md §2): whole
+ * Meshtastic wire frames chunked over a GATT characteristic. The chunk header
+ * is one byte, so the channel works at the default 23-byte ATT MTU (20-byte
+ * payloads) and never depends on MTU exchange succeeding; a larger MTU merely
+ * means fewer chunks.
+ *
+ *   chunk := [0]   flags/seq: bit7 FIRST, bit6 LAST,
+ *                  bits 0..5 seq (mod 64, from 0, +1 per chunk of a frame)
+ *            [1..] fragment payload
+ *   FIRST chunk payload begins [len_lo][len_hi] (total frame length, LE),
+ *   then frame bytes.
+ *
+ * One frame in flight per direction per link. A FIRST chunk aborts any
+ * partial reassembly (the sender restarted); a seq gap or overrun kills the
+ * partial rather than delivering a corrupt frame. The frame bytes themselves
+ * are channel- or PKC-encrypted Meshtastic airframes — this layer carries
+ * water, it does not authenticate the pipe.
+ */
+#define MESHTASTIC_BLE_PEER_CHUNK_FIRST    0x80U
+#define MESHTASTIC_BLE_PEER_CHUNK_LAST     0x40U
+#define MESHTASTIC_BLE_PEER_CHUNK_SEQ_MASK 0x3FU
+#define MESHTASTIC_BLE_PEER_CHUNK_HDR_LEN  1U
+/* Smallest chunk buffer that always makes progress: header + the FIRST
+ * chunk's 2-byte length prefix + one frame byte. */
+#define MESHTASTIC_BLE_PEER_CHUNK_MIN_BUF  4U
+/* The guaranteed ATT payload: MTU 23 minus the 3-byte ATT header. */
+#define MESHTASTIC_BLE_PEER_CHUNK_MTU23    20U
+/* Mirrors MESHTASTIC_PKT_MAX without importing it (this header stays free of
+ * project and Zephyr includes); equality is BUILD_ASSERTed where both are
+ * visible (meshtastic_ble_peer.c). */
+#define MESHTASTIC_BLE_PEER_FRAME_MAX      255U
+
+/* Sender side: an iterator over one frame. The frame pointer must stay valid
+ * until the chunker is done (nothing is copied). */
+struct meshtastic_ble_peer_chunker {
+	const uint8_t *frame;
+	uint16_t len;
+	uint16_t off;      /* frame bytes emitted so far */
+	uint8_t seq;       /* next chunk's seq (mod 64) */
+	bool first_sent;
+};
+
+/* Returns 0, -EINVAL on an empty frame, -EMSGSIZE past FRAME_MAX. */
+int meshtastic_ble_peer_chunker_start(struct meshtastic_ble_peer_chunker *ck,
+				      const uint8_t *frame, size_t len);
+
+/*
+ * Emit the next chunk into out (out_size >= MESHTASTIC_BLE_PEER_CHUNK_MIN_BUF,
+ * typically the link's ATT payload). Returns the chunk length (> 0), 0 when
+ * the frame has been fully emitted, -EINVAL on a too-small buffer.
+ */
+int meshtastic_ble_peer_chunker_next(struct meshtastic_ble_peer_chunker *ck,
+				     uint8_t *out, size_t out_size);
+
+/* Receive side: one in-flight frame per link direction, plus counters so the
+ * shell can prove what the channel did rather than guess. */
+struct meshtastic_ble_peer_reasm {
+	bool active;
+	uint8_t next_seq;
+	uint16_t expect;   /* declared frame length */
+	uint16_t got;      /* frame bytes received */
+	uint8_t frame[MESHTASTIC_BLE_PEER_FRAME_MAX];
+	uint32_t frames;   /* frames completed */
+	uint32_t aborted;  /* partials killed (fresh FIRST, seq gap, overrun) */
+	uint32_t rejected; /* chunks refused */
+};
+
+void meshtastic_ble_peer_reasm_reset(struct meshtastic_ble_peer_reasm *rs);
+
+/*
+ * Ingest one chunk. Returns 1 with the complete frame in rs->frame (length in
+ * *frame_len) — consume it before the next ingest; 0 when the chunk was
+ * accepted and more are needed; -EMSGSIZE on a declared length past FRAME_MAX
+ * (refused, nothing in flight afterwards); -EBADMSG on anything malformed —
+ * empty chunk, zero-length frame, a non-FIRST chunk with nothing in flight
+ * (the FIRST was missed), a seq gap, an overrun, or a LAST that arrives
+ * early. Any error kills a partial in flight; the next FIRST starts clean.
+ */
+int meshtastic_ble_peer_reasm_ingest(struct meshtastic_ble_peer_reasm *rs,
+				     const uint8_t *chunk, size_t len, size_t *frame_len);
+
 #endif /* MESHTASTIC_BLE_PEER_CODEC_H_ */

@@ -100,3 +100,168 @@ void meshtastic_ble_peer_rx_account(struct meshtastic_ble_peer_rx *st,
 	st->beats++;
 	st->last = *beat;
 }
+
+int meshtastic_ble_peer_chunker_start(struct meshtastic_ble_peer_chunker *ck,
+				      const uint8_t *frame, size_t len)
+{
+	if (len == 0U) {
+		return -EINVAL;
+	}
+	if (len > MESHTASTIC_BLE_PEER_FRAME_MAX) {
+		return -EMSGSIZE;
+	}
+
+	ck->frame = frame;
+	ck->len = (uint16_t)len;
+	ck->off = 0U;
+	ck->seq = 0U;
+	ck->first_sent = false;
+	return 0;
+}
+
+int meshtastic_ble_peer_chunker_next(struct meshtastic_ble_peer_chunker *ck,
+				     uint8_t *out, size_t out_size)
+{
+	bool first = !ck->first_sent;
+	size_t body_cap;
+	size_t take;
+	size_t pos;
+
+	if (out_size < MESHTASTIC_BLE_PEER_CHUNK_MIN_BUF) {
+		return -EINVAL;
+	}
+	if (ck->first_sent && ck->off == ck->len) {
+		return 0;
+	}
+
+	pos = MESHTASTIC_BLE_PEER_CHUNK_HDR_LEN;
+	if (first) {
+		out[pos] = (uint8_t)(ck->len & 0xFFU);
+		out[pos + 1U] = (uint8_t)(ck->len >> 8);
+		pos += 2U;
+	}
+	body_cap = out_size - pos;
+	take = ck->len - ck->off;
+	if (take > body_cap) {
+		take = body_cap;
+	}
+	memcpy(&out[pos], &ck->frame[ck->off], take);
+	ck->off += (uint16_t)take;
+
+	out[0] = ck->seq & MESHTASTIC_BLE_PEER_CHUNK_SEQ_MASK;
+	if (first) {
+		out[0] |= MESHTASTIC_BLE_PEER_CHUNK_FIRST;
+	}
+	if (ck->off == ck->len) {
+		out[0] |= MESHTASTIC_BLE_PEER_CHUNK_LAST;
+	}
+	ck->seq = (ck->seq + 1U) & MESHTASTIC_BLE_PEER_CHUNK_SEQ_MASK;
+	ck->first_sent = true;
+	return (int)(pos + take);
+}
+
+void meshtastic_ble_peer_reasm_reset(struct meshtastic_ble_peer_reasm *rs)
+{
+	memset(rs, 0, sizeof(*rs));
+}
+
+/* Kill a partial without touching the lifetime counters the caller owns. */
+static void reasm_abort(struct meshtastic_ble_peer_reasm *rs)
+{
+	if (rs->active) {
+		rs->active = false;
+		rs->aborted++;
+	}
+}
+
+int meshtastic_ble_peer_reasm_ingest(struct meshtastic_ble_peer_reasm *rs,
+				     const uint8_t *chunk, size_t len, size_t *frame_len)
+{
+	bool first;
+	bool last;
+	uint8_t seq;
+	const uint8_t *body;
+	size_t blen;
+
+	if (len < MESHTASTIC_BLE_PEER_CHUNK_HDR_LEN + 1U) {
+		rs->rejected++;
+		return -EBADMSG;
+	}
+
+	first = (chunk[0] & MESHTASTIC_BLE_PEER_CHUNK_FIRST) != 0U;
+	last = (chunk[0] & MESHTASTIC_BLE_PEER_CHUNK_LAST) != 0U;
+	seq = chunk[0] & MESHTASTIC_BLE_PEER_CHUNK_SEQ_MASK;
+	body = &chunk[MESHTASTIC_BLE_PEER_CHUNK_HDR_LEN];
+	blen = len - MESHTASTIC_BLE_PEER_CHUNK_HDR_LEN;
+
+	if (first) {
+		uint16_t declared;
+
+		/* A FIRST always supersedes: the sender restarted, and the
+		 * stale partial can never complete. */
+		reasm_abort(rs);
+
+		if (blen < 2U) {
+			rs->rejected++;
+			return -EBADMSG;
+		}
+		declared = (uint16_t)body[0] | ((uint16_t)body[1] << 8);
+		body += 2U;
+		blen -= 2U;
+
+		if (declared == 0U) {
+			rs->rejected++;
+			return -EBADMSG;
+		}
+		if (declared > MESHTASTIC_BLE_PEER_FRAME_MAX) {
+			rs->rejected++;
+			return -EMSGSIZE;
+		}
+		if (blen > declared) {
+			rs->rejected++;
+			return -EBADMSG;
+		}
+
+		memcpy(rs->frame, body, blen);
+		rs->expect = declared;
+		rs->got = (uint16_t)blen;
+		rs->next_seq = (seq + 1U) & MESHTASTIC_BLE_PEER_CHUNK_SEQ_MASK;
+		rs->active = true;
+	} else {
+		if (!rs->active) {
+			/* The FIRST was missed (or lost): nothing this chunk
+			 * could be reassembled into. */
+			rs->rejected++;
+			return -EBADMSG;
+		}
+		if (seq != rs->next_seq || blen > (size_t)(rs->expect - rs->got)) {
+			reasm_abort(rs);
+			rs->rejected++;
+			return -EBADMSG;
+		}
+
+		memcpy(&rs->frame[rs->got], body, blen);
+		rs->got += (uint16_t)blen;
+		rs->next_seq = (seq + 1U) & MESHTASTIC_BLE_PEER_CHUNK_SEQ_MASK;
+	}
+
+	if (last) {
+		if (rs->got != rs->expect) {
+			reasm_abort(rs);
+			rs->rejected++;
+			return -EBADMSG;
+		}
+		rs->active = false;
+		rs->frames++;
+		*frame_len = rs->got;
+		return 1;
+	}
+	if (rs->got == rs->expect) {
+		/* Full without LAST: the sender promises more bytes than the
+		 * declared length holds. Corrupt by construction. */
+		reasm_abort(rs);
+		rs->rejected++;
+		return -EBADMSG;
+	}
+	return 0;
+}

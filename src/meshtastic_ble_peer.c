@@ -3,7 +3,9 @@
  * Node-to-node BLE peer link, peripheral half (agents-a4it.3): a GATT service
  * carrying a 16-byte heartbeat (meshtastic_ble_peer_codec.h) in both
  * directions — a peer central WRITES its beats to us, and reads ours by
- * subscribing to NOTIFY on the same characteristic.
+ * subscribing to NOTIFY on the same characteristic. A second characteristic,
+ * the frame channel (agents-xhli.1), carries whole Meshtastic wire frames the
+ * same way, chunked so the default 23-byte ATT MTU always suffices.
  *
  * This is deliberately NOT the Meshtastic phone service: that one is a
  * single-client stateful session (one queue, one from_num, one frame cursor)
@@ -53,16 +55,27 @@ BUILD_ASSERT(CONFIG_BT_MAX_CONN >= 2,
 	BT_UUID_128_ENCODE(0xf3f1a2c0, 0x8e5e, 0x4d8b, 0x9f2a, 0x6c1d3b7e5a10)
 #define BT_UUID_MESHTASTIC_PEER_BEAT_VAL                                                           \
 	BT_UUID_128_ENCODE(0xf3f1a2c1, 0x8e5e, 0x4d8b, 0x9f2a, 0x6c1d3b7e5a10)
+#define BT_UUID_MESHTASTIC_PEER_FRAME_VAL                                                          \
+	BT_UUID_128_ENCODE(0xf3f1a2c2, 0x8e5e, 0x4d8b, 0x9f2a, 0x6c1d3b7e5a10)
 
 static struct bt_uuid_128 peer_service_uuid = BT_UUID_INIT_128(BT_UUID_MESHTASTIC_PEER_SERVICE_VAL);
 static struct bt_uuid_128 peer_beat_uuid = BT_UUID_INIT_128(BT_UUID_MESHTASTIC_PEER_BEAT_VAL);
+static struct bt_uuid_128 peer_frame_uuid = BT_UUID_INIT_128(BT_UUID_MESHTASTIC_PEER_FRAME_VAL);
 
 enum {
 	MESHTASTIC_PEER_ATTR_SERVICE = 0,
 	MESHTASTIC_PEER_ATTR_BEAT_CHRC,
 	MESHTASTIC_PEER_ATTR_BEAT_VALUE,
 	MESHTASTIC_PEER_ATTR_BEAT_CCC,
+	MESHTASTIC_PEER_ATTR_FRAME_CHRC,
+	MESHTASTIC_PEER_ATTR_FRAME_VALUE,
+	MESHTASTIC_PEER_ATTR_FRAME_CCC,
 };
+
+/* The frame channel carries exactly what meshtastic_build_wire_packet()
+ * produces; the codec's mirror of the limit must not drift. */
+BUILD_ASSERT(MESHTASTIC_BLE_PEER_FRAME_MAX == MESHTASTIC_PKT_MAX,
+	     "frame-channel FRAME_MAX must track MESHTASTIC_PKT_MAX");
 
 /* All mutated from thread context (BT RX thread, system workqueue, shell);
  * never from ISR. One mutex covers both directions' state. */
@@ -86,8 +99,20 @@ static struct {
 	/* RX (write) side, per connection registry slot. */
 	struct meshtastic_ble_peer_rx rx[MESHTASTIC_BLE_REG_SLOTS];
 	int64_t rx_last_ms[MESHTASTIC_BLE_REG_SLOTS]; /* k_uptime at last beat */
+	/* Frame channel: notify gate + one reassembler per slot (one frame in
+	 * flight per direction is the codec's contract). */
+	bool frame_notify_enabled;
+	struct meshtastic_ble_peer_reasm frame_rx[MESHTASTIC_BLE_REG_SLOTS];
+	meshtastic_ble_peer_frame_cb_t frame_cb;
 	struct meshtastic_ble_peer_stats stats;
 } peer;
+
+void meshtastic_ble_peer_frame_rx_register(meshtastic_ble_peer_frame_cb_t cb)
+{
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	peer.frame_cb = cb;
+	k_mutex_unlock(&peer_lock);
+}
 
 static void beat_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
@@ -156,6 +181,68 @@ static ssize_t write_beat(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 	return len;
 }
 
+static void frame_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	ARG_UNUSED(attr);
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	peer.frame_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
+	k_mutex_unlock(&peer_lock);
+	LOG_INF("BLE peer frame notify %s", value == BT_GATT_CCC_NOTIFY ? "on" : "off");
+}
+
+static ssize_t write_frame(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
+			   uint16_t len, uint16_t offset, uint8_t flags)
+{
+	unsigned int index = bt_conn_index(conn);
+	size_t frame_len = 0U;
+	int ret;
+
+	ARG_UNUSED(attr);
+	ARG_UNUSED(flags);
+
+	if (offset != 0U) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if (index >= MESHTASTIC_BLE_REG_SLOTS) {
+		return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+	}
+
+	/* Like a beat, a frame chunk is peer evidence — a phone never touches
+	 * this characteristic. */
+	ret = meshtastic_ble_classify_peer_evidence(index);
+	if (ret == -EBUSY) {
+		k_mutex_lock(&peer_lock, K_FOREVER);
+		peer.stats.hello_rejected_late++;
+		k_mutex_unlock(&peer_lock);
+		LOG_WRN("BLE conn %u: frame chunk on a phone-classified link, ignored", index);
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	} else if (ret == 0) {
+		LOG_INF("BLE conn %u classified peer (frame chunk)", index);
+	}
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	ret = meshtastic_ble_peer_reasm_ingest(&peer.frame_rx[index], buf, len, &frame_len);
+	if (ret == 1) {
+		peer.stats.frame_rx_frames++;
+		LOG_DBG("BLE peer frame rx: %zu bytes (conn %u)", frame_len, index);
+		if (peer.frame_cb != NULL) {
+			/* Contract (meshtastic_ble_peer.h): cb runs here with
+			 * the peer lock held and must only copy/queue. */
+			peer.frame_cb(index, peer.frame_rx[index].frame, frame_len);
+		}
+	} else if (ret < 0) {
+		peer.stats.frame_rx_rejected++;
+		LOG_WRN("BLE peer frame chunk rejected (%d, len=%u, conn %u)", ret, len, index);
+	}
+	k_mutex_unlock(&peer_lock);
+
+	if (ret < 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	}
+	return len;
+}
+
 BT_GATT_SERVICE_DEFINE(meshtastic_peer_svc,
 		       BT_GATT_PRIMARY_SERVICE(&peer_service_uuid.uuid),
 		       BT_GATT_CHARACTERISTIC(&peer_beat_uuid.uuid,
@@ -163,7 +250,13 @@ BT_GATT_SERVICE_DEFINE(meshtastic_peer_svc,
 						      BT_GATT_CHRC_WRITE_WITHOUT_RESP |
 						      BT_GATT_CHRC_NOTIFY,
 					      BT_GATT_PERM_WRITE, NULL, write_beat, NULL),
-		       BT_GATT_CCC(beat_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE));
+		       BT_GATT_CCC(beat_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+		       BT_GATT_CHARACTERISTIC(&peer_frame_uuid.uuid,
+					      BT_GATT_CHRC_WRITE |
+						      BT_GATT_CHRC_WRITE_WITHOUT_RESP |
+						      BT_GATT_CHRC_NOTIFY,
+					      BT_GATT_PERM_WRITE, NULL, write_frame, NULL),
+		       BT_GATT_CCC(frame_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE));
 
 int meshtastic_ble_peer_send_beat(void)
 {
@@ -201,6 +294,51 @@ bool meshtastic_ble_peer_notify_ready(void)
 	return peer.notify_enabled;
 }
 
+bool meshtastic_ble_peer_frame_notify_ready(void)
+{
+	return peer.frame_notify_enabled;
+}
+
+int meshtastic_ble_peer_frame_notify(const uint8_t *frame, size_t len)
+{
+	/* Chunk at the guaranteed minimum ATT payload rather than the live
+	 * MTU: correct on every link by construction (the codec's whole
+	 * point), merely more chunks when an MTU exchange has succeeded.
+	 * Per-conn MTU lookup is an optimization to measure at M3. */
+	uint8_t buf[MESHTASTIC_BLE_PEER_CHUNK_MTU23];
+	struct meshtastic_ble_peer_chunker ck;
+	int n;
+	int ret;
+
+	if (!peer.frame_notify_enabled) {
+		return -ENOTCONN;
+	}
+
+	ret = meshtastic_ble_peer_chunker_start(&ck, frame, len);
+	if (ret < 0) {
+		return ret;
+	}
+
+	while ((n = meshtastic_ble_peer_chunker_next(&ck, buf, sizeof(buf))) > 0) {
+		ret = bt_gatt_notify(NULL,
+				     &meshtastic_peer_svc.attrs[MESHTASTIC_PEER_ATTR_FRAME_VALUE],
+				     buf, (uint16_t)n);
+		if (ret != 0) {
+			/* Frame abandoned mid-flight; the receiver's partial
+			 * dies on our next FIRST chunk. */
+			k_mutex_lock(&peer_lock, K_FOREVER);
+			peer.stats.frame_tx_failed++;
+			k_mutex_unlock(&peer_lock);
+			return ret;
+		}
+	}
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	peer.stats.frame_tx_frames++;
+	k_mutex_unlock(&peer_lock);
+	return 0;
+}
+
 bool meshtastic_ble_peer_rx_get(unsigned int index, struct meshtastic_ble_peer_rx *out,
 				int64_t *last_ms)
 {
@@ -236,6 +374,7 @@ void meshtastic_ble_peer_conn_down(unsigned int index)
 
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	meshtastic_ble_peer_rx_reset(&peer.rx[index]);
+	meshtastic_ble_peer_reasm_reset(&peer.frame_rx[index]);
 	k_mutex_unlock(&peer_lock);
 }
 
