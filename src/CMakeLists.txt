@@ -88,6 +88,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_admin.c
     meshtastic_admin_session.c
   )
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN_CLIENT meshtastic_admin_client.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE
     meshtastic_ble.c
     meshtastic_ble_registry.c

@@ -32,6 +32,7 @@
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
 
+#include "meshtastic_admin_client.h"
 #include "meshtastic_admin_session.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
@@ -975,6 +976,7 @@ void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 	meshtastic_Routing_Error auth_err = meshtastic_Routing_Error_NOT_AUTHORIZED;
 	uint32_t from;
 	uint32_t id;
+	uint32_t request_id;
 	bool want_ack;
 	uint8_t channel_index;
 	bool pki_encrypted;
@@ -999,10 +1001,20 @@ void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 			     : pkt->channel_index;
 	pki_encrypted = mesh ? mesh->pki_encrypted : pkt->pki_encrypted;
 	via_mqtt = mesh ? mesh->via_mqtt : pkt->via_mqtt;
+	request_id = mesh ? mesh->decoded.request_id : pkt->request_id;
 	payload = mesh ? mesh->decoded.payload.bytes : pkt->payload;
 	payload_len = mesh ? mesh->decoded.payload.size : pkt->payload_len;
 
 	if (payload == NULL && payload_len != 0U) {
+		return;
+	}
+
+	/* A response to a request WE originated (agents-xhli.3): consumed by the
+	 * client before the admin_key gate — the target we queried is not
+	 * required to hold OUR key in ITS admin list, and its identity is
+	 * already proven by the PKC decrypt (checked inside). */
+	if (meshtastic_admin_client_on_admin(from, request_id, pki_encrypted, payload,
+					     payload_len)) {
 		return;
 	}
 

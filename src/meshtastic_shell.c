@@ -27,6 +27,7 @@
 
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
+#include "meshtastic_admin_client.h"
 #endif
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 #include <zephyr/bluetooth/addr.h>
@@ -2983,6 +2984,188 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_BLE_PEER */
 
+#if defined(CONFIG_MESHTASTIC_ADMIN)
+/* meshtastic admin trust [<node> [off]] — manage SecurityConfig.admin_key by
+ * NodeDB lookup: "trust that node as my remote admin". The headless-bench
+ * equivalent of the app's key-entry screen — the key comes from the target's
+ * own NodeInfo broadcast, so trust-on-first-use applies: verify the node id
+ * belongs to hardware you hold before trusting it. */
+static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
+{
+	meshtastic_Config cfg;
+	meshtastic_Config_SecurityConfig *sec;
+	uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
+	uint32_t node_num;
+	bool remove;
+	pb_size_t match;
+	int ret;
+
+	ret = meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg);
+	if (ret < 0 || cfg.which_payload_variant != meshtastic_Config_security_tag) {
+		shell_error(sh, "security config unavailable (%d)", ret);
+		return ret < 0 ? ret : -EIO;
+	}
+	sec = &cfg.payload_variant.security;
+
+	if (argc == 1U) {
+		shell_print(sh, "admin keys: %u/%u", (unsigned int)sec->admin_key_count,
+			    (unsigned int)ARRAY_SIZE(sec->admin_key));
+		for (pb_size_t i = 0; i < sec->admin_key_count; i++) {
+			shell_print(sh, "  [%u] %02x%02x%02x%02x… (%u bytes)", (unsigned int)i,
+				    sec->admin_key[i].bytes[0], sec->admin_key[i].bytes[1],
+				    sec->admin_key[i].bytes[2], sec->admin_key[i].bytes[3],
+				    (unsigned int)sec->admin_key[i].size);
+		}
+		return 0;
+	}
+
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	shell_error(sh, "config writes are compiled out of this build");
+	ARG_UNUSED(remove);
+	ARG_UNUSED(match);
+	ARG_UNUSED(node_num);
+	ARG_UNUSED(key);
+	return -ENOTSUP;
+#else
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+
+	ret = parse_u32(sh, argv[1], &node_num);
+	if (ret < 0) {
+		return ret;
+	}
+	remove = (argc >= 3U && strcmp(argv[2], "off") == 0);
+
+	if (meshtastic_nodedb_copy_pubkey(node_num, key) != 0) {
+		shell_error(sh, "no public key for 0x%08x in the NodeDB (heard its NodeInfo?)",
+			    node_num);
+		return -ENOENT;
+	}
+
+	match = sec->admin_key_count;
+	for (pb_size_t i = 0; i < sec->admin_key_count; i++) {
+		if (sec->admin_key[i].size == sizeof(key) &&
+		    memcmp(sec->admin_key[i].bytes, key, sizeof(key)) == 0) {
+			match = i;
+			break;
+		}
+	}
+
+	if (remove) {
+		if (match == sec->admin_key_count) {
+			shell_print(sh, "0x%08x was not trusted", node_num);
+			return 0;
+		}
+		for (pb_size_t i = match; i + 1U < sec->admin_key_count; i++) {
+			sec->admin_key[i] = sec->admin_key[i + 1U];
+		}
+		sec->admin_key_count--;
+	} else {
+		if (match != sec->admin_key_count) {
+			shell_print(sh, "0x%08x already trusted", node_num);
+			return 0;
+		}
+		if (sec->admin_key_count >= ARRAY_SIZE(sec->admin_key)) {
+			shell_error(sh, "admin key list full (%u)",
+				    (unsigned int)ARRAY_SIZE(sec->admin_key));
+			return -ENOSPC;
+		}
+		sec->admin_key[sec->admin_key_count].size = sizeof(key);
+		memcpy(sec->admin_key[sec->admin_key_count].bytes, key, sizeof(key));
+		sec->admin_key_count++;
+	}
+
+	ret = meshtastic_config_store_set_config(&cfg);
+	if (ret < 0) {
+		shell_error(sh, "config write failed (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "0x%08x %s as remote admin (%u key%s)", node_num,
+		    remove ? "untrusted" : "trusted", (unsigned int)sec->admin_key_count,
+		    sec->admin_key_count == 1U ? "" : "s");
+	return 0;
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+}
+
+#if defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
+/* meshtastic admin remote <node> get owner
+ *                        <node> get config <type 0-8>
+ *                        <node> set-owner <long> [short]
+ * Responses arrive asynchronously on the RX path and print as `admin client:`
+ * log lines; a getter also caches the target's session passkey for the
+ * mutating op that follows. */
+static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t node_num;
+	int ret;
+
+	if (argc < 3U) {
+		goto usage;
+	}
+	ret = parse_u32(sh, argv[1], &node_num);
+	if (ret < 0) {
+		return ret;
+	}
+
+	if (strcmp(argv[2], "get") == 0 && argc >= 4U) {
+		if (strcmp(argv[3], "owner") == 0) {
+			ret = meshtastic_admin_client_get_owner(node_num);
+		} else if (strcmp(argv[3], "config") == 0 && argc >= 5U) {
+			uint32_t type;
+
+			ret = parse_u32(sh, argv[4], &type);
+			if (ret < 0) {
+				return ret;
+			}
+			ret = meshtastic_admin_client_get_config(node_num, type);
+		} else {
+			goto usage;
+		}
+	} else if (strcmp(argv[2], "set-owner") == 0 && argc >= 4U) {
+		if (!meshtastic_admin_client_have_passkey(node_num)) {
+			shell_error(sh, "no fresh session passkey for 0x%08x — run "
+				    "`meshtastic admin remote 0x%08x get owner` first",
+				    node_num, node_num);
+			return -EACCES;
+		}
+		ret = meshtastic_admin_client_set_owner(node_num, argv[3],
+							argc >= 5U ? argv[4] : NULL);
+	} else {
+		goto usage;
+	}
+
+	if (ret < 0) {
+		shell_error(sh, "request failed (%d)%s", ret,
+			    ret == -EACCES ? " — no public key / passkey" : "");
+		return ret;
+	}
+	shell_print(sh, "request sent — watch for `admin client:` log lines");
+	return 0;
+
+usage:
+	shell_error(sh, "usage: meshtastic admin remote <node> get owner\n"
+		    "       meshtastic admin remote <node> get config <type 0-8>\n"
+		    "       meshtastic admin remote <node> set-owner <long> [short]");
+	return -EINVAL;
+}
+#endif /* CONFIG_MESHTASTIC_ADMIN_CLIENT */
+
+SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_admin_cmds,
+			       SHELL_CMD(trust, NULL,
+					 SHELL_HELP("List/manage trusted remote-admin keys.",
+						    "[<node> [off]]"),
+					 cmd_admin_trust),
+#if defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
+			       SHELL_CMD(remote, NULL,
+					 SHELL_HELP("Administer a peer node (PKC, any bearer).",
+						    "<node> get owner | get config <t> | "
+						    "set-owner <long> [short]"),
+					 cmd_admin_remote),
+#endif
+			       SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_ADMIN */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
@@ -3020,6 +3203,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  NULL),
 	SHELL_CMD(device, &meshtastic_device_cmds,
 		  SHELL_HELP("Device role and rebroadcast commands.", NULL), NULL),
+#if defined(CONFIG_MESHTASTIC_ADMIN)
+	SHELL_CMD(admin, &meshtastic_admin_cmds,
+		  SHELL_HELP("Remote-admin trust and client commands.", NULL), NULL),
+#endif
 	SHELL_CMD(lora, NULL,
 		  SHELL_HELP("Show or set the LoRa modem preset (reboot to apply) "
 			     "or the TX-enable switch (applies live).",

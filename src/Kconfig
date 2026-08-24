@@ -50,6 +50,20 @@ config MESHTASTIC_ADMIN
 	  Persistence of writes across reboot additionally requires
 	  MESHTASTIC_SETTINGS; without it writes apply live but are RAM-only.
 
+config MESHTASTIC_ADMIN_CLIENT
+	bool "Remote-admin client (originate admin requests to peer nodes)"
+	depends on MESHTASTIC_ADMIN && MESHTASTIC_PKI
+	default y
+	help
+	  Originate AdminMessage requests to another node — the role the phone
+	  app/CLI plays against stock firmware, from this node's shell
+	  (`meshtastic admin remote …`). Requests are ordinary PKC-encrypted
+	  ADMIN_APP unicasts, so they cross whatever bearer the TX path picks
+	  (LoRa, or a live BLE peer link). The target authorizes against its
+	  SecurityConfig.admin_key (`meshtastic admin trust <node>` on the
+	  target adds this node's key); mutating ops carry the target's rotating
+	  session passkey obtained from a preceding get.
+
 menuconfig MESHTASTIC_SETTINGS
 	bool "Persist Meshtastic configuration with Zephyr settings"
 	select SETTINGS

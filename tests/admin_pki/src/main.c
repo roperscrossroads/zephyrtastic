@@ -36,8 +36,10 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_admin_client.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_pki.h"
+#include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
 #include "vectors/meshtastic_vectors.h"
 
@@ -1072,3 +1074,100 @@ ZTEST(admin_pki, test_pki_nonce_matches_reference_layout)
 								      0x00 }),
 			  sizeof(nonce), "PKC nonce layout must match reference initNonce(extraNonce!=0)");
 }
+
+#if defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
+/* The remote-admin CLIENT end to end (agents-xhli.3): our get request leaves
+ * as a real PKC unicast; the peer's (forged, genuinely PKC-encrypted) response
+ * comes back through the full RX path — router, decrypt, admin handle_remote —
+ * where the client consumes it by sender + request_id BEFORE the admin_key
+ * gate (our admin_key list is empty here: the target we query is not required
+ * to hold our key) and caches the session passkey the mutating op needs. */
+ZTEST(admin_pki, test_admin_client_get_then_set_roundtrip)
+{
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	meshtastic_Data data = meshtastic_Data_init_zero;
+	uint8_t enc[MESHTASTIC_MAX_PAYLOAD_LEN + MESHTASTIC_PKI_OVERHEAD];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	struct meshtastic_wire_header *whdr = (struct meshtastic_wire_header *)wire;
+	const struct meshtastic_wire_header *txh;
+	pb_ostream_t os;
+	uint32_t req_id;
+	size_t enc_len = 0;
+	const uint32_t resp_id = 0x0AD1C101U;
+
+	set_admin_key(NULL, 0U);
+
+	/* Client-side gate: no passkey, no mutating op. */
+	zassert_false(meshtastic_admin_client_have_passkey(PEER_NODE_ID));
+	zassert_equal(meshtastic_admin_client_set_owner(PEER_NODE_ID, "X", "Y"), -EACCES,
+		      "mutating op without a passkey must be refused client-side");
+
+	/* The get leaves as PKC (0x00 wire marker) addressed to the peer; its
+	 * packet id — plaintext in the header — is the response correlation. */
+	mock_lora.send_count = 0U;
+	zassert_ok(meshtastic_admin_client_get_owner(PEER_NODE_ID), "get_owner send failed");
+	k_sleep(K_MSEC(50));
+	zassert_equal(mock_lora.send_count, 1U, "expected exactly the request on air");
+	txh = (const struct meshtastic_wire_header *)mock_lora.last_tx;
+	zassert_equal(sys_le32_to_cpu(txh->dest), PEER_NODE_ID, "request must target the peer");
+	zassert_equal(txh->channel, 0x00U, "client request must be PKC");
+	req_id = sys_le32_to_cpu(txh->id);
+
+	/* The peer's response: owner + its session passkey, request_id set,
+	 * genuinely PKC-encrypted via the ECDH-symmetry trick. */
+	resp.which_payload_variant = meshtastic_AdminMessage_get_owner_response_tag;
+	strcpy(resp.payload_variant.get_owner_response.long_name, "Peer Node");
+	strcpy(resp.payload_variant.get_owner_response.short_name, "PEER");
+	resp.session_passkey.size = MESHTASTIC_ADMIN_SESSION_KEY_LEN;
+	memset(resp.session_passkey.bytes, 0x5a, MESHTASTIC_ADMIN_SESSION_KEY_LEN);
+
+	data.portnum = (meshtastic_PortNum)MESHTASTIC_PORT_ADMIN;
+	data.request_id = req_id;
+	os = pb_ostream_from_buffer(data.payload.bytes, sizeof(data.payload.bytes));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &resp), "admin encode failed");
+	data.payload.size = (pb_size_t)os.bytes_written;
+
+	{
+		uint8_t plain[MESHTASTIC_MAX_PAYLOAD_LEN];
+		pb_ostream_t dos = pb_ostream_from_buffer(plain, sizeof(plain));
+
+		zassert_true(pb_encode(&dos, meshtastic_Data_fields, &data), "Data encode failed");
+		zassert_ok(meshtastic_pki_encrypt(PEER_NODE_ID, PEER_NODE_ID, resp_id, plain,
+						  dos.bytes_written, enc, sizeof(enc), &enc_len),
+			   "PKC encrypt (forged response) failed");
+	}
+
+	whdr->dest = sys_cpu_to_le32(TEST_NODE_ID);
+	whdr->src = sys_cpu_to_le32(PEER_NODE_ID);
+	whdr->id = sys_cpu_to_le32(resp_id);
+	whdr->flags = 3U | (3U << MESHTASTIC_FLAGS_HOP_START_SHIFT);
+	whdr->channel = 0x00U;
+	whdr->next_hop = 0U;
+	whdr->relay_node = 0U;
+	memcpy(wire + MESHTASTIC_HDR_LEN, enc, enc_len);
+
+	mock_lora.send_count = 0U;
+	inject_rx_frame(wire, MESHTASTIC_HDR_LEN + (uint32_t)enc_len);
+	k_sleep(K_MSEC(50));
+
+	/* Consumed by the client: passkey cached — and NOT refused by the
+	 * server gate (an unauthorized-admin NAK would have gone on air). */
+	zassert_true(meshtastic_admin_client_have_passkey(PEER_NODE_ID),
+		     "response must cache the target's session passkey");
+	zassert_equal(mock_lora.send_count, 0U,
+		      "a client response must not be NAK'd by the server admin gate");
+
+	/* The mutating op now leaves, carrying the cached passkey. */
+	mock_lora.send_count = 0U;
+	zassert_ok(meshtastic_admin_client_set_owner(PEER_NODE_ID, "New Name", "NEW"),
+		   "set_owner send failed");
+	k_sleep(K_MSEC(50));
+	zassert_true(mock_lora.send_count >= 1U, "set_owner never reached the radio");
+	txh = (const struct meshtastic_wire_header *)mock_lora.last_tx;
+	zassert_equal(txh->channel, 0x00U, "set_owner must be PKC too");
+
+	/* set_owner is want_ack: drop the reliable tracking so its retries
+	 * cannot pollute a later test's send counts. */
+	meshtastic_reliable_reset();
+}
+#endif /* CONFIG_MESHTASTIC_ADMIN_CLIENT */
