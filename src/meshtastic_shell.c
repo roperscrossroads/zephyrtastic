@@ -3231,11 +3231,17 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "walk    : pulls=%u timed_out=%u vector tx=%u rx=%u entry tx=%u",
 		    st.pull_started, st.pull_timed_out, st.vector_tx, st.vector_rx,
 		    st.entry_tx);
-	shell_print(sh, "merge   : applied=%u stale=%u REFUSED=%u unsolicited=%u busy=%u",
+	shell_print(sh, "merge   : applied=%u stale=%u REFUSED=%u unsolicited=%u busy=%u%s",
 		    st.entry_rx_applied, st.entry_rx_stale, st.entry_rx_refused,
-		    st.rx_unsolicited, st.tx_busy);
-	shell_print(sh, "config  : sections applied=%u kept_local=%u", st.sections_applied,
-		    st.sections_kept_local);
+		    st.rx_unsolicited, st.tx_busy,
+		    st.entry_rx_no_space ? "  ** DOCUMENT TABLE FULL — entries are being "
+					   "dropped and re-requested forever **"
+					 : "");
+	shell_print(sh, "config  : sections applied=%u kept_local=%u%s", st.sections_applied,
+		    st.sections_kept_local,
+		    st.sections_held ? "  ** a fleet LoRa section is REPLICATED BUT HELD "
+				       "(applying it would re-key this radio; see §7.9) **"
+				     : "");
 	shell_print(sh, "rx      : wrong_channel=%u undecodable=%u not_implemented=%u",
 		    st.rx_wrong_channel, st.rx_undecodable, st.rx_not_implemented);
 

@@ -271,3 +271,231 @@ ZTEST(cluster_doc, test_max_stamp_and_capacity)
 
 	zassert_equal(meshtastic_cluster_doc_accept(&doc, &existing, &s, false, v, 1), 1);
 }
+
+/* ==========================================================================
+ * ADVERSARIAL SET — written to BREAK the document, not to confirm it works.
+ *
+ * The happy-path tests above prove the merge rule. These probe the edges an
+ * attacker or a buggy peer actually reaches: a full table, hostile key
+ * orderings, payload boundaries, and tombstone/value races. Where one of these
+ * documents a REAL weakness rather than a defended one, it says so in the
+ * assertion message — a test that pins bad behaviour is only honest if it
+ * admits that is what it is doing.
+ * ========================================================================== */
+
+/*
+ * THE ENOSPC TRAP. A full table refuses new keys, but the diff predicate does
+ * not know that: wants() still says "pull this", so the walk asks for a key
+ * every round, is answered, fails to store it, and asks again forever. Nothing
+ * crashes and nothing corrupts — but a fleet whose document outgrows one
+ * member's table burns airtime on that member indefinitely, and the walk never
+ * reports why.
+ *
+ * That is a property of the two functions together, so it belongs here rather
+ * than in the module: if a future change makes wants() capacity-aware, this
+ * test is what says so out loud.
+ */
+ZTEST(cluster_doc, test_full_table_still_wants_what_it_cannot_store)
+{
+	struct meshtastic_hlc_stamp s;
+	uint8_t v[] = {1};
+
+	for (uint16_t i = 0U; i < CAP; i++) {
+		struct meshtastic_cluster_key k = base_key(i);
+
+		s = at(100 + i, NODE_A);
+		zassert_equal(meshtastic_cluster_doc_accept(&doc, &k, &s, false, v, 1), 1);
+	}
+
+	struct meshtastic_cluster_key unseen = base_key(999);
+
+	s = at(500, NODE_B);
+	zassert_true(meshtastic_cluster_doc_wants(&doc, &unseen, &s),
+		     "a key we lack is wanted regardless of capacity");
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &unseen, &s, false, v, 1), -ENOSPC);
+	zassert_true(meshtastic_cluster_doc_wants(&doc, &unseen, &s),
+		     "KNOWN: still wanted after ENOSPC — the walk will re-request it every "
+		     "round with no way to store it. Bounded by the digest cadence, never "
+		     "resolved. Capacity-aware wants() is the fix if this ever bites.");
+}
+
+/* Sorted insert under hostile orderings. The digest hashes rows in index order,
+ * so two nodes that received the same rows in different orders MUST end up with
+ * the same index order or they will never agree — and the walk resumes by
+ * index, so a mis-ordered table also mis-resumes. */
+ZTEST(cluster_doc, test_sort_order_survives_hostile_insert_sequences)
+{
+	static struct meshtastic_cluster_entry storage2[CAP];
+	struct meshtastic_cluster_doc doc2;
+	struct meshtastic_cluster_key keys[] = {
+		node_key(NODE_B, SEC_DEVICE), base_key(SEC_DISPLAY),
+		node_key(NODE_A, SEC_DISPLAY), base_key(SEC_DEVICE),
+		node_key(NODE_B, SEC_DISPLAY), node_key(NODE_A, SEC_DEVICE),
+	};
+	struct meshtastic_hlc_stamp s = at(100, NODE_A);
+	uint8_t v[] = {7};
+
+	meshtastic_cluster_doc_init(&doc2, storage2, CAP);
+
+	/* Forwards into one, backwards into the other. */
+	for (size_t i = 0; i < ARRAY_SIZE(keys); i++) {
+		zassert_equal(meshtastic_cluster_doc_accept(&doc, &keys[i], &s, false, v, 1), 1);
+	}
+	for (size_t i = ARRAY_SIZE(keys); i > 0; i--) {
+		zassert_equal(meshtastic_cluster_doc_accept(&doc2, &keys[i - 1], &s, false, v, 1),
+			      1);
+	}
+
+	zassert_equal(doc.count, doc2.count);
+	for (uint16_t i = 0U; i < doc.count; i++) {
+		zassert_equal(meshtastic_cluster_key_cmp(&doc.entries[i].key,
+							 &doc2.entries[i].key),
+			      0, "row %u differs — insert order leaked into the table", i);
+		if (i > 0U) {
+			zassert_true(meshtastic_cluster_key_cmp(&doc.entries[i - 1].key,
+								&doc.entries[i].key) < 0,
+				     "table is not strictly ascending at row %u", i);
+		}
+	}
+	zassert_equal(meshtastic_cluster_doc_hash(&doc), meshtastic_cluster_doc_hash(&doc2));
+}
+
+/* The digest hashes (key, stamp, tombstone) — so anything that changes a key
+ * must change the hash, or two different documents advertise as identical and
+ * the fleet silently stops converging. Probe each key field independently. */
+ZTEST(cluster_doc, test_hash_is_sensitive_to_every_key_field)
+{
+	static struct meshtastic_cluster_entry storage2[CAP];
+	struct meshtastic_cluster_doc doc2;
+	struct meshtastic_hlc_stamp s = at(100, NODE_A);
+	uint8_t v[] = {1};
+	struct meshtastic_cluster_key a = node_key(NODE_A, SEC_DEVICE);
+	uint32_t base_hash;
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &a, &s, false, v, 1), 1);
+	base_hash = meshtastic_cluster_doc_hash(&doc);
+
+	/* Same section + node, BASE layer instead of NODE. */
+	meshtastic_cluster_doc_init(&doc2, storage2, CAP);
+	struct meshtastic_cluster_key layer_flipped = base_key(SEC_DEVICE);
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc2, &layer_flipped, &s, false, v, 1), 1);
+	zassert_not_equal(base_hash, meshtastic_cluster_doc_hash(&doc2), "layer must hash");
+
+	/* Same layer + section, different owner. */
+	meshtastic_cluster_doc_init(&doc2, storage2, CAP);
+	struct meshtastic_cluster_key owner_flipped = node_key(NODE_B, SEC_DEVICE);
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc2, &owner_flipped, &s, false, v, 1), 1);
+	zassert_not_equal(base_hash, meshtastic_cluster_doc_hash(&doc2), "node_id must hash");
+
+	/* Same key, different section. */
+	meshtastic_cluster_doc_init(&doc2, storage2, CAP);
+	struct meshtastic_cluster_key sec_flipped = node_key(NODE_A, SEC_DISPLAY);
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc2, &sec_flipped, &s, false, v, 1), 1);
+	zassert_not_equal(base_hash, meshtastic_cluster_doc_hash(&doc2), "section must hash");
+
+	/* Same key, stamp differing only in the author. Two nodes writing in the
+	 * same millisecond with the same counter are separated by node_id alone —
+	 * if that does not reach the hash, they agree while holding different
+	 * values. */
+	meshtastic_cluster_doc_init(&doc2, storage2, CAP);
+	struct meshtastic_hlc_stamp other_author = at(100, NODE_B);
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc2, &a, &other_author, false, v, 1), 1);
+	zassert_not_equal(base_hash, meshtastic_cluster_doc_hash(&doc2),
+			  "stamp author must hash");
+
+	/* Payloads deliberately do NOT hash (a byte-identical re-encode must not
+	 * look like divergence) — pin that, because it is a choice, not an
+	 * oversight, and it means the digest cannot detect a payload that
+	 * differs under an identical stamp. */
+	meshtastic_cluster_doc_init(&doc2, storage2, CAP);
+	uint8_t other_v[] = {0xFF};
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc2, &a, &s, false, other_v, 1), 1);
+	zassert_equal(base_hash, meshtastic_cluster_doc_hash(&doc2),
+		      "payload must NOT hash — the stamp is the version (by design)");
+}
+
+ZTEST(cluster_doc, test_payload_length_boundary)
+{
+	struct meshtastic_cluster_key k = base_key(SEC_DEVICE);
+	struct meshtastic_hlc_stamp s = at(100, NODE_A);
+	static uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX + 1];
+
+	memset(big, 0xA5, sizeof(big));
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &k, &s, false, big,
+						    MESHTASTIC_CLUSTER_PAYLOAD_MAX),
+		      1, "exactly the cap must fit");
+	zassert_equal(meshtastic_cluster_doc_find(&doc, &k)->payload_len,
+		      MESHTASTIC_CLUSTER_PAYLOAD_MAX);
+
+	s = at(200, NODE_A);
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &k, &s, false, big, sizeof(big)),
+		      -EINVAL, "one over the cap must be refused, not truncated");
+	/* And the refusal must leave the stored entry untouched — a rejected
+	 * write that half-applies is worse than one that never arrived. */
+	zassert_equal(meshtastic_cluster_doc_find(&doc, &k)->stamp.physical_ms, 100);
+}
+
+/* Tombstone races. A tombstone is an ordinary versioned write, so an older
+ * value must lose to it and a newer value must resurrect over it. Getting this
+ * backwards would make unpin either un-undoable or useless. */
+ZTEST(cluster_doc, test_tombstone_is_just_another_version)
+{
+	struct meshtastic_cluster_key n = node_key(NODE_A, SEC_DISPLAY);
+	struct meshtastic_hlc_stamp s;
+	uint8_t v[] = {42};
+
+	s = at(200, NODE_A);
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &n, &s, true, NULL, 0), 1);
+
+	/* An older value arriving late must not undo the tombstone. */
+	s = at(100, NODE_B);
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &n, &s, false, v, 1), 0,
+		      "a stale value must not resurrect over a newer tombstone");
+	zassert_true(meshtastic_cluster_doc_find(&doc, &n)->tombstone);
+
+	/* A newer one must. */
+	s = at(300, NODE_B);
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &n, &s, false, v, 1), 1);
+	zassert_false(meshtastic_cluster_doc_find(&doc, &n)->tombstone);
+	zassert_equal(meshtastic_cluster_doc_effective(&doc, NODE_A, SEC_DISPLAY)->payload[0], 42);
+
+	/* And a tombstone can be re-applied over it. */
+	s = at(400, NODE_A);
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &n, &s, true, NULL, 0), 1);
+	zassert_is_null(meshtastic_cluster_doc_effective(&doc, NODE_A, SEC_DISPLAY));
+}
+
+/* An equal stamp from a DIFFERENT author is not equal — the total order breaks
+ * the tie on node_id — so two nodes writing in the same millisecond still pick
+ * the same winner independently. If this ever returned 0-and-keep, a fleet
+ * could split permanently on a simultaneous write. */
+ZTEST(cluster_doc, test_simultaneous_writers_break_the_tie_the_same_way)
+{
+	static struct meshtastic_cluster_entry storage2[CAP];
+	struct meshtastic_cluster_doc doc2;
+	struct meshtastic_cluster_key k = base_key(SEC_DEVICE);
+	struct meshtastic_hlc_stamp from_a = {.physical_ms = 100, .counter = 7, .node_id = NODE_A};
+	struct meshtastic_hlc_stamp from_b = {.physical_ms = 100, .counter = 7, .node_id = NODE_B};
+	uint8_t va[] = {0xAA};
+	uint8_t vb[] = {0xBB};
+
+	meshtastic_cluster_doc_init(&doc2, storage2, CAP);
+
+	/* Node 1 sees A then B; node 2 sees B then A. */
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &k, &from_a, false, va, 1), 1);
+	(void)meshtastic_cluster_doc_accept(&doc, &k, &from_b, false, vb, 1);
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc2, &k, &from_b, false, vb, 1), 1);
+	(void)meshtastic_cluster_doc_accept(&doc2, &k, &from_a, false, va, 1);
+
+	zassert_equal(meshtastic_cluster_doc_find(&doc, &k)->payload[0],
+		      meshtastic_cluster_doc_find(&doc2, &k)->payload[0],
+		      "a simultaneous write must resolve identically on both nodes");
+	zassert_equal(meshtastic_cluster_doc_hash(&doc), meshtastic_cluster_doc_hash(&doc2));
+}

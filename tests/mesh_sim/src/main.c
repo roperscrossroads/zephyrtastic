@@ -1838,6 +1838,20 @@ static void cluster_channel(bool on)
 		   "cluster channel set failed");
 }
 
+/* Scan the document for a key, using the same accessor the shell uses. */
+static bool doc_has(uint8_t layer, uint32_t node_id, uint16_t section)
+{
+	struct meshtastic_cluster_entry e;
+
+	for (uint16_t i = 0U; meshtastic_cluster_entry_get(i, &e); i++) {
+		if (e.key.layer == layer && e.key.node_id == node_id &&
+		    e.key.section == section) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* Teach this node PEER's public key the way the air does — a NodeInfo — then
  * name that key as an admin. PEER is now a master for the D4 gate. */
 static void trust_peer_as_master(bool trusted)
@@ -1896,6 +1910,39 @@ static void inject_cluster(const zephyrtastic_ClusterMessage *msg, uint32_t to, 
 	 * is listening until the radio comes back. */
 	wait_rx_armed();
 	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+}
+
+/*
+ * Inject a ClusterMessage over the PEER BEARER rather than the radio. The radio
+ * path needs an armed receiver, so injecting through it silently serialises
+ * against whatever the module is transmitting — which is fatal for any test
+ * about what happens to a request arriving MID-reply. The bearer has no such
+ * coupling, and a peer asking over BLE is an ordinary thing to happen.
+ */
+static void inject_cluster_bearer(const zephyrtastic_ClusterMessage *msg, uint32_t to,
+				  uint32_t id)
+{
+	uint8_t cbuf[zephyrtastic_ClusterMessage_size];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	pb_ostream_t os = pb_ostream_from_buffer(cbuf, sizeof(cbuf));
+	uint32_t wire_len;
+	struct meshtastic_packet pkt = {
+		.from = PEER_NODE_ID,
+		.to = to,
+		.id = id,
+		.portnum = MESHTASTIC_PORT_PRIVATE,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.channel_index = CLUSTER_CH,
+	};
+
+	zassert_true(pb_encode(&os, zephyrtastic_ClusterMessage_fields, msg), "encode failed");
+	pkt.payload = cbuf;
+	pkt.payload_len = os.bytes_written;
+	zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "wire build failed");
+	zassert_ok(meshtastic_radio_rx_inject(wire, (uint16_t)wire_len,
+					      MESHTASTIC_BEARER_BLE_PEER),
+		   "bearer inject failed");
 }
 
 /*
@@ -1967,6 +2014,19 @@ static size_t encode_display(uint32_t screen_on_secs, uint8_t *buf, size_t buf_l
 	return os.bytes_written;
 }
 
+/* An empty-but-well-formed Config for @p tag: two bytes on the wire (submessage
+ * tag + zero length), which is exactly what the bench's own promoted entries
+ * look like. Enough to satisfy the ingest check that payload IS its section. */
+static size_t encode_section(uint32_t tag, uint8_t *buf, size_t buf_len)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, buf_len);
+
+	cfg.which_payload_variant = (pb_size_t)tag;
+	zassert_true(pb_encode(&os, meshtastic_Config_fields, &cfg), "section encode failed");
+	return os.bytes_written;
+}
+
 static uint32_t stored_screen_on_secs(void)
 {
 	meshtastic_Config cfg;
@@ -1982,17 +2042,22 @@ ZTEST(mesh_sim, test_cluster_walk_converges_and_applies)
 {
 	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
 	struct meshtastic_cluster_stats before_st, after_st;
+	/* Newer than any stamp the adversarial set plants: ztest orders tests by
+	 * NAME, so those run first and this walk must still WIN the merge rather
+	 * than quietly losing LWW to leftovers. */
 	struct meshtastic_hlc_stamp base_stamp = {
-		.physical_ms = 1787600000000LL, .counter = 0U, .node_id = PEER_NODE_ID};
+		.physical_ms = 1950000000000LL, .counter = 0U, .node_id = PEER_NODE_ID};
 	struct meshtastic_hlc_stamp store_stamp;
 	uint32_t to = 0U;
 	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
 	size_t payload_len;
+	uint16_t before_count;
 
 	cluster_channel(true);
 	trust_peer_as_master(true);
 	wait_cluster_idle();
 	quiesce();
+	before_count = meshtastic_cluster_entry_count();
 	meshtastic_cluster_stats_get(&before_st);
 
 	/* 1. PEER advertises a document we do not have. */
@@ -2054,7 +2119,10 @@ ZTEST(mesh_sim, test_cluster_walk_converges_and_applies)
 	meshtastic_cluster_stats_get(&after_st);
 	zassert_equal(after_st.entry_rx_applied, before_st.entry_rx_applied + 1U,
 		      "the entry must have merged into the document");
-	zassert_equal(meshtastic_cluster_entry_count(), 1U, "the document must hold it");
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, meshtastic_Config_display_tag),
+		     "the document must hold it");
+	zassert_true(meshtastic_cluster_entry_count() >= before_count,
+		     "merging must never shrink the document");
 
 	/* 6. The point of all of it: the node is now RUNNING the fleet's value,
 	 * not merely storing a document that describes it. */
@@ -2079,7 +2147,7 @@ ZTEST(mesh_sim, test_cluster_walk_converges_and_applies)
 	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
 	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
 	msg.variant.digest.doc_hash = meshtastic_cluster_doc_hash_now();
-	msg.variant.digest.entry_count = 1U;
+	msg.variant.digest.entry_count = meshtastic_cluster_entry_count();
 	msg.variant.digest.has_max_stamp = true;
 	msg.variant.digest.max_stamp.physical_ms = base_stamp.physical_ms;
 	msg.variant.digest.max_stamp.node_id = PEER_NODE_ID;
@@ -2156,4 +2224,461 @@ ZTEST(mesh_sim, test_cluster_base_entry_from_untrusted_author_refused)
 
 	cluster_channel(false);
 }
+#endif /* CONFIG_MESHTASTIC_CLUSTER */
+
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+/* ==========================================================================
+ * Cluster M4b — ADVERSARIAL SET.
+ *
+ * Everything above proves the walk works when both ends behave. These assume
+ * the opposite: that whoever holds the cluster PSK is hostile, buggy, or a
+ * different firmware version, and that every field on the wire is
+ * attacker-chosen. §4 of the spec is explicit that a channel member is inside
+ * the trust boundary and cannot be cryptographically refuted — which makes it
+ * MORE important, not less, that a member cannot corrupt the document, wedge
+ * the walk, or re-key the radio of every node that hears it.
+ * ========================================================================== */
+
+/* Inject a ClusterEntry from PEER with full control of every field. */
+static void inject_entry(uint32_t section, zephyrtastic_ClusterLayer layer, uint32_t owner,
+			 int64_t ms, bool tombstone, const uint8_t *payload, size_t payload_len,
+			 uint32_t id)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+
+	msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+	msg.variant.entry.has_key = true;
+	msg.variant.entry.key.layer = layer;
+	msg.variant.entry.key.node_id = owner;
+	msg.variant.entry.key.section = section;
+	msg.variant.entry.has_stamp = true;
+	msg.variant.entry.stamp.physical_ms = ms;
+	msg.variant.entry.stamp.node_id = PEER_NODE_ID;
+	msg.variant.entry.tombstone = tombstone;
+	if (payload_len > 0U) {
+		msg.variant.entry.payload.size = (pb_size_t)payload_len;
+		memcpy(msg.variant.entry.payload.bytes, payload, payload_len);
+	}
+	inject_cluster(&msg, TEST_NODE_ID, id);
+}
+
+/*
+ * A battery of malformed frames from a trusted author. None may crash, none may
+ * enter the document, and the module must still be alive and converging
+ * afterwards — the last assertion is the one that matters, because "survived
+ * the frame" and "still works" are different claims.
+ */
+ZTEST(mesh_sim, test_cluster_hostile_frames_are_survived)
+{
+	zephyrtastic_ClusterMessage msg;
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint16_t before_count;
+	uint8_t good[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t good_len;
+	uint32_t id = 0x7200U;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	before_count = meshtastic_cluster_entry_count();
+	meshtastic_cluster_stats_get(&before_st);
+	good_len = encode_display(55U, good, sizeof(good));
+
+	/* An entry with no key, and one with no stamp. */
+	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+	msg.variant.entry.has_stamp = true;
+	msg.variant.entry.stamp.physical_ms = 1900000000000LL;
+	msg.variant.entry.stamp.node_id = PEER_NODE_ID;
+	msg.variant.entry.payload.size = (pb_size_t)good_len;
+	memcpy(msg.variant.entry.payload.bytes, good, good_len);
+	inject_cluster(&msg, TEST_NODE_ID, id++);
+
+	msg.variant.entry.has_key = true;
+	msg.variant.entry.key.section = meshtastic_Config_display_tag;
+	msg.variant.entry.has_stamp = false;
+	inject_cluster(&msg, TEST_NODE_ID, id++);
+
+	/* An UNSET stamp — an unversioned write that could never win LWW and so
+	 * must never enter the table (it would be unbeatable-by-nothing). */
+	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_BASE, 0U, 0,
+		     false, good, good_len, id++);
+
+	/* Structurally impossible keys: an owner on BASE, none on NODE. */
+	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_BASE,
+		     PEER_NODE_ID, 1900000000000LL, false, good, good_len, id++);
+	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_NODE, 0U,
+		     1900000000000LL, false, good, good_len, id++);
+
+	/* A tombstone carrying a payload, and a value carrying none. */
+	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_NODE,
+		     TEST_NODE_ID, 1900000000000LL, true, good, good_len, id++);
+	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     1900000000000LL, false, NULL, 0U, id++);
+
+	/* A section number that cannot be a Config tag at all. */
+	inject_entry(0xFFFFFFFFU, zephyrtastic_ClusterLayer_BASE, 0U, 1900000000000LL, false,
+		     good, good_len, id++);
+
+	/* Bytes that are not a ClusterMessage. */
+	{
+		uint8_t junk[24];
+		uint8_t wire[MESHTASTIC_PKT_MAX];
+		uint32_t wire_len;
+		struct meshtastic_packet pkt = {
+			.from = PEER_NODE_ID, .to = TEST_NODE_ID, .id = id++,
+			.portnum = MESHTASTIC_PORT_PRIVATE, .hop_limit = 3U, .hop_start = 3U,
+			.channel_index = CLUSTER_CH,
+		};
+
+		memset(junk, 0xFF, sizeof(junk));
+		pkt.payload = junk;
+		pkt.payload_len = sizeof(junk);
+		zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "build failed");
+		wait_rx_armed();
+		zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7),
+			   "inject failed");
+	}
+	k_sleep(K_MSEC(400));
+
+	zassert_equal(meshtastic_cluster_entry_count(), before_count,
+		      "no malformed frame may enter the document");
+	zassert_false(doc_has(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, meshtastic_Config_position_tag),
+		      "a structurally invalid key must not be stored");
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.rx_undecodable > before_st.rx_undecodable ||
+			     after_st.entry_rx_refused > before_st.entry_rx_refused,
+		     "malformed frames must be counted, not silently dropped");
+
+	/* STILL ALIVE: a well-formed entry after all that must still land. Note
+	 * it carries a POSITION payload — the display bytes used above would now
+	 * (correctly) be refused under a position key. */
+	good_len = encode_section(meshtastic_Config_position_tag, good, sizeof(good));
+	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     1900000000000LL, false, good, good_len, id++);
+	k_sleep(K_MSEC(300));
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, meshtastic_Config_position_tag),
+		     "the module must still accept good frames after a hostile burst");
+
+	cluster_channel(false);
+}
+
+/*
+ * A payload that is not the section its key claims. The allowlist is checked
+ * against key.section, so a well-formed key can carry ANY bytes — including a
+ * section the allowlist bans. Today's reconciler refuses to apply it (it checks
+ * which_payload_variant), but that is the wrong place to stop it: an entry that
+ * cannot ever be applied still replicates to the whole fleet, changes every
+ * node's document hash, and can never be removed at the BASE layer (base has no
+ * tombstone, by design). One frame, permanent fleet-wide junk.
+ */
+ZTEST(mesh_sim, test_cluster_entry_payload_must_match_its_claimed_section)
+{
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	uint16_t before_count;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	before_count = meshtastic_cluster_entry_count();
+
+	/* A NETWORK section — banned outright — wearing a display key. */
+	cfg.which_payload_variant = meshtastic_Config_network_tag;
+	cfg.payload_variant.network.wifi_enabled = true;
+	zassert_true(pb_encode(&os, meshtastic_Config_fields, &cfg), "encode failed");
+	inject_entry(meshtastic_Config_display_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     1900000000001LL, false, buf, os.bytes_written, 0x7301U);
+	k_sleep(K_MSEC(300));
+
+	zassert_equal(meshtastic_cluster_entry_count(), before_count,
+		      "an entry whose payload is not its claimed section must be refused at "
+		      "INGEST — the reconciler refusing to apply it is too late, because it "
+		      "has already replicated and BASE entries cannot be tombstoned");
+
+	/* And outright garbage. */
+	{
+		uint8_t junk[16];
+
+		memset(junk, 0xA5, sizeof(junk));
+		inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+			     1900000000002LL, false, junk, sizeof(junk), 0x7302U);
+	}
+	k_sleep(K_MSEC(300));
+	zassert_equal(meshtastic_cluster_entry_count(), before_count,
+		      "an undecodable payload must be refused at ingest");
+
+	cluster_channel(false);
+}
+
+/*
+ * The one-packet fleet kill. `promote` refuses to CREATE a base/lora entry
+ * because a missed preset change orphans a node permanently (§7.9, no straggler
+ * sweep yet) — but nothing stopped one ARRIVING, and the reconciler applied it.
+ * A single frame from anyone holding the cluster PSK would therefore re-key the
+ * radio of every node that heard it, and the nodes that missed it would be
+ * unreachable on the old preset with no way to be told.
+ *
+ * The fix has to keep the two halves apart: the document is replicated state
+ * and must still converge (refusing at ingest would strand this node's document
+ * from the fleet's forever), but the reconciler is the actuator and must not
+ * pull that trigger. Replicate, never apply.
+ */
+ZTEST(mesh_sim, test_cluster_lora_section_replicates_but_is_never_applied)
+{
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	meshtastic_Config before_lora;
+	meshtastic_Config after_lora;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &before_lora),
+		   "lora read failed");
+
+	cfg.which_payload_variant = meshtastic_Config_lora_tag;
+	cfg.payload_variant.lora.use_preset = true;
+	cfg.payload_variant.lora.modem_preset =
+		meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW;
+	cfg.payload_variant.lora.hop_limit = 7U;
+	cfg.payload_variant.lora.tx_enabled = true;
+	zassert_true(pb_encode(&os, meshtastic_Config_fields, &cfg), "encode failed");
+	inject_entry(meshtastic_Config_lora_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     1900000000003LL, false, buf, os.bytes_written, 0x7401U);
+	k_sleep(K_MSEC(400));
+
+	/* It REPLICATES — the document must still converge with the fleet. */
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, meshtastic_Config_lora_tag),
+		     "a lora entry must still replicate, or this node's document diverges "
+		     "from the fleet's permanently");
+
+	/* It is NEVER APPLIED. */
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &after_lora),
+		   "lora read failed");
+	zassert_equal(after_lora.payload_variant.lora.modem_preset,
+		      before_lora.payload_variant.lora.modem_preset,
+		      "one frame must never be able to re-key this node's radio");
+	zassert_equal(after_lora.payload_variant.lora.hop_limit,
+		      before_lora.payload_variant.lora.hop_limit,
+		      "no part of a doc-borne lora section may reach the store");
+
+	cluster_channel(false);
+}
+
+/*
+ * Vector-request abuse. Serving a stamp vector is the most expensive thing a
+ * peer can make us do — one ~30 byte request, up to a full walk of the document
+ * in reply. If a repeat request RESTARTS the walk, a peer can hold the radio
+ * indefinitely for the cost of one small frame each time.
+ */
+ZTEST(mesh_sim, test_cluster_vector_walk_cannot_be_restarted_mid_flight)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+
+	/* The document must span MORE THAN ONE CHUNK, or no walk is ever in
+	 * flight when the next request lands and the test cannot tell abuse
+	 * from ordinary back-to-back service. Five rows > 4 rows per frame. */
+	{
+		static const uint32_t secs[] = {
+			meshtastic_Config_device_tag,	 meshtastic_Config_position_tag,
+			meshtastic_Config_power_tag,	 meshtastic_Config_display_tag,
+			meshtastic_Config_bluetooth_tag,
+		};
+
+		for (size_t i = 0; i < ARRAY_SIZE(secs); i++) {
+			len = encode_section(secs[i], buf, sizeof(buf));
+			inject_entry(secs[i], zephyrtastic_ClusterLayer_BASE, 0U,
+				     1900000001000LL + (int64_t)i, false, buf, len,
+				     0x7501U + (uint32_t)i);
+			k_sleep(K_MSEC(120));
+		}
+	}
+	zassert_true(meshtastic_cluster_entry_count() > 4U,
+		     "need a multi-chunk document for this test to mean anything");
+	quiesce();
+	meshtastic_cluster_stats_get(&before_st);
+
+	/* One request over the radio to start a walk, then a burst down the
+	 * bearer while that walk is still between chunks. */
+	msg.which_variant = zephyrtastic_ClusterMessage_vector_req_tag;
+	inject_cluster(&msg, TEST_NODE_ID, 0x7510U);
+	k_sleep(K_MSEC(120)); /* chunk 0 is out; the gap before chunk 1 is open */
+	for (uint32_t i = 1U; i < 5U; i++) {
+		inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7510U + i);
+		k_sleep(K_MSEC(20));
+	}
+	k_sleep(K_MSEC(2000));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.tx_busy > before_st.tx_busy,
+		     "requests arriving while a walk is in flight must be REFUSED (counted "
+		     "busy), not allowed to rewind it — otherwise one small frame buys an "
+		     "unbounded reply and the walk never reaches the end of the document");
+	/* And the walk that was in flight must have finished rather than being
+	 * restarted: the whole document, once, not chunk 0 five times. */
+	zassert_true(after_st.vector_tx - before_st.vector_tx <= 3U,
+		     "%u chunks for a 2-chunk document means the walk was being rewound",
+		     after_st.vector_tx - before_st.vector_tx);
+
+	cluster_channel(false);
+}
+
+/* A stamp vector we never asked for must be ignored: acting on one would let
+ * any channel member steer which keys we go and fetch. */
+ZTEST(mesh_sim, test_cluster_unsolicited_vector_is_ignored)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	struct meshtastic_cluster_stats before_st, after_st;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	meshtastic_cluster_stats_get(&before_st);
+
+	msg.which_variant = zephyrtastic_ClusterMessage_vector_tag;
+	msg.variant.vector.entries_count = 1U;
+	msg.variant.vector.entries[0].has_key = true;
+	msg.variant.vector.entries[0].key.layer = zephyrtastic_ClusterLayer_BASE;
+	msg.variant.vector.entries[0].key.section = meshtastic_Config_display_tag;
+	msg.variant.vector.entries[0].has_stamp = true;
+	msg.variant.vector.entries[0].stamp.physical_ms = 1900000002000LL;
+	msg.variant.vector.entries[0].stamp.node_id = PEER_NODE_ID;
+	msg.variant.vector.offset = 0U;
+	msg.variant.vector.total = 1U;
+	inject_cluster(&msg, TEST_NODE_ID, 0x7601U);
+	k_sleep(K_MSEC(400));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.vector_rx, before_st.vector_rx,
+		      "a vector we did not ask for must not be consumed");
+	zassert_true(after_st.rx_unsolicited > before_st.rx_unsolicited,
+		     "and it must be counted as unsolicited");
+
+	cluster_channel(false);
+}
+/*
+ * TABLE EXHAUSTION. The document table is fixed and never evicts (§6 defers
+ * that), and a BASE entry can never be tombstoned (§2.1) — so anything that
+ * gets into the table is there until a factory reset. A per-node key names its
+ * owner, and authorship is satisfied by an author claiming to BE that owner,
+ * which a channel member can do for any id it invents. Nothing about the owner
+ * had to be real.
+ *
+ * That is a worse outcome than the config rewrite §4 already concedes: a
+ * rewrite is repairable by a master writing again, a full table is not
+ * repairable at all. It has to be bounded by what actually exists on the mesh.
+ */
+ZTEST(mesh_sim, test_cluster_entries_for_invented_nodes_cannot_fill_the_table)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint16_t before_count;
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	before_count = meshtastic_cluster_entry_count();
+	meshtastic_cluster_stats_get(&before_st);
+	len = encode_section(meshtastic_Config_display_tag, buf, sizeof(buf));
+	/* (the invented-node entries below are refused, so their section is
+	 * immaterial; the accepted ones further down use bluetooth deliberately) */
+
+	/* Node ids this mesh has never seen, each "authored" by itself so the
+	 * D4 owner rule is satisfied — which is exactly the point. */
+	for (uint32_t i = 0U; i < 8U; i++) {
+		zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+		uint32_t invented = 0xDEAD0000U + i;
+
+		msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+		msg.variant.entry.has_key = true;
+		msg.variant.entry.key.layer = zephyrtastic_ClusterLayer_NODE;
+		msg.variant.entry.key.node_id = invented;
+		msg.variant.entry.key.section = meshtastic_Config_display_tag;
+		msg.variant.entry.has_stamp = true;
+		msg.variant.entry.stamp.physical_ms = 1900000003000LL + (int64_t)i;
+		msg.variant.entry.stamp.node_id = invented; /* owner == author */
+		msg.variant.entry.payload.size = (pb_size_t)len;
+		memcpy(msg.variant.entry.payload.bytes, buf, len);
+		inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7700U + i);
+		k_sleep(K_MSEC(30));
+	}
+	k_sleep(K_MSEC(400));
+
+	zassert_equal(meshtastic_cluster_entry_count(), before_count,
+		      "entries for nodes that do not exist must not reach a table that "
+		      "never evicts");
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.entry_rx_refused >= before_st.entry_rx_refused + 8U,
+		     "and every one of them must be counted as refused");
+
+	/* A per-node entry for a node we HAVE met still works — the gate is
+	 * existence, not a ban on the layer. This node's own entry is the case
+	 * §2.3 depends on: a wiped node pulls its own override back. */
+	{
+		zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+
+		msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+		msg.variant.entry.has_key = true;
+		msg.variant.entry.key.layer = zephyrtastic_ClusterLayer_NODE;
+		msg.variant.entry.key.node_id = TEST_NODE_ID;
+		/* NOT display: a per-node entry is a PIN, and a pin legitimately
+		 * beats base at apply time. Leaving one on a section another
+		 * test reads through effective() would quietly change what that
+		 * test sees — which is the anti-shadowing design working, not a
+		 * bug, but it makes this test a landmine. */
+		msg.variant.entry.key.section = meshtastic_Config_bluetooth_tag;
+		msg.variant.entry.has_stamp = true;
+		msg.variant.entry.stamp.physical_ms = 1900000004000LL;
+		msg.variant.entry.stamp.node_id = TEST_NODE_ID;
+		len = encode_section(meshtastic_Config_bluetooth_tag, buf, sizeof(buf));
+		msg.variant.entry.payload.size = (pb_size_t)len;
+		memcpy(msg.variant.entry.payload.bytes, buf, len);
+		inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7710U);
+	}
+	k_sleep(K_MSEC(400));
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID,
+			     meshtastic_Config_bluetooth_tag),
+		     "a node must still be able to recover its OWN entry (§2.3)");
+
+	/* PEER is in the NodeDB (trust_peer_as_master seeded it), so its own
+	 * per-node entry is accepted too. */
+	{
+		zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+
+		msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+		msg.variant.entry.has_key = true;
+		msg.variant.entry.key.layer = zephyrtastic_ClusterLayer_NODE;
+		msg.variant.entry.key.node_id = PEER_NODE_ID;
+		msg.variant.entry.key.section = meshtastic_Config_bluetooth_tag;
+		msg.variant.entry.has_stamp = true;
+		msg.variant.entry.stamp.physical_ms = 1900000004100LL;
+		msg.variant.entry.stamp.node_id = PEER_NODE_ID;
+		msg.variant.entry.payload.size = (pb_size_t)len;
+		memcpy(msg.variant.entry.payload.bytes, buf, len);
+		inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7711U);
+	}
+	k_sleep(K_MSEC(400));
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_NODE, PEER_NODE_ID,
+			     meshtastic_Config_bluetooth_tag),
+		     "a node we have actually met must not be blocked by the gate");
+
+	cluster_channel(false);
+}
+
 #endif /* CONFIG_MESHTASTIC_CLUSTER */

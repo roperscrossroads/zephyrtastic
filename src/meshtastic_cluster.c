@@ -51,6 +51,8 @@
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #endif
+#include <zephyr/meshtastic/nodedb.h>
+
 #include "meshtastic_channels.h"
 #include "meshtastic_cluster.h"
 #include "meshtastic_cluster_doc.h"
@@ -152,6 +154,45 @@ static bool section_shareable(uint16_t section)
 	return false;
 }
 
+/*
+ * The payload must BE the section its key claims.
+ *
+ * The document is deliberately payload-agnostic — pure table logic, no protobuf
+ * — so if this check does not happen at the module boundary it happens nowhere,
+ * and the allowlist above is tested against key.section alone. A well-formed key
+ * could then carry anything: undecodable bytes, or a banned section wearing a
+ * permitted key.
+ *
+ * Refusing at APPLY time is not enough, which is the whole point. An entry the
+ * reconciler will never apply still replicates to every member, changes every
+ * document hash, and at the BASE layer can never be withdrawn — base has no
+ * tombstone by design (§2.1), so "no fleet default" is the key's ABSENCE and
+ * there is no way to express its removal. One frame, permanent fleet-wide junk.
+ *
+ * Both doors use this: frames off the air, and records off flash at boot. Flash
+ * is more trusted, but it is also where an entry accepted by an OLDER, laxer
+ * build is still sitting — so validating on load is what makes the upgrade
+ * clean out what the previous rules let in.
+ */
+static bool payload_is_its_section(uint16_t section, const uint8_t *payload, size_t len,
+				   bool tombstone)
+{
+	/* Static: the callers are the RX thread (single-threaded module
+	 * dispatch) and the one-shot settings load, never concurrently, and a
+	 * decoded Config is a union of every section — too big for either
+	 * stack. */
+	static meshtastic_Config probe;
+	pb_istream_t is;
+
+	if (tombstone) {
+		return len == 0U; /* nothing to check; accept() enforces the rest */
+	}
+	is = pb_istream_from_buffer(payload, len);
+	probe = (meshtastic_Config)meshtastic_Config_init_zero;
+	return pb_decode(&is, meshtastic_Config_fields, &probe) &&
+	       probe.which_payload_variant == section;
+}
+
 /* ---- authorship (D4) ------------------------------------------------------ */
 
 static bool author_is_master(uint32_t node_id)
@@ -198,6 +239,44 @@ static bool entry_authorized(const struct meshtastic_cluster_key *key,
 		return true;
 	}
 	return author_is_master(author);
+}
+
+/*
+ * THE TABLE-EXHAUSTION GATE, and why it is separate from authorship.
+ *
+ * A per-node key names its owner, and nothing about the owner has to be real:
+ * authorship (above) is satisfied by an author claiming to BE the owner, and a
+ * channel member can claim anything (§4). So without this, one member can mint
+ * entries for invented node ids until the table is full — and that damage does
+ * not heal. There is no eviction (§6 defers it) and BASE entries cannot be
+ * tombstoned at all, so a full table stays full and the fleet's real config can
+ * no longer be stored. Rewriting config — the worse-sounding attack §4 already
+ * concedes — is repairable by a master writing again. This is not.
+ *
+ * The gate is EXISTENCE, not permission: a per-node entry is accepted only for
+ * a node this one has actually heard of, or for itself (so a wiped node can
+ * still pull its own entries back — §2.3). That bounds the table by the size of
+ * the real mesh instead of by an attacker's imagination. It is not a complete
+ * answer — a large mesh can still outgrow a small table, and the eviction
+ * policy that would finish the job is still deferred — it removes the part an
+ * attacker gets for free.
+ *
+ * Hot tier OR warm key tier, deliberately: a node evicted from the hot store
+ * whose key survives is still a node we have met, and refusing its pin would be
+ * a silent, self-inflicted divergence.
+ */
+static bool node_owner_is_known(uint32_t node_id)
+{
+	struct meshtastic_nodedb_node node;
+	uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
+
+	if (node_id == meshtastic_get_node_id()) {
+		return true;
+	}
+	if (meshtastic_nodedb_get(node_id, &node) == 0) {
+		return true;
+	}
+	return meshtastic_nodedb_copy_pubkey(node_id, key) == 0;
 }
 
 /* ---- channel binding ------------------------------------------------------ */
@@ -305,6 +384,20 @@ static int cluster_settings_set(const char *key, size_t len, settings_read_cb re
 	stamp.node_id = rec.author;
 	plen = len - offsetof(struct cluster_rec, payload);
 
+	/* Flash is more trusted than the air, but not exempt: these same records
+	 * may have been accepted by an older build with laxer rules, so the load
+	 * path runs the static checks too and an upgrade quietly drops what it
+	 * should never have stored. Authorship is deliberately NOT re-checked
+	 * here — it depends on the NodeDB, and refusing a persisted entry because
+	 * we have not re-learned a master's key yet would throw away this node's
+	 * own configuration on every cold boot. */
+	if (!section_shareable(k.section) ||
+	    !payload_is_its_section(k.section, rec.payload, plen, rec.tombstone != 0U)) {
+		LOG_WRN("cluster: dropping persisted %s — it does not pass the current "
+			"ingest rules", key);
+		return 0;
+	}
+
 	k_mutex_lock(&cluster_lock, K_FOREVER);
 	(void)meshtastic_cluster_doc_accept(&cluster.doc, &k, &stamp, rec.tombstone != 0U,
 					    rec.payload, plen);
@@ -386,6 +479,39 @@ static void reconcile_section(uint16_t section)
 		return; /* already applied; re-writing would only churn */
 	}
 
+	/*
+	 * THE SECTION THIS NODE REPLICATES BUT REFUSES TO ACT ON.
+	 *
+	 * `promote` will not CREATE a base/lora entry, because a fleet preset
+	 * change permanently orphans any node that misses it and the straggler
+	 * sweep (CONFIG-CONVERGENCE.md §7.9) does not exist yet. Nothing stops
+	 * one ARRIVING, though, and applying it re-keys the radio: new preset,
+	 * new channel hashes, node gone from the mesh. One frame from anyone
+	 * holding the cluster PSK would take the whole fleet off the air, and
+	 * the nodes that missed the frame could not be told.
+	 *
+	 * So the two halves are kept apart. The document is replicated state
+	 * and this entry stays in it — refusing it at ingest instead would
+	 * strand this node's document from the fleet's forever, trading a
+	 * recoverable problem for a permanent one. The reconciler is the
+	 * actuator, and this is where the trigger does not get pulled.
+	 *
+	 * When the straggler sweep lands, this is the gate that opens.
+	 */
+	if (section == meshtastic_Config_lora_tag) {
+		k_mutex_lock(&cluster_lock, K_FOREVER);
+		if (cluster.stats.sections_held == 0U) {
+			k_mutex_unlock(&cluster_lock);
+			LOG_WRN("cluster: HOLDING a fleet LoRa section — replicated, "
+				"deliberately not applied (a missed preset change orphans a "
+				"node until the straggler sweep exists)");
+			k_mutex_lock(&cluster_lock, K_FOREVER);
+		}
+		cluster.stats.sections_held++;
+		k_mutex_unlock(&cluster_lock);
+		return;
+	}
+
 	cfg = (meshtastic_Config)meshtastic_Config_init_zero;
 	is = pb_istream_from_buffer(payload, payload_len);
 	if (!pb_decode(&is, meshtastic_Config_fields, &cfg) ||
@@ -393,17 +519,6 @@ static void reconcile_section(uint16_t section)
 		LOG_WRN("cluster: entry for section %u does not decode as that section",
 			(unsigned int)section);
 		return;
-	}
-
-	if (section == meshtastic_Config_lora_tag) {
-		/* promote refuses to CREATE one of these; nothing stops one
-		 * arriving. Applying it changes the preset, and any node that
-		 * misses the change is orphaned until the straggler sweep
-		 * (CONFIG-CONVERGENCE.md §7.9) exists. Loud, then applied —
-		 * silently ignoring it would leave the doc and the radio
-		 * permanently disagreeing with no trace. */
-		LOG_WRN("cluster: applying a fleet LoRa section — a node that misses this "
-			"change stays orphaned until the straggler sweep exists");
 	}
 
 	ret = meshtastic_config_store_merge_config(&cfg, &doc_stamp);
@@ -820,7 +935,16 @@ static void on_vector_req(uint32_t from)
 	bool serve;
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
-	serve = (cluster.vec_dest == 0U || cluster.vec_dest == from);
+	/*
+	 * Only when idle — NOT when the requester is the peer we are already
+	 * serving. Serving a stamp vector is the most expensive thing a peer
+	 * can ask for: one ~30 byte request, up to a whole document in reply.
+	 * If a repeat request restarted the walk, a peer could reset our offset
+	 * to zero forever for the cost of one small frame each time, and the
+	 * walk would never finish. Refusing costs the requester one digest
+	 * period; the walk in flight is already answering it.
+	 */
+	serve = (cluster.vec_dest == 0U);
 	if (serve) {
 		cluster.vec_dest = from;
 		cluster.vec_offset = 0U;
@@ -904,7 +1028,9 @@ static void on_entry_req(uint32_t from, const zephyrtastic_ClusterEntryReq *r)
 	bool serve;
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
-	serve = (cluster.ent_dest == 0U || cluster.ent_dest == from);
+	/* Idle only, for the same reason as the vector walk above: a repeat
+	 * request must not rewind a burst that is already being served. */
+	serve = (cluster.ent_dest == 0U);
 	if (serve) {
 		cluster.ent_dest = from;
 		cluster.ent_count = 0U;
@@ -964,6 +1090,41 @@ static void on_entry(uint32_t from, const zephyrtastic_ClusterEntry *e)
 			stamp.node_id);
 		return;
 	}
+	if (key.layer == MESHTASTIC_CLUSTER_LAYER_NODE && !node_owner_is_known(key.node_id)) {
+		k_mutex_lock(&cluster_lock, K_FOREVER);
+		cluster.stats.entry_rx_refused++;
+		k_mutex_unlock(&cluster_lock);
+		LOG_WRN("cluster: refused an entry for unknown node 0x%08x — the table is "
+			"finite and never evicts, so entries for nodes that do not exist "
+			"would fill it permanently", key.node_id);
+		return;
+	}
+	/*
+	 * The payload must BE the section its key claims.
+	 *
+	 * The document is deliberately payload-agnostic — pure table logic, no
+	 * protobuf — so if this check does not happen here it happens nowhere,
+	 * and the allowlist above is checked against key.section alone. A
+	 * well-formed key could then carry anything: undecodable bytes, or a
+	 * banned section wearing a permitted key.
+	 *
+	 * Refusing at APPLY time is not enough, which is the whole point. An
+	 * entry the reconciler will never apply still replicates to every
+	 * member, changes every document hash, and at the BASE layer can never
+	 * be withdrawn — base has no tombstone by design (§2.1), so "no fleet
+	 * default" is the key's absence and there is no way to express its
+	 * removal. One frame, permanent fleet-wide junk. Ingest is the only
+	 * place that can still say no.
+	 */
+	if (!payload_is_its_section(key.section, e->payload.bytes, e->payload.size,
+				    e->tombstone)) {
+		k_mutex_lock(&cluster_lock, K_FOREVER);
+		cluster.stats.entry_rx_refused++;
+		k_mutex_unlock(&cluster_lock);
+		LOG_WRN("cluster: refused entry for section %u from 0x%08x — payload is not "
+			"that section", (unsigned int)key.section, from);
+		return;
+	}
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
 	(void)meshtastic_hlc_observe(&cluster.hlc, &stamp);
@@ -977,6 +1138,15 @@ static void on_entry(uint32_t from, const zephyrtastic_ClusterEntry *e)
 		/* Replay defence, for free: a re-sent old entry carries its old
 		 * stamp and loses LWW like any other stale write (§4). */
 		cluster.stats.entry_rx_stale++;
+	} else if (ret == -ENOSPC) {
+		/* Counted apart from malformed input because it means something
+		 * completely different and needs a different response: the frame
+		 * was fine, this node has simply run out of table. The walk will
+		 * keep asking for this key every round and keep failing — the
+		 * diff predicate is not capacity-aware (tests/cluster pins that)
+		 * — so a climbing number here is the fleet outgrowing
+		 * MESHTASTIC_CLUSTER_MAX_ENTRIES, not an attack. */
+		cluster.stats.entry_rx_no_space++;
 	} else {
 		cluster.stats.rx_undecodable++;
 	}

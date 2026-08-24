@@ -74,13 +74,20 @@ struct meshtastic_cluster_stats {
 	uint32_t entry_tx;	  /* entries we served */
 	uint32_t entry_rx_applied;
 	uint32_t entry_rx_stale;   /* arrived, ours was newer — LWW kept ours */
-	uint32_t entry_rx_refused; /* secret boundary or D4 authorship */
+	uint32_t entry_rx_refused;  /* secret boundary, D4 authorship, unknown owner */
+	uint32_t entry_rx_no_space; /* table full — the fleet outgrew MAX_ENTRIES */
 	uint32_t rx_unsolicited;   /* a reply we had not asked for */
 	uint32_t tx_busy;	   /* a peer asked while we were serving another */
 
 	/* The reconciler (effective(me) → config store). */
 	uint32_t sections_applied;
 	uint32_t sections_kept_local; /* our store's version was newer */
+	/* Sections the document holds and this node deliberately does NOT apply.
+	 * v1: lora only — replicating a fleet preset change is safe, ACTING on
+	 * one orphans any node that missed it until the straggler sweep exists.
+	 * A non-zero value here is not an error; it is the fleet asking for
+	 * something this firmware will not do yet. */
+	uint32_t sections_held;
 };
 
 void meshtastic_cluster_stats_get(struct meshtastic_cluster_stats *out);
