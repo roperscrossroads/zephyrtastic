@@ -39,6 +39,21 @@ void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 void meshtastic_admin_reset(void);
 
 /**
+ * True if @p node_id's known public key is in SecurityConfig.admin_key[] — this
+ * node's "is that one of my masters?" test, over the hot→warm NodeDB key lookup
+ * so an evicted admin is not locked out (A-1).
+ *
+ * Two callers ask it about different subjects. Remote admin asks it about a
+ * packet's SENDER. Cluster sync asks it about the AUTHOR recorded in a document
+ * entry's stamp — the D4 base-authorship gate (docs/CLUSTER-SYNC-M4.md §4) —
+ * which is a claim no receiver can cryptographically refute today (there is no
+ * signing primitive in Meshtastic PKC; §4 states that plainly). The gate is
+ * still worth having: it stops an ordinary fleet member's honest mistake from
+ * rewriting fleet base config, and the channel PSK remains the real boundary.
+ */
+bool meshtastic_admin_node_is_trusted(uint32_t node_id);
+
+/**
  * True when this node is administratively managed (SecurityConfig.is_managed):
  * configuration may be changed only by an authorized remote admin, so the local
  * path is refused.

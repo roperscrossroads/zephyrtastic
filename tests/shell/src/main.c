@@ -493,3 +493,118 @@ ZTEST(meshtastic_shell, test_rf_reports_unknown_readback_as_unknown)
 }
 
 #endif /* CONFIG_MESHTASTIC_RF_PATH_REPORT */
+
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+/* ---- Cluster sync commands ------------------------------------------------ */
+
+/*
+ * These exist first of all to COMPILE the `meshtastic cluster …` block: no
+ * twister scenario built the shell and the cluster module together until this
+ * one, so those commands reached hardware unbuilt by CI. What they assert
+ * beyond that is the shell-visible half of the M4b contract — the promote gates
+ * and the origin marker's refusal — which is where an operator actually meets
+ * it.
+ */
+
+/* Provision the channel the module binds to, so status reports it bound. */
+static void provision_cluster_channel(void)
+{
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
+
+	ch.role = meshtastic_Channel_Role_SECONDARY;
+	ch.has_settings = true;
+	strncpy(ch.settings.name, CONFIG_MESHTASTIC_CLUSTER_CHANNEL_NAME,
+		sizeof(ch.settings.name) - 1U);
+	ch.settings.psk.size = 16U;
+	ch.settings.psk.bytes[0] = 0x42U;
+	zassert_ok(meshtastic_channels_set_slot(2U, &ch), "cluster channel set failed");
+}
+
+ZTEST(meshtastic_shell, test_cluster_status_reports_channel_binding)
+{
+	const char *out = NULL;
+	meshtastic_Channel off = meshtastic_Channel_init_zero;
+
+	off.role = meshtastic_Channel_Role_DISABLED;
+	off.has_settings = true;
+	zassert_ok(meshtastic_channels_set_slot(2U, &off), "channel teardown failed");
+
+	zassert_ok(run_cmd("meshtastic cluster status", &out), "status failed");
+	zassert_not_null(strstr(out, "NOT PROVISIONED"),
+			 "an unbound module must say so, not report a silent idle");
+
+	provision_cluster_channel();
+	zassert_ok(run_cmd("meshtastic cluster status", &out), "status failed");
+	zassert_not_null(strstr(out, "= index 2"), "status must name the bound slot");
+	zassert_not_null(strstr(out, "sync    : idle"), "status must report the walk state");
+}
+
+/* The secret boundary and the lora hazard, as an operator meets them. */
+ZTEST(meshtastic_shell, test_cluster_promote_refuses_secrets_and_lora)
+{
+	const char *out = NULL;
+
+	provision_cluster_channel();
+
+	/* Not in the parser's table at all — security and network are not even
+	 * nameable, which is the outermost layer of the D9 ban. */
+	zassert_not_equal(run_cmd("meshtastic cluster promote security", &out), 0,
+			  "security must never be promotable");
+	zassert_not_equal(run_cmd("meshtastic cluster promote network", &out), 0,
+			  "network must never be promotable");
+
+	/* lora IS nameable, deliberately: the refusal that follows teaches the
+	 * §7.9 straggler problem, which "unknown section" would not. */
+	zassert_not_equal(run_cmd("meshtastic cluster promote lora", &out), 0,
+			  "lora promote must be refused until the straggler sweep exists");
+	zassert_not_null(strstr(out, "orphans nodes"), "the refusal should explain itself");
+}
+
+/*
+ * The origin marker, from the operator's side (CLUSTER-SYNC-M4.md D10). A
+ * promote applies its own entry back through the store, which leaves the
+ * store's stamp equal to the document's — the marker that says "this value came
+ * from the document". Promoting again would mint a second stamp for identical
+ * bytes and make the whole fleet churn through an apply that changes nothing,
+ * so it is refused until a local edit moves the stamp again.
+ */
+ZTEST(meshtastic_shell, test_cluster_promote_is_idempotent_via_origin_marker)
+{
+	const char *out = NULL;
+
+	provision_cluster_channel();
+
+	zassert_ok(run_cmd("meshtastic cluster promote display", &out), "promote failed");
+	zassert_not_null(strstr(out, "promoted to fleet base"), "promote should confirm");
+
+	/* The reconciler runs on the system workqueue. */
+	k_sleep(K_MSEC(50));
+
+	zassert_ok(run_cmd("meshtastic cluster status", &out), "status failed");
+	zassert_not_null(strstr(out, "sections applied=1"),
+			 "the promoting node must apply its own base entry");
+
+	zassert_not_equal(run_cmd("meshtastic cluster promote display", &out), 0,
+			  "re-promoting an unchanged doc-derived section must be refused");
+	zassert_not_null(strstr(out, "already IS the fleet base"),
+			 "the refusal should name the reason");
+}
+
+ZTEST(meshtastic_shell, test_cluster_pull_needs_a_channel_and_a_peer)
+{
+	const char *out = NULL;
+	meshtastic_Channel off = meshtastic_Channel_init_zero;
+
+	off.role = meshtastic_Channel_Role_DISABLED;
+	off.has_settings = true;
+	zassert_ok(meshtastic_channels_set_slot(2U, &off), "channel teardown failed");
+
+	zassert_not_equal(run_cmd("meshtastic cluster pull 0xDEADBEEF", &out), 0,
+			  "a pull with no cluster channel must fail, not idle silently");
+	zassert_not_null(strstr(out, "nothing to pull over"), "the refusal should explain itself");
+
+	provision_cluster_channel();
+	zassert_not_equal(run_cmd("meshtastic cluster pull 0x12345678", &out), 0,
+			  "pulling from ourselves is not a walk");
+}
+#endif /* CONFIG_MESHTASTIC_CLUSTER */

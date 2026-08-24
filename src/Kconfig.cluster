@@ -39,6 +39,34 @@ config MESHTASTIC_CLUSTER_DIGEST_PERIOD_SEC
 	  change is the fast path; this is the level-triggered backstop for
 	  nodes that were asleep, out of range, or newly joined.
 
+config MESHTASTIC_CLUSTER_PULL_DELAY_MS
+	int "Maximum delay before answering a digest mismatch (ms)"
+	default 3000
+	range 0 60000
+	help
+	  A digest is a broadcast, so every diverged member hears the same one
+	  and would pull from the same sender in the same slot. Each waits a
+	  random time up to this before sending its ClusterVectorReq.
+
+config MESHTASTIC_CLUSTER_TX_GAP_MS
+	int "Spacing between the frames of a multi-frame reply (ms)"
+	default 500
+	range 0 10000
+	help
+	  A stamp vector or a burst of entries takes several frames. Spacing
+	  them leaves the peer airtime to answer instead of transmitting a
+	  whole reply into one contention window.
+
+config MESHTASTIC_CLUSTER_SYNC_TIMEOUT_SEC
+	int "Give up on an unanswered pull after (seconds)"
+	default 60
+	range 5 3600
+	help
+	  Only one anti-entropy exchange runs at a time, so a peer that
+	  vanishes mid-walk must not hold the slot forever. Nothing is lost
+	  when this fires: the documents still differ, so the next digest
+	  starts the walk again.
+
 config MESHTASTIC_CLUSTER_MAX_ENTRIES
 	int "Cluster document capacity (entries)"
 	default 32

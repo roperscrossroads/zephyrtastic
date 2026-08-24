@@ -102,6 +102,21 @@ void meshtastic_cluster_doc_max_stamp(const struct meshtastic_cluster_doc *doc,
 				      struct meshtastic_hlc_stamp *out);
 
 /*
+ * The anti-entropy diff predicate (CLUSTER-SYNC-M4.md §3.3): true when a peer's
+ * (key, stamp) row describes a version we do NOT have — a key we lack, or one we
+ * hold at an older stamp — i.e. exactly the rows worth asking for. Rows where OUR
+ * copy is newer return false and are deliberately not acted on: our own next
+ * digest invites the peer to pull from us, so neither side ever pushes uninvited.
+ *
+ * Malformed keys (unknown layer, an owner on BASE or none on NODE) and unset
+ * stamps return false — a row that meshtastic_cluster_doc_accept() would refuse
+ * is not worth a round trip to fetch.
+ */
+bool meshtastic_cluster_doc_wants(const struct meshtastic_cluster_doc *doc,
+				  const struct meshtastic_cluster_key *key,
+				  const struct meshtastic_hlc_stamp *stamp);
+
+/*
  * effective(me, section): the NODE entry for @p node_id when present and not
  * a tombstone, else the BASE entry, else NULL. Returns a payload-bearing
  * entry only — a tombstoned NODE entry falls through to BASE by design.

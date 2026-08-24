@@ -197,6 +197,52 @@ ZTEST(cluster_doc, test_hash_is_arrival_order_independent)
 	zassert_not_equal(meshtastic_cluster_doc_hash(&doc), meshtastic_cluster_doc_hash(&doc2));
 }
 
+/*
+ * The anti-entropy diff (§3.3). What a node asks for after reading a peer's
+ * stamp vector is exactly the rows this returns true for — and, just as
+ * load-bearing, what it does NOT ask for is everything else. A row where OUR
+ * copy is newer must not provoke a fetch: the walk would then pull an old value
+ * over a new one, and the two nodes would trade the same key back and forth
+ * forever. Nobody pushes; the node that is ahead merely lets its next digest
+ * invite the other to pull.
+ */
+ZTEST(cluster_doc, test_wants_only_what_is_newer)
+{
+	struct meshtastic_cluster_key k = base_key(SEC_DEVICE);
+	struct meshtastic_cluster_key n = node_key(NODE_A, SEC_DISPLAY);
+	struct meshtastic_hlc_stamp s100 = at(100, NODE_A);
+	struct meshtastic_hlc_stamp s200 = at(200, NODE_B);
+	struct meshtastic_hlc_stamp unset = {0};
+	uint8_t v[] = {1};
+
+	/* A key we have never seen is always worth pulling. */
+	zassert_true(meshtastic_cluster_doc_wants(&doc, &k, &s100));
+	zassert_true(meshtastic_cluster_doc_wants(&doc, &n, &s100));
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &k, &s200, false, v, 1), 1);
+
+	/* Older: leave it. Identical: leave it (this is the converged case, the
+	 * one that must cost nothing). Newer: pull it. */
+	zassert_false(meshtastic_cluster_doc_wants(&doc, &k, &s100), "an older row must not be "
+								     "fetched over a newer one");
+	zassert_false(meshtastic_cluster_doc_wants(&doc, &k, &s200), "an identical row is not a "
+								     "difference");
+	struct meshtastic_hlc_stamp s300 = at(300, NODE_A);
+
+	zassert_true(meshtastic_cluster_doc_wants(&doc, &k, &s300));
+
+	/* Rows accept() would refuse are not worth a round trip either: the
+	 * two predicates share one validity rule so they cannot disagree. */
+	struct meshtastic_cluster_key bad_base = base_key(SEC_DEVICE);
+	struct meshtastic_cluster_key bad_node = node_key(0U, SEC_DEVICE);
+
+	bad_base.node_id = NODE_A; /* BASE has no owner */
+	zassert_false(meshtastic_cluster_doc_wants(&doc, &bad_base, &s300));
+	zassert_false(meshtastic_cluster_doc_wants(&doc, &bad_node, &s300));
+	zassert_false(meshtastic_cluster_doc_wants(&doc, &k, &unset),
+		      "an unversioned row can never win, so never fetch it");
+}
+
 ZTEST(cluster_doc, test_max_stamp_and_capacity)
 {
 	struct meshtastic_hlc_stamp max;

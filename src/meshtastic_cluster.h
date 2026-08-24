@@ -12,8 +12,9 @@
  * channel, NVS persistence, and the promote entry point. The document logic
  * itself is meshtastic_cluster_doc.{c,h}.
  *
- * M4a scope: the doc + digests + mismatch DETECTION (logged and counted, not
- * yet acted on). Vector/entry pull is M4b; pin/unpin/push-on-change is M4c.
+ * M4b scope: the doc + digests + the anti-entropy walk (vector → entry pull →
+ * merge) + the reconciler that applies effective(me) to the config store.
+ * pin/unpin/tombstones and push-on-change are M4c.
  */
 
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
@@ -35,20 +36,58 @@ void meshtastic_cluster_digest_now(void);
  * (CONFIG-CONVERGENCE.md §7.9) exists.
  *
  * Returns 0, -EPERM (not allowlisted / lora hazard), -ENOENT (section not in
- * the store), -ENOSPC (doc full), else an encode/store error.
+ * the store), -EALREADY (this section's stored value IS the current fleet base
+ * — it was applied FROM the document, so re-promoting it would only churn),
+ * -ENOSPC (doc full), else an encode/store error.
  */
 int meshtastic_cluster_promote(uint16_t section);
 
+/*
+ * Start an anti-entropy exchange with @p node_id now, as if its digest had just
+ * mismatched: ClusterVectorReq → diff → ClusterEntryReq → merge → reconcile.
+ * The bench and the sim use it so convergence is provable on demand instead of
+ * on the digest cadence.
+ *
+ * Returns 0, -EBUSY (an exchange is already in flight — §3.3 allows one),
+ * -ENOTCONN (the cluster channel is not provisioned), -EINVAL (not a node id).
+ */
+int meshtastic_cluster_pull(uint32_t node_id);
+
 struct meshtastic_cluster_stats {
+	/* digest_tx counts digests HANDED TO the send path. On a node whose
+	 * radio TX is disabled (config.lora.tx_enabled = false) the frame is
+	 * dropped at the radio choke point afterwards and never airs — and a
+	 * digest is a broadcast, so no peer bearer carries it either. The shell
+	 * says so rather than letting the counter imply transmission. */
 	uint32_t digest_tx;
 	uint32_t digest_rx_match;
 	uint32_t digest_rx_mismatch;
 	uint32_t rx_wrong_channel; /* port-256 frames not on the cluster channel */
 	uint32_t rx_undecodable;
-	uint32_t rx_not_implemented; /* M4b/M4c verbs received, counted, dropped */
+	uint32_t rx_not_implemented; /* M4c verbs received, counted, dropped */
+
+	/* The anti-entropy walk (M4b). */
+	uint32_t pull_started;	  /* exchanges we opened on a digest mismatch */
+	uint32_t pull_timed_out;  /* opened, no vector came back in time */
+	uint32_t vector_tx;	  /* vector chunks we served */
+	uint32_t vector_rx;	  /* vector chunks we consumed */
+	uint32_t entry_tx;	  /* entries we served */
+	uint32_t entry_rx_applied;
+	uint32_t entry_rx_stale;   /* arrived, ours was newer — LWW kept ours */
+	uint32_t entry_rx_refused; /* secret boundary or D4 authorship */
+	uint32_t rx_unsolicited;   /* a reply we had not asked for */
+	uint32_t tx_busy;	   /* a peer asked while we were serving another */
+
+	/* The reconciler (effective(me) → config store). */
+	uint32_t sections_applied;
+	uint32_t sections_kept_local; /* our store's version was newer */
 };
 
 void meshtastic_cluster_stats_get(struct meshtastic_cluster_stats *out);
+
+/* Human-readable state of the anti-entropy exchange in flight, and (when
+ * non-NULL) the peer it is with — 0 when idle. */
+const char *meshtastic_cluster_sync_state(uint32_t *peer);
 
 /* Snapshot for the shell: entry count, doc hash, whether the cluster channel
  * currently resolves (index in *ch_index when true). */

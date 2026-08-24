@@ -499,12 +499,18 @@ static bool owner_name_all_whitespace(const char *name)
  * it arrived on a channel literally named "admin". Mirrors Channels::adminChannel. */
 #define ADMIN_LEGACY_CHANNEL_NAME "admin"
 
-/* True if the sender's stored public key matches a configured admin key
+/* True if @p from's stored public key matches a configured admin key
  * (SecurityConfig.admin_key[0..2]) — the modern, secure remote-admin gate.
  * Uses the hot→warm key lookup (not the hot-only nodedb_get): an admin whose
  * hot record was evicted, its key surviving only in the warm ring, must not be
- * locked out of remote admin (A-1). */
-static bool admin_key_matches_sender(uint32_t from)
+ * locked out of remote admin (A-1).
+ *
+ * Exported (meshtastic_admin_node_is_trusted) because the cluster module asks
+ * the same question about a different subject: not "did this packet come from
+ * an admin?" but "did an admin AUTHOR this document entry?" — the D4 base-
+ * authorship gate of CLUSTER-SYNC-M4.md §4. Same key list, same lookup, one
+ * implementation. */
+bool meshtastic_admin_node_is_trusted(uint32_t from)
 {
 	uint8_t sender_key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
 	meshtastic_Config cfg;
@@ -553,7 +559,7 @@ static bool admin_remote_authorized(bool pki_encrypted, uint32_t from, bool via_
 				    uint8_t channel_index, meshtastic_Routing_Error *err)
 {
 	if (pki_encrypted) {
-		if (admin_key_matches_sender(from)) {
+		if (meshtastic_admin_node_is_trusted(from)) {
 			return true;
 		}
 		*err = meshtastic_Routing_Error_ADMIN_PUBLIC_KEY_UNAUTHORIZED;

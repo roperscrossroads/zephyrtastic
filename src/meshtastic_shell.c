@@ -3192,6 +3192,8 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 {
 	struct meshtastic_cluster_stats st;
 	struct meshtastic_cluster_entry e;
+	const char *sync;
+	uint32_t sync_peer = 0U;
 	uint8_t ch_index;
 	bool have_ch;
 
@@ -3200,6 +3202,7 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 
 	meshtastic_cluster_stats_get(&st);
 	have_ch = meshtastic_cluster_channel_resolved(&ch_index);
+	sync = meshtastic_cluster_sync_state(&sync_peer);
 
 	if (have_ch) {
 		shell_print(sh, "channel : \"%s\" = index %u",
@@ -3212,8 +3215,27 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		    (unsigned int)meshtastic_cluster_entry_count(),
 		    meshtastic_cluster_entry_count() == 1U ? "y" : "ies",
 		    (unsigned int)meshtastic_cluster_doc_hash_now());
-	shell_print(sh, "digests : tx=%u rx match=%u MISMATCH=%u", st.digest_tx,
+	/* "queued", not "sent": the counter increments where the digest enters
+	 * the send path, and a node with config.lora.tx_enabled = false has its
+	 * frames dropped further down, at the radio choke point. A digest is a
+	 * broadcast, so no peer bearer carries it either — on such a node this
+	 * number counts digests that never left. */
+	shell_print(sh, "digests : queued=%u%s rx match=%u MISMATCH=%u", st.digest_tx,
+		    mt.tx_enabled ? "" : " (radio TX OFF — none of these aired)",
 		    st.digest_rx_match, st.digest_rx_mismatch);
+	if (sync_peer != 0U) {
+		shell_print(sh, "sync    : %s with 0x%08x", sync, sync_peer);
+	} else {
+		shell_print(sh, "sync    : %s", sync);
+	}
+	shell_print(sh, "walk    : pulls=%u timed_out=%u vector tx=%u rx=%u entry tx=%u",
+		    st.pull_started, st.pull_timed_out, st.vector_tx, st.vector_rx,
+		    st.entry_tx);
+	shell_print(sh, "merge   : applied=%u stale=%u REFUSED=%u unsolicited=%u busy=%u",
+		    st.entry_rx_applied, st.entry_rx_stale, st.entry_rx_refused,
+		    st.rx_unsolicited, st.tx_busy);
+	shell_print(sh, "config  : sections applied=%u kept_local=%u", st.sections_applied,
+		    st.sections_kept_local);
 	shell_print(sh, "rx      : wrong_channel=%u undecodable=%u not_implemented=%u",
 		    st.rx_wrong_channel, st.rx_undecodable, st.rx_not_implemented);
 
@@ -3245,6 +3267,12 @@ static int cmd_cluster_promote(const struct shell *sh, size_t argc, char **argv)
 			    "CONFIG-CONVERGENCE.md §7.9)");
 		return ret;
 	}
+	if (ret == -EALREADY) {
+		shell_error(sh, "%s already IS the fleet base — this node is running the "
+			    "document's own copy, so there is nothing new to promote "
+			    "(edit the section first)", argv[1]);
+		return ret;
+	}
 	if (ret < 0) {
 		shell_error(sh, "promote failed (%d)", ret);
 		return ret;
@@ -3263,6 +3291,41 @@ static int cmd_cluster_digest(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* meshtastic cluster pull <node> — run the anti-entropy walk against one peer
+ * now instead of waiting for its next digest. The convergence proof, on demand:
+ * the walk is identical either way, only the trigger differs. */
+static int cmd_cluster_pull(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t node_num;
+	int ret;
+
+	if (argc != 2U) {
+		shell_error(sh, "usage: meshtastic cluster pull <node>");
+		return -EINVAL;
+	}
+	ret = parse_u32(sh, argv[1], &node_num);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = meshtastic_cluster_pull(node_num);
+	if (ret == -EBUSY) {
+		shell_error(sh, "an exchange is already in flight (one at a time)");
+		return ret;
+	}
+	if (ret == -ENOTCONN) {
+		shell_error(sh, "no channel named \"%s\" — nothing to pull over",
+			    CONFIG_MESHTASTIC_CLUSTER_CHANNEL_NAME);
+		return ret;
+	}
+	if (ret < 0) {
+		shell_error(sh, "pull failed (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "pulling from 0x%08x — `cluster status` shows the walk", node_num);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 			       SHELL_CMD(status, NULL,
 					 SHELL_HELP("Cluster doc, digest stats, channel binding.",
@@ -3275,6 +3338,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 			       SHELL_CMD(digest, NULL,
 					 SHELL_HELP("Broadcast one digest now.", NULL),
 					 cmd_cluster_digest),
+			       SHELL_CMD(pull, NULL,
+					 SHELL_HELP("Run the anti-entropy walk against a peer "
+						    "now.", "<node>"),
+					 cmd_cluster_pull),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_CLUSTER */
 

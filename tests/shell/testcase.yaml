@@ -46,6 +46,19 @@ tests:
       # them fails for a reason that has nothing to do with the code.
       - CONFIG_SHELL_BACKEND_DUMMY_BUF_SIZE=4096
 
+  # Compiles the shell WITH cluster sync — and, until this row existed, nothing
+  # in twister did. mesh_sim builds the cluster module with SHELL=n; every shell
+  # scenario built the shell with CLUSTER=n; so the ~200-line `meshtastic
+  # cluster …` block only ever compiled in a hardware build. That is the same
+  # escape class as the scanner row above, and the same one the M4a digest-TX
+  # seam closed on the transmit side.
+  meshtastic.shell.cluster.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_CLUSTER=y
+      # Never fire on its own during the suite: the tests drive promote/pull
+      # explicitly and a spontaneous digest would race their assertions.
+      - CONFIG_MESHTASTIC_CLUSTER_DIGEST_PERIOD_SEC=86400
+
   # The a4it.8 compile-time safety seed: a build with the default off boots
   # receive-only before any config write exists.
   meshtastic.shell.tx_default_off.native_sim:

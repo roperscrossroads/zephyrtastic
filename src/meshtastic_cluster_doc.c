@@ -63,6 +63,20 @@ meshtastic_cluster_doc_find(const struct meshtastic_cluster_doc *doc,
 	return found ? &doc->entries[i] : NULL;
 }
 
+/* Structural validity of a key on its own: BASE has no owner, NODE must name
+ * one, no other layer exists. Shared by accept() and wants() so the two can
+ * never disagree about which rows are worth handling. */
+static bool key_is_valid(const struct meshtastic_cluster_key *key)
+{
+	if (key->layer == MESHTASTIC_CLUSTER_LAYER_BASE) {
+		return key->node_id == 0U;
+	}
+	if (key->layer == MESHTASTIC_CLUSTER_LAYER_NODE) {
+		return key->node_id != 0U;
+	}
+	return false;
+}
+
 int meshtastic_cluster_doc_accept(struct meshtastic_cluster_doc *doc,
 				  const struct meshtastic_cluster_key *key,
 				  const struct meshtastic_hlc_stamp *stamp, bool tombstone,
@@ -81,17 +95,12 @@ int meshtastic_cluster_doc_accept(struct meshtastic_cluster_doc *doc,
 	if (!tombstone && payload_len == 0U) {
 		return -EINVAL;
 	}
-	if (key->layer == MESHTASTIC_CLUSTER_LAYER_BASE) {
-		/* BASE has no owner and never tombstones — "no fleet default"
-		 * is simply the key's absence. */
-		if (key->node_id != 0U || tombstone) {
-			return -EINVAL;
-		}
-	} else if (key->layer == MESHTASTIC_CLUSTER_LAYER_NODE) {
-		if (key->node_id == 0U) {
-			return -EINVAL;
-		}
-	} else {
+	if (!key_is_valid(key)) {
+		return -EINVAL;
+	}
+	/* BASE never tombstones — "no fleet default" is simply the key's
+	 * absence, so a BASE tombstone would be an unremovable hole. */
+	if (key->layer == MESHTASTIC_CLUSTER_LAYER_BASE && tombstone) {
 		return -EINVAL;
 	}
 	if (meshtastic_hlc_stamp_is_unset(stamp)) {
@@ -156,6 +165,20 @@ uint32_t meshtastic_cluster_doc_hash(const struct meshtastic_cluster_doc *doc)
 		crc = crc32_ieee_update(crc, row, sizeof(row));
 	}
 	return crc;
+}
+
+bool meshtastic_cluster_doc_wants(const struct meshtastic_cluster_doc *doc,
+				  const struct meshtastic_cluster_key *key,
+				  const struct meshtastic_hlc_stamp *stamp)
+{
+	const struct meshtastic_cluster_entry *mine;
+
+	if (!key_is_valid(key) || meshtastic_hlc_stamp_is_unset(stamp)) {
+		return false;
+	}
+	mine = meshtastic_cluster_doc_find(doc, key);
+	/* No copy at all is the "newer than unset" case accept() also takes. */
+	return mine == NULL || meshtastic_hlc_newer(stamp, &mine->stamp);
 }
 
 void meshtastic_cluster_doc_max_stamp(const struct meshtastic_cluster_doc *doc,
