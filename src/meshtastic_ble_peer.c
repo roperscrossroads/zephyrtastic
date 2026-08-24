@@ -364,6 +364,19 @@ static void peer_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 	if (central.conn == NULL && central.scanning &&
 	    (central.target_node == 0U || central.target_node == m.node_num)) {
 		connect_now = true;
+		/* Already-linked guard: a node whose beats we are receiving on an
+		 * INBOUND link keeps advertising (the re-arm is deliberate — it must
+		 * stay visible to phones and other peers), so its adverts are not
+		 * connect candidates. Without this, a >2-node bench busy-loops on its
+		 * own inbound peer at advertising rate: matched -> bt_conn_le_create
+		 * -EINVAL ("found valid connection") -> rescan -> matched again — 174
+		 * attempts in 50 s on the first 3-node topology (2026-08-24). */
+		for (unsigned int i = 0; i < MESHTASTIC_BLE_REG_SLOTS; i++) {
+			if (peer.rx[i].beats > 0U && peer.rx[i].last.node_num == m.node_num) {
+				connect_now = false;
+				break;
+			}
+		}
 	}
 	k_mutex_unlock(&peer_lock);
 
@@ -414,7 +427,20 @@ static void scan_work_fn(struct k_work *work)
 		return;
 	}
 
-	err = bt_le_scan_start(BT_LE_SCAN_PASSIVE, peer_scan_cb);
+	/* BT_LE_SCAN_PASSIVE minus BT_LE_SCAN_OPT_FILTER_DUPLICATE: the ESP32-S3
+	 * controller rejects LE Set Scan Enable with the duplicate filter on
+	 * (opcode 0x200c, status 0x12 -> -EINVAL; found on the a4it.8 bench node,
+	 * where the Nordic controller had accepted it). Controller-side dedup was
+	 * only ever an optimization here — the seen table dedups matched adverts
+	 * itself — so scanning without it costs extra callbacks, not correctness. */
+	static const struct bt_le_scan_param peer_scan_param = {
+		.type = BT_LE_SCAN_TYPE_PASSIVE,
+		.options = BT_LE_SCAN_OPT_NONE,
+		.interval = BT_GAP_SCAN_FAST_INTERVAL,
+		.window = BT_GAP_SCAN_FAST_WINDOW,
+	};
+
+	err = bt_le_scan_start(&peer_scan_param, peer_scan_cb);
 	if (err != 0 && err != -EALREADY) {
 		LOG_ERR("BLE peer scan start failed (%d)", err);
 		return;
