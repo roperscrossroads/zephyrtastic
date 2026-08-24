@@ -158,6 +158,23 @@ config MESHTASTIC_DEFAULT_OK_TO_MQTT
 
 	  A later admin or phone-app change overrides this seed.
 
+config MESHTASTIC_TX_ENABLED_DEFAULT
+	bool "Transmit enabled by default on a fresh node"
+	default y
+	help
+	  Seeds config.lora.tx_enabled on first boot. Default y: a fresh node
+	  transmits, matching the reference firmware — a mesh radio that boots
+	  silently muted would be the worse surprise.
+
+	  Set to n for a board whose RF hardware must never be keyed (e.g. a
+	  broken antenna connector, which reflects the PA's power back into the
+	  front end): the very first boot after a flash is then already
+	  receive-only, closing the window between first boot and the first
+	  config write, during which a fresh node would otherwise beacon.
+
+	  A stored config (shell `meshtastic lora tx on|off`, phone, admin)
+	  overrides this seed either way.
+
 config MESHTASTIC_TX_POWER
 	int "Fallback TX power for a region with no declared limit (dBm)"
 	default 17

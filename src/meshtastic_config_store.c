@@ -547,7 +547,13 @@ static void seed_config_defaults(const struct meshtastic_config *cfg)
 	store.configs[idx].payload_variant.lora.region =
 		(meshtastic_Config_LoRaConfig_RegionCode)CONFIG_MESHTASTIC_DEFAULT_REGION;
 	store.configs[idx].payload_variant.lora.hop_limit = mt.hop_limit;
-	store.configs[idx].payload_variant.lora.tx_enabled = true;
+	/* Kconfig-able for boards whose RF hardware must never be keyed (a broken
+	 * antenna connector reflects the PA's power back into the front end —
+	 * agents-a4it.8): with TX_ENABLED_DEFAULT=n the very first boot of a
+	 * fresh-flashed node is already receive-only, closing the window between
+	 * first boot and the first config write. A stored config still wins. */
+	store.configs[idx].payload_variant.lora.tx_enabled =
+		IS_ENABLED(CONFIG_MESHTASTIC_TX_ENABLED_DEFAULT);
 	store.configs[idx].payload_variant.lora.tx_power = mt.tx_power;
 	/* Matches the reference's NodeDB.cpp default and this port's own prior
 	 * (hardcoded, unconditional) board devicetree default -- without this,

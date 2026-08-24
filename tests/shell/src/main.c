@@ -321,6 +321,22 @@ ZTEST(meshtastic_shell, test_unmanaging_restores_config_write)
 		      "unmanaged node should accept the write");
 }
 
+/* The fresh-node seed honours MESHTASTIC_TX_ENABLED_DEFAULT — the compile-time
+ * half of the a4it.8 safety story: with =n the first boot after a flash is
+ * already receive-only, no config-write window. Asserting against IS_ENABLED
+ * exercises whichever value this scenario builds with; the dedicated
+ * tx_default_off scenario runs the =n branch. */
+ZTEST(meshtastic_shell, test_lora_tx_seed_follows_kconfig)
+{
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "lora config read failed");
+	zassert_equal(cfg.payload_variant.lora.tx_enabled,
+		      IS_ENABLED(CONFIG_MESHTASTIC_TX_ENABLED_DEFAULT),
+		      "seeded tx_enabled should match MESHTASTIC_TX_ENABLED_DEFAULT");
+}
+
 /* `lora tx off` is the safety switch for a node with damaged RF hardware
  * (agents-a4it.8): it must persist to the stored LoRaConfig, apply live (no
  * reboot — set_config runs apply_core), and read back as receive-only. */
@@ -345,6 +361,14 @@ ZTEST(meshtastic_shell, test_lora_tx_off_persists_and_reads_back)
 	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
 		   "lora config re-read failed");
 	zassert_true(cfg.payload_variant.lora.tx_enabled, "tx_enabled should be restored");
+
+	/* Leave the store at the build's seed value so the seed-follows-Kconfig
+	 * test holds regardless of execution order. */
+	zassert_ok(run_cmd(IS_ENABLED(CONFIG_MESHTASTIC_TX_ENABLED_DEFAULT)
+				   ? "meshtastic lora tx on"
+				   : "meshtastic lora tx off",
+			   NULL),
+		   "restore failed");
 }
 
 ZTEST(meshtastic_shell, test_managed_node_refuses_lora_tx_write)

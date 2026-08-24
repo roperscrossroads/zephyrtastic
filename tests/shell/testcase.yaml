@@ -45,3 +45,9 @@ tests:
       # this the later sections are silently truncated and a test asserting on
       # them fails for a reason that has nothing to do with the code.
       - CONFIG_SHELL_BACKEND_DUMMY_BUF_SIZE=4096
+
+  # The a4it.8 compile-time safety seed: a build with the default off boots
+  # receive-only before any config write exists.
+  meshtastic.shell.tx_default_off.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_TX_ENABLED_DEFAULT=n
