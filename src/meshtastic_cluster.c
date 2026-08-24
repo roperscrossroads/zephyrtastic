@@ -154,7 +154,8 @@ static struct {
 	uint8_t ent_next;
 
 	/* Bounds. */
-	int64_t serve_next_ms;	    /* no new reply walk before this */
+	uint8_t serve_tokens;	    /* reply-walk budget (token bucket) */
+	int64_t serve_refill_ms;    /* when the bucket last earned a token */
 	int64_t pull_hold_until_ms; /* fruitless-walk backoff */
 	uint32_t pull_last_applied; /* entry_rx_applied when we last asked */
 	bool pull_asked_entries;    /* the last walk actually requested entries */
@@ -162,6 +163,12 @@ static struct {
 	int64_t refuse_log_next_ms; /* refusal-warning throttle */
 	uint32_t refuse_since_log;
 } cluster;
+
+/* How many reply walks may be served back-to-back before the rate limit bites.
+ * A fleet coming up together has every member pull at once, and making them
+ * queue behind each other for no reason would be a self-inflicted convergence
+ * delay — the bound that matters is the SUSTAINED rate, not the first few. */
+#define CLUSTER_SERVE_BURST 3U
 
 /* Consecutive fruitless walks tolerated before backing off. Two is noise (a
  * race with a peer mid-write); three is a pattern. */
@@ -1091,22 +1098,47 @@ static void on_digest(uint32_t from, const zephyrtastic_ClusterDigest *d)
 /*
  * May we start serving a reply right now? Called with the lock held.
  *
- * Two bounds, and they answer different questions. IDLE answers "are we already
+ * Two bounds, answering different questions. IDLE answers "are we already
  * mid-reply?" — a repeat request must not rewind a walk in flight, or one small
  * frame resets our offset to zero and the walk never reaches the end of the
- * document. The MINIMUM INTERVAL answers the question idleness cannot: a peer
- * that simply waits for each walk to finish before asking again extracts a
- * reply every time, indefinitely, and "one at a time" bounds concurrency but
- * not rate. Serving a vector or an entry burst is by far the most expensive
- * thing anyone can make this node do — tens of bytes in, most of a document
- * out — so the rate is where the actual bound has to live.
+ * document. The TOKEN BUCKET answers what idleness cannot: a peer that simply
+ * waits for each walk to finish before asking again extracts a full reply every
+ * time, indefinitely. "One at a time" bounds concurrency, not rate — and rate is
+ * where the bound has to live, because serving a vector or an entry burst is by
+ * far the most expensive thing anyone can make this node do: tens of bytes in,
+ * most of a document out.
  *
- * The floor is far below any legitimate cadence (peers pull once per digest
- * period, which is minutes), so honest convergence never notices it.
+ * A bucket rather than a flat interval, because a flat interval would punish
+ * the one case that matters most — a fleet powering up together, where every
+ * member pulls at once and all of them are legitimate. The burst absorbs that;
+ * the refill rate is the actual ceiling on sustained abuse.
+ *
+ * Per-peer accounting would be fairer and is deliberately NOT used: the sender
+ * id is attacker-chosen, so a per-peer budget is one a hostile node grants
+ * itself simply by inventing more ids. A global bound is the only one that
+ * actually bounds.
  */
 static bool may_serve_locked(void)
 {
-	if (k_uptime_get() < cluster.serve_next_ms) {
+	int64_t now = k_uptime_get();
+	int64_t elapsed;
+
+	if (CONFIG_MESHTASTIC_CLUSTER_SERVE_MIN_INTERVAL_MS == 0) {
+		return true; /* limit disabled (tests) */
+	}
+
+	elapsed = now - cluster.serve_refill_ms;
+	if (elapsed >= CONFIG_MESHTASTIC_CLUSTER_SERVE_MIN_INTERVAL_MS) {
+		uint32_t gained =
+			(uint32_t)(elapsed / CONFIG_MESHTASTIC_CLUSTER_SERVE_MIN_INTERVAL_MS);
+
+		cluster.serve_tokens =
+			(uint8_t)MIN(cluster.serve_tokens + gained, CLUSTER_SERVE_BURST);
+		cluster.serve_refill_ms +=
+			(int64_t)gained * CONFIG_MESHTASTIC_CLUSTER_SERVE_MIN_INTERVAL_MS;
+	}
+
+	if (cluster.serve_tokens == 0U) {
 		cluster.stats.tx_busy++;
 		return false;
 	}
@@ -1115,8 +1147,9 @@ static bool may_serve_locked(void)
 
 static void serve_started_locked(void)
 {
-	cluster.serve_next_ms = k_uptime_get() +
-				CONFIG_MESHTASTIC_CLUSTER_SERVE_MIN_INTERVAL_MS;
+	if (cluster.serve_tokens > 0U) {
+		cluster.serve_tokens--;
+	}
 }
 
 static void on_vector_req(uint32_t from)
@@ -1622,6 +1655,11 @@ int meshtastic_cluster_init(void)
 	 * pull ours explicitly rather than depending on a global load. */
 	(void)settings_load_subtree("mtclus");
 #endif
+
+	/* Start with a full reply budget: the fleet this node is joining may
+	 * already be waiting to pull from it. */
+	cluster.serve_tokens = CLUSTER_SERVE_BURST;
+	cluster.serve_refill_ms = k_uptime_get();
 
 	(void)k_work_schedule(&digest_work, K_MSEC(digest_period_ms()));
 	if (cluster.doc.count > 0U) {

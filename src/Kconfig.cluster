@@ -68,9 +68,12 @@ config MESHTASTIC_CLUSTER_SERVE_MIN_INTERVAL_MS
 	  RATE — a peer that waits for each walk to finish before asking again
 	  extracts a reply every time, indefinitely. This is the rate bound.
 
-	  Far below any legitimate cadence (peers pull once per digest period),
-	  so honest convergence never notices it. 0 disables the limit; only
-	  useful in tests.
+	  It is the refill period of a small token bucket, not a hard floor, so
+	  a fleet powering up together (every member pulling at once, all of
+	  them legitimate) is absorbed by the burst while sustained abuse is
+	  still capped. Far below any legitimate cadence — peers pull once per
+	  digest period, which is minutes. 0 disables the limit; only useful
+	  in tests.
 
 config MESHTASTIC_CLUSTER_SYNC_TIMEOUT_SEC
 	int "Give up on an unanswered pull after (seconds)"
