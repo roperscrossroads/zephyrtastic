@@ -18,3 +18,20 @@ tests:
       - CONFIG_MESHTASTIC_SCANNER=y
       - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
       - CONFIG_MESHTASTIC_SCANNER_DWELL_MS=1000
+
+  # Signal measurement.
+  meshtastic.mesh_sim.rf.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_RF=y
+      - CONFIG_MESHTASTIC_RF_PEERS=8
+
+  # RF *and* scanner together. Neither config above builds both, and both tap
+  # the same RX callback — exactly the shape of gap that let a plain compile
+  # error ship in the scanner's own shell block once already.
+  meshtastic.mesh_sim.rf_scanner.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_RF=y
+      - CONFIG_MESHTASTIC_RF_PEERS=8
+      - CONFIG_MESHTASTIC_SCANNER=y
+      - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
+      - CONFIG_MESHTASTIC_SCANNER_DWELL_MS=1000

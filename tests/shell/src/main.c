@@ -339,3 +339,80 @@ ZTEST(meshtastic_shell, test_config_write_compiled_out)
 }
 
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+
+#if defined(CONFIG_MESHTASTIC_RF_PATH_REPORT)
+
+/* ---- `meshtastic rf` ------------------------------------------------------
+ *
+ * The report's whole value is that it distinguishes "in effect" from
+ * "configured", so the tests assert on the MARKERS rather than on the numbers —
+ * the numbers are hardware, the markers are the logic.
+ *
+ * native_sim is the only place two of these branches are reachable at all: it
+ * has no board FEM override, so the weak defaults apply and the
+ * "not on this hardware" row is exercised; and its mock radio is not an SX126x,
+ * so the driver readback is genuinely unavailable and must report unknown
+ * rather than off.
+ */
+
+ZTEST(meshtastic_shell, test_rf_reports_every_chain_stage)
+{
+	const char *out = NULL;
+
+	zassert_ok(run_cmd("meshtastic rf", &out), "rf should always be readable");
+	zassert_not_null(out, "rf printed nothing");
+
+	/* Every stage present, in signal order. A stage that silently stopped
+	 * being printed would look identical to a stage that is fine. */
+	zassert_not_null(strstr(out, "FRONT END"), "missing FRONT END section");
+	zassert_not_null(strstr(out, "RECEIVE"), "missing RECEIVE section");
+	zassert_not_null(strstr(out, "TRANSMIT"), "missing TRANSMIT section");
+	zassert_not_null(strstr(out, "HEALTH"), "missing HEALTH section");
+
+	zassert_not_null(strstr(out, "rx boosted gain"), "missing the rx boost row");
+	zassert_not_null(strstr(out, "fem lna"), "missing the fem lna row");
+	zassert_not_null(strstr(out, "tx power"), "missing the tx power row");
+}
+
+/*
+ * The row that only this platform can prove. With no board override,
+ * meshtastic_radio_fem_lna_can_control() is the weak false, so the LNA row must
+ * report "not present" — NOT "disabled". Reporting absence as a disabled
+ * setting is the exact confusion the marker scheme exists to prevent, and on
+ * every bench board this branch is unreachable.
+ */
+ZTEST(meshtastic_shell, test_rf_marks_absent_hardware_as_absent)
+{
+	const char *out = NULL;
+	const char *row;
+
+	zassert_ok(run_cmd("meshtastic rf", &out), "rf failed");
+	row = strstr(out, "fem lna");
+	zassert_not_null(row, "missing the fem lna row");
+
+	zassert_not_null(strstr(row, "no controllable receive path"),
+			 "a board with no LNA control must say so, not report a mode");
+}
+
+/*
+ * The mock radio is not an SX126x, so meshtastic_radio_rx_boosted_applied()
+ * cannot know what the chip is doing. It must say "unknown". If this ever reads
+ * OFF, the tristate has been collapsed to a bool somewhere and the report is
+ * now claiming knowledge it does not have.
+ */
+ZTEST(meshtastic_shell, test_rf_reports_unknown_readback_as_unknown)
+{
+	const char *out = NULL;
+	const char *row;
+
+	zassert_ok(run_cmd("meshtastic rf", &out), "rf failed");
+	row = strstr(out, "rx boosted gain");
+	zassert_not_null(row, "missing the rx boost row");
+
+	zassert_not_null(strstr(row, "applied unknown"),
+			 "an unreportable applied gain must read unknown, never OFF");
+	zassert_not_null(strstr(out, "not assuming it is off"),
+			 "the unknown case should explain itself");
+}
+
+#endif /* CONFIG_MESHTASTIC_RF_PATH_REPORT */

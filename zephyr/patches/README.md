@@ -288,3 +288,42 @@ alongside the existing counters.
 to 0005's own CAD/AGC-reset implementation, which itself isn't upstream
 (upstream Meshtastic runs on RadioLib against a different driver entirely;
 there's no equivalent counter surface to align with).
+
+### 0011-sx126x-expose-rx-boosted-gain-staged-and-applied.patch
+
+Records what was actually written to the chip's `RX_GAIN` register, and
+exposes both that and the staged request:
+`sx126x_rx_boosted_staged_get()` / `sx126x_rx_boosted_applied_get()`.
+
+**Why:** `sx126x_set_rx_boosted_gain()` (added by 0005) deliberately only
+*stages* its value — the register is valid to write in STANDBY only
+(datasheet §9.6), so the request reaches the silicon on the next
+`sx126x_lora_config()`. That is the right design, but it makes one failure
+mode completely silent: a `lora_config()` that errored **before** the gain
+step leaves the chip on the old gain while every layer above believes the
+new one is in force. The cost is 2–3 dB of receive sensitivity, and nothing
+anywhere reports it — the node simply hears less than it should.
+
+`data->rx_boosted_applied` is assigned only **after** the write succeeds, so
+a failed write leaves the previous true value standing rather than an
+optimistic one. `data->rx_gain_valid` separates "never written" from
+"wrote false", and both getters return `false` instead of inventing a value
+when it is not knowable — "never configured" and "configured off" are
+different states, and reporting the first as the second would be worse than
+admitting the gap.
+
+Consumed by `main/src/meshtastic_rf_path.c` (`meshtastic rf`), which declares
+**weak fallbacks** for both getters so the firmware still links — and reports
+the value as `unknown` — against a Zephyr tree that has not had this patch
+applied. A build that silently failed to link would be obvious; one that
+linked and reported a fabricated answer would be much worse.
+
+> **Verified:** patch isolated via the reconstructed-baseline procedure above
+> (pristine + 0002/0003/0004/0005/0006/0008/0009 + this patch reproduces both
+> live files byte-for-byte); `git apply --reverse --check` clean against the
+> live tree; native_sim suites green (inert there — `CONFIG_LORA_SX126X`
+> unset, the weak fallbacks report unknown, which the shell tests assert).
+
+`upstreamable: true` — the staged/applied distinction is a property of the
+driver's own design, not of this project, and every user of
+`sx126x_set_rx_boosted_gain()` has the same blind spot.

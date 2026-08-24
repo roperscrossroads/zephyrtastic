@@ -1,0 +1,101 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.h b/drivers/lora/native/sx126x/sx126x.h
+index 494cf9e..dd7c6e2 100644
+--- a/drivers/lora/native/sx126x/sx126x.h
++++ b/drivers/lora/native/sx126x/sx126x.h
+@@ -53,6 +53,24 @@ struct sx126x_data {
+ 	 */
+ 	bool rx_boosted;
+ 
++	/*
++	 * What was last successfully WRITTEN to the chip's RX_GAIN register, as
++	 * opposed to rx_boosted, which is only what has been REQUESTED.
++	 *
++	 * The two diverge for a real and otherwise-silent reason:
++	 * sx126x_set_rx_boosted_gain() deliberately stages rather than writing
++	 * (the register is only valid to write in STANDBY), so the request reaches
++	 * the silicon on the next sx126x_lora_config(). If that config failed
++	 * before reaching the gain step, the chip is still on the OLD gain while
++	 * every layer above believes the new one is in force -- 2-3 dB of receive
++	 * sensitivity gone with nothing reporting a problem.
++	 *
++	 * rx_gain_valid distinguishes "we have never written it" from "we wrote
++	 * false", so a reader can report unknown instead of guessing.
++	 */
++	bool rx_boosted_applied;
++	bool rx_gain_valid;
++
+ 	/* TX completion via message queue */
+ 	struct k_msgq tx_msgq;
+ 	struct sx126x_tx_result tx_result;
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+index 957d4a1..ddb950b 100644
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -1184,6 +1184,13 @@ static int sx126x_lora_config(const struct device *dev,
+ 		goto out;
+ 	}
+ 
++	/* Record what actually reached the register, not what was asked for. This
++	 * assignment is placed AFTER the error check on purpose: a failed write
++	 * must leave the previous applied value standing, so a reader sees the
++	 * stale-but-true state rather than an optimistic one. */
++	data->rx_boosted_applied = data->rx_boosted;
++	data->rx_gain_valid = true;
++
+ 	data->config_valid = true;
+ 	LOG_DBG("Config: freq=%u, SF=%d, BW=%d, CR=%d, power=%d",
+ 		config->frequency, config->datarate, config->bandwidth,
+@@ -1217,6 +1224,53 @@ int sx126x_set_rx_boosted_gain(const struct device *dev, bool boosted)
+ 	return 0;
+ }
+ 
++/*
++ * Readback of the staged request and of what was actually applied to the chip.
++ *
++ * Two functions rather than one struct because callers want them separately and
++ * the interesting case is precisely when they DISAGREE: staged ON with applied
++ * OFF means a lora_config() failed before the gain step and the radio is 2-3 dB
++ * less sensitive than every configuration layer above it believes.
++ *
++ * Both return false when the value is not knowable rather than inventing one.
++ * "Never configured" and "configured off" are different states, and a
++ * diagnostic that reported the first as the second would be worse than one that
++ * admitted it could not tell.
++ */
++bool sx126x_rx_boosted_staged_get(const struct device *dev, bool *out)
++{
++	struct sx126x_data *data;
++
++	if (dev == NULL || out == NULL) {
++		return false;
++	}
++	data = dev->data;
++
++	k_mutex_lock(&data->lock, K_FOREVER);
++	*out = data->rx_boosted;
++	k_mutex_unlock(&data->lock);
++
++	return true;
++}
++
++bool sx126x_rx_boosted_applied_get(const struct device *dev, bool *out)
++{
++	struct sx126x_data *data;
++	bool valid;
++
++	if (dev == NULL || out == NULL) {
++		return false;
++	}
++	data = dev->data;
++
++	k_mutex_lock(&data->lock, K_FOREVER);
++	valid = data->rx_gain_valid;
++	*out = data->rx_boosted_applied;
++	k_mutex_unlock(&data->lock);
++
++	return valid;
++}
++
+ /* Bounds the CAD wait so a lost DIO1 edge can't hang a TX forever. Generous
+  * relative to the worst case (4 symbols at SF12/BW125 is ~131 ms) --
+  * matches this driver's existing conservative timeout style

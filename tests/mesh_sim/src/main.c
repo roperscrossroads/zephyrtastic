@@ -28,6 +28,9 @@
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 #include "meshtastic_scanner.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_RF_HIST)
+#include "meshtastic_rf_measure.h"
+#endif
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_reliable.h"
@@ -1372,4 +1375,208 @@ ZTEST(mesh_sim, test_rx_boosted_gain_tracks_config)
 	zassert_ok(meshtastic_config_store_set_config(&cfg), "lora config write failed");
 	zassert_ok(meshtastic_config_store_apply_core(), "config apply failed");
 	zassert_true(mt.rx_boosted_gain, "apply_core did not restore rx_boosted_gain");
+}
+
+#if defined(CONFIG_MESHTASTIC_RF_HIST)
+/* --- signal measurement ----------------------------------------------------
+ *
+ * The bin edges and the direct/relayed split are the two things here that would
+ * drift silently if someone "tidied" the arithmetic, so they get exact
+ * assertions rather than range checks.
+ */
+
+/* flags byte sits after dest(4) + src(4) + id(4). */
+#define WIRE_FLAGS_OFFSET 12U
+
+ZTEST(mesh_sim, test_rf_rssi_bin_edges_including_the_rail)
+{
+	/* The rail is the whole reason this bin exists: RssiPkt is an unsigned
+	 * -dBm/2 byte, so 0 is the TOP of the scale, not a missing reading, and a
+	 * bench node a metre away pins there. Folding it into the top ordinary bin
+	 * would hide the one condition that invalidates a comparison outright. */
+	zassert_equal(meshtastic_rf_rssi_bin(0), MESHTASTIC_RF_RSSI_RAIL_BIN,
+		      "RSSI 0 is the rail, not an ordinary top-bin reading");
+	zassert_equal(meshtastic_rf_rssi_bin(5), MESHTASTIC_RF_RSSI_RAIL_BIN,
+		      "anything above 0 is also railed");
+	zassert_not_equal(meshtastic_rf_rssi_bin(-1), MESHTASTIC_RF_RSSI_RAIL_BIN,
+			  "-1 dBm is a real reading and must NOT land in the rail bin");
+
+	zassert_equal(meshtastic_rf_rssi_bin(-131), 0, "below the floor underflows to bin 0");
+	zassert_equal(meshtastic_rf_rssi_bin(-130), 1, "the floor itself is the first real bin");
+	zassert_equal(meshtastic_rf_rssi_bin(-126), 1, "5 dB wide: -130..-125 share a bin");
+	zassert_equal(meshtastic_rf_rssi_bin(-125), 2, "the next 5 dB step is the next bin");
+}
+
+ZTEST(mesh_sim, test_rf_snr_bin_edges)
+{
+	zassert_equal(meshtastic_rf_snr_bin(-23), 0, "below the floor underflows");
+	zassert_equal(meshtastic_rf_snr_bin(-22), 1, "the floor is the first real bin");
+	zassert_equal(meshtastic_rf_snr_bin(-21), 1, "2 dB wide");
+	zassert_equal(meshtastic_rf_snr_bin(-20), 2, "the next step");
+	zassert_equal(meshtastic_rf_snr_bin(15), MESHTASTIC_RF_SNR_BINS - 1, "above +14 overflows");
+}
+
+ZTEST(mesh_sim, test_rf_bins_every_received_frame)
+{
+	struct meshtastic_rf_window w;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	meshtastic_rf_reset();
+	build_peer_text(0x7001U, "measure", wire, &wire_len);
+
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -87, 6),
+		   "inject failed");
+
+	meshtastic_rf_window_get(&w);
+	zassert_equal(w.hist.frames, 1U, "the frame must be counted");
+	zassert_equal(w.hist.rssi[meshtastic_rf_rssi_bin(-87)], 1U, "RSSI landed in its bin");
+	zassert_equal(w.hist.snr[meshtastic_rf_snr_bin(6)], 1U, "SNR landed in its bin");
+	zassert_equal(w.hist.rssi_min, -87, "min tracked");
+	zassert_equal(w.hist.snr_max, 6, "max tracked");
+}
+
+/*
+ * A frame the stack cannot decode still tells us the radio heard something.
+ * Weak, undecodable frames are exactly the population an antenna or LNA change
+ * moves, so measuring only what decoded would systematically miss the effect.
+ */
+ZTEST(mesh_sim, test_rf_counts_undecodable_frames)
+{
+	struct meshtastic_rf_window w;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	meshtastic_rf_reset();
+	build_peer_text(0x7002U, "foreign", wire, &wire_len);
+	wire[13] ^= 0xFFU; /* channel hash byte: now a channel we hold no key for */
+
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -95, 2), "inject failed");
+
+	meshtastic_rf_window_get(&w);
+	zassert_equal(w.hist.frames, 1U,
+		      "a frame we cannot decrypt was still demodulated and must be measured");
+}
+
+ZTEST(mesh_sim, test_rf_splits_direct_from_relayed)
+{
+	struct meshtastic_rf_peer peers[4];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	int n;
+
+	meshtastic_rf_reset();
+
+	/* One hop: hop_start still equals hop_limit, so hdr->src really is the
+	 * transmitter we heard. */
+	build_peer_text(0x7003U, "direct", wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -60, 10), "inject failed");
+
+	/* Same source, but a hop has been consumed — this measures the RELAY's
+	 * link to us, and must not touch the per-peer averages. */
+	build_peer_text(0x7004U, "relayed", wire, &wire_len);
+	wire[WIRE_FLAGS_OFFSET] = (uint8_t)((wire[WIRE_FLAGS_OFFSET] & ~0x07U) | 0x02U);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -100, -5), "inject failed");
+
+	n = meshtastic_rf_peers_get(peers, ARRAY_SIZE(peers));
+	zassert_equal(n, 1, "both frames came from one source id");
+	zassert_equal(peers[0].frames_direct, 1U, "exactly one direct frame");
+	zassert_equal(peers[0].frames_relayed, 1U, "exactly one relayed frame");
+	zassert_equal(peers[0].snr_sum, 10, "only the DIRECT frame's SNR may be averaged");
+	zassert_equal(peers[0].rssi_sum, -60, "only the DIRECT frame's RSSI may be averaged");
+}
+
+ZTEST(mesh_sim, test_rf_reset_clears_the_window_but_not_the_lifetime)
+{
+	struct meshtastic_rf_window before, after;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	meshtastic_rf_reset();
+	build_peer_text(0x7005U, "lifetime", wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -70, 5), "inject failed");
+	meshtastic_rf_window_get(&before);
+	zassert_true(before.lifetime > 0U, "lifetime should have advanced");
+
+	meshtastic_rf_reset();
+	meshtastic_rf_window_get(&after);
+
+	zassert_equal(after.hist.frames, 0U, "the window must start empty");
+	zassert_equal(after.lifetime, before.lifetime,
+		      "a reset must not destroy the record of how much was ever seen");
+}
+#endif /* CONFIG_MESHTASTIC_RF_HIST */
+
+/* --- licensed operation is opt-in ------------------------------------------
+ *
+ * is_licensed lifts the regional power clamp AND skips the front-end backoff,
+ * so a spuriously-true flag transmits over the legal limit. It must therefore
+ * be false unless a stored owner record explicitly carries it — never inherited
+ * from uninitialised memory, never implied by an absent field.
+ */
+ZTEST(mesh_sim, test_licensed_defaults_to_false)
+{
+	bool licensed = true; /* poisoned, so a no-op read cannot pass this */
+
+	meshtastic_config_store_get_owner_flags(&licensed, NULL);
+	zassert_false(licensed, "a node with no explicit licence must not be licensed");
+	zassert_false(mt.licensed, "the cached transmit-path flag must agree");
+}
+
+/*
+ * The proto has no presence flag for is_licensed, so a User built from zero is
+ * indistinguishable from one that explicitly says "not licensed". That
+ * ambiguity is resolved in the SAFE direction deliberately: writing an owner
+ * without the flag clears the licence rather than silently retaining elevated
+ * transmit rights.
+ */
+ZTEST(mesh_sim, test_setting_an_owner_without_the_flag_clears_the_licence)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	bool licensed = false;
+
+	strcpy(user.long_name, "licensed node");
+	user.is_licensed = true;
+	zassert_ok(meshtastic_config_store_set_owner(&user), "set_owner failed");
+	meshtastic_config_store_get_owner_flags(&licensed, NULL);
+	zassert_true(licensed, "an explicit licence must be honoured");
+	zassert_true(mt.licensed, "and must reach the cached transmit-path flag");
+
+	/* Now a client that does not get-modify-set: same name, flag absent. */
+	user = (meshtastic_User)meshtastic_User_init_zero;
+	strcpy(user.long_name, "licensed node");
+	zassert_ok(meshtastic_config_store_set_owner(&user), "set_owner failed");
+	meshtastic_config_store_get_owner_flags(&licensed, NULL);
+	zassert_false(licensed, "an owner write without the flag must clear the licence");
+	zassert_false(mt.licensed, "the cached flag must not go stale and keep transmit rights");
+}
+
+/*
+ * The cache must not go stale. mt.licensed is read per frame on the transmit
+ * path and cannot take the config-store mutex there, so set_owner refreshes it
+ * — along with the resolved tx_power, because refreshing only one would leave
+ * the node skipping the front-end backoff while still clamped to the region
+ * limit, a combination a reboot would never produce.
+ */
+ZTEST(mesh_sim, test_licence_change_refreshes_the_cached_tx_power)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	int8_t unlicensed_power;
+
+	user = (meshtastic_User)meshtastic_User_init_zero;
+	strcpy(user.long_name, "n");
+	zassert_ok(meshtastic_config_store_set_owner(&user), "set_owner failed");
+	unlicensed_power = mt.tx_power;
+
+	user.is_licensed = true;
+	zassert_ok(meshtastic_config_store_set_owner(&user), "set_owner failed");
+	zassert_true(mt.licensed, "the licence must take effect without a reboot");
+	zassert_true(mt.tx_power >= unlicensed_power,
+		     "a licence must never LOWER the resolved transmit power (%d -> %d)",
+		     unlicensed_power, mt.tx_power);
+
+	/* Leave the fixture unlicensed for every test that follows. */
+	user.is_licensed = false;
+	zassert_ok(meshtastic_config_store_set_owner(&user), "set_owner failed");
+	zassert_false(mt.licensed, "cleanup: the licence must clear again");
 }

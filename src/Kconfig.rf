@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_RF
+	bool "RF gain-path diagnostics and measurement"
+	default n
+	help
+	  Tools for answering "is this gain setting actually helping?" with
+	  evidence rather than folklore.
+
+	  There are four amplifiers between the air and a decoded packet and three
+	  layers that can supply a setting for them, so a configured value and an
+	  effective value routinely disagree. `meshtastic rf` reports what the
+	  radio was really told; the measurement half turns received frames into
+	  distributions that two settings can be compared across.
+
+	  Safe to enable in an ordinary node build: the report is pure readback,
+	  and the measurement half only observes frames the radio already
+	  delivered. Nothing here transmits.
+
+	  See main/docs/rf-measurement.md.
+
+if MESHTASTIC_RF
+
+config MESHTASTIC_RF_PATH_REPORT
+	bool "`meshtastic rf` — effective gain-path report"
+	default y
+	help
+	  A single screen walking the signal chain in order — front end, receive,
+	  transmit, health — reporting the value that is IN EFFECT rather than the
+	  one that is stored.
+
+	  The distinction is the reason this exists. `sx126x_rx_boosted_gain` is
+	  seeded into the config store and pushed to the driver at every boot,
+	  overriding the devicetree default, so neither of those two sources is
+	  the answer on a provisioned node. And the driver only STAGES the value:
+	  it reaches the chip on the next lora_config(), so a config that failed
+	  leaves the radio 2-3 dB less sensitive than the configuration claims.
+
+	  Costs no RAM and nothing on the receive path.
+
+config MESHTASTIC_RF_HIST
+	bool "RSSI/SNR distributions and per-peer frame rates"
+	default y
+	help
+	  Accumulate every received frame into a distribution, and count frames
+	  per peer.
+
+	  This is the piece that makes a comparison possible at all. The firmware
+	  already counts a great deal, and the NodeDB keeps each peer's LAST SNR —
+	  but a single sample of a noisy quantity is not evidence, so nothing
+	  today can answer "did that antenna help?".
+
+	  Taps the radio receive callback after the scanner's off-preset gate and
+	  before the software queue, so it sees frames the queue drops (the radio
+	  demodulated them; a full queue is our limit, not the RF chain's) but not
+	  frames from a sweep of other people's presets.
+
+config MESHTASTIC_RF_PEERS
+	int "Peer table entries"
+	depends on MESHTASTIC_RF_HIST
+	default 24
+	range 4 512
+	help
+	  About 40 bytes each. The default fits comfortably on a 256 KB nRF52840
+	  alongside everything else; raise it in a per-board overlay where there
+	  is room.
+
+	  Eviction is least-recently-heard and is COUNTED, so a full table reports
+	  that its peer list is partial instead of silently pretending otherwise.
+
+endif # MESHTASTIC_RF

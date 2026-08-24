@@ -96,6 +96,35 @@ bool meshtastic_radio_fem_lna_can_control(void);
  */
 void meshtastic_radio_fem_lna_set(bool enable);
 
+/**
+ * @brief Which receive path the board currently intends to use.
+ *
+ * @warning This is the board's INTENT, not a pin read, and the distinction is
+ * load-bearing rather than pedantic. On the Heltec V4 the LNA select and the
+ * TX/RX mode select are the SAME PIN (see that board's
+ * meshtastic_radio_fem_set_tx()), so a read-back sampled during a transmit
+ * would report "bypass" on a board whose LNA is perfectly well enabled. Intent
+ * is the only answer that is correct at every instant, so that is what a
+ * diagnostic must report — labelled as intent.
+ *
+ * Meaningful only where @ref meshtastic_radio_fem_lna_can_control is true.
+ * Weak default: false.
+ */
+bool meshtastic_radio_fem_lna_get(void);
+
+/**
+ * @brief Human-readable name of the fitted front-end, or NULL if there is none.
+ *
+ * For diagnostics only. A board that detects its front-end at runtime (the V4
+ * reads a bias line to tell a KCT8103L from a GC1109) returns what it actually
+ * found, so a report can distinguish "no front-end on this hardware" from
+ * "detection failed" — which otherwise look identical from the outside and have
+ * very different consequences for transmit power.
+ *
+ * Weak default: NULL.
+ */
+const char *meshtastic_radio_fem_name(void);
+
 #ifdef __cplusplus
 }
 #endif

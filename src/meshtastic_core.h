@@ -73,6 +73,18 @@ struct meshtastic_context {
 	/* config.lora.tx_enabled: false makes the node receive-only. Enforced at
 	 * the single TX choke point in meshtastic_radio.c. Defaults true. */
 	bool tx_enabled;
+	/* owner.is_licensed, cached from the config store.
+	 *
+	 * Cached rather than read on demand because the transmit path needs it on
+	 * every frame, and meshtastic_config_store_get_owner_flags() takes the
+	 * store mutex — calling that while already holding mt_radio_sem and
+	 * mt.lock would introduce a new lock ordering for no benefit. The value
+	 * only changes on a config write, which is exactly when this is refreshed.
+	 *
+	 * It gates two things, both mirroring the reference: the region power
+	 * clamp, and whether the board FEM's gain is subtracted at all
+	 * (RadioInterface::limitPower). */
+	bool licensed;
 	const char *channel_name;
 	const char *long_name;
 	const char *short_name;
@@ -213,6 +225,89 @@ static inline uint32_t meshtastic_radio_agc_patch_fail_count(void)
 }
 static inline void meshtastic_radio_cad_agc_stats_reset(void)
 {
+}
+#endif
+
+/**
+ * @brief Three-state answer for a setting the radio may not be able to report.
+ *
+ * UNKNOWN is a first-class value, not a placeholder. A driver that cannot tell
+ * us what the chip is doing must say so — reporting UNKNOWN as OFF would turn
+ * "we cannot see" into "it is disabled", which is the exact confusion a
+ * diagnostic exists to remove.
+ */
+enum meshtastic_radio_tristate {
+	MESHTASTIC_RADIO_TRI_UNKNOWN = 0,
+	MESHTASTIC_RADIO_TRI_OFF,
+	MESHTASTIC_RADIO_TRI_ON,
+};
+
+/**
+ * @brief What was last actually handed to the radio driver, and whether it took it.
+ *
+ * The point of this struct is that it is written at the lora_config() call
+ * sites, so it records what the radio was really told rather than what the
+ * configuration believes. The two diverge in ways that are otherwise invisible:
+ * a failed config leaves the chip on its previous settings while every stored
+ * value still reads new.
+ */
+struct meshtastic_radio_effective {
+	uint32_t frequency;   /**< Hz, as programmed. */
+	uint32_t bandwidth_hz;
+	uint8_t spread_factor;
+	uint8_t coding_rate;
+	/*
+	 * Two transmit-power fields, not one, because the drive level is
+	 * programmed per transmission and reverted immediately afterwards. A
+	 * single "current tx power" would report whichever config ran last —
+	 * in practice the RX-side one — and be quietly wrong about what the
+	 * node actually transmits at.
+	 */
+	int8_t tx_power_rx_cfg; /**< drive programmed by a receive-side config */
+	int8_t tx_power_tx_cfg; /**< drive programmed for the last transmit */
+	int last_rc;            /**< return code of the most recent lora_config() */
+	uint32_t generation;    /**< increments per SUCCESSFUL config; 0 = never configured */
+};
+
+/**
+ * @brief Read back the last configuration actually pushed to the radio.
+ *
+ * @param out Filled on success.
+ * @return 0, or -EINVAL for a NULL @p out.
+ */
+int meshtastic_radio_effective_get(struct meshtastic_radio_effective *out);
+
+/**
+ * @brief RX gain boost as STAGED by the driver, and as APPLIED to the chip.
+ *
+ * These differ, and the gap is a real failure mode rather than a theoretical
+ * one: sx126x_set_rx_boosted_gain() only records the request, which reaches the
+ * silicon on the next lora_config(). If that config failed, the chip is still
+ * on the old gain while the stored configuration claims the new one — a silent
+ * loss of 2-3 dB of receive sensitivity. Reporting them separately is what makes
+ * that visible.
+ *
+ * Both read UNKNOWN on a radio whose driver cannot report it — which includes
+ * every non-SX126x build, hence the fallbacks below.
+ */
+#if defined(CONFIG_LORA_SX126X)
+enum meshtastic_radio_tristate meshtastic_radio_rx_boosted_staged(void);
+enum meshtastic_radio_tristate meshtastic_radio_rx_boosted_applied(void);
+
+/** @brief Consecutive SPI BUSY-line timeouts; a wiring/driver-health signal. */
+uint32_t meshtastic_radio_busy_timeout_streak(void);
+#else
+static inline enum meshtastic_radio_tristate meshtastic_radio_rx_boosted_staged(void)
+{
+	return MESHTASTIC_RADIO_TRI_UNKNOWN;
+}
+static inline enum meshtastic_radio_tristate meshtastic_radio_rx_boosted_applied(void)
+{
+	return MESHTASTIC_RADIO_TRI_UNKNOWN;
+}
+static inline uint32_t meshtastic_radio_busy_timeout_streak(void)
+{
+	return 0U;
 }
 #endif
 

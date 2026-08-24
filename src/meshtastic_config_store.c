@@ -738,6 +738,10 @@ int meshtastic_config_store_apply_core(void)
 				lora.tx_power, (int)lora.region, resolved);
 		}
 		mt.tx_power = resolved;
+		/* Cache the licence flag alongside the power it helped resolve. The
+		 * transmit path needs it per frame and must not take the store mutex
+		 * there; this is the one place both are known together. */
+		mt.licensed = store.is_licensed;
 	}
 
 	/* Resolve the modem preset. wide_lora is hardcoded false: it is a
@@ -1204,6 +1208,9 @@ int meshtastic_config_store_set_rebroadcast_mode(
 
 int meshtastic_config_store_set_owner(const meshtastic_User *user)
 {
+	int8_t new_tx_power;
+	bool new_licensed;
+
 	if (user == NULL) {
 		return -EINVAL;
 	}
@@ -1220,9 +1227,58 @@ int meshtastic_config_store_set_owner(const meshtastic_User *user)
 	if (user->short_name[0] != '\0') {
 		copy_string(store.short_name, sizeof(store.short_name), user->short_name);
 	}
+	/* No presence flag exists for is_licensed in the proto (it is a plain
+	 * proto3 bool), so an unset field is indistinguishable from an explicit
+	 * false — exactly as upstream's handleSetOwner sees it. That is the SAFE
+	 * direction here and is deliberately not worked around: a client that
+	 * writes a User built from zero clears the licence rather than silently
+	 * retaining elevated transmit rights. Licensed operation is opt-in, every
+	 * time it is written. (Contrast is_unmessagable beside it, which does have
+	 * a presence flag and so can be left alone when absent.) */
 	store.is_licensed = user->is_licensed;
 	store.is_unmessagable = user->has_is_unmessagable && user->is_unmessagable;
+
+	/* Re-resolve the transmit power under the new licence state, and capture
+	 * both halves together.
+	 *
+	 * Necessary because mt.licensed is a CACHE (the transmit path cannot take
+	 * this mutex per frame). Without this the flag would go stale until the
+	 * next reboot, and refreshing only the flag would be worse still: it would
+	 * leave the node skipping the front-end backoff while its power was still
+	 * clamped to the region limit, a combination that occurs nowhere else and
+	 * that a reboot would never produce. */
+	{
+		/* int, and checked: index_for_config_tag() returns -ENOENT on a miss,
+		 * which in a uint8_t would become 254 and index far off the end of a
+		 * ten-element array. Unreachable while the lora tag is in the table,
+		 * but a lookup whose failure mode is an out-of-bounds read does not
+		 * get to rely on that. */
+		int lora_idx = index_for_config_tag(meshtastic_Config_lora_tag);
+
+		new_licensed = store.is_licensed;
+		if (lora_idx < 0) {
+			LOG_ERR("no lora config slot; leaving tx power unchanged");
+			new_tx_power = mt.tx_power;
+		} else {
+			const meshtastic_Config_LoRaConfig *lora =
+				&store.configs[lora_idx].payload_variant.lora;
+
+			new_tx_power = meshtastic_tx_power_resolve(lora->tx_power, lora->region,
+								   new_licensed);
+		}
+	}
 	store_unlock();
+
+	/* Assigned outside the store lock: the transmit path reads these without
+	 * one, and nothing here needs the two mutations to be atomic against it —
+	 * a frame that catches the pair mid-update transmits at the old or the new
+	 * level, both of which are legal. */
+	if ((mt.tx_power != new_tx_power) || (mt.licensed != new_licensed)) {
+		LOG_INF("owner licence %s: tx power %d -> %d dBm at the antenna",
+			new_licensed ? "set" : "cleared", mt.tx_power, new_tx_power);
+	}
+	mt.tx_power = new_tx_power;
+	mt.licensed = new_licensed;
 
 	/* mt.long_name / mt.short_name already point at store.* (apply_core). */
 	store_schedule_save();

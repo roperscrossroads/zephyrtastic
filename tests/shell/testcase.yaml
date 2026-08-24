@@ -33,3 +33,15 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_SCANNER=y
       - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
+
+  # `meshtastic rf`. native_sim has no board FEM override, so this scenario is
+  # also the only place the "[--] not on this hardware" branch compiles AND runs
+  # — on the bench boards that row is always the controllable one.
+  meshtastic.shell.rf.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_RF=y
+      # The dummy backend captures only 300-400 chars by default, and the rf
+      # report is a deliberately complete walk of the chain (~2 KB). Without
+      # this the later sections are silently truncated and a test asserting on
+      # them fails for a reason that has nothing to do with the code.
+      - CONFIG_SHELL_BACKEND_DUMMY_BUF_SIZE=4096

@@ -167,6 +167,35 @@ bool meshtastic_radio_fem_lna_can_control(void)
 	return fem_lna_controllable;
 }
 
+/*
+ * Report the INTENT, never the pin. meshtastic_radio_fem_set_tx() above drives
+ * this one pin HIGH for transmit and back to the configured receive level after,
+ * so sampling the pad during a TX would say "bypass" on a node whose LNA is
+ * enabled. fem_lna_enabled is what the receive path actually returns to, which
+ * is the answer that holds at every instant.
+ */
+bool meshtastic_radio_fem_lna_get(void)
+{
+	return fem_lna_enabled;
+}
+
+/*
+ * The detected part, not a compile-time guess: one image serves both PCB
+ * revisions and detection can fail (see heltec_v4_fem_init). NULL here means
+ * detection did not complete, which matters — the gain table degrades to
+ * identity in that case and transmit power is quietly under-driven.
+ */
+const char *meshtastic_radio_fem_name(void)
+{
+	if (fem_gain_table == fem_gain_kct8103l) {
+		return "KCT8103L";
+	}
+	if (fem_gain_table == fem_gain_gc1109) {
+		return "GC1109";
+	}
+	return NULL;
+}
+
 void meshtastic_radio_fem_lna_set(bool enable)
 {
 	fem_lna_enabled = enable;

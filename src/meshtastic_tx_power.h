@@ -53,10 +53,21 @@ int8_t meshtastic_tx_power_resolve(int8_t configured,
 /**
  * @brief Desired radiated power -> the value to program into the transceiver.
  *
- * Applies the board's FEM conversion (if any) and clamps to what the radio can
- * actually be set to.
+ * Applies the board's FEM conversion and clamps to what the radio can actually
+ * be set to. The two steps are gated differently, and the difference is the
+ * whole reason @p licensed is a parameter:
+ *
+ *  - The FEM conversion exists to keep radiated power inside a REGULATORY
+ *    limit, so it is skipped for a licensed operator — mirroring the
+ *    reference's `if (!is_licensed) power = powerConversion(power);`
+ *    (RadioInterface::limitPower).
+ *  - The clamp is the transceiver's ELECTRICAL range and applies to everyone.
+ *
+ * @param radiated_dbm desired power at the antenna, dBm
+ * @param licensed     operator holds an amateur licence (skips the FEM backoff)
+ * @return the drive level to program into the transceiver, dBm
  */
-int8_t meshtastic_tx_power_chip_drive(int8_t radiated_dbm);
+int8_t meshtastic_tx_power_chip_drive(int8_t radiated_dbm, bool licensed);
 
 #ifdef __cplusplus
 }

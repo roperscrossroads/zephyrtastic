@@ -22,6 +22,9 @@
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 #include "meshtastic_scanner.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_RF_HIST)
+#include "meshtastic_rf_measure.h"
+#endif
 #include "meshtastic_router.h"
 #include "meshtastic_airtime.h"
 #include "meshtastic_tx_power.h"
@@ -89,6 +92,67 @@ static struct lora_modem_config mt_lora_cfg = {
 			.symbol_num = 0,
 		},
 };
+
+/*
+ * What was last actually handed to lora_config(), for `meshtastic rf`.
+ *
+ * Recorded HERE, at the call sites, rather than derived from mt.* on demand,
+ * because the whole point is to be able to say when the two disagree. A config
+ * that failed leaves the chip on its previous settings while every stored value
+ * already reads new; asking mt.* would cheerfully report the new one.
+ *
+ * Guarded by mt_effective_lock rather than mt.lock: the readers are the shell
+ * and (later) the RF report, and making them contend for mt.lock — held across
+ * lora_config() itself — would let a diagnostic stall the radio path.
+ */
+static struct meshtastic_radio_effective mt_effective;
+static struct k_spinlock mt_effective_lock;
+
+/*
+ * @param tx_side true when this config programmed a transmit (so the drive
+ *                level belongs in tx_power_tx_cfg, not the RX-side field).
+ * @param rc      lora_config()'s return code, recorded verbatim.
+ *
+ * Reads mt_lora_cfg, so it must be called while the caller still holds mt.lock,
+ * before anything can overwrite the config it describes.
+ */
+static void mt_record_effective(bool tx_side, int rc)
+{
+	k_spinlock_key_t key = k_spin_lock(&mt_effective_lock);
+
+	mt_effective.frequency = mt_lora_cfg.frequency;
+	mt_effective.bandwidth_hz = mt.modem.bandwidth_hz;
+	mt_effective.spread_factor = mt.modem.spread_factor;
+	mt_effective.coding_rate = mt.modem.coding_rate;
+	if (tx_side) {
+		mt_effective.tx_power_tx_cfg = (int8_t)mt_lora_cfg.tx_power;
+	} else {
+		mt_effective.tx_power_rx_cfg = (int8_t)mt_lora_cfg.tx_power;
+	}
+	mt_effective.last_rc = rc;
+	if (rc == 0) {
+		/* Only successful configs advance the generation, so a stalled
+		 * counter alongside a growing uptime is itself the symptom. */
+		mt_effective.generation++;
+	}
+
+	k_spin_unlock(&mt_effective_lock, key);
+}
+
+int meshtastic_radio_effective_get(struct meshtastic_radio_effective *out)
+{
+	k_spinlock_key_t key;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+
+	key = k_spin_lock(&mt_effective_lock);
+	*out = mt_effective;
+	k_spin_unlock(&mt_effective_lock, key);
+
+	return 0;
+}
 
 /* Push the resolved modem params into the driver config. Called under mt.lock
  * at both lora_config() sites.
@@ -228,6 +292,24 @@ __weak void meshtastic_radio_fem_lna_set(bool enable)
 	ARG_UNUSED(enable);
 }
 
+/*
+ * Default receive-path intent: bypass. Only meaningful where the board reports
+ * meshtastic_radio_fem_lna_can_control(), so a diagnostic must gate on that
+ * rather than treat this false as "the LNA is off" — on hardware with no
+ * controllable path there is no choice being made at all.
+ */
+__weak bool meshtastic_radio_fem_lna_get(void)
+{
+	return false;
+}
+
+/* Default: no front-end fitted. A board that detects one at runtime returns what
+ * it actually found, so "absent" and "detection failed" stay distinguishable. */
+__weak const char *meshtastic_radio_fem_name(void)
+{
+	return NULL;
+}
+
 int meshtastic_radio_tune_explicit(uint32_t frequency_hz, uint8_t spread_factor,
 				   uint32_t bandwidth_hz, uint8_t coding_rate)
 {
@@ -262,11 +344,12 @@ int meshtastic_radio_retune(void)
 	k_mutex_lock(&mt.lock, K_FOREVER);
 	mt_lora_cfg.frequency = mt.frequency;
 	apply_modem_params();
-	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power);
+	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power, mt.licensed);
 	mt_lora_cfg.tx = false;
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_NONE;
 	mt_lora_cfg.cad.symbol_num = 0;
 	ret = lora_config(mt.lora_dev, &mt_lora_cfg);
+	mt_record_effective(false, ret);
 	k_mutex_unlock(&mt.lock);
 
 	if (ret < 0) {
@@ -336,6 +419,27 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 
 	(void)k_sem_take(&mt_radio_sem, K_FOREVER);
 
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+	/* The gate again, now that the radio is actually ours.
+	 *
+	 * The check above runs OUTSIDE mt_radio_sem, so a sweep starting in the
+	 * window between the two could take the semaphore first and retune. That is
+	 * not merely a stale answer: meshtastic_radio_tune_explicit() writes
+	 * mt.frequency and mt.modem, and the configuration below reads exactly those
+	 * — so the frame would be configured onto the SCAN preset and transmitted
+	 * there. Narrow, but it is the one outcome the gate exists to prevent, and
+	 * the semaphore is what makes the answer stable, so the decisive check
+	 * belongs on this side of it.
+	 *
+	 * The early check is kept as well: it is the common path while sweeping, and
+	 * it refuses without touching the radio at all. */
+	if (meshtastic_scanner_active()) {
+		meshtastic_scanner_note_tx_blocked();
+		(void)k_sem_give(&mt_radio_sem);
+		return -EPERM;
+	}
+#endif
+
 	/*
 	 * Continuous async RX must be stopped first: the SX126x driver
 	 * rejects lora_config()/lora_send() with -EBUSY while it is active.
@@ -349,7 +453,7 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 
 	mt_lora_cfg.frequency = mt.frequency;
 	apply_modem_params();
-	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power);
+	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power, mt.licensed);
 	mt_lora_cfg.tx = true;
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_LBT;
 	/* 0 = "driver default" (documented in lora.h) -- the sx126x driver
@@ -365,6 +469,7 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	meshtastic_radio_fem_set_tx(true);
 
 	ret = lora_config(mt.lora_dev, &mt_lora_cfg);
+	mt_record_effective(true, ret);
 	if (ret == 0) {
 		retries = CONFIG_MESHTASTIC_TX_BUSY_RETRIES;
 		for (;;) {
@@ -381,7 +486,15 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 
 	mt_lora_cfg.tx = false;
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_NONE;
-	(void)lora_config(mt.lora_dev, &mt_lora_cfg);
+	{
+		/* Deliberately NOT into `ret` — that still carries the send result,
+		 * which the caller's status accounting below depends on. The revert
+		 * is recorded as an RX-side config because that is what it is: it
+		 * puts the radio back where it listens. */
+		int revert_rc = lora_config(mt.lora_dev, &mt_lora_cfg);
+
+		mt_record_effective(false, revert_rc);
+	}
 
 	/* Return the front-end to its RX path (e.g. re-enable the LNA). */
 	meshtastic_radio_fem_set_tx(false);
@@ -459,6 +572,26 @@ static void mt_rx_cb(const struct device *dev, uint8_t *data, uint16_t size, int
 		meshtastic_scanner_note_rx_dropped();
 		return;
 	}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_RF_HIST)
+	/* Measurement tap. The position is argued, not incidental — two pressures
+	 * pull in opposite directions and both matter:
+	 *
+	 *  - AFTER the scanner gate above, so a sweeping node does not fold frames
+	 *    from other people's presets into its own signal statistics. Those
+	 *    frames are on a different frequency and spreading factor; they say
+	 *    nothing about the chain this node operates on.
+	 *
+	 *  - BEFORE the msgq put below, so a frame the software queue drops is
+	 *    still counted. The radio demodulated it; a full queue is our limit,
+	 *    not the RF chain's, and dropping those silently would bias the sample
+	 *    downward during exactly the bursts an experiment wants to see.
+	 *
+	 * Not in the router, deliberately: it discards ignored, duplicate and
+	 * undecodable frames before RSSI is ever read, and weak undecodable frames
+	 * are the population an antenna or LNA change actually moves. */
+	meshtastic_rf_on_rx(data, size, rssi, snr);
 #endif
 
 	slot.len = size;
@@ -599,6 +732,64 @@ void meshtastic_radio_cad_agc_stats_reset(void)
 	sx126x_cad_agc_stats_reset();
 }
 
+/*
+ * Readback of what the driver staged vs what it actually applied, plus the SPI
+ * BUSY-timeout streak.
+ *
+ * These are declared __weak here rather than plain extern on purpose: they are
+ * provided by carried patch 0011 (rx-boost readback) and by
+ * sx126x_hal_common.c, and this firmware must still LINK against a Zephyr tree
+ * that has not had the patch applied. A build that silently failed to link
+ * would be an obvious problem; one that linked and reported a confident,
+ * fabricated answer would be a much worse one. So the fallbacks return
+ * UNKNOWN/0 and the report prints them as unknown.
+ */
+__weak bool sx126x_rx_boosted_staged_get(const struct device *dev, bool *out)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(out);
+	return false;
+}
+
+__weak bool sx126x_rx_boosted_applied_get(const struct device *dev, bool *out)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(out);
+	return false;
+}
+
+__weak uint32_t sx126x_hal_busy_timeout_streak(void)
+{
+	return 0U;
+}
+
+static enum meshtastic_radio_tristate mt_tri(bool got, bool value)
+{
+	if (!got) {
+		return MESHTASTIC_RADIO_TRI_UNKNOWN;
+	}
+	return value ? MESHTASTIC_RADIO_TRI_ON : MESHTASTIC_RADIO_TRI_OFF;
+}
+
+enum meshtastic_radio_tristate meshtastic_radio_rx_boosted_staged(void)
+{
+	bool v = false;
+
+	return mt_tri(sx126x_rx_boosted_staged_get(mt.lora_dev, &v), v);
+}
+
+enum meshtastic_radio_tristate meshtastic_radio_rx_boosted_applied(void)
+{
+	bool v = false;
+
+	return mt_tri(sx126x_rx_boosted_applied_get(mt.lora_dev, &v), v);
+}
+
+uint32_t meshtastic_radio_busy_timeout_streak(void)
+{
+	return sx126x_hal_busy_timeout_streak();
+}
+
 static void mt_agc_reset_work_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(mt_agc_reset_work, mt_agc_reset_work_fn);
 
@@ -696,7 +887,7 @@ int meshtastic_radio_init(void)
 
 	mt_lora_cfg.frequency = mt.frequency;
 	apply_modem_params();
-	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power);
+	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power, mt.licensed);
 	mt_lora_cfg.tx = false;
 
 #if defined(CONFIG_LORA_SX126X)
@@ -706,6 +897,7 @@ int meshtastic_radio_init(void)
 #endif
 
 	ret = lora_config(mt.lora_dev, &mt_lora_cfg);
+	mt_record_effective(false, ret);
 	if (ret < 0) {
 		LOG_ERR("Initial lora_config failed (%d)", ret);
 		return -EIO;

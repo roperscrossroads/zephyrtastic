@@ -29,6 +29,23 @@ patches:
       undriven analog input without it. Confirmed on hardware: with the call
       dropped, the Heltec V4 display+battery UI and the LoRa radio coexist
       (tx ok / rx decoding with the full UI enabled).
+
+      2026-07-21 follow-up (now captured in the patch's own comment, previously
+      only in the live working tree): esp-idf's own gpio_config_as_analog(io_num)
+      -- its per-pin analog-routing call -- was tried as a "surgical" replacement
+      and still killed DIO1 on the bench. So it isn't the routing *method* that
+      matters: any analog routing of GPIO1 disturbs the shared RTC-IO state
+      GPIO14/DIO1 depends on, once DIO1 is already live. Leaving the pin undriven
+      keeps the radio alive; the battery then reads ~1.8x low (see
+      TMP-BAT-FIX-OPTIONS.md, deferred).
+
+      PROVENANCE: the patch file previously captured only the 2026-07-20 version
+      of this comment; the 2026-07-21 follow-up existed solely as an uncommitted
+      edit in zephyr/'s working tree and would have been silently discarded by
+      the next `west update` / `west patch clean`. Found and re-captured
+      2026-08-23 while auditing all carried patches against the live tree ahead
+      of adding hal_nordic to the manifest (same class of gap as 0008/0010's
+      documented near-misses).
   - path: 0002-sx126x-poll-dio1-on-light-sleep-wake.patch
     sha256sum: 71cab4cc1a40f2a2eb9aefe59922670bd983848c2c202b59e5fcb73d25410252
     module: zephyr
@@ -388,3 +405,38 @@ patches:
       carried patches here -- the convention is this directory. Found and
       captured 2026-08-19 during a full audit of modified files in zephyr/
       against patches.yml.
+  - path: 0011-sx126x-expose-rx-boosted-gain-staged-and-applied.patch
+    sha256sum: 379e5c73c954e7ac6919bf3c4660fadc8758061f5d613df52357d17e2078aeb6
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-08-23"
+    upstreamable: true
+    comments: |
+      drivers/lora/native/sx126x: record what was actually written to the
+      RX_GAIN register, and expose both that and the staged request.
+
+      sx126x_set_rx_boosted_gain() deliberately only STAGES its value -- the
+      register is valid to write in STANDBY only (datasheet 9.6), so the
+      request reaches the silicon on the next sx126x_lora_config(). That is
+      correct, but it makes a failure silent: a lora_config() that errored
+      before the gain step leaves the chip on the OLD gain while every layer
+      above believes the new one is in force. The cost is 2-3 dB of receive
+      sensitivity, and nothing anywhere reports it -- the node simply hears
+      less than it should.
+
+      Adds data->rx_boosted_applied (set only AFTER the write succeeds, so a
+      failed write leaves the previous true value standing) and
+      data->rx_gain_valid, plus sx126x_rx_boosted_staged_get() /
+      sx126x_rx_boosted_applied_get(). Both getters return false rather than
+      inventing a value when it is not knowable: "never configured" and
+      "configured off" are different states, and reporting the first as the
+      second would be worse than admitting the gap.
+
+      Consumed by main/src/meshtastic_rf_path.c (`meshtastic rf`), which
+      declares weak fallbacks so the firmware still links -- and reports the
+      value as unknown -- against a Zephyr tree without this patch applied.
+
+      upstreamable: the staged/applied distinction is a property of the
+      driver's own design, not of this project, and any user of
+      sx126x_set_rx_boosted_gain() has the same blind spot.

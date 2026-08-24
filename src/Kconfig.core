@@ -161,6 +161,7 @@ config MESHTASTIC_DEFAULT_OK_TO_MQTT
 config MESHTASTIC_TX_POWER
 	int "Fallback TX power for a region with no declared limit (dBm)"
 	default 17
+	range 0 40
 	help
 	  Radiated power, in dBm, used only when the configured tx_power is 0
 	  AND the region has no regulatory power limit to fall back on.
@@ -177,6 +178,7 @@ config MESHTASTIC_TX_POWER
 config MESHTASTIC_RADIO_MAX_TX_POWER
 	int "Maximum transceiver drive level (dBm)"
 	default 22
+	range -30 40
 	help
 	  Ceiling for the value programmed into the transceiver, AFTER any FEM
 	  gain conversion. 22 dBm is the SX1262's high-power PA maximum and
@@ -188,6 +190,7 @@ config MESHTASTIC_RADIO_MAX_TX_POWER
 config MESHTASTIC_RADIO_MIN_TX_POWER
 	int "Minimum transceiver drive level (dBm)"
 	default -9
+	range -30 40
 	help
 	  Floor for the value programmed into the transceiver. -9 dBm is the
 	  SX1262's minimum with the high-power PA selected.

@@ -468,6 +468,13 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	 * turns it off (config_store applies that). Seeded here so a node with no
 	 * stored lora config is not silently mute. */
 	mt.tx_enabled = true;
+	/* Licensed operation is OPT-IN and must never be inherited by accident: it
+	 * lifts the regional power clamp and skips the front-end backoff, so a
+	 * spurious true transmits over the legal limit. Static storage already
+	 * zeroes this; stating it here makes the default a decision rather than a
+	 * property of where the struct happens to live, and it is only ever raised
+	 * from a stored owner record that explicitly carries the flag. */
+	mt.licensed = false;
 	mt.tx_power = meshtastic_tx_power_resolve(
 		cfg->tx_power, meshtastic_Config_LoRaConfig_RegionCode_UNSET, false);
 	mt.long_name = (cfg->long_name != NULL) ? cfg->long_name : CONFIG_MESHTASTIC_NODE_LONG_NAME;
