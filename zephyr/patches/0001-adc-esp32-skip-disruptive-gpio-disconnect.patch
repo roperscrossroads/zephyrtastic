@@ -1,8 +1,8 @@
 diff --git a/drivers/adc/adc_esp32.c b/drivers/adc/adc_esp32.c
-index 9941acf53d..315a61214b 100644
+index 9941acf53d..2f2a20fee1 100644
 --- a/drivers/adc/adc_esp32.c
 +++ b/drivers/adc/adc_esp32.c
-@@ -325,18 +325,17 @@ static int adc_esp32_channel_setup(const struct device *dev, const struct adc_ch
+@@ -325,18 +325,23 @@ static int adc_esp32_channel_setup(const struct device *dev, const struct adc_ch
  		return -ENOTSUP;
  	}
  
@@ -25,9 +25,15 @@ index 9941acf53d..315a61214b 100644
 +	 * a neighbouring RTC-capable pin on the same controller. On the Heltec V4 that
 +	 * pin is the SX1262 DIO1 (GPIO14, adjacent to the ADC1_CH0 battery pin GPIO1):
 +	 * the first ADC channel-setup silently kills the radio's TX-done/RX-done IRQ.
-+	 * Upstream ESP-IDF adc_oneshot does not touch the GPIO here; the SAR ADC reads
-+	 * the (undriven) analog input without it. Dropping the call lets the ADC and a
-+	 * neighbouring digital-interrupt peripheral coexist. */
++	 *
++	 * NOTE (2026-07-21): esp-idf's own gpio_config_as_analog(io_num) — its per-pin
++	 * analog-routing call — was tried here as a "surgical" replacement and STILL
++	 * killed DIO1 on the bench (radio dead: tx 0 ok, rx 0). So it is not the routing
++	 * *method* that matters: any analog routing of GPIO1 disturbs the shared RTC-IO
++	 * state that GPIO14/DIO1 depends on, once DIO1 is already live. Upstream avoids
++	 * this by ordering (ADC pin routed at boot, before the radio attaches DIO1);
++	 * our radio comes up first. Leaving the pin undriven keeps the radio alive; the
++	 * battery then reads ~1.8x low (see TMP-BAT-FIX-OPTIONS.md, deferred). */
 +	ARG_UNUSED(err);
  
  	return 0;

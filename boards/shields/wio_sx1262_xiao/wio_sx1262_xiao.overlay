@@ -1,0 +1,103 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Wio-SX1262 for XIAO (standalone SKU 113010003 / nRF52840 kit SKU 102010710 pinout —
+ * Meshtastic's SEEED_XIAO_NRF_KIT_DEFAULT, NOT the 30-pin board-to-board variant).
+ *
+ * Pin source: upstream Meshtastic
+ * firmware/variants/nrf52840/seeed_xiao_nrf52840_kit/variant.h, the "Wio-SX1262 for
+ * XIAO" block (there are three pinout blocks in that file gated on
+ * XIAO_BLE_LEGACY_PINOUT / SEEED_XIAO_NRF_WIO_BTB / neither — this shield is the third,
+ * "neither" case, "Same for both default and I2C pinouts"):
+ *
+ *   SX126X_CS    D4      SX126X_RESET D2      SX126X_BUSY D3
+ *   SX126X_DIO1  D1      SX126X_RXEN  D5      SX126X_TXEN  (not connected)
+ *   SX126X_DIO2_AS_RF_SWITCH (silicon-level TX/RX path select)
+ *   SX126X_DIO3_TCXO_VOLTAGE 1.8
+ *   GPS_TX_PIN D6, GPS_RX_PIN D7, PIN_GPS_STANDBY D0 (SEEED_XIAO_NRF_KIT_DEFAULT only —
+ *   the I2C-variant build moves GPS to the NFC pins instead; this shield follows the
+ *   DEFAULT variant, matching the shield name/pinout choice above)
+ *
+ * D-pin -> physical GPIO comes from Zephyr's OWN xiao_ble board, not re-derived:
+ * zephyr/boards/seeed/xiao_ble/seeed_xiao_connector.dtsi (the "xiao_d" gpio-map) and
+ * xiao_ble_common.dtsi (xiao_spi=&spi2, xiao_serial=&uart0, confirmed wired to D8/D9/D10
+ * and D6/D7 respectively via that board's own pinctrl — nothing here is a new pinctrl
+ * assignment, this shield only enables buses the base board already routes to the
+ * header).
+ *
+ * rx-enable-gpios (not a board-specific C hook): Zephyr's native sx126x driver
+ * (zephyr/dts/bindings/lora/semtech,sx126x-base.yaml) has first-class
+ * tx-enable-gpios/rx-enable-gpios properties — "the driver tracks the state of the
+ * radio and controls the RF switch" — the same job RadioLib's SX126x RXEN/TXEN
+ * constructor args do upstream. TXEN is omitted (not connected on this module, per
+ * variant.h). Polarity (GPIO_ACTIVE_HIGH) is the conventional default for an
+ * enable-type pin, matching how other SX126x RF-switch-enable pins in this project are
+ * wired — VERIFY(hardware), nothing sourced here states the polarity explicitly.
+ *
+ * GPS standby polarity: variant.h states PIN_GPS_STANDBY=D0 with no explicit polarity.
+ * "Drive high to force wake" mirrors heltec_wifi_lora32_v4's own gps_standby_hog for the
+ * same L76K module family — a reasonable inference (same chip, not a guess about this
+ * board's wiring), but VERIFY(hardware) before trusting it.
+ *
+ * Deliberately NOT here: battery ADC (Meshtastic's BATTERY_PIN/VBAT_ENABLE reference raw
+ * nRF52840 Arduino pin numbers 32/14, which are NOT header pins covered by the xiao_d
+ * connector map — they're presumably internal to the XIAO module's own battery-monitor
+ * circuit, a property of the base xiao_ble board, not this radio shield. Zephyr's own
+ * xiao_ble board defines no such ADC channel node upstream either. Out of scope for a
+ * shield; would need its own investigation, likely as a board-level fix or an
+ * app/boards/xiao_ble.overlay, not bundled in here.) The tri-color status LED is also
+ * left as whatever zephyr/boards/seeed/xiao_ble already defines (led0/led1) rather than
+ * re-deriving Meshtastic's separate Arduino-numbered LED pins (11/12/13), which this
+ * doc has no independently-sourced way to cross-check against Zephyr's own mapping.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/lora/sx126x.h>
+
+/ {
+	aliases {
+		lora0 = &lora0;
+	};
+};
+
+/*
+ * PIN_GPS_STANDBY (D0). A gpio-hog must sit directly under its real controller (the
+ * xiao_d nexus is a remapping layer for normal gpio-dt-spec consumers, not a valid hog
+ * parent) -- D0 = gpio0 pin 2 per seeed_xiao_connector.dtsi's own gpio-map. See the
+ * polarity note above.
+ */
+&gpio0 {
+	gps_standby_hog: gps_standby_hog {
+		gpio-hog;
+		gpios = <2 GPIO_ACTIVE_HIGH>;
+		output-high;
+	};
+};
+
+&xiao_spi {
+	status = "okay";
+	cs-gpios = <&xiao_d 4 GPIO_ACTIVE_LOW>;
+
+	lora0: modem@0 {
+		compatible = "semtech,sx1262";
+		reg = <0>;
+		reset-gpios = <&xiao_d 2 GPIO_ACTIVE_LOW>;
+		busy-gpios = <&xiao_d 3 GPIO_ACTIVE_HIGH>;
+		dio1-gpios = <&xiao_d 1 GPIO_ACTIVE_HIGH>;
+		rx-enable-gpios = <&xiao_d 5 GPIO_ACTIVE_HIGH>;
+		dio2-tx-enable;
+		dio3-tcxo-voltage = <SX126X_DIO3_TCXO_1V8>;
+		tcxo-power-startup-delay-ms = <5>;
+		spi-max-frequency = <4000000>;
+	};
+};
+
+&xiao_serial {
+	status = "okay";
+	current-speed = <9600>;
+
+	gnss: gnss {
+		compatible = "gnss-nmea-generic";
+		status = "okay";
+	};
+};

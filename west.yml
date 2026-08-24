@@ -15,6 +15,8 @@ manifest:
           - cmsis
           - cmsis_6
           - hal_espressif
+          - hal_nordic  # needed for any nRF52 target (e.g. xiao_ble); absent until the
+                        # first Nordic-chip board (2026-08-23)
           - hal_stm32
           - hal_xtensa
           - mbedtls

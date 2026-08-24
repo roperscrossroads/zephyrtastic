@@ -11,11 +11,11 @@
 # are relative to the target module's root (module: zephyr).
 patches:
   - path: 0001-adc-esp32-skip-disruptive-gpio-disconnect.patch
-    sha256sum: e24b20667f9fabe9fd1988d614e4429ea5093bf8896407f9dc5b595c6a51fe25
+    sha256sum: ef1ad9de50389a5ad32187b3c3122f9103f526881959688f0bf55aa729be60a1
     module: zephyr
     author: Adam Roper
     email: adam.r.roper@gmail.com
-    date: "2026-07-20"
+    date: "2026-07-21"
     upstreamable: true
     comments: |
       adc_esp32 channel-setup: drop the gpio_pin_configure_dt(GPIO_DISCONNECTED)

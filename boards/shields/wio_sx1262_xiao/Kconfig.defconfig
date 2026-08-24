@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# xiao_ble (upstream Zephyr) sets no system heap pool of its own
+# (HEAP_MEM_POOL_SIZE defaults to 0, "no system heap available" per
+# kernel/Kconfig), unlike this project's own ESP32 boards which each declare
+# a HEAP_MEM_POOL_ADD_SIZE_* contribution. meshtastic_watchdog.c's heartbeat
+# heap-stats logging references the kernel's _system_heap directly, which
+# does not exist to link against when the pool size resolves to zero -- same
+# 4096 B this project's ESP32 boards use.
+config HEAP_MEM_POOL_ADD_SIZE_SHIELD_WIO_SX1262_XIAO
+	int
+	default 4096
+	depends on SHIELD_WIO_SX1262_XIAO

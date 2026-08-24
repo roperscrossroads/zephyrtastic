@@ -36,10 +36,28 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 #if DT_HAS_ALIAS(watchdog0)
 
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
 /* ESP-IDF HAL header, for RTC_NOINIT_ATTR below -- not available outside an
  * ESP32 build (e.g. native_sim), hence guarded inside this board-has-a-wdt0
  * branch rather than included unconditionally at file scope. */
 #include <esp_attr.h>
+#define MESHTASTIC_WDT_RTC_ATTR RTC_NOINIT_ATTR
+#define MESHTASTIC_WDT_IRAM_ATTR IRAM_ATTR
+#else
+/* No RTC-persistent memory on this chip family (e.g. nRF52) -- these
+ * breadcrumbs simply don't survive a reset here. Ordinary static RAM is
+ * still correct everywhere else below: each variable is written before use,
+ * and the *_take_last_crash() getters already treat a magic-value mismatch
+ * as "nothing to report" -- exactly what a zero-initialized RAM variable
+ * gives on the first read after any reset. The watchdog's actual job (feed
+ * channels, force a reboot on a hang) is completely unaffected either way. */
+#define MESHTASTIC_WDT_RTC_ATTR
+/* IRAM_ATTR (place this ISR in fast IRAM, immune to a flash-cache stall
+ * during a concurrent flash op) is an ESP-IDF-specific hazard this chip
+ * family doesn't share the same way; empty here is correct, not a
+ * degradation to work around. */
+#define MESHTASTIC_WDT_IRAM_ATTR
+#endif
 
 /* _system_heap backs k_malloc() -- and on this Zephyr port, the vendored
  * WiFi/BT HAL's heap_caps_malloc() is a thin wrapper straight over k_malloc()
@@ -117,8 +135,8 @@ static struct k_work_delayable heartbeat_work;
  * -- protects against the hardware reset landing mid-write. */
 #define WATCHDOG_CRASH_MAGIC 0x43524153U /* "CRAS" */
 
-static RTC_NOINIT_ATTR uint32_t rtc_crash_magic;
-static RTC_NOINIT_ATTR struct meshtastic_watchdog_crash_info rtc_crash_info;
+static MESHTASTIC_WDT_RTC_ATTR uint32_t rtc_crash_magic;
+static MESHTASTIC_WDT_RTC_ATTR struct meshtastic_watchdog_crash_info rtc_crash_info;
 
 /* Separate breadcrumb + magic for the hardware-ISR path (see
  * hw_wdt_stage0_callback() below) -- deliberately its own RTC-persistent
@@ -128,8 +146,8 @@ static RTC_NOINIT_ATTR struct meshtastic_watchdog_crash_info rtc_crash_info;
  * not just one application channel. */
 #define HW_WATCHDOG_CRASH_MAGIC 0x48435241U /* "HCRA" */
 
-static RTC_NOINIT_ATTR uint32_t rtc_hw_crash_magic;
-static RTC_NOINIT_ATTR struct meshtastic_hw_watchdog_crash_info rtc_hw_crash_info;
+static MESHTASTIC_WDT_RTC_ATTR uint32_t rtc_hw_crash_magic;
+static MESHTASTIC_WDT_RTC_ATTR struct meshtastic_hw_watchdog_crash_info rtc_hw_crash_info;
 
 /* Boot-time latch of the above, taken in meshtastic_watchdog_init() before the
  * hardware callback is installed -- see hw_crash_latch() for why the RTC slot
@@ -240,7 +258,7 @@ static void channel_timeout_cb(int channel_id, void *user_data)
  * running, forces the actual reset; this callback only needs to record the
  * breadcrumb before that happens (~10s later on this build's timeout).
  */
-static void IRAM_ATTR hw_wdt_stage0_callback(const struct device *dev, int channel_id)
+static void MESHTASTIC_WDT_IRAM_ATTR hw_wdt_stage0_callback(const struct device *dev, int channel_id)
 {
 	const char *tname;
 

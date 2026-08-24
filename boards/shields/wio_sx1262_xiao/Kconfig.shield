@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config SHIELD_WIO_SX1262_XIAO
+	def_bool $(shields_list_contains,wio_sx1262_xiao)

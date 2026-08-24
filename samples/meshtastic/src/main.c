@@ -26,7 +26,9 @@
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_mgmt.h>
 
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
 #include <esp_attr.h>
+#endif
 
 #include <zephyr/meshtastic/diagnostics.h>
 #include <zephyr/meshtastic/logring.h>
@@ -64,7 +66,14 @@ static const struct device *lora_dev = DEVICE_DT_GET_OR_NULL(DT_ALIAS(lora0));
  * cuts the RTC power domain, which V3's EN-based resets appear to do — clears
  * this memory too; the magic-value check below just starts a fresh history in
  * that case rather than trusting garbage.)
+ *
+ * ESP32-only: needs RTC memory that survives a warm reset, which is an
+ * Espressif-specific concept (RTC_NOINIT_ATTR) with no equivalent used here on
+ * other chip families. On a board without it, boot-history simply isn't kept
+ * across resets -- the watchdog/fatal/logring crash reporting below this block
+ * is unaffected and still runs on every board.
  */
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
 #define RESET_HISTORY_LEN   8U
 #define RESET_HISTORY_MAGIC 0x4D455348U /* "MESH" */
 
@@ -77,6 +86,7 @@ static RTC_NOINIT_ATTR uint32_t rtc_magic;
 static RTC_NOINIT_ATTR uint32_t rtc_boot_count;
 static RTC_NOINIT_ATTR uint32_t rtc_history_next;
 static RTC_NOINIT_ATTR struct reset_history_entry rtc_history[RESET_HISTORY_LEN];
+#endif /* CONFIG_SOC_FAMILY_ESPRESSIF_ESP32 */
 
 static struct net_mgmt_event_callback ipv4_ready_cb;
 
@@ -116,7 +126,6 @@ static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mg
 	struct meshtastic_watchdog_crash_info wdt_crash;
 	struct meshtastic_hw_watchdog_crash_info hw_wdt_crash;
 	struct meshtastic_fatal_crash_info fatal_crash;
-	uint32_t i;
 
 	ARG_UNUSED(cb);
 	ARG_UNUSED(iface);
@@ -126,8 +135,9 @@ static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mg
 	}
 	logged = true;
 
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
 	LOG_INF("Reset-cause history (RTC-persistent across warm resets, oldest first):");
-	for (i = 0; i < RESET_HISTORY_LEN; i++) {
+	for (uint32_t i = 0; i < RESET_HISTORY_LEN; i++) {
 		uint32_t idx = (rtc_history_next + i) % RESET_HISTORY_LEN;
 
 		if (rtc_history[idx].boot_count == 0U) {
@@ -135,6 +145,7 @@ static void log_boot_reset_cause(struct net_mgmt_event_callback *cb, uint64_t mg
 		}
 		log_reset_cause_line("  ", rtc_history[idx].boot_count, rtc_history[idx].reset_cause);
 	}
+#endif /* CONFIG_SOC_FAMILY_ESPRESSIF_ESP32 */
 
 	/* Companion to the ring above: if the *last* reset was watchdog-forced,
 	 * this fills in what the bare cause code above can't -- see
@@ -229,6 +240,8 @@ int main(void)
 #endif
 	};
 	int ret;
+
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
 	uint32_t cause = 0;
 
 	/* Read+clear now (the hwinfo register doesn't survive past the next reset);
@@ -251,7 +264,13 @@ int main(void)
 	rtc_history[rtc_history_next].boot_count = rtc_boot_count;
 	rtc_history[rtc_history_next].reset_cause = cause;
 	rtc_history_next = (rtc_history_next + 1U) % RESET_HISTORY_LEN;
+#endif /* CONFIG_SOC_FAMILY_ESPRESSIF_ESP32 */
 
+	/* Registered on every board, RTC ring or not -- log_boot_reset_cause() also
+	 * reports the watchdog/fatal/logring crash info below, which isn't
+	 * ESP32-specific. It only ever fires once an IPv4 lease exists, so on a
+	 * board with no IP network (e.g. LoRa+BLE only, no WiFi) this simply never
+	 * triggers -- an accepted limitation, not a bug to chase here. */
 	net_mgmt_init_event_callback(&ipv4_ready_cb, log_boot_reset_cause, NET_EVENT_IPV4_ADDR_ADD);
 	net_mgmt_add_event_callback(&ipv4_ready_cb);
 

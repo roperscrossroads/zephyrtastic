@@ -1,0 +1,8 @@
+shield:
+  name: wio_sx1262_xiao
+  full_name: Wio-SX1262 for XIAO
+  vendor: seeed
+  # Standalone SKU 113010003 / nRF52840 kit SKU 102010710 pinout only (Meshtastic's
+  # SEEED_XIAO_NRF_KIT_DEFAULT). The 30-pin board-to-board connector variant from the
+  # ESP32S3 kit (SEEED_XIAO_NRF_WIO_BTB) uses different expansion-connector pins and is
+  # NOT this shield.
