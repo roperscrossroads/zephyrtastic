@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_SENSECAP_INDICATOR_D1L_ESP32S3_PROCPU
+
+# --- PSRAM: 8 MB OCTAL --------------------------------------------------
+# Confirmed octal PSRAM (not quad) from Seeed's own reference firmware
+# (CONFIG_SPIRAM_MODE_OCT=y in seeed-solution/SenseCAP_Indicator_ESP32) and from
+# upstream Meshtastic's platformio.ini for this variant. `ESP_SPIRAM` has base
+# `default n`; MCUboot must never touch PSRAM (own `default n if MCUBOOT`), hence
+# the `!MCUBOOT` guard, same pattern as heltec_wifi_lora32_v4_r8.
+config ESP_SPIRAM
+	default y if !MCUBOOT
+
+if ESP_SPIRAM
+
+choice SPIRAM_MODE
+	default SPIRAM_MODE_OCT
+endchoice
+
+# ESPPSRAM64 = 8 MB, matching the psram0 DT node size.
+choice SPIRAM_TYPE
+	default SPIRAM_TYPE_ESPPSRAM64
+endchoice
+
+# Seeed's own firmware runs this part at 120 MHz, but only after applying
+# vendor-supplied "PSRAM patches" to ESP-IDF for octal-at-120MHz stability
+# (seeed-solution/SenseCAP_Indicator_ESP32 DeepWiki: "PSRAM Patches and Hardware
+# Optimization"). Nothing here has bench-verified a speed on this board with a
+# stock Zephyr build, so this starts at the same conservative 40 MHz
+# heltec_wifi_lora32_v4_r8 settled on after its own octal-PSRAM instability at
+# 80 MHz -- NOT a SenseCAP-specific measurement. VERIFY(hardware) before
+# raising it.
+choice SPIRAM_SPEED
+	default SPIRAM_SPEED_40M
+endchoice
+
+endif # ESP_SPIRAM
+
+endif # BOARD_SENSECAP_INDICATOR_D1L_ESP32S3_PROCPU

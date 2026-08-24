@@ -1,0 +1,174 @@
+/*
+ * Seeed SenseCAP Indicator D1L — PROCPU.
+ * ESP32-S3, 8MB flash + 8MB OCTAL PSRAM, SX1262 LoRa.
+ *
+ * HEADLESS bring-up: this board also has an ST7701 RGB touchscreen, an RP2040
+ * co-processor (UART), a BMP390 sensor and an audio codec, none of which are
+ * wired here. This .dts covers only what's needed to boot and run the mesh
+ * radio: SoC, PSRAM/flash, the TCA9535 I2C GPIO expander, and the SX1262
+ * behind it. See README.md for the full source list and what's out of scope.
+ *
+ * Pin sources (none of this is guessed — see README.md for the full citation
+ * list):
+ *   - seeed-solution/SenseCAP_Indicator_ESP32 (Seeed's own ESP-IDF reference
+ *     firmware, vendored at ~/zephyrtastic-wt/SenseCAP_Indicator_ESP32):
+ *     components/bsp/src/boards/sensecap_indicator_board.c (I2C bus pins, TCA9535
+ *     address) and components/lora/bsp_sx126x.h (SPI pins, expander INT pin,
+ *     expander pin indices for the radio's NSS/RESET/BUSY/DIO1).
+ *   - upstream Meshtastic firmware/variants/esp32s3/seeed-sensecap-indicator/
+ *     variant.h and platformio.ini (SPI pins, expander pin indices, expander
+ *     address, expander INT pin — cross-checked against the above and agrees).
+ *   - Seeed's product page (seeedstudio.com/SenseCAP-Indicator-D1L-p-5646.html)
+ *     and Seeed's own sdkconfig.defaults (examples/indicator_lora,
+ *     examples/indicator_basis in the vendored repo above) for flash/PSRAM size.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/dts-v1/;
+
+#include <espressif/esp32s3/esp32s3_wroom_n8r8.dtsi>
+#include "sensecap_indicator_d1l-pinctrl.dtsi"
+#include <espressif/partitions_0x0_amp_8M.dtsi>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/lora/sx126x.h>
+
+/ {
+	model = "Seeed SenseCAP Indicator D1L PROCPU";
+	compatible = "espressif,esp32s3";
+
+	aliases {
+		lora0 = &lora0;
+		i2c-0 = &i2c0;
+	};
+
+	chosen {
+		zephyr,sram = &sram1;
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,bt-hci = &esp32_bt_hci;
+	};
+};
+
+/* Native USB console/shell. No confirmed schematic evidence of a discrete
+ * USB-UART bridge chip on this board (see the pinctrl file); this mirrors
+ * heltec_wifi_lora32_v4's own no-CP2102 setup and needs no pin assignment. */
+&usb_serial {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
+
+	/*
+	 * TCA9535 I2C GPIO expander, addr 0x20 (Seeed bsp_board_lcd_evb_res:
+	 * IO_EXPANDER_I2C_ADDR; Meshtastic configuration.h: TCA9535_ADDR). TCA9535
+	 * is pin/register-compatible with the NXP PCA9535 (16-bit expander family);
+	 * Zephyr's nxp,pca9539 binding documents itself as covering that same part
+	 * (nxp,pca_series.yaml: "PCA9539 compatible with PCA9535, PCA9555, PCA6416")
+	 * and gpio_pca_series.c is a real, complete interrupt-capable driver for it
+	 * (edge/level triggering, deferred k_work dispatch, per-pin callbacks) — the
+	 * same shape of logic Seeed's own ESP-IDF firmware hand-rolls in
+	 * sx126x_sensecap_board.c (gpio_isr_handler on the combined INT line -> a
+	 * FreeRTOS task -> an I2C register read to find which pin fired). Using
+	 * this driver means the LoRa radio's CS/RESET/BUSY/DIO1, wired below as
+	 * ordinary gpio-dt-specs on this controller, need no board-specific glue
+	 * code at all — the native sx126x driver (zephyr/drivers/lora/native/sx126x)
+	 * already just calls the generic Zephyr GPIO API, which this expander
+	 * driver implements the same as any native SoC GPIO bank.
+	 *
+	 * int-gpios: the combined interrupt line is GPIO42 (Meshtastic
+	 * platformio.ini: IO_EXPANDER_IRQ=42; Seeed bsp_sx126x.h:
+	 * ESP32_EXPANDER_IO_INT), confirmed real and routed (not polled) — Seeed's
+	 * own firmware installs a genuine edge ISR on it. GPIO42 = gpio1 pin 10
+	 * (esp32s3_common.dtsi: gpio1 covers GPIO32..53). Active-low open-drain
+	 * per the pca_series binding's own documentation of this property, which
+	 * matches the TCA9535's /INT behaviour; the internal pull-up is enabled
+	 * defensively since no schematic confirms whether an external one exists.
+	 * VERIFY(hardware): GPIO42 polarity/pull and the whole IRQ path, on a bench.
+	 */
+	expander: tca9535@20 {
+		compatible = "nxp,pca9539";
+		reg = <0x20>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <16>;
+		int-gpios = <&gpio1 10 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+	};
+};
+
+&spi2 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	pinctrl-0 = <&spim2_default>;
+	pinctrl-names = "default";
+
+	/*
+	 * CS is expander pin 0 (Seeed bsp_sx126x.h: EXPANDER_IO_RADIO_NSS;
+	 * Meshtastic variant.h: LORA_CS (0 | IO_EXPANDER)). Zephyr's SPI CS
+	 * handling (spi_context_cs_control()) is a plain gpio_pin_set_dt() call —
+	 * generic across any GPIO controller, native or expander-backed — so this
+	 * is architecturally sound, but every SPI transfer now pays an I2C
+	 * round-trip (tens to a few hundred us) before the clock even starts. Not
+	 * a correctness problem; a real latency cost worth characterising on the
+	 * bench once this boots — see README.md.
+	 */
+	cs-gpios = <&expander 0 GPIO_ACTIVE_LOW>;
+
+	/*
+	 * SX1262. RESET/BUSY/DIO1 are expander pins 1/2/3 (Seeed bsp_sx126x.h:
+	 * EXPANDER_IO_RADIO_RST/BUSY/DIO_1; Meshtastic variant.h: LORA_RESET
+	 * (1|IO_EXPANDER), LORA_DIO2 (2|IO_EXPANDER) [Meshtastic's macro name for
+	 * this index is misleading -- it is the BUSY line, matching Seeed's own
+	 * EXPANDER_IO_RADIO_BUSY=2], LORA_DIO1 (3|IO_EXPANDER)).
+	 *
+	 * No GPIO_OPEN_DRAIN on reset-gpios (unlike heltec_wifi_lora32_v4's native
+	 * reset line) -- gpio_pca_series.c's pin_configure returns -ENOTSUP for
+	 * GPIO_SINGLE_ENDED on parts that don't support it, and nothing in Seeed's
+	 * or Meshtastic's own code does anything open-drain-specific for this pin,
+	 * so this doesn't carry V4's choice over without evidence it applies here.
+	 *
+	 * No GPIO_INT_WAKEUP on dio1-gpios (unlike V4) -- an expander pin cannot be
+	 * a light-sleep EXT1 wake source (Meshtastic's own variant.h says so:
+	 * "LORA_DIO1 is an expander pin ... can't be used as a sleep/GPIO wakeup
+	 * source"). This board has no light-sleep DIO1 wake until/unless something
+	 * else provides it; a missed-frame-during-sleep tradeoff to accept for now,
+	 * not a bug to chase.
+	 *
+	 * dio3-tcxo-voltage: Seeed's bsp_sx126x.h sets SX126X_TCXO_CTRL_VOLTAGE
+	 * TCXO_CTRL_2_4V -- 2.4V, NOT the 1.8V the Heltec boards use. Different
+	 * from every other board in this project; taken directly from Seeed's own
+	 * source, not assumed to match.
+	 *
+	 * No dio2-tx-enable and no rx-boosted: this board has no external FEM (no
+	 * PA/LNA front-end mentioned anywhere in Meshtastic's variant.h or Seeed's
+	 * BSP for this SKU — a bare SX1262), so the weak
+	 * meshtastic_radio_fem_*() identity/no-op defaults apply as-is; no board
+	 * _fem.c is needed. rx-boosted is a real SX1262 capability independent of
+	 * any FEM, but nothing sourced here confirms Seeed enables it — left off
+	 * rather than assumed on.
+	 */
+	lora0: modem@0 {
+		compatible = "semtech,sx1262";
+		reg = <0>;
+		reset-gpios = <&expander 1 GPIO_ACTIVE_LOW>;
+		busy-gpios = <&expander 2 GPIO_ACTIVE_HIGH>;
+		dio1-gpios = <&expander 3 GPIO_ACTIVE_HIGH>;
+		dio3-tcxo-voltage = <SX126X_DIO3_TCXO_2V4>;
+		tcxo-power-startup-delay-ms = <5>;
+		spi-max-frequency = <4000000>;
+	};
+};

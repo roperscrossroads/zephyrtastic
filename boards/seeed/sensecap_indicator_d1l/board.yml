@@ -1,0 +1,8 @@
+board:
+  name: sensecap_indicator_d1l
+  full_name: SenseCAP Indicator D1L
+  vendor: seeed
+  # LoRa-only (SX1262, D1L). The D1Pro SKU adds sensors on the same PCB family
+  # and is NOT this board; a D1Pro overlay would be a separate board dir.
+  socs:
+  - name: esp32s3

@@ -1,0 +1,16 @@
+# Seeed SenseCAP Indicator D1L board configuration
+#
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_SENSECAP_INDICATOR_D1L
+	# 8 MB flash + 8 MB octal PSRAM. Confirmed independently against Seeed's own
+	# ESP-IDF reference firmware (examples/indicator_lora/sdkconfig.defaults and
+	# examples/indicator_basis/sdkconfig.defaults in seeed-solution/SenseCAP_Indicator_ESP32:
+	# CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y, CONFIG_SPIRAM_MODE_OCT=y) and against
+	# upstream Meshtastic's own platformio.ini for this variant. Not confirmed to be
+	# a literal Espressif WROOM-packaged SIP rather than a bare chip + discrete
+	# flash/PSRAM on a custom PCB -- SOC_ESP32S3_WROOM_N8R8 is used here purely for
+	# its 8 MB flash / 8 MB octal PSRAM Kconfig defaults, which match either way.
+	select SOC_ESP32S3_WROOM_N8R8
+	select SOC_ESP32S3_PROCPU if BOARD_SENSECAP_INDICATOR_D1L_ESP32S3_PROCPU
+	select SOC_ESP32S3_APPCPU if BOARD_SENSECAP_INDICATOR_D1L_ESP32S3_APPCPU

@@ -1,0 +1,47 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Pin control for the Seeed SenseCAP Indicator D1L.
+ *
+ * Radio SPI and the TCA9535 I2C GPIO expander pins are sourced from Seeed's own
+ * ESP-IDF reference firmware (seeed-solution/SenseCAP_Indicator_ESP32,
+ * components/bsp/src/boards/sensecap_indicator_board.c and
+ * components/lora/bsp_sx126x.h) and cross-checked against upstream Meshtastic's
+ * variant.h/platformio.ini for this board (firmware/variants/esp32s3/
+ * seeed-sensecap-indicator/) -- both agree:
+ *   I2C0 SDA=GPIO39 SCL=GPIO40 (the TCA9535 expander lives here, addr 0x20)
+ *   SPI  SCLK=GPIO41 MISO=GPIO47 MOSI=GPIO48 (the SX1262 -- CS/RESET/BUSY/DIO1
+ *        are NOT native GPIOs; they're behind the expander, wired in the board
+ *        .dts, not here)
+ *
+ * No console UART pin group here -- like heltec_wifi_lora32_v4 ("the V4 has no
+ * CP2102"), this board's console uses the ESP32-S3's native USB-CDC peripheral
+ * (&usb_serial in the board .dts), which needs no GPIO-matrix pinctrl at all.
+ * That sidesteps guessing a UART0/USB-bridge pinout with no schematic to check
+ * it against; VERIFY(hardware) if the case's USB-C port turns out to be wired
+ * to a discrete bridge chip instead.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/esp32s3-pinctrl.h>
+
+&pinctrl {
+	i2c0_default: i2c0_default {
+		group1 {
+			pinmux = <I2C0_SDA_GPIO39>,
+				 <I2C0_SCL_GPIO40>;
+			drive-open-drain;
+		};
+	};
+
+	spim2_default: spim2_default {
+		group1 {
+			pinmux = <SPIM2_MISO_GPIO47>,
+				 <SPIM2_SCLK_GPIO41>;
+		};
+
+		group2 {
+			pinmux = <SPIM2_MOSI_GPIO48>;
+			output-low;
+		};
+	};
+};
