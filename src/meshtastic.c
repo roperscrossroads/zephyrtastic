@@ -42,6 +42,9 @@
 #include "meshtastic_pki.h"
 #include "meshtastic_gnss.h"
 #include "meshtastic_mqtt.h"
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+#include "meshtastic_cluster.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 #include "meshtastic_airtime.h"
 #endif
@@ -592,6 +595,15 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
 	ret = meshtastic_message_init();
+	if (ret < 0) {
+		return ret;
+	}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+	/* After the settings init: the channel table and persisted doc entries
+	 * must both be loaded before the first digest describes them. */
+	ret = meshtastic_cluster_init();
 	if (ret < 0) {
 		return ret;
 	}

@@ -38,6 +38,10 @@
 #if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
 #include "meshtastic_dfu_trigger.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+#include "meshtastic_cluster.h"
+#include "meshtastic_cluster_doc.h"
+#endif
 #include "meshtastic_build.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
@@ -3157,6 +3161,110 @@ usage:
 }
 #endif /* CONFIG_MESHTASTIC_ADMIN_CLIENT */
 
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+/* Config-section names for `cluster promote` — the shareable set plus lora
+ * (which promote itself refuses with the §7.9 explanation, a better teacher
+ * than "unknown section"). */
+static int cluster_section_parse(const char *name, uint16_t *tag)
+{
+	static const struct {
+		const char *name;
+		uint16_t tag;
+	} sections[] = {
+		{"device", meshtastic_Config_device_tag},
+		{"position", meshtastic_Config_position_tag},
+		{"power", meshtastic_Config_power_tag},
+		{"display", meshtastic_Config_display_tag},
+		{"lora", meshtastic_Config_lora_tag},
+		{"bluetooth", meshtastic_Config_bluetooth_tag},
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(sections); i++) {
+		if (strcmp(name, sections[i].name) == 0) {
+			*tag = sections[i].tag;
+			return 0;
+		}
+	}
+	return -EINVAL;
+}
+
+static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_cluster_stats st;
+	struct meshtastic_cluster_entry e;
+	uint8_t ch_index;
+	bool have_ch;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_cluster_stats_get(&st);
+	have_ch = meshtastic_cluster_channel_resolved(&ch_index);
+
+	if (have_ch) {
+		shell_print(sh, "channel : \"%s\" = index %u",
+			    CONFIG_MESHTASTIC_CLUSTER_CHANNEL_NAME, ch_index);
+	} else {
+		shell_print(sh, "channel : \"%s\" NOT PROVISIONED — module idle",
+			    CONFIG_MESHTASTIC_CLUSTER_CHANNEL_NAME);
+	}
+	shell_print(sh, "doc     : %u entr%s, hash %08x",
+		    (unsigned int)meshtastic_cluster_entry_count(),
+		    meshtastic_cluster_entry_count() == 1U ? "y" : "ies",
+		    (unsigned int)meshtastic_cluster_doc_hash_now());
+	shell_print(sh, "digests : tx=%u rx match=%u MISMATCH=%u", st.digest_tx,
+		    st.digest_rx_match, st.digest_rx_mismatch);
+	shell_print(sh, "rx      : wrong_channel=%u undecodable=%u not_implemented=%u",
+		    st.rx_wrong_channel, st.rx_undecodable, st.rx_not_implemented);
+
+	for (uint16_t i = 0U; meshtastic_cluster_entry_get(i, &e); i++) {
+		shell_print(sh, "  [%c/%08x/%u] %s%u B, stamp %lld.%u by 0x%08x",
+			    e.key.layer == MESHTASTIC_CLUSTER_LAYER_BASE ? 'b' : 'n',
+			    e.key.node_id, (unsigned int)e.key.section,
+			    e.tombstone ? "TOMBSTONE, " : "", (unsigned int)e.payload_len,
+			    (long long)e.stamp.physical_ms, e.stamp.counter, e.stamp.node_id);
+	}
+	return 0;
+}
+
+static int cmd_cluster_promote(const struct shell *sh, size_t argc, char **argv)
+{
+	uint16_t tag;
+	int ret;
+
+	if (argc != 2U || cluster_section_parse(argv[1], &tag) != 0) {
+		shell_error(sh, "usage: meshtastic cluster promote "
+			    "<device|position|power|display|bluetooth>");
+		return -EINVAL;
+	}
+
+	ret = meshtastic_cluster_promote(tag);
+	if (ret == -EPERM) {
+		shell_error(sh, "refused: section not shareable (secret boundary), or lora "
+			    "(a missed fleet preset change orphans nodes — see "
+			    "CONFIG-CONVERGENCE.md §7.9)");
+		return ret;
+	}
+	if (ret < 0) {
+		shell_error(sh, "promote failed (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "%s promoted to fleet base (advertised on the next digest)", argv[1]);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
+			       SHELL_CMD(status, NULL,
+					 SHELL_HELP("Cluster doc, digest stats, channel binding.",
+						    NULL),
+					 cmd_cluster_status),
+			       SHELL_CMD(promote, NULL,
+					 SHELL_HELP("Promote my current section to fleet base.",
+						    "<device|position|power|display|bluetooth>"),
+					 cmd_cluster_promote),
+			       SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_CLUSTER */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_admin_cmds,
 			       SHELL_CMD(trust, NULL,
 					 SHELL_HELP("List/manage trusted remote-admin keys.",
@@ -3212,6 +3320,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 	SHELL_CMD(admin, &meshtastic_admin_cmds,
 		  SHELL_HELP("Remote-admin trust and client commands.", NULL), NULL),
+#endif
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+	SHELL_CMD(cluster, &meshtastic_cluster_cmds,
+		  SHELL_HELP("Fleet config convergence.", NULL), cmd_cluster_status),
 #endif
 	SHELL_CMD(lora, NULL,
 		  SHELL_HELP("Show or set the LoRa modem preset (reboot to apply) "

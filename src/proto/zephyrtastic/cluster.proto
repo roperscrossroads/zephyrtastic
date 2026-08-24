@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: GPL-3.0
+//
+// Cluster-sync wire messages (agents-xhli.4, docs/CLUSTER-SYNC-M4.md).
+//
+// This is zephyrtastic's OWN protocol, not upstream Meshtastic protocol: it
+// rides portnum PRIVATE_APP (256) — the range upstream reserves for private
+// applications — on a dedicated secondary channel, so stock nodes drop the
+// frames before decryption and nothing here forks the upstream schema.
+// The `payload` bytes of a ClusterEntry ARE upstream encoding, deliberately:
+// a nanopb-encoded meshtastic.Config carrying exactly one section.
+
+syntax = "proto3";
+
+package zephyrtastic;
+
+enum ClusterLayer {
+  BASE = 0; // fleet-wide defaults; key.node_id == 0
+  NODE = 1; // per-node override ("pin"); key.node_id names the node
+}
+
+message ClusterKey {
+  ClusterLayer layer = 1;
+  uint32 node_id = 2; // 0 for BASE
+  uint32 section = 3; // meshtastic.Config payload-variant field tag
+}
+
+// Mirrors struct meshtastic_hlc_stamp field-for-field.
+message HlcStamp {
+  int64 physical_ms = 1;
+  uint32 counter = 2;
+  uint32 node_id = 3; // the author that minted this version
+}
+
+message KeyStamp {
+  ClusterKey key = 1;
+  HlcStamp stamp = 2;
+}
+
+// Broadcast at the digest cadence. Triple-compare against the local doc:
+// any field differing means the two documents differ somewhere.
+message ClusterDigest {
+  fixed32 doc_hash = 1;   // CRC-32 over the sorted (key, stamp, tombstone) rows
+  uint32 entry_count = 2;
+  HlcStamp max_stamp = 3;
+}
+
+// Unicast to a digest sender whose triple mismatched ours.
+message ClusterVectorReq {
+}
+
+// Unicast reply: the (key, stamp) rows, no payloads. Resumable when the doc
+// outgrows one frame.
+message ClusterVector {
+  repeated KeyStamp entries = 1;
+  uint32 offset = 2; // index of entries[0] in the sender's sorted doc
+  uint32 total = 3;  // sender's full entry count
+}
+
+// Unicast: "send me these entries" (keys where the vector showed newer stamps).
+message ClusterEntryReq {
+  repeated ClusterKey keys = 1;
+}
+
+// One document entry: broadcast on change, unicast in reply to ClusterEntryReq.
+message ClusterEntry {
+  ClusterKey key = 1;
+  HlcStamp stamp = 2;
+  bool tombstone = 3; // NODE layer only: "no override" — payload empty
+  bytes payload = 4;  // encoded meshtastic.Config, one section; empty iff tombstone
+  // 15 is reserved for a future author signature (CLUSTER-SYNC-M4.md §4): the
+  // channel PSK bounds replication today, and authorship is honour-system
+  // within it until a signing primitive exists.
+  reserved 15;
+}
+
+// The top-level PRIVATE_APP payload: one port, one envelope, five verbs.
+message ClusterMessage {
+  oneof variant {
+    ClusterDigest digest = 1;
+    ClusterVectorReq vector_req = 2;
+    ClusterVector vector = 3;
+    ClusterEntryReq entry_req = 4;
+    ClusterEntry entry = 5;
+  }
+}

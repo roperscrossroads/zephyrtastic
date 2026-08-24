@@ -1,0 +1,51 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_CLUSTER
+	bool "Cluster config sync (fleet convergence over a dedicated channel)"
+	select CRC
+	help
+	  Fleet configuration convergence (docs/CLUSTER-SYNC-M4.md): every
+	  member holds one replicated document — base/ fleet defaults plus
+	  nodes/<id>/ pins, each entry independently HLC-stamped — and
+	  anti-entropy digests on portnum PRIVATE_APP (256) over a dedicated
+	  secondary channel keep the fleet eventually consistent with no
+	  leader and no quorum. The channel PSK bounds replication; the
+	  security and network config sections are never gossiped. This is
+	  zephyrtastic-private protocol: stock nodes drop the frames before
+	  decryption and still flood-relay them.
+
+	  Document persistence across reboot additionally requires
+	  MESHTASTIC_SETTINGS; without it the doc is RAM-only and re-converges
+	  from the fleet after a reset (the level-triggered backstop makes
+	  that merely slower, not wrong).
+
+if MESHTASTIC_CLUSTER
+
+config MESHTASTIC_CLUSTER_CHANNEL_NAME
+	string "Channel name the cluster module binds to"
+	default "cluster"
+	help
+	  The module resolves this channel by name at use time; with no
+	  matching non-disabled channel it idles (one log line says so).
+	  Provision it like any secondary channel.
+
+config MESHTASTIC_CLUSTER_DIGEST_PERIOD_SEC
+	int "Digest broadcast period (seconds)"
+	default 300
+	range 30 86400
+	help
+	  Cadence of the ~30-byte digest broadcast (±12% jitter). Push-on-
+	  change is the fast path; this is the level-triggered backstop for
+	  nodes that were asleep, out of range, or newly joined.
+
+config MESHTASTIC_CLUSTER_MAX_ENTRIES
+	int "Cluster document capacity (entries)"
+	default 32
+	range 8 256
+	help
+	  base sections + per-node pins the document can hold. 32 covers a
+	  five-node fleet pinning everything. ~150 B RAM per entry (PSRAM on
+	  boards that have it).
+
+endif # MESHTASTIC_CLUSTER

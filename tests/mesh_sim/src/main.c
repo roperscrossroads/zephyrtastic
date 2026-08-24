@@ -22,6 +22,13 @@
 
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_channels.h"
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+#include <pb_encode.h>
+
+#include "zephyrtastic/cluster.pb.h"
+
+#include "meshtastic_cluster.h"
+#endif
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
@@ -308,6 +315,109 @@ ZTEST(mesh_sim, test_bearer_frame_delivered_locally_never_relayed)
 			      "bearer frame was relayed onto LoRa");
 	}
 }
+
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+/* Cluster M4a: a digest describing a different document, arriving on the
+ * cluster channel over the sim radio, is noticed (counted as a mismatch);
+ * the same frame on the WRONG channel is refused before interpretation. */
+ZTEST(mesh_sim, test_cluster_digest_divergence_noticed)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint8_t cbuf[64];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	pb_ostream_t os = pb_ostream_from_buffer(cbuf, sizeof(cbuf));
+	uint8_t ch_index;
+
+	/* Provision the cluster channel (slot 2, the name the module binds). */
+	{
+		meshtastic_Channel ch = meshtastic_Channel_init_zero;
+
+		ch.role = meshtastic_Channel_Role_SECONDARY;
+		ch.has_settings = true;
+		strncpy(ch.settings.name, CONFIG_MESHTASTIC_CLUSTER_CHANNEL_NAME,
+			sizeof(ch.settings.name) - 1U);
+		ch.settings.psk.size = 16U;
+		ch.settings.psk.bytes[0] = 0x42U;
+		zassert_ok(meshtastic_channels_set_slot(2U, &ch), "cluster channel set failed");
+	}
+	zassert_true(meshtastic_cluster_channel_resolved(&ch_index), "module must bind");
+	zassert_equal(ch_index, 2U);
+
+	/* A digest claiming one entry — our doc is empty, so this diverges. */
+	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
+	msg.variant.digest.doc_hash = 0xDEADBEEFU;
+	msg.variant.digest.entry_count = 1U;
+	msg.variant.digest.has_max_stamp = true;
+	msg.variant.digest.max_stamp.physical_ms = 12345;
+	msg.variant.digest.max_stamp.node_id = PEER_NODE_ID;
+	zassert_true(pb_encode(&os, zephyrtastic_ClusterMessage_fields, &msg), "encode failed");
+
+	meshtastic_cluster_stats_get(&before_st);
+	{
+		struct meshtastic_packet pkt = {
+			.from = PEER_NODE_ID,
+			.to = MESHTASTIC_NODE_BROADCAST,
+			.id = 0x5005U,
+			.portnum = MESHTASTIC_PORT_PRIVATE,
+			.payload = cbuf,
+			.payload_len = os.bytes_written,
+			.hop_limit = 3U,
+			.hop_start = 3U,
+			.channel_index = 2U,
+		};
+
+		zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "encode failed");
+	}
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	k_sleep(K_MSEC(200));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.digest_rx_mismatch, before_st.digest_rx_mismatch + 1U,
+		      "divergent digest must be counted as a mismatch");
+	zassert_equal(after_st.digest_rx_match, before_st.digest_rx_match,
+		      "it must not be counted as a match");
+
+	/* The broadcast digest was flood-relayed (by design — non-members carry
+	 * cluster traffic too); wait out the relay TX before injecting again. */
+	wait_rx_armed();
+
+	/* The same payload on the PRIMARY channel is not cluster traffic. */
+	{
+		struct meshtastic_packet pkt = {
+			.from = PEER_NODE_ID,
+			.to = MESHTASTIC_NODE_BROADCAST,
+			.id = 0x5006U,
+			.portnum = MESHTASTIC_PORT_PRIVATE,
+			.payload = cbuf,
+			.payload_len = os.bytes_written,
+			.hop_limit = 3U,
+			.hop_start = 3U,
+			.channel_index = meshtastic_channels_primary_index(),
+		};
+
+		zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "encode failed");
+	}
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	k_sleep(K_MSEC(200));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.digest_rx_mismatch, before_st.digest_rx_mismatch + 1U,
+		      "wrong-channel frame must not reach digest handling");
+	zassert_true(after_st.rx_wrong_channel > before_st.rx_wrong_channel,
+		     "wrong-channel frame must be counted as such");
+
+	/* Teardown: disable the channel so the module idles for other tests. */
+	{
+		meshtastic_Channel off = meshtastic_Channel_init_zero;
+
+		off.role = meshtastic_Channel_Role_DISABLED;
+		off.has_settings = true;
+		zassert_ok(meshtastic_channels_set_slot(2U, &off), "channel teardown failed");
+	}
+}
+#endif /* CONFIG_MESHTASTIC_CLUSTER */
 
 /* Dedup spans bearers: the same (src,id) heard first over the peer link is a
  * duplicate when its LoRa copy arrives — one delivery, and the LoRa copy is

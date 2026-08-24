@@ -1,0 +1,14 @@
+# nanopb sizing for the cluster-sync messages (docs/CLUSTER-SYNC-M4.md §3).
+#
+# payload: an encoded meshtastic.Config carrying ONE allowlisted section. The
+# largest v1 section (DeviceConfig, 100 B) plus the oneof wrapper fits well
+# inside 128; a build-side static assert pins ClusterMessage_size under the
+# Data-payload budget so this cap can never silently outgrow a frame.
+*ClusterEntry.payload    max_size:128
+
+# 4 rows x 43 B (generated KeyStamp_size 41 + repeated overhead) keeps a full
+# ClusterVector inside one frame's Data budget; larger documents resume via
+# offset/total. The BUILD_ASSERT on ClusterMessage_size in meshtastic_cluster.c
+# is what keeps these counts honest against the generated sizes.
+*ClusterVector.entries   max_count:4
+*ClusterEntryReq.keys    max_count:6

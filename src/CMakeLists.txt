@@ -30,6 +30,11 @@ if(CONFIG_MESHTASTIC)
       proto/meshtastic/admin.proto
     )
   endif()
+  if(CONFIG_MESHTASTIC_CLUSTER)
+    # zephyrtastic's OWN schema (cluster sync, docs/CLUSTER-SYNC-M4.md) —
+    # private protocol on PRIVATE_APP, forks nothing upstream.
+    list(APPEND MESHTASTIC_NANOPB_PROTOS proto/zephyrtastic/cluster.proto)
+  endif()
   zephyr_nanopb_sources(meshtastic ${MESHTASTIC_NANOPB_PROTOS})
 
   # Build identity (git describe + build time) regenerated on every build into a
@@ -89,6 +94,10 @@ if(CONFIG_MESHTASTIC)
     meshtastic_admin_session.c
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN_CLIENT meshtastic_admin_client.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_CLUSTER
+    meshtastic_cluster.c
+    meshtastic_cluster_doc.c
+  )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE
     meshtastic_ble.c
     meshtastic_ble_registry.c
