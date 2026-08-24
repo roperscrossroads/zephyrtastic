@@ -31,6 +31,20 @@ extern "C" {
 #define MESHTASTIC_HDR_LEN     16U
 #define MESHTASTIC_PAYLOAD_MAX (MESHTASTIC_PKT_MAX - MESHTASTIC_HDR_LEN)
 
+/*
+ * Which bearer carried a received wire frame (agents-xhli.2). The frame bytes
+ * are identical on every bearer; the tag exists for the v1 link-local rule:
+ * a frame from a non-LoRa bearer is delivered locally but NEVER relayed onto
+ * LoRa (bridging bearers creates a multi-bearer flooding graph this design
+ * refuses to enter -- PEER-TRANSPORT-DESIGN.md par.2). Route learning, the
+ * MQTT uplink, airtime accounting and RF signal bookkeeping are LoRa-only for
+ * the same reason: they describe RF topology and RF traffic.
+ */
+enum meshtastic_bearer {
+	MESHTASTIC_BEARER_LORA = 0,
+	MESHTASTIC_BEARER_BLE_PEER,
+};
+
 /* The phone-protocol firmware version this port advertises — parses as 2.7.4 so
  * the app stays above its minimum-version gate. Single source of truth for the
  * DeviceMetadata field AND the MQTT map-report. Distinct from meshtastic_build_id()
@@ -159,6 +173,17 @@ void meshtastic_set_ble_connected(bool connected);
 bool meshtastic_transport_prefer_wifi(void);
 
 int meshtastic_radio_init(void);
+
+/*
+ * Hand one received wire frame from a non-LoRa bearer to the RX pipeline
+ * (agents-xhli.2). Posts into the same queue the LoRa driver callback feeds,
+ * so the frame is processed on the mesh RX thread with the full router path —
+ * dedup, decode, local delivery — under the bearer's link-local gates. Safe
+ * from any thread context (non-blocking put; the frame is copied). Returns 0,
+ * -EINVAL on a bad length, -ENOBUFS when the RX queue is full (dropped and
+ * counted, same as an RF frame in that state).
+ */
+int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic_bearer bearer);
 
 /* Disarm the SX1262 DIO1 EXT1 light-sleep/deep-sleep wake before sys_poweroff(), so an
  * incoming frame does not wake an admin-shut-down node (it wakes only on reset, as

@@ -202,11 +202,13 @@ static struct k_thread mt_thread;
  */
 static K_SEM_DEFINE(mt_radio_sem, 1, 1);
 
-/* Raw frame handed from the driver RX callback to the processing thread. */
+/* Raw frame handed from the driver RX callback — or a non-LoRa bearer via
+ * meshtastic_radio_rx_inject() — to the processing thread. */
 struct mt_rx_slot {
 	uint16_t len;
 	int16_t rssi;
 	int8_t snr;
+	uint8_t bearer; /* enum meshtastic_bearer */
 	uint8_t buf[MESHTASTIC_PKT_MAX];
 };
 
@@ -597,12 +599,38 @@ static void mt_rx_cb(const struct device *dev, uint8_t *data, uint16_t size, int
 	slot.len = size;
 	slot.rssi = rssi;
 	slot.snr = snr;
+	slot.bearer = MESHTASTIC_BEARER_LORA;
 	memcpy(slot.buf, data, size);
 
 	if (k_msgq_put(&mt_rx_msgq, &slot, K_NO_WAIT) != 0) {
 		mt.status.rx_dropped++;
 		LOG_DBG("RX queue full, dropped %u-byte frame", size);
 	}
+}
+
+int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic_bearer bearer)
+{
+	struct mt_rx_slot slot;
+
+	if (buf == NULL || len < MESHTASTIC_HDR_LEN || len > sizeof(slot.buf)) {
+		return -EINVAL;
+	}
+
+	slot.len = len;
+	/* No RF reception happened: rssi/snr carry no meaning on a wired-style
+	 * bearer. Zeros are the explicit "no measurement" the router's bookkeeping
+	 * gates on (it never folds non-LoRa frames into RF signal stats). */
+	slot.rssi = 0;
+	slot.snr = 0;
+	slot.bearer = (uint8_t)bearer;
+	memcpy(slot.buf, buf, len);
+
+	if (k_msgq_put(&mt_rx_msgq, &slot, K_NO_WAIT) != 0) {
+		mt.status.rx_dropped++;
+		LOG_DBG("RX queue full, dropped %u-byte bearer frame", len);
+		return -ENOBUFS;
+	}
+	return 0;
 }
 
 static void mt_thread_fn(void *p1, void *p2, void *p3)
@@ -630,7 +658,8 @@ static void mt_thread_fn(void *p1, void *p2, void *p3)
 
 		ret = k_msgq_get(&mt_rx_msgq, &slot, wait);
 		if (ret == 0) {
-			meshtastic_router_process_lora_rx(slot.buf, slot.len, slot.rssi, slot.snr);
+			meshtastic_router_process_rx(slot.buf, slot.len, slot.rssi, slot.snr,
+						     (enum meshtastic_bearer)slot.bearer);
 			continue;
 		}
 

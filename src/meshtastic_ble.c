@@ -863,11 +863,31 @@ uint32_t meshtastic_ble_adv_starts(void)
 	return ble.adv_starts;
 }
 
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+/* Bearer ingest (agents-xhli.2): a wire frame completed by the peer frame
+ * channel enters the same RX pipeline as an airframe, tagged with its bearer
+ * so the router applies the link-local rule (delivered locally, never relayed
+ * onto LoRa). Runs under the peer lock on the BT RX thread — the inject is a
+ * non-blocking queue put, exactly what the M1 callback contract allows. */
+static void ble_peer_frame_ingest(unsigned int index, const uint8_t *frame, size_t len)
+{
+	int ret = meshtastic_radio_rx_inject(frame, (uint16_t)len, MESHTASTIC_BEARER_BLE_PEER);
+
+	if (ret < 0) {
+		LOG_WRN("BLE peer frame (conn %u, %zu B) not ingested (%d)", index, len, ret);
+	}
+}
+#endif
+
 int meshtastic_ble_init(void)
 {
 	int ret;
 
 	k_mutex_init(&ble.lock);
+
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+	meshtastic_ble_peer_frame_rx_register(ble_peer_frame_ingest);
+#endif
 
 	meshtastic_phoneapi_init(&ble.api, "ble", ble_queue, ARRAY_SIZE(ble_queue), ble_data_ready,
 				 ble_disconnect, ble_invalidate_delivery, NULL, &ble_to_scratch,

@@ -276,6 +276,70 @@ ZTEST(mesh_sim, test_duplicate_frame_delivered_once)
 	zassert_equal(rx.count, 1U, "expected exactly one delivery, got %u", rx.count);
 }
 
+/* The v1 link-local rule (agents-xhli.2): a frame arriving over a non-LoRa
+ * bearer is delivered locally but NEVER relayed onto LoRa. The frame here is a
+ * broadcast with hop budget — exactly what the LoRa path above does relay
+ * (rebroadcast ALL) — so a captured TX would be the gate failing, not noise. */
+ZTEST(mesh_sim, test_bearer_frame_delivered_locally_never_relayed)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct lora_sim_frame f;
+	const char *msg = "via the peer bearer";
+
+	build_peer_text(0x3003U, msg, wire, &wire_len);
+	zassert_ok(meshtastic_radio_rx_inject(wire, (uint16_t)wire_len,
+					      MESHTASTIC_BEARER_BLE_PEER),
+		   "bearer inject failed");
+
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "bearer frame not delivered");
+	zassert_equal(rx.from, PEER_NODE_ID, "wrong sender");
+	zassert_mem_equal(rx.payload, msg, strlen(msg), "wrong text");
+
+	/* Delivery may legitimately trigger traffic WE originate (the NodeDB asks
+	 * an unknown sender for NodeInfo); what must never appear is a relay —
+	 * a TX still carrying the injected frame's (src,id). */
+	while (lora_sim_take_tx(lora_dev, &f, K_MSEC(300)) == 0) {
+		const struct meshtastic_wire_header *h =
+			(const struct meshtastic_wire_header *)f.data;
+
+		zassert_false(sys_le32_to_cpu(h->src) == PEER_NODE_ID &&
+				      sys_le32_to_cpu(h->id) == 0x3003U,
+			      "bearer frame was relayed onto LoRa");
+	}
+}
+
+/* Dedup spans bearers: the same (src,id) heard first over the peer link is a
+ * duplicate when its LoRa copy arrives — one delivery, and the LoRa copy is
+ * not relayed either (DUP_SEEN drops it before the relay path). */
+ZTEST(mesh_sim, test_bearer_then_lora_copy_deduplicated)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct lora_sim_frame f;
+	const char *msg = "one delivery only";
+
+	build_peer_text(0x4004U, msg, wire, &wire_len);
+	zassert_ok(meshtastic_radio_rx_inject(wire, (uint16_t)wire_len,
+					      MESHTASTIC_BEARER_BLE_PEER),
+		   "bearer inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "bearer copy not delivered");
+
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7),
+		   "LoRa inject failed");
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(200)), -EAGAIN,
+		      "LoRa copy was delivered a second time");
+	zassert_equal(rx.count, 1U, "expected exactly one delivery, got %u", rx.count);
+	while (lora_sim_take_tx(lora_dev, &f, K_MSEC(200)) == 0) {
+		const struct meshtastic_wire_header *h =
+			(const struct meshtastic_wire_header *)f.data;
+
+		zassert_false(sys_le32_to_cpu(h->src) == PEER_NODE_ID &&
+				      sys_le32_to_cpu(h->id) == 0x4004U,
+			      "duplicate LoRa copy was relayed");
+	}
+}
+
 /*
  * INTEROP: the on-air frame must match the wire format the stock Meshtastic
  * firmware (./firmware/) produces and expects, or a real mesh won't decode us.

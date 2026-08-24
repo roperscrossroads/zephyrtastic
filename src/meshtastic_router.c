@@ -426,7 +426,8 @@ static int relay_injected_encrypted_mesh_packet(const meshtastic_MeshPacket *mes
  * Phase 2). Forward-declared here because the RX path calls it before its definition. */
 static void handle_inbound_impl(const struct meshtastic_packet *packet, const uint8_t *wire,
 				size_t wire_len, bool decoded,
-				const meshtastic_MeshPacket *decoded_mesh);
+				const meshtastic_MeshPacket *decoded_mesh,
+				enum meshtastic_bearer bearer);
 
 static void deliver_packet(const struct meshtastic_packet *packet,
 			   const meshtastic_MeshPacket *decoded_mesh)
@@ -513,8 +514,24 @@ static meshtastic_Routing_Error decode_fail_to_routing_err(enum meshtastic_decod
 	return meshtastic_Routing_Error_NO_CHANNEL;
 }
 
-void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi, int8_t snr)
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+/* RX airtime is an RF quantity: a frame from a non-LoRa bearer spent no air,
+ * so folding it into the duty-cycle ledger would corrupt the budget. */
+static void rx_airtime_log(bool rf, enum meshtastic_airtime_type type, uint32_t ms)
 {
+	if (rf) {
+		meshtastic_airtime_log(type, ms);
+	}
+}
+#endif
+
+void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int8_t snr,
+				  enum meshtastic_bearer bearer)
+{
+	/* The link-local rule (agents-xhli.2) hangs off this one flag: everything
+	 * that describes RF — relay, airtime, signal stats, route learning, the
+	 * MQTT uplink — happens only for a frame that actually crossed the air. */
+	const bool rf = (bearer == MESHTASTIC_BEARER_LORA);
 	const struct meshtastic_wire_header *hdr;
 	uint32_t src;
 	uint32_t pkt_id;
@@ -554,7 +571,7 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 	if (meshtastic_nodedb_is_ignored(src)) {
 		LOG_DBG("Ignoring packet from ignored node 0x%08x", src);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
@@ -564,7 +581,7 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 		 * poison the dedup cache and NodeDB if processed. */
 		LOG_DBG("Ignoring packet with broadcast source");
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
@@ -573,19 +590,28 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 	    ((hdr->flags & MESHTASTIC_FLAGS_VIA_MQTT) != 0U)) {
 		LOG_DBG("Ignoring packet with via_mqtt set");
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
 
 	if (src == mt.node_id) {
+		/* Our own frame arriving over a non-LoRa bearer is not an RF echo:
+		 * nothing rebroadcast it, so it proves nothing about the mesh and
+		 * must not feed the implicit-ACK / relayer correlation. (v1 peers
+		 * never relay, so this is a misbehaving sender — drop it.) */
+		if (!rf) {
+			LOG_DBG("Own frame id=0x%08x via bearer %u ignored", pkt_id,
+				(unsigned int)bearer);
+			return;
+		}
 		/* A neighbour rebroadcast one of our own packets: implicit ACK that it
 		 * reached the mesh. We never relay or deliver our own echo. The
 		 * relayer byte feeds the next-hop learn correlation (M2). */
 		meshtastic_routing_note_own_echo(pkt_id, hdr->relay_node);
 		meshtastic_reliable_on_implicit_ack(pkt_id);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX, airtime_ms);
+		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX, airtime_ms);
 #endif
 		return;
 	}
@@ -610,11 +636,16 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 							   hop_start);
 		}
 
-		note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
+		/* Redundancy accounting reasons about peers RELAYING on the air; a
+		 * bearer copy proves nothing about RF flooding (and must not cancel
+		 * a queued LoRa relay). */
+		if (rf) {
+			note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
+		}
 
 		LOG_DBG("Duplicate (src=0x%08x id=0x%08x)", src, pkt_id);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
@@ -628,13 +659,16 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 			.id = pkt_id,
 		};
 
-		note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
+		if (rf) {
+			note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
 
-		LOG_DBG("Hop-upgraded duplicate (src=0x%08x id=0x%08x hops=%u): relay", src,
-			pkt_id, rx_hop_limit);
-		meshtastic_routing_sniff_rebroadcast(hdr, buf, (size_t)len, &upgraded, NULL);
+			LOG_DBG("Hop-upgraded duplicate (src=0x%08x id=0x%08x hops=%u): relay",
+				src, pkt_id, rx_hop_limit);
+			meshtastic_routing_sniff_rebroadcast(hdr, buf, (size_t)len, &upgraded,
+							     NULL);
+		}
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
@@ -649,16 +683,16 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 	if (ret < 0) {
 		LOG_DBG("RX header parse failed (%d)", ret);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 	if (packet.from == 0U) {
-		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 	} else {
-		meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX, airtime_ms);
+		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX, airtime_ms);
 	}
 #endif
 
@@ -677,13 +711,31 @@ void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi
 	}
 
 	mt.status.rx_packets++;
-	mt.status.last_rx_from = src;
-	mt.status.last_rssi = rssi;
-	mt.status.last_snr = snr;
+	if (rf) {
+		/* "Last heard" RF bookkeeping: a bearer frame carries no signal
+		 * measurement, and zeroing these would overwrite the last real
+		 * RF reading the bench reads off `meshtastic status`. */
+		mt.status.last_rx_from = src;
+		mt.status.last_rssi = rssi;
+		mt.status.last_snr = snr;
+	}
+
+	if (!rf && decoded) {
+		/* The conversion stamped TRANSPORT_LORA (its via_mqtt-derived
+		 * default). Upstream has no BLE-bearer value; TRANSPORT_API is the
+		 * nearest "arrived over a local link, not the air" the phone can
+		 * display without being lied to about LoRa. */
+		rx_mesh.transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_API;
+	}
 
 	/* Pass the decoded MeshPacket (valid only when decoded==true; consumed only on the
 	 * deliver path, which runs only for a decoded frame) so the phone sees it verbatim. */
-	handle_inbound_impl(&packet, buf, (size_t)len, decoded, decoded ? &rx_mesh : NULL);
+	handle_inbound_impl(&packet, buf, (size_t)len, decoded, decoded ? &rx_mesh : NULL, bearer);
+}
+
+void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi, int8_t snr)
+{
+	meshtastic_router_process_rx(buf, len, rssi, snr, MESHTASTIC_BEARER_LORA);
 }
 
 static void log_inject_mesh_packet(const char *phase, const meshtastic_MeshPacket *mesh)
@@ -831,7 +883,10 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 	 * (TXT-1) survives to the phone. We pass packet == NULL: there is no separate struct to
 	 * build here (that was a redundant second mesh_pb_to_packet). via_mqtt/TRANSPORT_MQTT are
 	 * already set on `work` above; wire==NULL keeps sniff skipped and gates learn_next_hop. */
-	handle_inbound_impl(NULL, NULL, 0U, decoded, decoded ? &work : NULL);
+	/* Bearer LORA is behaviour-neutral here: wire==NULL already skips the sniff,
+	 * and via_mqtt/TRANSPORT_MQTT gate route learning + the transport tag. */
+	handle_inbound_impl(NULL, NULL, 0U, decoded, decoded ? &work : NULL,
+			    MESHTASTIC_BEARER_LORA);
 	LOG_DBG("inject done (local delivery)");
 
 	return 0;
@@ -839,8 +894,10 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 
 static void handle_inbound_impl(const struct meshtastic_packet *packet, const uint8_t *wire,
 				size_t wire_len, bool decoded,
-				const meshtastic_MeshPacket *decoded_mesh)
+				const meshtastic_MeshPacket *decoded_mesh,
+				enum meshtastic_bearer bearer)
 {
+	const bool rf = (bearer == MESHTASTIC_BEARER_LORA);
 	const struct meshtastic_wire_header *hdr = NULL;
 	const struct meshtastic_packet *pkt = packet;
 	struct meshtastic_packet materialized;
@@ -915,24 +972,34 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		}
 
 #if defined(CONFIG_MESHTASTIC_MQTT)
-		meshtastic_mqtt_on_rx(pkt, wire, wire_len, decoded_mesh);
+		/* Uplinking a peer-link frame to the broker would bridge the
+		 * bearers one hop removed — the same graph the no-relay rule
+		 * refuses. LoRa-borne traffic only. */
+		if (rf) {
+			meshtastic_mqtt_on_rx(pkt, wire, wire_len, decoded_mesh);
+		}
 #endif
 		meshtastic_routing_on_decoded(pkt, decoded_mesh);
 		meshtastic_dispatch_modules(pkt, decoded_mesh);
 		/* After module dispatch: the NodeDB has now created/refreshed the
 		 * source entry, so a learned next hop has somewhere to land.
 		 * Phase 4b: pass rx_mesh (NULL on the public inject/test path -> struct
-		 * fallback inside). */
-		meshtastic_routing_learn_next_hop(pkt, decoded_mesh);
+		 * fallback inside). LoRa only: a bearer frame's relay_node never rode
+		 * the air and says nothing about RF topology. */
+		if (rf) {
+			meshtastic_routing_learn_next_hop(pkt, decoded_mesh);
+		}
 	} else if (hdr != NULL) {
 		LOG_DBG("RX encrypted relay 0x%08x->0x%08x id=0x%08x", pkt->from, pkt->to,
 			pkt->id);
 	}
 
-	if (hdr != NULL && !suppress_relay) {
+	if (hdr != NULL && !suppress_relay && rf) {
 		/* Phase 4b: decoded_mesh is NULL on the encrypted-relay path (no decode) and
 		 * the public inject/test path -> struct-fallback for snr inside. Phase 4c: pkt is
-		 * the materialised struct on the decoded RF path, else the passed-in struct. */
+		 * the materialised struct on the decoded RF path, else the passed-in struct.
+		 * rf: THE link-local gate — a frame that arrived over a non-LoRa bearer is
+		 * never flood-relayed onto the air (agents-xhli.2). */
 		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, pkt, decoded_mesh);
 	}
 }
@@ -943,7 +1010,7 @@ void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, co
 	/* Public boundary: callers that hold only the flat struct (locally injected
 	 * downlinks, tests) get the to_mesh_pb rebuild on the phone path. The RF RX path
 	 * uses handle_inbound_impl() directly to carry the decoded MeshPacket verbatim. */
-	handle_inbound_impl(packet, wire, wire_len, decoded, NULL);
+	handle_inbound_impl(packet, wire, wire_len, decoded, NULL, MESHTASTIC_BEARER_LORA);
 }
 
 void meshtastic_router_stamp_originated(uint32_t to, uint32_t from, uint8_t *next_hop,

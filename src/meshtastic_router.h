@@ -24,10 +24,21 @@ extern "C" {
 #endif
 
 /**
+ * @brief Process one raw wire frame from any bearer's RX path.
+ *
+ * Filters duplicates, decodes the wire packet, then passes the result to the
+ * inbound pipeline. @p bearer selects the link-local policy (agents-xhli.2):
+ * frames from a non-LoRa bearer are delivered locally but never relayed onto
+ * LoRa, never uplinked to MQTT, never teach next-hop routes, and never touch
+ * airtime or RF signal bookkeeping — the frame did not cross the air.
+ */
+void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int8_t snr,
+				  enum meshtastic_bearer bearer);
+
+/**
  * @brief Process one raw LoRa frame from the radio RX path.
  *
- * Filters duplicates, decodes the wire packet, then passes the result to
- * @ref meshtastic_handle_inbound_packet.
+ * @ref meshtastic_router_process_rx with the LoRa bearer.
  */
 void meshtastic_router_process_lora_rx(const uint8_t *buf, int len, int16_t rssi, int8_t snr);
 
