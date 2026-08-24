@@ -87,9 +87,14 @@ void meshtastic_ble_peer_conn_down(unsigned int index);
 /* Arm/disarm the passive peer scanner. Default off — armed from the shell so
  * a first bench session can attribute any instability to it. Scanning runs
  * only while there is no outbound peer link and resumes automatically after a
- * connect attempt completes or fails. */
+ * connect attempt completes or fails. With MESHTASTIC_SETTINGS the armed
+ * state and connect target persist and re-arm on boot (agents-xhli.9), so a
+ * chain re-forms unattended after a reset. */
 int meshtastic_ble_peer_scan_set(bool on);
 bool meshtastic_ble_peer_scan_armed(void);
+
+/* The persisted/armed connect target (0 = any peer). */
+uint32_t meshtastic_ble_peer_scan_target(void);
 
 /* Target one node number (0 = connect to any peer found) and arm the scan. */
 int meshtastic_ble_peer_connect(uint32_t node_num);

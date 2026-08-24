@@ -2819,9 +2819,15 @@ static int cmd_blepeer_status(const struct shell *sh, size_t argc, char **argv)
 		    ps.frame_rx_frames, ps.frame_rx_rejected, ps.frame_tx_frames,
 		    ps.frame_tx_failed,
 		    meshtastic_ble_peer_frame_notify_ready() ? "on" : "off");
-	shell_print(sh, "scan          : %s, adverts matched=%u reflections=%u",
-		    meshtastic_ble_peer_scan_armed() ? "armed" : "off", ps.adverts_matched,
-		    ps.reflections);
+	if (meshtastic_ble_peer_scan_armed() && meshtastic_ble_peer_scan_target() != 0U) {
+		shell_print(sh, "scan          : armed (target 0x%08x), adverts matched=%u "
+			    "reflections=%u", meshtastic_ble_peer_scan_target(),
+			    ps.adverts_matched, ps.reflections);
+	} else {
+		shell_print(sh, "scan          : %s, adverts matched=%u reflections=%u",
+			    meshtastic_ble_peer_scan_armed() ? "armed" : "off",
+			    ps.adverts_matched, ps.reflections);
+	}
 	shell_print(sh, "connects      : attempted=%u failed=%u discovery_failures=%u",
 		    ps.connects_attempted, ps.connects_failed, ps.discovery_failures);
 	if (link.connected) {

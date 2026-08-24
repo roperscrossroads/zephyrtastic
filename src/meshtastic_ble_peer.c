@@ -32,6 +32,9 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
 
 #include <zephyr/sys/byteorder.h>
 
@@ -888,6 +891,82 @@ BT_CONN_CB_DEFINE(peer_conn_callbacks) = {
 	.disconnected = peer_central_disconnected,
 };
 
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+/*
+ * Persisted central intent (agents-xhli.9): scan-arm + connect target survive
+ * a reboot, so a chain re-forms unattended — before this, every reset silently
+ * disarmed the scanner and a human had to re-arm it from the shell, and a
+ * rebooted node's empty link accounting let a plain any-scan grab the wrong
+ * peer. Only INTENT is stored (what the operator armed), never link state.
+ * For deterministic chain shapes, arm links with a targeted
+ * `blepeer connect <node>` rather than a bare `scan on`.
+ */
+struct peer_intent_rec {
+	uint8_t scan_on;
+	uint32_t target;
+} __packed;
+
+static void peer_intent_save(void)
+{
+	struct peer_intent_rec rec;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	rec.scan_on = central.scan_on ? 1U : 0U;
+	rec.target = central.target_node;
+	k_mutex_unlock(&peer_lock);
+
+	if (settings_save_one("blepeer/central", &rec, sizeof(rec)) != 0) {
+		LOG_WRN("BLE peer: intent save failed");
+	}
+}
+
+static int peer_intent_settings_set(const char *key, size_t len, settings_read_cb read_cb,
+				    void *cb_arg)
+{
+	struct peer_intent_rec rec;
+
+	if (strcmp(key, "central") != 0) {
+		return -ENOENT;
+	}
+	if (len != sizeof(rec) || read_cb(cb_arg, &rec, sizeof(rec)) != (ssize_t)sizeof(rec)) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	central.scan_on = (rec.scan_on != 0U);
+	central.target_node = rec.target;
+	k_mutex_unlock(&peer_lock);
+	return 0;
+}
+
+static int peer_intent_settings_commit(void)
+{
+	/* meshtastic_ble_init()'s settings_load() runs after bt_enable(), so a
+	 * restored arm can start immediately; a subtree load from anywhere
+	 * earlier just leaves the intent staged for that later commit. */
+	if (!bt_is_ready()) {
+		return 0;
+	}
+	if (central.scan_on) {
+		if (central.target_node != 0U) {
+			LOG_INF("BLE peer: restored scan intent, target 0x%08x",
+				central.target_node);
+		} else {
+			LOG_INF("BLE peer: restored scan intent (any peer)");
+		}
+		(void)k_work_submit(&scan_work);
+	}
+	return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mt_blepeer, "blepeer", NULL, peer_intent_settings_set,
+			       peer_intent_settings_commit, NULL);
+#else
+static void peer_intent_save(void)
+{
+}
+#endif /* CONFIG_MESHTASTIC_SETTINGS */
+
 int meshtastic_ble_peer_scan_set(bool on)
 {
 	int err = 0;
@@ -898,6 +977,7 @@ int meshtastic_ble_peer_scan_set(bool on)
 		central.target_node = 0U;
 	}
 	k_mutex_unlock(&peer_lock);
+	peer_intent_save();
 
 	if (on) {
 		(void)k_work_submit(&scan_work);
@@ -918,6 +998,16 @@ bool meshtastic_ble_peer_scan_armed(void)
 	return central.scan_on;
 }
 
+uint32_t meshtastic_ble_peer_scan_target(void)
+{
+	uint32_t t;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	t = central.target_node;
+	k_mutex_unlock(&peer_lock);
+	return t;
+}
+
 int meshtastic_ble_peer_connect(uint32_t node_num)
 {
 	if (node_num == mt.node_id) {
@@ -932,6 +1022,7 @@ int meshtastic_ble_peer_connect(uint32_t node_num)
 	central.target_node = node_num;
 	central.scan_on = true;
 	k_mutex_unlock(&peer_lock);
+	peer_intent_save();
 
 	(void)k_work_submit(&scan_work);
 	return 0;
