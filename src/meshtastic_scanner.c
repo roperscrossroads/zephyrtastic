@@ -74,6 +74,7 @@ static struct {
 	uint32_t total;      /* ever captured; keeps counting past the ring */
 	uint32_t tx_blocked; /* transmissions refused while off our preset */
 	uint32_t rx_dropped; /* frames surveyed but withheld from the stack */
+	uint32_t parks;      /* times the sweep thread has parked; stop()'s handshake */
 	struct meshtastic_scan_stats stats[MESHTASTIC_SCANNER_MAX_PRESETS];
 } scan;
 
@@ -151,6 +152,7 @@ static void scan_thread_fn(void *p1, void *p2, void *p3)
 
 		scan_lock();
 		if (!scan.sweeping) {
+			scan.parks++;
 			scan_unlock();
 			/* Parked. Tell stop() the radio is ours no longer, then wait to
 			 * be woken rather than polling. */
@@ -232,6 +234,17 @@ int meshtastic_scanner_start(void)
 	scan.cur = 0U;
 	scan_unlock();
 
+	/* Drain any token left over from an earlier park — including the boot-time
+	 * one, since the thread parks immediately at startup and nothing consumes
+	 * that. Without this, scan_idle is permanently one ahead and stop()'s
+	 * wait-for-park below is satisfied by a stale token: it returns without
+	 * waiting, so the sweep thread can still be inside its retune when stop()
+	 * restores the operating preset and reopens the TX gate — leaving the radio
+	 * parked on a scan frequency with TX allowed, the one outcome this design
+	 * exists to prevent. Safe to do here: the thread is blocked on scan_wake and
+	 * cannot post another token until we give it below. */
+	(void)k_sem_take(&scan_idle, K_NO_WAIT);
+
 	k_sem_give(&scan_wake); /* un-park the thread */
 
 	LOG_INF("scanner: sweeping %u presets, dwell = ToA + %ums — TX refused until stop",
@@ -252,9 +265,11 @@ int meshtastic_scanner_stop(void)
 	scan_unlock();
 
 	/* Wake the thread out of its dwell and wait for it to park, so it cannot
-	 * retune underneath the restore below. The timeout is a backstop: a missed
-	 * ack costs a redundant retune, never a transmit, because tx_closed is still
-	 * set until after the restore succeeds. */
+	 * retune underneath the restore below. start() drains scan_idle first, so
+	 * the only token this can consume is the one from the park it caused — see
+	 * the note there. The timeout is a backstop: a genuinely missed ack costs a
+	 * redundant retune, never a transmit, because tx_closed is still set until
+	 * after the restore succeeds. */
 	k_sem_give(&scan_wake);
 	(void)k_sem_take(&scan_idle, K_MSEC(2000));
 
@@ -331,6 +346,16 @@ uint32_t meshtastic_scanner_rx_dropped(void)
 
 	scan_lock();
 	n = scan.rx_dropped;
+	scan_unlock();
+	return n;
+}
+
+uint32_t meshtastic_scanner_parks(void)
+{
+	uint32_t n;
+
+	scan_lock();
+	n = scan.parks;
 	scan_unlock();
 	return n;
 }

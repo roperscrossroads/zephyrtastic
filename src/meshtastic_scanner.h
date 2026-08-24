@@ -102,6 +102,17 @@ bool meshtastic_scanner_active(void);
 bool meshtastic_scanner_sweeping(void);
 
 /**
+ * @brief How many times the sweep thread has parked, for the lifetime of the node.
+ *
+ * meshtastic_scanner_stop() must not return until the thread has parked — only
+ * then is it certain the sweep cannot retune underneath the restore. That makes
+ * this counter the observable form of the handshake: a stop() that leaves it
+ * unchanged did not actually wait. Deliberately NOT cleared by
+ * meshtastic_scanner_reset(), so a caller can bracket one start/stop cycle.
+ */
+uint32_t meshtastic_scanner_parks(void);
+
+/**
  * @brief Per-preset observations.
  *
  * @param out   Array to fill.

@@ -770,6 +770,54 @@ ZTEST(mesh_sim, test_scan_mode_refuses_tx_and_restores)
 	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "no TX captured after stopping");
 }
 
+/*
+ * stop() must not return until the sweep thread has PARKED.
+ *
+ * The check above ("stop must restore the operating frequency") passes either
+ * way, because it only samples the radio once — immediately, before a sweep
+ * thread that was still running could have retuned back on top of the restore.
+ * The ordering is what actually carries the safety property: stop() clears
+ * tx_closed as soon as the restore succeeds, so if the sweep is still live at
+ * that moment it can tune to the next scan preset with TX already re-enabled,
+ * and the node transmits on a foreign mesh's frequency.
+ *
+ * Found 2026-08-23 by review, and it was real: scan_idle is given on every park
+ * INCLUDING the one at boot, and nothing consumed that first token, so the
+ * semaphore sat permanently one ahead and every stop() took the stale token and
+ * returned in 0 ms without waiting for anything. Instrumented on native_sim,
+ * all three stop() calls in this suite showed count=1 / waited 0 ms. start()
+ * now drains it, so the only token stop() can take is the one from the park it
+ * caused.
+ *
+ * Asserted on the park COUNT rather than on elapsed time: the invariant is
+ * "the thread parked before stop() returned", which is exactly what the counter
+ * records, and it does not depend on scheduler timing to be meaningful.
+ */
+ZTEST(mesh_sim, test_scan_stop_waits_for_the_sweep_thread_to_park)
+{
+	uint32_t parks_before;
+
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "baseline switch failed");
+
+	parks_before = meshtastic_scanner_parks();
+	zassert_ok(meshtastic_scanner_start(), "scan start failed");
+
+	/* Let the sweep get properly under way, so stop() is interrupting a real
+	 * dwell rather than racing the thread's very first pass. */
+	k_sleep(K_MSEC(200));
+	zassert_true(meshtastic_scanner_sweeping(), "the sweep should be running");
+	zassert_equal(meshtastic_scanner_parks(), parks_before,
+		      "a running sweep must not have parked");
+
+	zassert_ok(meshtastic_scanner_stop(), "scan stop failed");
+
+	/* No k_sleep here, deliberately: the point is that stop() ITSELF waited. */
+	zassert_equal(meshtastic_scanner_parks(), parks_before + 1U,
+		      "stop() returned before the sweep thread parked — it can still "
+		      "retune onto a scan preset now that TX has been re-enabled");
+}
+
 /* The survey captures headers from frames the normal stack would discard — a
  * foreign mesh's channel hash, which we hold no key for. That is the whole point:
  * the header is plaintext, so no keys and no channel setup are needed. */
