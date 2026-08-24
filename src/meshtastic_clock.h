@@ -76,6 +76,11 @@ void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quali
 /** Trust level of the source that last set the clock (NONE if never set). */
 enum meshtastic_clock_quality meshtastic_clock_get_quality(void);
 
+#if defined(CONFIG_ZTEST)
+/* Test-only: return the clock to the never-set state. See the definition. */
+void meshtastic_clock_test_reset(void);
+#endif
+
 /** True once a valid epoch has been seeded. */
 bool meshtastic_clock_valid(void);
 

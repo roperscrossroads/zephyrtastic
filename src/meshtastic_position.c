@@ -488,6 +488,31 @@ static void meshtastic_module_position_on_packet(const struct meshtastic_packet 
 	}
 
 	log_position(from, request_id, &position);
+
+	/*
+	 * Mesh time (reference: PositionModule::trySetRtc): a remote position on
+	 * the PRIMARY channel carrying a nonzero, device-derived time is offered
+	 * to the wall clock at NET quality. The quality ladder does the real
+	 * gating — NET seeds an unset (or device-RTC) clock and can never
+	 * displace phone/operator (NTP) or GPS time. Deliberate divergences from
+	 * the reference, see docs/parity/module-parity notes: no
+	 * hasQualityTimesource() pre-gate (no port target has an I2C RTC, and
+	 * "GNSS fitted but fixless" is exactly the situation where mesh time
+	 * helps — a later fix outranks NET on the ladder anyway), and no T-Watch
+	 * force path (no such board).
+	 */
+	if (position.time != 0U &&
+	    packet->channel_index == meshtastic_channels_primary_index() &&
+	    position.location_source >= meshtastic_Position_LocSource_LOC_INTERNAL) {
+		enum meshtastic_clock_quality before = meshtastic_clock_get_quality();
+
+		meshtastic_clock_set_epoch(position.time, MESHTASTIC_CLOCK_QUALITY_NET);
+		if (before < MESHTASTIC_CLOCK_QUALITY_NET &&
+		    meshtastic_clock_get_quality() == MESHTASTIC_CLOCK_QUALITY_NET) {
+			LOG_INF("Clock set from mesh: epoch %u (position from 0x%08x)",
+				position.time, from);
+		}
+	}
 }
 
 static bool interval_elapsed(bool valid, int64_t last_ms, int64_t now_ms, int64_t interval_ms)

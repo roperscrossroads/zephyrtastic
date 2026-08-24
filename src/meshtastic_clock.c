@@ -82,6 +82,21 @@ void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quali
 	clock_valid = true;
 }
 
+#if defined(CONFIG_ZTEST)
+/* Test seam: the clock is process-global with no production reset (nothing in
+ * the firmware ever un-learns time), but tests need a known starting state --
+ * several suites set GPS-quality time, which would otherwise leak into any
+ * later test of a lower-quality source (the reference has the same seam,
+ * PIO_UNIT_TESTING in RTC.cpp). */
+void meshtastic_clock_test_reset(void)
+{
+	current_quality = MESHTASTIC_CLOCK_QUALITY_NONE;
+	last_set_uptime_ms = 0;
+	boot_epoch_ms = 0;
+	clock_valid = false;
+}
+#endif
+
 void meshtastic_clock_set_epoch(uint32_t epoch_now, enum meshtastic_clock_quality quality)
 {
 	meshtastic_clock_set_epoch_ms((int64_t)epoch_now * 1000, quality);

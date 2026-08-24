@@ -5565,3 +5565,68 @@ ZTEST(protocol_stack, test_remote_admin_pkc_wrong_key_unauthorized)
 }
 
 #endif /* CONFIG_MESHTASTIC_ADMIN */
+
+/* Mesh time (reference: PositionModule::trySetRtc): a remote primary-channel
+ * position carrying a nonzero, device-derived time seeds the wall clock at
+ * NET quality; a manual-source time is ignored; an NTP-or-better clock is
+ * never displaced. One ordered test: the clock is process-global, so the
+ * three cases must control its state (via the test reset seam) themselves. */
+ZTEST(protocol_stack, test_mesh_time_from_remote_position)
+{
+	meshtastic_Position p = meshtastic_Position_init_zero;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t now;
+	pb_ostream_t os;
+
+	meshtastic_clock_test_reset();
+
+	/* A: device-derived time on the primary channel seeds an unset clock. */
+	p.time = 1756000123U;
+	p.location_source = meshtastic_Position_LocSource_LOC_INTERNAL;
+	os = pb_ostream_from_buffer(payload, sizeof(payload));
+	zassert_true(pb_encode(&os, meshtastic_Position_fields, &p), "encode A failed");
+	build_wire_packet(PEER_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x77E501U, 3U,
+			  MESHTASTIC_PORT_POSITION, payload, os.bytes_written, wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 8);
+	zassert_ok(k_sem_take(&state.rx_sem, K_SECONDS(1)), "rx timeout (A)");
+	k_msleep(50);
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_NET,
+		      "a primary-channel device-time position must seed the clock at NET");
+	now = meshtastic_clock_now_epoch();
+	zassert_true(now >= 1756000123U && now < 1756000123U + 5U,
+		      "clock should be on the mesh timeline, got %u", now);
+
+	/* B: a manual/unknown location source is ignored (reference gate). The
+	 * epoch is deliberately newer than A's so a wrongly-accepted offer would
+	 * be visible as a forward jump. */
+	p.time = 1799990000U;
+	p.location_source = meshtastic_Position_LocSource_LOC_MANUAL;
+	os = pb_ostream_from_buffer(payload, sizeof(payload));
+	zassert_true(pb_encode(&os, meshtastic_Position_fields, &p), "encode B failed");
+	build_wire_packet(PEER_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x77E502U, 3U,
+			  MESHTASTIC_PORT_POSITION, payload, os.bytes_written, wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 8);
+	zassert_ok(k_sem_take(&state.rx_sem, K_SECONDS(1)), "rx timeout (B)");
+	k_msleep(50);
+	now = meshtastic_clock_now_epoch();
+	zassert_true(now < 1799990000U, "a manual-source time must not move the clock");
+
+	/* C: NET must never displace NTP (phone/operator/SNTP time). */
+	meshtastic_clock_set_epoch(1760000000U, MESHTASTIC_CLOCK_QUALITY_NTP);
+	p.time = 1756111111U;
+	p.location_source = meshtastic_Position_LocSource_LOC_INTERNAL;
+	os = pb_ostream_from_buffer(payload, sizeof(payload));
+	zassert_true(pb_encode(&os, meshtastic_Position_fields, &p), "encode C failed");
+	build_wire_packet(PEER_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x77E503U, 3U,
+			  MESHTASTIC_PORT_POSITION, payload, os.bytes_written, wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 8);
+	zassert_ok(k_sem_take(&state.rx_sem, K_SECONDS(1)), "rx timeout (C)");
+	k_msleep(50);
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_NTP,
+		      "mesh time must not displace an NTP-quality clock");
+	now = meshtastic_clock_now_epoch();
+	zassert_true(now >= 1760000000U && now < 1760000000U + 5U,
+		      "clock must stay on the NTP timeline, got %u", now);
+}
