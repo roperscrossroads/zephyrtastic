@@ -146,6 +146,77 @@ ZTEST(cluster_doc, test_pin_never_shadows_base_replication)
 	zassert_equal(e->payload[0], 20, "unpin must land on the base updated during the pin");
 }
 
+/*
+ * THE OTHER HALF of the test above — and the half that decides whether `unpin`
+ * does anything at all on a real node.
+ *
+ * effective() alone answers "which value", and the test above proves that
+ * answer is right. But the reconciler also has to hand the config store a
+ * VERSION, and the store runs its own last-writer-wins merge: too old a version
+ * and the write is declined. Score a reversion by the base entry's own stamp and
+ * that is exactly what happens — the pin the store is running was minted AFTER
+ * the base, so the base loses, the write bounces, and the node keeps running the
+ * value it was just told to stop running. The document would be correct and the
+ * radio would be wrong.
+ *
+ * The tombstone is the write that fixes it: it is minted after the pin, and
+ * counting it in the version is what makes "unpin reverts to the current base"
+ * true rather than aspirational.
+ */
+ZTEST(cluster_doc, test_effective_version_carries_the_reversion)
+{
+	struct meshtastic_cluster_key b = base_key(SEC_DISPLAY);
+	struct meshtastic_cluster_key n = node_key(NODE_A, SEC_DISPLAY);
+	struct meshtastic_hlc_stamp s;
+	struct meshtastic_hlc_stamp v;
+	const struct meshtastic_cluster_entry *e;
+	uint8_t base_v[] = {10};
+	uint8_t pin_v[] = {77};
+
+	/* Nothing at either layer: no version to report. */
+	zassert_false(meshtastic_cluster_doc_effective_version(&doc, NODE_A, SEC_DISPLAY, &v),
+		      "a section the document holds no opinion about has no version");
+
+	/* Base alone — the version is the base's own stamp. */
+	s = at(100, NODE_B);
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &b, &s, false, base_v, 1), 1);
+	zassert_true(meshtastic_cluster_doc_effective_version(&doc, NODE_A, SEC_DISPLAY, &v));
+	zassert_equal(meshtastic_hlc_compare(&v, &s), 0);
+
+	/* A pin minted later — the version follows the value. */
+	s = at(150, NODE_A);
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &n, &s, false, pin_v, 1), 1);
+	zassert_true(meshtastic_cluster_doc_effective_version(&doc, NODE_A, SEC_DISPLAY, &v));
+	zassert_equal(meshtastic_hlc_compare(&v, &s), 0, "a live pin decides, and dates, the "
+		      "answer");
+
+	/*
+	 * THE CASE THAT MATTERS. Unpin with the base UNCHANGED underneath — the
+	 * ordinary "I changed my mind" — so the base entry's own stamp (100) is
+	 * OLDER than the pin (150) the store is running. The version must be the
+	 * tombstone's (250), or the store declines the reversion.
+	 */
+	s = at(250, NODE_A);
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &n, &s, true, NULL, 0), 1);
+	e = meshtastic_cluster_doc_effective(&doc, NODE_A, SEC_DISPLAY);
+	zassert_not_null(e);
+	zassert_equal(e->payload[0], 10, "the value reverts to base");
+	zassert_true(meshtastic_cluster_doc_effective_version(&doc, NODE_A, SEC_DISPLAY, &v));
+	zassert_equal(meshtastic_hlc_compare(&v, &s), 0,
+		      "the reversion must be dated by the TOMBSTONE, not by the older base it "
+		      "falls back to — otherwise the store's own LWW merge declines the write "
+		      "and the node never actually comes off the pin");
+
+	/* And a base promoted AFTER the unpin still gets through: the version is
+	 * the newest of the pair, so an old tombstone cannot freeze the section. */
+	s = at(300, NODE_B);
+	base_v[0] = 20;
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &b, &s, false, base_v, 1), 1);
+	zassert_true(meshtastic_cluster_doc_effective_version(&doc, NODE_A, SEC_DISPLAY, &v));
+	zassert_equal(meshtastic_hlc_compare(&v, &s), 0,
+		      "a tombstone must not date the section forever");
+}
+
 ZTEST(cluster_doc, test_effective_fallbacks)
 {
 	struct meshtastic_hlc_stamp s = at(100, NODE_A);

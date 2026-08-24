@@ -3162,9 +3162,9 @@ usage:
 #endif /* CONFIG_MESHTASTIC_ADMIN_CLIENT */
 
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
-/* Config-section names for `cluster promote` — the shareable set plus lora
- * (which promote itself refuses with the §7.9 explanation, a better teacher
- * than "unknown section"). */
+/* Config-section names for `cluster promote`/`pin`/`unpin` — the shareable set
+ * plus lora (which promote and pin both refuse with the §7.9 explanation, a
+ * better teacher than "unknown section"). */
 static int cluster_section_parse(const char *name, uint16_t *tag)
 {
 	static const struct {
@@ -3246,6 +3246,13 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		    st.entry_rx_no_space ? "  ** DOCUMENT TABLE FULL — entries are being "
 					   "dropped and re-requested forever **"
 					 : "");
+	/* suppressed>0 is the rate bound working, not a fault: a push is a
+	 * latency optimisation over the digest, so dropping one costs a digest
+	 * period and never correctness. */
+	shell_print(sh, "push    : sent=%u suppressed=%u%s", st.push_tx, st.push_suppressed,
+		    st.push_suppressed ? "  (rate-bounded — the digest still carries every "
+					 "change)"
+				       : "");
 	shell_print(sh, "config  : sections applied=%u kept_local=%u%s", st.sections_applied,
 		    st.sections_kept_local,
 		    st.sections_held ? "  ** a fleet LoRa section is REPLICATED BUT HELD "
@@ -3257,12 +3264,23 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 					 "clock drift horizon — someone's clock is wrong **"
 				       : "");
 
+	/* The per-node rows for THIS node are the ones an operator is reasoning
+	 * about during a pin/unpin, and they are visually identical to every
+	 * other node's. Say which are ours: a live one is what effective() is
+	 * currently returning for that section, a tombstoned one is why it is
+	 * NOT (§2.2). */
 	for (uint16_t i = 0U; meshtastic_cluster_entry_get(i, &e); i++) {
-		shell_print(sh, "  [%c/%08x/%u] %s%u B, stamp %lld.%u by 0x%08x",
+		bool mine = (e.key.layer == MESHTASTIC_CLUSTER_LAYER_NODE) &&
+			    (e.key.node_id == meshtastic_get_node_id());
+
+		shell_print(sh, "  [%c/%08x/%u] %s%u B, stamp %lld.%u by 0x%08x%s",
 			    e.key.layer == MESHTASTIC_CLUSTER_LAYER_BASE ? 'b' : 'n',
 			    e.key.node_id, (unsigned int)e.key.section,
 			    e.tombstone ? "TOMBSTONE, " : "", (unsigned int)e.payload_len,
-			    (long long)e.stamp.physical_ms, e.stamp.counter, e.stamp.node_id);
+			    (long long)e.stamp.physical_ms, e.stamp.counter, e.stamp.node_id,
+			    mine ? (e.tombstone ? "  <- MY UNPIN (base applies)"
+						: "  <- MY PIN (wins over base)")
+				 : "");
 	}
 	return 0;
 }
@@ -3295,7 +3313,91 @@ static int cmd_cluster_promote(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "promote failed (%d)", ret);
 		return ret;
 	}
-	shell_print(sh, "%s promoted to fleet base (advertised on the next digest)", argv[1]);
+	shell_print(sh, "%s promoted to fleet base (broadcast once; the digest backs it up)",
+		    argv[1]);
+	return 0;
+}
+
+/*
+ * meshtastic cluster pin <sec> — this node's own override for one section.
+ *
+ * The pin does not replace or hide the fleet base: base/<sec> keeps replicating
+ * underneath with its own stamp and the pin wins only when effective(me) is
+ * computed. That separation is the whole reason the document has two layers
+ * (CONFIG-CONVERGENCE.md §7.7) — it is what makes `unpin` land on the base as
+ * it stands AT THAT MOMENT rather than on the one frozen when the pin was made.
+ */
+static int cmd_cluster_pin(const struct shell *sh, size_t argc, char **argv)
+{
+	uint16_t tag;
+	int ret;
+
+	if (argc != 2U || cluster_section_parse(argv[1], &tag) != 0) {
+		shell_error(sh, "usage: meshtastic cluster pin "
+			    "<device|position|power|display|bluetooth>");
+		return -EINVAL;
+	}
+
+	ret = meshtastic_cluster_pin(tag);
+	if (ret == -EPERM) {
+		shell_error(sh, "refused: section not shareable (secret boundary), lora (a "
+			    "doc-borne lora section is replicated but never applied, so the pin "
+			    "could not take effect), or this node is managed");
+		return ret;
+	}
+	if (ret == -EALREADY) {
+		shell_error(sh, "%s is already this node's pin — the stored value came FROM "
+			    "that pin, so re-pinning would only mint a second stamp for the "
+			    "same bytes (edit the section first)", argv[1]);
+		return ret;
+	}
+	if (ret == -ENOENT) {
+		shell_error(sh, "no %s section in the config store", argv[1]);
+		return ret;
+	}
+	if (ret < 0) {
+		shell_error(sh, "pin failed (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "%s pinned for this node — the fleet base keeps replicating "
+		    "underneath and `unpin` returns to whatever it holds then", argv[1]);
+	return 0;
+}
+
+/* meshtastic cluster unpin <sec> — drop the override. A TOMBSTONE, not a
+ * deletion: removal has to replicate, or the next anti-entropy pass pulls the
+ * pin back from a peer that still holds it (D7). */
+static int cmd_cluster_unpin(const struct shell *sh, size_t argc, char **argv)
+{
+	uint16_t tag;
+	int ret;
+
+	if (argc != 2U || cluster_section_parse(argv[1], &tag) != 0) {
+		shell_error(sh, "usage: meshtastic cluster unpin "
+			    "<device|position|power|display|bluetooth>");
+		return -EINVAL;
+	}
+
+	ret = meshtastic_cluster_unpin(tag);
+	if (ret == -ENOENT) {
+		shell_error(sh, "this node has no pin on %s", argv[1]);
+		return ret;
+	}
+	if (ret == -EALREADY) {
+		shell_error(sh, "%s is already unpinned (the tombstone is replicating)",
+			    argv[1]);
+		return ret;
+	}
+	if (ret == -EPERM) {
+		shell_error(sh, "refused: this node is managed (SecurityConfig.is_managed)");
+		return ret;
+	}
+	if (ret < 0) {
+		shell_error(sh, "unpin failed (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "%s unpinned — this node now follows the fleet base as it stands "
+		    "now (with no fleet base for the section, it keeps what it has)", argv[1]);
 	return 0;
 }
 
@@ -3353,6 +3455,16 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 					 SHELL_HELP("Promote my current section to fleet base.",
 						    "<device|position|power|display|bluetooth>"),
 					 cmd_cluster_promote),
+			       SHELL_CMD(pin, NULL,
+					 SHELL_HELP("Override one section for THIS node "
+						    "(base keeps replicating underneath).",
+						    "<device|position|power|display|bluetooth>"),
+					 cmd_cluster_pin),
+			       SHELL_CMD(unpin, NULL,
+					 SHELL_HELP("Drop this node's override (a replicating "
+						    "tombstone); follow the current base.",
+						    "<device|position|power|display|bluetooth>"),
+					 cmd_cluster_unpin),
 			       SHELL_CMD(digest, NULL,
 					 SHELL_HELP("Broadcast one digest now.", NULL),
 					 cmd_cluster_digest),

@@ -14,7 +14,7 @@
  *
  * M4b scope: the doc + digests + the anti-entropy walk (vector → entry pull →
  * merge) + the reconciler that applies effective(me) to the config store.
- * pin/unpin/tombstones and push-on-change are M4c.
+ * M4c adds the per-node layer — pin, unpin (a tombstone), and push-on-change.
  */
 
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
@@ -43,6 +43,47 @@ void meshtastic_cluster_digest_now(void);
 int meshtastic_cluster_promote(uint16_t section);
 
 /*
+ * Pin MY current value of @p section as this node's override: store value →
+ * `nodes/<me>/<sec>`, stamped now, broadcast once (D11) and thereafter carried
+ * by the digest like any other entry.
+ *
+ * A pin does not compete with the fleet base and never hides it. `base/<sec>`
+ * keeps replicating underneath with its own stamp; the pin wins only when
+ * effective(me) is computed (D6). That is what makes `unpin` land on whatever
+ * the base holds AT THAT MOMENT rather than on the base frozen at pin time —
+ * the §7.7 shadowing bug made structurally impossible rather than merely
+ * avoided.
+ *
+ * Returns 0, -EPERM (not allowlisted, lora, or this node is is_managed),
+ * -ENOENT (section not in the store), -EALREADY (this node is already running
+ * this exact pin — its stored value came FROM the pin, so re-pinning would mint
+ * a second stamp for identical bytes and churn the fleet), -ENOSPC (doc full),
+ * else an encode/store error.
+ *
+ * Pinning a section whose value this node inherited from `base/` is NOT
+ * -EALREADY and is a deliberately useful thing to do: it freezes today's fleet
+ * default as this node's own, so later base updates stop reaching it.
+ */
+int meshtastic_cluster_pin(uint16_t section);
+
+/*
+ * Drop this node's pin on @p section: a stamped TOMBSTONE at `nodes/<me>/<sec>`,
+ * pushed like any other entry. Removal has to replicate — silently deleting the
+ * key would let the next anti-entropy pass resurrect the pin from a peer that
+ * still holds it (D7).
+ *
+ * effective(me) falls straight through to `base/<sec>` as it stands now, and
+ * the reconciler applies it. With no fleet base for the section there is
+ * nothing to fall through to: the node keeps running whatever it currently has,
+ * and simply stops advertising an override — "no fleet default" is the base
+ * key's absence (§2.1), not a value.
+ *
+ * Returns 0, -EPERM (is_managed), -ENOENT (no pin on that section),
+ * -EALREADY (already tombstoned), else a store error.
+ */
+int meshtastic_cluster_unpin(uint16_t section);
+
+/*
  * Start an anti-entropy exchange with @p node_id now, as if its digest had just
  * mismatched: ClusterVectorReq → diff → ClusterEntryReq → merge → reconcile.
  * The bench and the sim use it so convergence is provable on demand instead of
@@ -64,7 +105,7 @@ struct meshtastic_cluster_stats {
 	uint32_t digest_rx_mismatch;
 	uint32_t rx_wrong_channel; /* port-256 frames not on the cluster channel */
 	uint32_t rx_undecodable;
-	uint32_t rx_not_implemented; /* M4c verbs received, counted, dropped */
+	uint32_t rx_not_implemented; /* a verb this build does not know */
 
 	/* The anti-entropy walk (M4b). */
 	uint32_t pull_started;	  /* exchanges we opened on a digest mismatch */
@@ -81,6 +122,17 @@ struct meshtastic_cluster_stats {
 	uint32_t entry_rx_future;   /* stamped beyond the clock drift horizon */
 	uint32_t rx_unsolicited;   /* a reply we had not asked for */
 	uint32_t tx_busy;	   /* a peer asked while we were serving another */
+
+	/* Push-on-change (M4c, D11): the ONLY frames this module originates
+	 * uninvited. Everything else is a timer or a reply.
+	 *
+	 * push_suppressed is not an error. A push is an optimisation — it buys
+	 * the fleet one digest period of latency — so the rate bound drops one
+	 * rather than let a flapping config or a held-down up-arrow turn this
+	 * node into a broadcast source. The digest backstop still carries every
+	 * change; nothing here is ever load-bearing for correctness. */
+	uint32_t push_tx;
+	uint32_t push_suppressed;
 
 	/* The reconciler (effective(me) → config store). */
 	uint32_t sections_applied;

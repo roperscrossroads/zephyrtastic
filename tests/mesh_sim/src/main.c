@@ -1873,17 +1873,26 @@ static struct meshtastic_hlc_stamp doc_max_stamp(void)
 }
 
 /* Scan the document for a key, using the same accessor the shell uses. */
-static bool doc_has(uint8_t layer, uint32_t node_id, uint16_t section)
+static bool doc_get(uint8_t layer, uint32_t node_id, uint16_t section,
+		    struct meshtastic_cluster_entry *out)
 {
 	struct meshtastic_cluster_entry e;
 
 	for (uint16_t i = 0U; meshtastic_cluster_entry_get(i, &e); i++) {
 		if (e.key.layer == layer && e.key.node_id == node_id &&
 		    e.key.section == section) {
+			if (out != NULL) {
+				*out = e;
+			}
 			return true;
 		}
 	}
 	return false;
+}
+
+static bool doc_has(uint8_t layer, uint32_t node_id, uint16_t section)
+{
+	return doc_get(layer, node_id, section, NULL);
 }
 
 /* Teach this node PEER's public key the way the air does — a NodeInfo — then
@@ -2510,6 +2519,228 @@ ZTEST(mesh_sim, test_cluster_lora_section_replicates_but_is_never_applied)
 	cluster_channel(false);
 }
 
+/* ==========================================================================
+ * Cluster M4c — the per-node layer: pin, unpin, and push-on-change.
+ * ========================================================================== */
+
+static size_t encode_position(uint32_t broadcast_secs, uint8_t *buf, size_t buf_len)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, buf_len);
+
+	cfg.which_payload_variant = meshtastic_Config_position_tag;
+	cfg.payload_variant.position.position_broadcast_secs = broadcast_secs;
+	zassert_true(pb_encode(&os, meshtastic_Config_fields, &cfg), "position encode failed");
+	return os.bytes_written;
+}
+
+static uint32_t stored_position_broadcast_secs(void)
+{
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg),
+		   "position read failed");
+	return cfg.payload_variant.position.position_broadcast_secs;
+}
+
+/* Drain captured TX until one of OUR pushes for @p section appears, and hand
+ * back the whole entry so the test can assert on what actually went out. */
+static bool take_push(uint16_t section, zephyrtastic_ClusterEntry *out)
+{
+	zephyrtastic_ClusterMessage msg;
+	uint32_t to = 0U;
+
+	while (take_cluster_tx(&msg, &to)) {
+		if (msg.which_variant != zephyrtastic_ClusterMessage_entry_tag ||
+		    !msg.variant.entry.has_key ||
+		    msg.variant.entry.key.section != (uint32_t)section) {
+			continue;
+		}
+		zassert_equal(to, MESHTASTIC_NODE_BROADCAST,
+			      "a push must be a BROADCAST — one frame for the fleet, not N "
+			      "unicasts (D11)");
+		*out = msg.variant.entry;
+		return true;
+	}
+	return false;
+}
+
+/*
+ * THE M4c PROOF, and the half of it a document-only test cannot reach.
+ *
+ * tests/cluster proves effective() lands on the current base after an unpin.
+ * This proves the CONFIG STORE does — which is a separate claim, because the
+ * store runs its own last-writer-wins merge and the base entry a reversion
+ * falls back to is, in the ordinary case, OLDER than the pin the node is
+ * running. Date the reversion by that base stamp and the store declines the
+ * write: the document says one thing, the radio keeps doing another, and
+ * nothing anywhere reports a failure.
+ *
+ * So the base here is deliberately left UNCHANGED under the pin. The bench
+ * sequence (§8 step 3) promotes a newer base underneath, which is the easier
+ * case — a newer base wins the store's merge on its own stamp. This is the one
+ * that only works if the tombstone carries the version.
+ */
+ZTEST(mesh_sim, test_cluster_pin_and_unpin_move_the_config_store)
+{
+	zephyrtastic_ClusterEntry pushed;
+	struct meshtastic_cluster_entry e;
+	meshtastic_Config local = meshtastic_Config_init_zero;
+	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t payload_len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	/* 1. A fleet base for position, applied. */
+	payload_len = encode_position(111U, payload, sizeof(payload));
+	inject_entry(meshtastic_Config_position_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 40000), false, payload, payload_len, 0x7A01U);
+	k_sleep(K_MSEC(400));
+	zassert_equal(stored_position_broadcast_secs(), 111U,
+		      "the fleet base must reach the store before the pin means anything");
+
+	/* 2. A LOCAL edit — the operator changes this node away from the fleet
+	 * default. This is what a pin is for. */
+	local.which_payload_variant = meshtastic_Config_position_tag;
+	local.payload_variant.position.position_broadcast_secs = 222U;
+	zassert_ok(meshtastic_config_store_set_config(&local), "local position write failed");
+	zassert_equal(stored_position_broadcast_secs(), 222U);
+	quiesce();
+
+	/* 3. Pin it. The document gains nodes/<me>/position; the fleet base is
+	 * untouched underneath. */
+	zassert_ok(meshtastic_cluster_pin(meshtastic_Config_position_tag), "pin failed");
+	zassert_true(doc_get(MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID,
+			     meshtastic_Config_position_tag, &e),
+		     "pin must create this node's entry");
+	zassert_false(e.tombstone, "a pin carries a value");
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, meshtastic_Config_position_tag),
+		     "a pin must never displace the fleet base — that separation IS the "
+		     "anti-shadowing design (§7.7)");
+
+	/* 4. And it was announced, once, on the wire. Push-on-change is the only
+	 * frame this module originates uninvited (D11). */
+	zassert_true(take_push(meshtastic_Config_position_tag, &pushed),
+		     "a pin must be broadcast, not left for the next digest");
+	zassert_equal(pushed.key.layer, zephyrtastic_ClusterLayer_NODE);
+	zassert_equal(pushed.key.node_id, TEST_NODE_ID);
+	zassert_false(pushed.tombstone);
+	zassert_true(pushed.payload.size > 0U, "a pin push must carry the section");
+
+	k_sleep(K_MSEC(300));
+	zassert_equal(stored_position_broadcast_secs(), 222U,
+		      "the pinned value is what this node runs");
+
+	/* 5. The origin marker, one layer down (D10): the store now holds the
+	 * pin's own stamp, so re-pinning identical bytes is refused instead of
+	 * minting a second version of them for the whole fleet to carry. */
+	zassert_equal(meshtastic_cluster_pin(meshtastic_Config_position_tag), -EALREADY,
+		      "a second identical pin must be refused, not stamped again");
+
+	/* 6. UNPIN — a tombstone, because removal has to replicate (D7). */
+	quiesce();
+	zassert_ok(meshtastic_cluster_unpin(meshtastic_Config_position_tag), "unpin failed");
+	zassert_true(doc_get(MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID,
+			     meshtastic_Config_position_tag, &e),
+		     "unpin must leave a tombstone — deleting the key silently would let the "
+		     "next anti-entropy pass pull the pin back from a peer that still holds it");
+	zassert_true(e.tombstone, "the removal must be a tombstone, not a value");
+	zassert_equal(e.payload_len, 0U, "a tombstone carries nothing");
+
+	zassert_true(take_push(meshtastic_Config_position_tag, &pushed),
+		     "the removal must be broadcast like any other write");
+	zassert_true(pushed.tombstone, "and it must go out AS a tombstone");
+	zassert_equal(pushed.payload.size, 0U);
+
+	/* 7. THE ASSERTION THIS TEST EXISTS FOR. The base underneath never
+	 * changed, so its stamp is older than the pin the store is running. The
+	 * node must come off the pin anyway. */
+	k_sleep(K_MSEC(400));
+	zassert_equal(stored_position_broadcast_secs(), 111U,
+		      "unpin must return the CONFIG STORE to the fleet base, not just the "
+		      "document — the base's own stamp is older than the pin, so a reversion "
+		      "dated by it loses the store's LWW merge and the node silently keeps "
+		      "running the value it was told to stop running");
+
+	/* 8. Idempotence and the refusals. */
+	zassert_equal(meshtastic_cluster_unpin(meshtastic_Config_position_tag), -EALREADY,
+		      "a second unpin would be a new version of nothing");
+	zassert_equal(meshtastic_cluster_unpin(meshtastic_Config_device_tag), -ENOENT,
+		      "unpinning what was never pinned is not a write");
+	zassert_equal(meshtastic_cluster_pin(meshtastic_Config_security_tag), -EPERM,
+		      "the secret boundary applies to pins exactly as it does to promotes");
+	zassert_equal(meshtastic_cluster_pin(meshtastic_Config_lora_tag), -EPERM,
+		      "a lora pin could never take effect — the reconciler holds doc-borne "
+		      "lora sections — so accepting one would replicate a guaranteed no-op "
+		      "into a table that never evicts");
+
+	cluster_channel(false);
+}
+
+/*
+ * PUSH-ON-CHANGE IS THE FIRST TIME THIS MODULE TRANSMITS UNINVITED, and local
+ * writes have no natural rate. An operator on the up-arrow, a script in a loop,
+ * a config that flaps between two values — each is a flood-relayed broadcast per
+ * write unless something says no.
+ *
+ * The bound drops pushes rather than queueing them, which is safe HERE and
+ * nowhere else in this module: the entry is already in the document and the
+ * digest already advertises it, so a dropped push costs a digest period of
+ * latency and can never cost correctness. This test asserts both halves — that
+ * the rate is bounded, and that the document is right regardless.
+ */
+ZTEST(mesh_sim, test_cluster_push_on_change_is_rate_bounded)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	struct meshtastic_cluster_entry e;
+	const uint32_t writes = 8U;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	meshtastic_cluster_stats_get(&before_st);
+
+	/* Flap one section. The gap is deliberately LONGER than the inter-frame
+	 * gap so the queue is empty at every write: what this test measures is
+	 * the rate bound, and a shorter gap would let writes coalesce into a
+	 * still-pending push instead, capping the broadcasts for a different
+	 * (also correct, also counted) reason. */
+	for (uint32_t i = 0U; i < writes; i++) {
+		int ret = (i % 2U == 0U)
+				  ? meshtastic_cluster_pin(meshtastic_Config_device_tag)
+				  : meshtastic_cluster_unpin(meshtastic_Config_device_tag);
+
+		zassert_ok(ret, "write %u of the flap failed (%d)", i, ret);
+		k_sleep(K_MSEC(CONFIG_MESHTASTIC_CLUSTER_TX_GAP_MS + 100));
+	}
+	k_sleep(K_MSEC(400));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.push_suppressed > before_st.push_suppressed,
+		     "a burst of local writes must not become a burst of broadcasts");
+	zassert_true(after_st.push_tx - before_st.push_tx < writes,
+		     "%u writes produced %u broadcasts — the rate bound did nothing", writes,
+		     after_st.push_tx - before_st.push_tx);
+	zassert_equal((after_st.push_tx - before_st.push_tx) +
+			      (after_st.push_suppressed - before_st.push_suppressed),
+		      writes,
+		      "every write must be accounted for as either broadcast or suppressed — "
+		      "a push that is silently neither is one nobody can reason about");
+
+	/* And the point: the document is correct whether or not any of that
+	 * aired. The last write was an unpin. */
+	zassert_true(doc_get(MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID,
+			     meshtastic_Config_device_tag, &e),
+		     "the document must hold the write even when its push was dropped");
+	zassert_true(e.tombstone, "the last write was an unpin; the document must say so");
+
+	cluster_channel(false);
+}
+
 /*
  * Vector-request abuse. Serving a stamp vector is the most expensive thing a
  * peer can make us do — one ~30 byte request, up to a full walk of the document
@@ -2567,10 +2798,23 @@ ZTEST(mesh_sim, test_cluster_vector_walk_cannot_be_restarted_mid_flight)
 		     "busy), not allowed to rewind it — otherwise one small frame buys an "
 		     "unbounded reply and the walk never reaches the end of the document");
 	/* And the walk that was in flight must have finished rather than being
-	 * restarted: the whole document, once, not chunk 0 five times. */
-	zassert_true(after_st.vector_tx - before_st.vector_tx <= 3U,
-		     "%u chunks for a 2-chunk document means the walk was being rewound",
-		     after_st.vector_tx - before_st.vector_tx);
+	 * restarted: the whole document, once, not chunk 0 five times.
+	 *
+	 * Derived from the document's ACTUAL size rather than hardcoded. ztest
+	 * orders by name, so how many entries earlier tests have left in the
+	 * table is not this test's business — and a hardcoded chunk count turns
+	 * "someone added a test that accepts one more entry" into a failure here
+	 * with no relationship to what this test is about. */
+	{
+		const uint32_t rows_per_chunk =
+			(uint32_t)ARRAY_SIZE(((zephyrtastic_ClusterVector *)NULL)->entries);
+		uint32_t chunks = (meshtastic_cluster_entry_count() + rows_per_chunk - 1U) /
+				  rows_per_chunk;
+
+		zassert_true(after_st.vector_tx - before_st.vector_tx <= chunks + 1U,
+			     "%u chunks for a %u-chunk document means the walk was being rewound",
+			     after_st.vector_tx - before_st.vector_tx, chunks);
+	}
 
 	cluster_channel(false);
 }

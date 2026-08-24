@@ -75,6 +75,24 @@ config MESHTASTIC_CLUSTER_SERVE_MIN_INTERVAL_MS
 	  digest period, which is minutes. 0 disables the limit; only useful
 	  in tests.
 
+config MESHTASTIC_CLUSTER_PUSH_MIN_INTERVAL_MS
+	int "Minimum interval between change broadcasts we originate (ms)"
+	default 30000
+	range 0 3600000
+	help
+	  A local write (promote, pin, unpin) is broadcast once so the fleet
+	  does not wait out a digest period. That is the only frame this
+	  module originates uninvited, and local writes have no natural rate:
+	  a held-down up-arrow or a config that flaps would otherwise be one
+	  flood-relayed broadcast per write.
+
+	  This is the refill period of a small token bucket, so a burst of
+	  legitimate writes (setting a node up) all air immediately while the
+	  sustained rate stays capped. Over budget a push is DROPPED, not
+	  queued — the entry is already in the document and the digest still
+	  advertises it, so the cost is one digest period of latency and never
+	  correctness. 0 disables the limit; only useful in tests.
+
 config MESHTASTIC_CLUSTER_SYNC_TIMEOUT_SEC
 	int "Give up on an unanswered pull after (seconds)"
 	default 60

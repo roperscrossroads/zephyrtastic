@@ -219,3 +219,35 @@ meshtastic_cluster_doc_effective(const struct meshtastic_cluster_doc *doc, uint3
 	e = meshtastic_cluster_doc_find(doc, &k);
 	return (e != NULL && !e->tombstone) ? e : NULL;
 }
+
+bool meshtastic_cluster_doc_effective_version(const struct meshtastic_cluster_doc *doc,
+					      uint32_t node_id, uint16_t section,
+					      struct meshtastic_hlc_stamp *out)
+{
+	struct meshtastic_cluster_key k = {
+		.layer = MESHTASTIC_CLUSTER_LAYER_NODE,
+		.node_id = node_id,
+		.section = section,
+	};
+	const struct meshtastic_cluster_entry *node = meshtastic_cluster_doc_find(doc, &k);
+	const struct meshtastic_cluster_entry *base;
+	bool have = false;
+
+	k.layer = MESHTASTIC_CLUSTER_LAYER_BASE;
+	k.node_id = 0U;
+	base = meshtastic_cluster_doc_find(doc, &k);
+
+	memset(out, 0, sizeof(*out));
+	/* A tombstone counts here even though it supplies no value — it is the
+	 * write that says "stop using my pin", and its stamp is the only thing
+	 * newer than the pin the store is still running. */
+	if (node != NULL) {
+		*out = node->stamp;
+		have = true;
+	}
+	if (base != NULL && meshtastic_hlc_newer(&base->stamp, out)) {
+		*out = base->stamp;
+		have = true;
+	}
+	return have;
+}

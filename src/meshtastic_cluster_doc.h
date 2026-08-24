@@ -133,4 +133,36 @@ const struct meshtastic_cluster_entry *
 meshtastic_cluster_doc_effective(const struct meshtastic_cluster_doc *doc, uint32_t node_id,
 				 uint16_t section);
 
+/*
+ * THE VERSION OF THAT ANSWER — the newest stamp across BOTH layers for the
+ * section, whichever layer actually supplied the value. False when the document
+ * holds no entry for the section at either layer.
+ *
+ * Why it spans both layers rather than just reporting the winning entry's own
+ * stamp: the version is what the reconciler writes into the config store, and
+ * therefore what says "the store is running the document's current answer".
+ * `unpin` is what forces the distinction. A tombstone REMOVES the pin's stamp
+ * from the document, so after an unpin the answer is the base entry — whose
+ * stamp is OLDER than the pin the store is still holding. Feed the base's own
+ * stamp to the store's last-writer-wins merge and it loses, the write is
+ * declined, and the node quietly keeps running the value it was just told to
+ * stop running. The tombstone is a write, minted after the pin, and counting it
+ * in the version is what makes "unpin reverts to the current base" true rather
+ * than aspirational (D6/D7).
+ *
+ * The rule generalises the same way for the pin direction: a per-node entry
+ * pulled back by a wiped node (§2.3) can be older than a base promoted while it
+ * was away, and taking the newest stamp of the pair is what lets that pin still
+ * reach the store.
+ *
+ * The one consequence, named because it is visible in the counters: while a
+ * section is pinned, a NEW base for it bumps the version without changing the
+ * answer, so the reconciler rewrites identical bytes once per base update. That
+ * is a redundant flash write on a rare, operator-driven event — the alternative
+ * is `unpin` silently doing nothing, which is not a trade.
+ */
+bool meshtastic_cluster_doc_effective_version(const struct meshtastic_cluster_doc *doc,
+					      uint32_t node_id, uint16_t section,
+					      struct meshtastic_hlc_stamp *out);
+
 #endif /* MESHTASTIC_CLUSTER_DOC_H_ */

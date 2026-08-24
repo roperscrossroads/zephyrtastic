@@ -10,9 +10,12 @@
  * scopes the traffic, so ingest is double-gated on both.
  *
  * M4a: digests out at a cadence, digests in compared against the local doc.
- * M4b (here): what a mismatch now DOES — the anti-entropy walk of §3.3
- * (ClusterVectorReq → stamp rows → ClusterEntryReq → entries → LWW merge) and
- * the reconciler that turns a changed document into applied configuration.
+ * M4b: what a mismatch DOES — the anti-entropy walk of §3.3 (ClusterVectorReq
+ * → stamp rows → ClusterEntryReq → entries → LWW merge) and the reconciler
+ * that turns a changed document into applied configuration.
+ * M4c (here): the per-node layer — `pin` writes nodes/<me>/<sec>, `unpin`
+ * tombstones it, and a local write is broadcast once instead of waiting for
+ * the next digest.
  *
  * Two properties are worth naming because they are why this needs no delivery
  * tracking, no acknowledgements and no retry queues:
@@ -22,10 +25,19 @@
  *    leave the two documents still differing, so the next digest states the
  *    difference again and the walk simply reruns. The only cost of failure is
  *    latency, bounded by the digest period.
- *  - Nobody ever pushes uninvited. A node that finds it is AHEAD of a peer
- *    does nothing at all; its own digest is the invitation for the peer to
- *    pull. That is what keeps a mute node (radio TX off) a full participant:
- *    it pulls over its BLE peer link, which carries unicasts (M2's divert).
+ *  - Nobody pushes uninvited ABOUT SOMEONE ELSE'S WRITE. A node that finds it
+ *    is AHEAD of a peer does nothing at all; its own digest is the invitation
+ *    for the peer to pull, and an entry that merely arrived here is never
+ *    re-broadcast. That is what keeps a mute node (radio TX off) a full
+ *    participant: it pulls over its BLE peer link, which carries unicasts
+ *    (M2's divert), and it never has to originate anything to converge.
+ *
+ *    Push-on-change (M4c, D11) is the single, deliberate exception, and it is
+ *    narrow on purpose: only a write MADE HERE — a promote, a pin, an unpin —
+ *    is announced, exactly once. It is a latency optimisation layered on top
+ *    of the digest, never a delivery mechanism: dropping one costs a digest
+ *    period and can never cost correctness. That is what lets its rate bound
+ *    (below) simply throw pushes away instead of queueing them.
  *
  * The document logic lives in meshtastic_cluster_doc.c where it is
  * unit-testable without any of this.
@@ -45,6 +57,14 @@
  *   frames we serve on request       one walk at a time (never rewound) AND a
  *                                    minimum interval between walks, so one
  *                                    small request cannot buy unbounded airtime
+ *   broadcasts we originate on       a token bucket, applied when the push is
+ *   change (M4c push-on-change)      QUEUED rather than when it is sent: over
+ *                                    budget the push is DROPPED, not deferred,
+ *                                    because deferring only moves an unbounded
+ *                                    backlog. Held-down up-arrow, a config that
+ *                                    flaps, a script in a loop — all cost one
+ *                                    broadcast per refill period, and the
+ *                                    digest still carries every change
  *   rows we ask for                  the ClusterEntryReq key cap, and never for
  *                                    a key a full table would refuse
  *   entries the table accepts        the table cap, plus the owner-existence
@@ -110,6 +130,21 @@ BUILD_ASSERT(meshtastic_Config_DeviceConfig_size + 8U <= MESHTASTIC_CLUSTER_PAYL
 #define CLUSTER_VECTOR_ROWS ARRAY_SIZE(((zephyrtastic_ClusterVector *)NULL)->entries)
 #define CLUSTER_PULL_KEYS   ARRAY_SIZE(((zephyrtastic_ClusterEntryReq *)NULL)->keys)
 
+/*
+ * Push-on-change budget. The burst matters more than it looks: an operator
+ * setting a node up types several commands in a row and every one of them is
+ * legitimate, so a flat minimum interval would punish exactly the case the
+ * feature exists for. The refill period is the ceiling on sustained rate.
+ *
+ * The queue only has to hold a burst — a push refused for budget is dropped at
+ * enqueue, never parked — so anything beyond the burst size would be dead
+ * storage.
+ */
+#define CLUSTER_PUSH_BURST 3U
+#define CLUSTER_PUSH_QUEUE 4U
+BUILD_ASSERT(CLUSTER_PUSH_QUEUE >= CLUSTER_PUSH_BURST,
+	     "the push queue must be able to hold a full burst");
+
 static K_MUTEX_DEFINE(cluster_lock);
 
 /* PSRAM on the V4 family (no-op elsewhere): CPU-only, mutex-guarded, never a
@@ -153,9 +188,19 @@ static struct {
 	uint8_t ent_count;
 	uint8_t ent_next;
 
+	/* Push-on-change: a short FIFO of OUR OWN just-written keys, each to be
+	 * broadcast once. The entry itself is read from the document at send
+	 * time, so a key written twice before it airs simply broadcasts the
+	 * newer version. */
+	struct meshtastic_cluster_key push_keys[CLUSTER_PUSH_QUEUE];
+	uint8_t push_head;
+	uint8_t push_count;
+
 	/* Bounds. */
 	uint8_t serve_tokens;	    /* reply-walk budget (token bucket) */
 	int64_t serve_refill_ms;    /* when the bucket last earned a token */
+	uint8_t push_tokens;	    /* push budget (token bucket) */
+	int64_t push_refill_ms;
 	int64_t pull_hold_until_ms; /* fruitless-walk backoff */
 	uint32_t pull_last_applied; /* entry_rx_applied when we last asked */
 	bool pull_asked_entries;    /* the last walk actually requested entries */
@@ -571,25 +616,37 @@ static void reconcile_section(uint16_t section)
 	static uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
 	static meshtastic_Config cfg;
 	const struct meshtastic_cluster_entry *e;
-	struct meshtastic_hlc_stamp doc_stamp;
+	struct meshtastic_hlc_stamp version;
 	uint16_t payload_len;
 	pb_istream_t is;
 	int ret;
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
 	e = meshtastic_cluster_doc_effective(&cluster.doc, meshtastic_get_node_id(), section);
-	if (e == NULL) {
+	if (e == NULL ||
+	    !meshtastic_cluster_doc_effective_version(&cluster.doc, meshtastic_get_node_id(),
+						      section, &version)) {
 		/* The document holds no opinion about this section — not the
-		 * same as holding an empty one. Local config stands untouched. */
+		 * same as holding an empty one. Local config stands untouched.
+		 * A tombstoned pin with no fleet base underneath lands here
+		 * too: there is nothing to revert TO, so unpinning stops the
+		 * advertisement and leaves the node running what it has. */
 		k_mutex_unlock(&cluster_lock);
 		return;
 	}
-	doc_stamp = e->stamp;
 	payload_len = e->payload_len;
 	memcpy(payload, e->payload, payload_len);
 	k_mutex_unlock(&cluster_lock);
 
-	if (section_is_doc_derived(section, &doc_stamp)) {
+	/*
+	 * The version is the newest stamp across BOTH layers, not the winning
+	 * entry's own — see meshtastic_cluster_doc_effective_version(). It is
+	 * what carries an `unpin` through: the tombstone erases the pin's stamp
+	 * from the document, so scoring the reversion by the base entry's own
+	 * (older) stamp would lose the store's LWW merge and leave this node
+	 * running the value it was just told to stop running.
+	 */
+	if (section_is_doc_derived(section, &version)) {
 		return; /* already applied; re-writing would only churn */
 	}
 
@@ -635,7 +692,7 @@ static void reconcile_section(uint16_t section)
 		return;
 	}
 
-	ret = meshtastic_config_store_merge_config(&cfg, &doc_stamp);
+	ret = meshtastic_config_store_merge_config(&cfg, &version);
 	k_mutex_lock(&cluster_lock, K_FOREVER);
 	if (ret == 1) {
 		cluster.stats.sections_applied++;
@@ -647,8 +704,8 @@ static void reconcile_section(uint16_t section)
 	if (ret == 1) {
 		LOG_INF("cluster: applied section %u from the document (stamp %lld.%u by "
 			"0x%08x)",
-			(unsigned int)section, (long long)doc_stamp.physical_ms,
-			doc_stamp.counter, doc_stamp.node_id);
+			(unsigned int)section, (long long)version.physical_ms, version.counter,
+			version.node_id);
 	} else if (ret == 0) {
 		/* Not a failure and not a retry loop: LWW said our own version
 		 * is newer, so ours stands and our digest invites the fleet to
@@ -740,6 +797,94 @@ static void pull_reset_locked(void)
 	cluster.pull_peer = 0U;
 	cluster.pull_key_count = 0U;
 	cluster.pull_deadline_ms = 0;
+}
+
+/* ---- push-on-change (D11) -------------------------------------------------- */
+
+/*
+ * THE BOUND ON THE ONLY FRAMES WE ORIGINATE UNINVITED.
+ *
+ * Everything else this module transmits is a timer (the digest) or an answer to
+ * a request, and both are bounded by something the other end cannot influence.
+ * A push is different: it is caused by a LOCAL EVENT, and local events have no
+ * natural rate. An operator on the up-arrow, a script in a loop, a config that
+ * flaps between two values — each would otherwise be a broadcast per write, on
+ * a shared channel, flood-relayed by every member.
+ *
+ * The budget is spent at ENQUEUE, and over budget the push is DROPPED rather
+ * than deferred. Deferring would only rename the backlog: the writes keep
+ * coming, the queue grows, and the frames still air eventually. Dropping is
+ * safe here in a way it is nowhere else in this module, because the push is
+ * pure latency optimisation — the entry is already in the document, the digest
+ * already advertises it, and a peer that misses the broadcast pulls it on the
+ * next period. Correctness never depends on a push arriving, which is exactly
+ * why one may be thrown away.
+ *
+ * A bucket rather than a flat interval, for the same reason as the serve limit:
+ * setting a node up means several legitimate writes in a row.
+ *
+ * Called with the lock held.
+ */
+static bool may_push_locked(void)
+{
+	int64_t now = k_uptime_get();
+	int64_t elapsed;
+
+	if (CONFIG_MESHTASTIC_CLUSTER_PUSH_MIN_INTERVAL_MS == 0) {
+		return true; /* limit disabled (tests) */
+	}
+
+	elapsed = now - cluster.push_refill_ms;
+	if (elapsed >= CONFIG_MESHTASTIC_CLUSTER_PUSH_MIN_INTERVAL_MS) {
+		uint32_t gained =
+			(uint32_t)(elapsed / CONFIG_MESHTASTIC_CLUSTER_PUSH_MIN_INTERVAL_MS);
+
+		cluster.push_tokens =
+			(uint8_t)MIN(cluster.push_tokens + gained, CLUSTER_PUSH_BURST);
+		cluster.push_refill_ms +=
+			(int64_t)gained * CONFIG_MESHTASTIC_CLUSTER_PUSH_MIN_INTERVAL_MS;
+	}
+	return cluster.push_tokens > 0U;
+}
+
+/*
+ * Queue ONE key of ours for a single broadcast. Called with the lock held,
+ * immediately after the local write that changed it.
+ *
+ * Only keys written HERE ever reach this. An entry that merely arrived is never
+ * re-broadcast: that would turn one write into a flood of re-pushes proportional
+ * to fleet size, and the anti-entropy walk already covers everyone the original
+ * broadcast missed.
+ */
+static void push_enqueue_locked(const struct meshtastic_cluster_key *key)
+{
+	uint8_t idx;
+
+	/* Already queued? The frame is built from the document at SEND time, so
+	 * the push still pending will carry this newer version anyway — a second
+	 * slot would only broadcast the same key twice. Counted as suppressed
+	 * because that is what the counter means to a reader: this write did not
+	 * get a broadcast of its own. push_tx + push_suppressed is then exactly
+	 * the number of local writes, with nothing unaccounted for. */
+	for (uint8_t i = 0U; i < cluster.push_count; i++) {
+		idx = (uint8_t)((cluster.push_head + i) % CLUSTER_PUSH_QUEUE);
+		if (meshtastic_cluster_key_cmp(&cluster.push_keys[idx], key) == 0) {
+			cluster.stats.push_suppressed++;
+			return;
+		}
+	}
+
+	if (cluster.push_count >= CLUSTER_PUSH_QUEUE || !may_push_locked()) {
+		cluster.stats.push_suppressed++;
+		return;
+	}
+
+	if (cluster.push_tokens > 0U) {
+		cluster.push_tokens--;
+	}
+	idx = (uint8_t)((cluster.push_head + cluster.push_count) % CLUSTER_PUSH_QUEUE);
+	cluster.push_keys[idx] = *key;
+	cluster.push_count++;
 }
 
 /*
@@ -850,6 +995,43 @@ static uint32_t tx_next_locked(zephyrtastic_ClusterMessage *msg)
 		return cluster.pull_peer;
 	}
 
+	/*
+	 * 5. A change of ours, broadcast once (D11). LAST deliberately: it is
+	 * the only frame in this module that nobody is waiting for. Everything
+	 * above either unblocks a peer or advances our own convergence, and a
+	 * push that waits a frame gap behind them costs nothing — the digest is
+	 * already the guarantee.
+	 */
+	while (cluster.push_count > 0U) {
+		const struct meshtastic_cluster_key *key = &cluster.push_keys[cluster.push_head];
+		const struct meshtastic_cluster_entry *e =
+			meshtastic_cluster_doc_find(&cluster.doc, key);
+
+		cluster.push_head = (uint8_t)((cluster.push_head + 1U) % CLUSTER_PUSH_QUEUE);
+		cluster.push_count--;
+		if (e == NULL) {
+			continue; /* superseded out of existence; nothing to say */
+		}
+
+		msg->which_variant = zephyrtastic_ClusterMessage_entry_tag;
+		key_to_pb(&e->key, &msg->variant.entry.key);
+		msg->variant.entry.has_key = true;
+		stamp_to_pb(&e->stamp, &msg->variant.entry.stamp);
+		msg->variant.entry.has_stamp = true;
+		msg->variant.entry.tombstone = e->tombstone;
+		msg->variant.entry.payload.size = e->payload_len;
+		memcpy(msg->variant.entry.payload.bytes, e->payload, e->payload_len);
+		cluster.stats.push_tx++;
+		/* A BROADCAST, so it rides the cluster channel and is flood-
+		 * relayed — one frame reaches the fleet instead of N unicasts.
+		 * On a node whose radio TX is off it airs nowhere and no peer
+		 * bearer carries it either (broadcasts are not diverted), which
+		 * is not a special case to fix: that node's next digest
+		 * advertises the entry and the fleet pulls it, one period later
+		 * (§3.2). */
+		return MESHTASTIC_NODE_BROADCAST;
+	}
+
 	return 0U;
 }
 
@@ -893,9 +1075,15 @@ static void tx_work_fn(struct k_work *work)
 		reschedule = true;
 		again = K_MSEC(CONFIG_MESHTASTIC_CLUSTER_TX_GAP_MS);
 	} else if (cluster.pull_state == PULL_AWAIT_VECTOR) {
-		/* Nothing to send, but a deadline to enforce. */
+		/* Nothing to send, but a deadline to enforce. Capped at a second
+		 * rather than sleeping to the deadline: a local write can queue
+		 * a push at any moment, and the pushers deliberately do not
+		 * reschedule a worker that is already pending (that would let an
+		 * optional frame collapse the spacing of a reply burst). Waking
+		 * to re-check costs one workqueue slot a second for at most the
+		 * sync timeout. */
 		reschedule = true;
-		again = K_MSEC(MAX(cluster.pull_deadline_ms - now, 100));
+		again = K_MSEC(CLAMP(cluster.pull_deadline_ms - now, 100, 1000));
 	}
 	k_mutex_unlock(&cluster_lock);
 
@@ -1457,7 +1645,8 @@ static void cluster_on_packet(const struct meshtastic_packet *packet,
 		on_entry(packet->from, &msg.variant.entry);
 		break;
 	default:
-		/* M4c verbs land here; count them so a mixed-version bench is
+		/* All five v1 verbs are handled above, so this is a peer running
+		 * a protocol we do not have. Counted so a mixed-version bench is
 		 * visible rather than silent. */
 		k_mutex_lock(&cluster_lock, K_FOREVER);
 		cluster.stats.rx_not_implemented++;
@@ -1468,13 +1657,145 @@ static void cluster_on_packet(const struct meshtastic_packet *packet,
 
 MESHTASTIC_MODULE_DEFINE(cluster, MESHTASTIC_PORT_PRIVATE, 0, cluster_on_packet, NULL);
 
-/* ---- promote (the only v1 writer) ---------------------------------------- */
+/* ---- the local writers: promote, pin, unpin ------------------------------- */
+
+/*
+ * A managed node's configuration is its master's to set (SecurityConfig
+ * .is_managed — the same gate the local admin path and the shell's config
+ * commands already honour). Writing the cluster document is a configuration
+ * write like any other: `pin` would let a managed worker override what its
+ * master just sent it, and `promote` would let it rewrite the fleet's defaults
+ * from a node that is not supposed to have opinions. Remote admin (M3) still
+ * works, which is the point of being managed.
+ */
+static bool local_writes_allowed(void)
+{
+#if defined(CONFIG_MESHTASTIC_ADMIN)
+	return !meshtastic_admin_is_managed();
+#else
+	return true;
+#endif
+}
+
+/* Wake the TX worker for a queued push — but never pull a PENDING one forward.
+ * A push is the one optional frame here (see tx_next_locked step 5), and
+ * collapsing the gap of a reply burst mid-flight to get it out sooner would be
+ * the wrong trade. An idle worker starts now; a busy one picks the push up
+ * within a frame gap, or within a second while a pull is outstanding. */
+static void push_kick(void)
+{
+	if (!k_work_delayable_is_pending(&tx_work)) {
+		(void)k_work_reschedule(&tx_work, K_NO_WAIT);
+	}
+}
+
+/*
+ * The write itself, shared by all three writers: mint, accept, persist, queue
+ * the push, reconcile. Called with the lock NOT held.
+ *
+ * @p store_stamp is folded into the cluster clock before minting. The document
+ * and the config store each run their own HLC instance, so without this a fresh
+ * entry can compare OLDER than the very store value it was made from and the
+ * reconciler then declines to apply it — a real defect found in M4b review. It
+ * matters for a tombstone too, where there is no value to carry: the tombstone
+ * has to out-rank the store's current version or `unpin` cannot revert it.
+ */
+static int doc_write_local(const struct meshtastic_cluster_key *key,
+			   const struct meshtastic_hlc_stamp *store_stamp, bool tombstone,
+			   const uint8_t *payload, size_t payload_len,
+			   struct meshtastic_hlc_stamp *minted)
+{
+	int ret;
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	meshtastic_hlc_observe(&cluster.hlc, store_stamp);
+	meshtastic_hlc_local(&cluster.hlc, meshtastic_get_node_id(), minted);
+	ret = meshtastic_cluster_doc_accept(&cluster.doc, key, minted, tombstone, payload,
+					    payload_len);
+	if (ret == 1) {
+		persist_entry(meshtastic_cluster_doc_find(&cluster.doc, key));
+		push_enqueue_locked(key);
+		ret = 0;
+	} else if (ret == 0) {
+		/* Freshly minted stamps are strictly newer than anything seen;
+		 * a stale verdict here means a logic error, not a race. */
+		ret = -EINVAL;
+	}
+	k_mutex_unlock(&cluster_lock);
+
+	if (ret == 0) {
+		/* Reconcile so this node's own store records the new stamp —
+		 * which is what makes the section doc-derived here too, and the
+		 * -EALREADY refusals meaningful. */
+		(void)k_work_submit(&reconcile_work);
+		push_kick();
+	}
+	return ret;
+}
+
+/* Read MY current value of @p section and encode it as the document carries it
+ * (an upstream meshtastic_Config with one payload variant set — D8). */
+static int section_snapshot(uint16_t section, uint8_t *out, size_t out_len, size_t *written,
+			    struct meshtastic_hlc_stamp *store_stamp)
+{
+	meshtastic_Config cfg;
+	pb_ostream_t os = pb_ostream_from_buffer(out, out_len);
+	int ret = meshtastic_config_store_get_config((pb_size_t)section, &cfg);
+
+	if (ret < 0 || cfg.which_payload_variant != section) {
+		return -ENOENT;
+	}
+	if (meshtastic_config_store_get_config_stamp((pb_size_t)section, store_stamp) != 0) {
+		return -ENOENT;
+	}
+	if (!pb_encode(&os, meshtastic_Config_fields, &cfg)) {
+		LOG_ERR("cluster: section %u encode failed: %s", (unsigned int)section,
+			PB_GET_ERROR(&os));
+		return -EINVAL;
+	}
+	*written = os.bytes_written;
+	return 0;
+}
+
+/*
+ * THE ORIGIN MARKER, ENFORCED (D10) — the shared half of promote and pin.
+ *
+ * True when the value this node currently stores for @p section came FROM the
+ * entry at @p key: the reconciler wrote it carrying that entry's stamp, so the
+ * two stamps being equal is the fact itself (§2.2). Lifting it back into the
+ * document would mint a second stamp for bytes the fleet already has, and every
+ * member would then churn through an apply that changes nothing. A local edit
+ * moves the store's stamp and lifts the refusal, which is exactly the intended
+ * workflow.
+ *
+ * Note which key each writer asks about, because it is the whole difference
+ * between them: promote asks about `base/<sec>`, pin about `nodes/<me>/<sec>`.
+ * Pinning a value inherited from the base is therefore NOT a re-pin — it is the
+ * meaningful act of freezing today's fleet default as this node's own.
+ *
+ * A TOMBSTONE never counts as the origin, even when the stamps match. After an
+ * unpin the store legitimately carries the tombstone's stamp (that is the
+ * version the reversion was applied under — see the reconciler), and reading
+ * that as "already pinned" would refuse the operator's next pin on a section
+ * they have just unpinned. There is no value to have come from a tombstone.
+ */
+static bool store_came_from(const struct meshtastic_cluster_key *key,
+			    const struct meshtastic_hlc_stamp *store_stamp)
+{
+	const struct meshtastic_cluster_entry *existing;
+	bool same;
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	existing = meshtastic_cluster_doc_find(&cluster.doc, key);
+	same = (existing != NULL) && !existing->tombstone &&
+	       (meshtastic_hlc_compare(store_stamp, &existing->stamp) == 0);
+	k_mutex_unlock(&cluster_lock);
+	return same;
+}
 
 int meshtastic_cluster_promote(uint16_t section)
 {
-	meshtastic_Config cfg;
 	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
-	pb_ostream_t os = pb_ostream_from_buffer(payload, sizeof(payload));
 	struct meshtastic_cluster_key key = {
 		.layer = MESHTASTIC_CLUSTER_LAYER_BASE,
 		.node_id = 0U,
@@ -1482,10 +1803,10 @@ int meshtastic_cluster_promote(uint16_t section)
 	};
 	struct meshtastic_hlc_stamp stamp;
 	struct meshtastic_hlc_stamp store_stamp;
-	const struct meshtastic_cluster_entry *existing;
+	size_t payload_len;
 	int ret;
 
-	if (!section_shareable(section)) {
+	if (!section_shareable(section) || !local_writes_allowed()) {
 		return -EPERM;
 	}
 	if (section == meshtastic_Config_lora_tag) {
@@ -1497,59 +1818,124 @@ int meshtastic_cluster_promote(uint16_t section)
 		return -EPERM;
 	}
 
-	ret = meshtastic_config_store_get_config((pb_size_t)section, &cfg);
-	if (ret < 0 || cfg.which_payload_variant != section) {
-		return -ENOENT;
+	ret = section_snapshot(section, payload, sizeof(payload), &payload_len, &store_stamp);
+	if (ret != 0) {
+		return ret;
 	}
-	if (meshtastic_config_store_get_config_stamp((pb_size_t)section, &store_stamp) != 0) {
-		return -ENOENT;
-	}
-	if (!pb_encode(&os, meshtastic_Config_fields, &cfg)) {
-		LOG_ERR("cluster: promote encode failed: %s", PB_GET_ERROR(&os));
-		return -EINVAL;
-	}
-
-	k_mutex_lock(&cluster_lock, K_FOREVER);
-
-	/* The origin marker, enforced (D10). This section's stored value IS the
-	 * fleet base already — promoting it would mint a second stamp for bytes
-	 * the fleet has, and every node would then churn through an apply that
-	 * changes nothing. A local edit moves the store's stamp and lifts the
-	 * refusal, which is exactly the intended workflow. */
-	existing = meshtastic_cluster_doc_find(&cluster.doc, &key);
-	if (existing != NULL && meshtastic_hlc_compare(&store_stamp, &existing->stamp) == 0) {
-		k_mutex_unlock(&cluster_lock);
+	if (store_came_from(&key, &store_stamp)) {
 		LOG_INF("cluster: section %u is already the fleet base", (unsigned int)section);
 		return -EALREADY;
 	}
 
-	/* Fold the store's version for this section into the cluster clock
-	 * before minting. The two clocks are separate instances, so without
-	 * this a freshly promoted entry could compare OLDER than the very value
-	 * it was made from and the reconciler would decline to apply it. */
-	meshtastic_hlc_observe(&cluster.hlc, &store_stamp);
-	meshtastic_hlc_local(&cluster.hlc, meshtastic_get_node_id(), &stamp);
-	ret = meshtastic_cluster_doc_accept(&cluster.doc, &key, &stamp, false, payload,
-					    os.bytes_written);
-	if (ret == 1) {
-		persist_entry(meshtastic_cluster_doc_find(&cluster.doc, &key));
-		ret = 0;
-	} else if (ret == 0) {
-		/* Freshly minted stamps are strictly newer than anything seen;
-		 * a stale verdict here means a logic error, not a race. */
-		ret = -EINVAL;
-	}
-	k_mutex_unlock(&cluster_lock);
-
+	ret = doc_write_local(&key, &store_stamp, false, payload, payload_len, &stamp);
 	if (ret == 0) {
 		LOG_INF("cluster: promoted section %u to base (stamp %lld.%u by 0x%08x)",
 			(unsigned int)section, (long long)stamp.physical_ms, stamp.counter,
 			stamp.node_id);
-		/* Reconcile so this node's own store records the base stamp —
-		 * which is what makes the section doc-derived here too, and the
-		 * refusal above meaningful. Push-on-change is M4c; until then
-		 * the next digest advertises it. */
-		(void)k_work_submit(&reconcile_work);
+	}
+	return ret;
+}
+
+int meshtastic_cluster_pin(uint16_t section)
+{
+	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	struct meshtastic_cluster_key key = {
+		.layer = MESHTASTIC_CLUSTER_LAYER_NODE,
+		.node_id = meshtastic_get_node_id(),
+		.section = section,
+	};
+	struct meshtastic_hlc_stamp stamp;
+	struct meshtastic_hlc_stamp store_stamp;
+	size_t payload_len;
+	int ret;
+
+	if (!section_shareable(section) || !local_writes_allowed()) {
+		return -EPERM;
+	}
+	if (section == meshtastic_Config_lora_tag) {
+		/* Not the fleet-wide hazard promote refuses — a pin binds only
+		 * this node — but the reconciler HOLDS every doc-borne lora
+		 * section rather than applying it (see reconcile_section), so a
+		 * lora pin could never take effect. Accepting a write that is
+		 * guaranteed to do nothing, and replicating it fleet-wide into a
+		 * table that never evicts, would be worse than saying no. The
+		 * same straggler sweep opens both gates. */
+		LOG_WRN("cluster: refusing to pin lora — doc-borne lora sections are "
+			"replicated but never applied, so the pin could not take effect");
+		return -EPERM;
+	}
+	if (key.node_id == 0U) {
+		return -EINVAL; /* no node id yet: nothing to own the entry */
+	}
+
+	ret = section_snapshot(section, payload, sizeof(payload), &payload_len, &store_stamp);
+	if (ret != 0) {
+		return ret;
+	}
+	if (store_came_from(&key, &store_stamp)) {
+		LOG_INF("cluster: section %u is already this node's pin", (unsigned int)section);
+		return -EALREADY;
+	}
+
+	ret = doc_write_local(&key, &store_stamp, false, payload, payload_len, &stamp);
+	if (ret == 0) {
+		LOG_INF("cluster: pinned section %u for this node (stamp %lld.%u by 0x%08x)",
+			(unsigned int)section, (long long)stamp.physical_ms, stamp.counter,
+			stamp.node_id);
+	}
+	return ret;
+}
+
+int meshtastic_cluster_unpin(uint16_t section)
+{
+	struct meshtastic_cluster_key key = {
+		.layer = MESHTASTIC_CLUSTER_LAYER_NODE,
+		.node_id = meshtastic_get_node_id(),
+		.section = section,
+	};
+	const struct meshtastic_cluster_entry *existing;
+	struct meshtastic_hlc_stamp stamp;
+	struct meshtastic_hlc_stamp store_stamp;
+	bool present;
+	bool already;
+	int ret;
+
+	if (!local_writes_allowed()) {
+		return -EPERM;
+	}
+	if (key.node_id == 0U) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	existing = meshtastic_cluster_doc_find(&cluster.doc, &key);
+	present = (existing != NULL);
+	already = present && existing->tombstone;
+	k_mutex_unlock(&cluster_lock);
+
+	if (!present) {
+		return -ENOENT;
+	}
+	if (already) {
+		/* The tombstone IS the removal and it is already replicating.
+		 * Minting a second one would be a new version of "nothing",
+		 * which the fleet would dutifully carry for no reason. */
+		return -EALREADY;
+	}
+
+	/* Fold in the store's stamp for the section as usual — the tombstone has
+	 * no value of its own, but it must out-rank the store's current version
+	 * or the reconciler cannot revert this node off the pin it is running. */
+	if (meshtastic_config_store_get_config_stamp((pb_size_t)section, &store_stamp) != 0) {
+		memset(&store_stamp, 0, sizeof(store_stamp));
+	}
+
+	ret = doc_write_local(&key, &store_stamp, true, NULL, 0U, &stamp);
+	if (ret == 0) {
+		LOG_INF("cluster: unpinned section %u — reverting to the fleet base as it "
+			"stands now (stamp %lld.%u by 0x%08x)",
+			(unsigned int)section, (long long)stamp.physical_ms, stamp.counter,
+			stamp.node_id);
 	}
 	return ret;
 }
@@ -1657,9 +2043,13 @@ int meshtastic_cluster_init(void)
 #endif
 
 	/* Start with a full reply budget: the fleet this node is joining may
-	 * already be waiting to pull from it. */
+	 * already be waiting to pull from it. Likewise a full push budget — the
+	 * first thing an operator does with a fresh node is configure it, and
+	 * every one of those writes deserves to reach the fleet at once. */
 	cluster.serve_tokens = CLUSTER_SERVE_BURST;
 	cluster.serve_refill_ms = k_uptime_get();
+	cluster.push_tokens = CLUSTER_PUSH_BURST;
+	cluster.push_refill_ms = cluster.serve_refill_ms;
 
 	(void)k_work_schedule(&digest_work, K_MSEC(digest_period_ms()));
 	if (cluster.doc.count > 0U) {
