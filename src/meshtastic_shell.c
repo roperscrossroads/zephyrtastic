@@ -34,6 +34,9 @@
 #include "meshtastic_ble_peer.h"
 #include "meshtastic_ble_registry.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
+#include "meshtastic_dfu_trigger.h"
+#endif
 #include "meshtastic_build.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
@@ -2243,6 +2246,25 @@ static int cmd_netlog(const struct shell *sh, size_t argc, char **argv)
 }
 #endif
 
+#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
+static int cmd_dfu(const struct shell *sh, size_t argc, char **argv)
+{
+	bool serial_only = (argc >= 2) && (strcmp(argv[1], "serial") == 0);
+
+	if (argc >= 2 && !serial_only) {
+		shell_error(sh, "usage: dfu [serial]  (default: UF2 mode, drive + serial DFU)");
+		return -EINVAL;
+	}
+
+	shell_print(sh, "rebooting into the bootloader (%s mode) — this console goes away now",
+		    serial_only ? "serial-DFU" : "UF2");
+	/* Give the shell a beat to push the line out the CDC pipe. */
+	k_sleep(K_MSEC(100));
+	meshtastic_dfu_enter(serial_only);
+	return 0; /* unreachable */
+}
+#endif
+
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 /* ---- node-to-node BLE peer link (a4it.6) ---- */
 
@@ -2531,6 +2553,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 	SHELL_CMD(blepeer, &meshtastic_blepeer_cmds,
 		  SHELL_HELP("Node-to-node BLE peer link.", NULL), cmd_blepeer_status),
+#endif
+#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
+	SHELL_CMD(dfu, NULL,
+		  SHELL_HELP("Reboot into the bootloader for reflashing.", "[serial]"),
+		  cmd_dfu),
 #endif
 #if defined(CONFIG_MESHTASTIC_RF_PATH_REPORT) && defined(CONFIG_MESHTASTIC_RF_HIST)
 	/* Bare `meshtastic rf` runs the gain-path report; the subcommands cover

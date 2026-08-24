@@ -35,7 +35,13 @@
 LOG_MODULE_REGISTER(meshtastic_sample, LOG_LEVEL_INF);
 
 /* Obtain LoRa device from the "lora0" devicetree alias. */
-static const struct device *lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
+/* _OR_NULL so a radio-less bring-up probe (the radio DRIVER disabled, e.g.
+ * -DCONFIG_LORA_SX126X=n, while the DT node stays) still compiles: with no
+ * driver the device is NULL, device_is_ready(NULL) is false, and main exits
+ * early — USB console, shell and BLE still come up. Exists because a hang in
+ * a radio driver's init happens BEFORE the USB console and looks like a dead
+ * board; this probe build is how it gets diagnosed. */
+static const struct device *lora_dev = DEVICE_DT_GET_OR_NULL(DT_ALIAS(lora0));
 
 /*
  * Reset-cause logging (wedge/reboot investigation, 2026-07-17): hwinfo's reset-

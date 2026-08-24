@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_DFU_TRIGGER
+	bool "Software re-entry into the Adafruit nRF52 bootloader"
+	depends on SOC_SERIES_NRF52
+	depends on REBOOT
+	default n
+	help
+	  Let the running firmware put the board back into its (Adafruit-fork)
+	  bootloader without touching hardware: write the bootloader's DFU magic
+	  into the nRF GPREGRET retained register and reset. Exposes
+	  meshtastic_dfu_enter() and, with the shell, `meshtastic dfu`.
+
+	  Exists because boards like the XIAO+Wio-SX1262 kit have no reset
+	  BUTTON — only an RST pad, so the double-tap needs tweezers. An image
+	  that crashes before USB comes up still needs the pad; this hatch is
+	  for every healthier day.
+
+config MESHTASTIC_DFU_TOUCH
+	bool "1200-baud touch enters the bootloader (Arduino convention)"
+	depends on MESHTASTIC_DFU_TRIGGER
+	depends on UART_LINE_CTRL
+	default y
+	help
+	  Watch the CDC console's line coding; when a host opens it at 1200 baud
+	  (the Arduino/CircuitPython "touch", what `adafruit-nrfutil --touch
+	  1200` sends), reboot into serial-DFU mode. Makes this firmware behave
+	  exactly like stock for the standard flashing tools.
+
+config MESHTASTIC_DFU_TOUCH_POLL_MS
+	int "Touch poll interval (ms)"
+	depends on MESHTASTIC_DFU_TOUCH
+	default 500
+
+config MESHTASTIC_DFU_ON_FATAL
+	bool "A fatal error reboots into the bootloader (bring-up aid)"
+	depends on MESHTASTIC_DFU_TRIGGER
+	default n
+	help
+	  Stamp the DFU magic in the fatal-error handler, so a crash lands in
+	  the bootloader ready for reflashing instead of rebooting into the
+	  (possibly crash-looping) app. Invaluable while bringing up a board
+	  whose only console is USB — a fault before USB init is otherwise
+	  invisible AND unreachable without the reset pad. Turn OFF once the
+	  board is stable: a deployed node should reboot and retry, not sit
+	  in DFU waiting for a cable.
+
+config MESHTASTIC_DFU_BOOT_GUARD
+	bool "A boot HANG reboots into the bootloader via the hardware WDT (bring-up aid)"
+	depends on MESHTASTIC_DFU_TRIGGER
+	depends on !WATCHDOG
+	default n
+	help
+	  Faults are caught by MESHTASTIC_DFU_ON_FATAL; a HANG (e.g. a driver
+	  init busy-waiting forever, before USB exists) is not — the board just
+	  looks dead. Arm the nRF hardware watchdog at PRE_KERNEL, before any
+	  driver init can hang; if it fires, the next boot sees the DOG reset
+	  reason at the same early point and reboots straight into the
+	  bootloader. A healthy boot starts feeding the watchdog from the
+	  system workqueue and runs forever.
+
+	  Bring-up only, default off: a deployed node that hangs once would
+	  park itself in DFU until someone plugs a cable in. (The nRF WDT
+	  cannot be stopped once started, so the feeder never quits.)
+
+config MESHTASTIC_DFU_BOOT_GUARD_TIMEOUT_S
+	int "Boot-guard watchdog timeout (seconds)"
+	depends on MESHTASTIC_DFU_BOOT_GUARD
+	default 15
+	help
+	  The boot must reach the system workqueue feeder within this time.
+	  A full init + first feed takes well under 5 s; 15 leaves margin.

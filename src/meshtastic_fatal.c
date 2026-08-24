@@ -28,6 +28,10 @@
 
 #include <zephyr/meshtastic/diagnostics.h>
 
+#if defined(CONFIG_MESHTASTIC_DFU_ON_FATAL)
+#include "meshtastic_dfu_trigger.h"
+#endif
+
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 /* No public header declares this despite being __weak/overridable -- it's
@@ -114,6 +118,14 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 	rtc_fatal_magic = FATAL_CRASH_MAGIC;
 
 	LOG_PANIC();
+
+#if defined(CONFIG_MESHTASTIC_DFU_ON_FATAL)
+	/* Bring-up aid: make the reset below land in the bootloader, ready to
+	 * reflash — a crash before USB init is otherwise invisible AND
+	 * unreachable without the reset pad. mark() is a plain register store,
+	 * safe in this exception context. */
+	meshtastic_dfu_mark(true);
+#endif
 
 #if defined(CONFIG_RESET_ON_FATAL_ERROR)
 	LOG_ERR("Resetting system");
