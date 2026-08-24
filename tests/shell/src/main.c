@@ -321,6 +321,42 @@ ZTEST(meshtastic_shell, test_unmanaging_restores_config_write)
 		      "unmanaged node should accept the write");
 }
 
+/* `lora tx off` is the safety switch for a node with damaged RF hardware
+ * (agents-a4it.8): it must persist to the stored LoRaConfig, apply live (no
+ * reboot — set_config runs apply_core), and read back as receive-only. */
+ZTEST(meshtastic_shell, test_lora_tx_off_persists_and_reads_back)
+{
+	meshtastic_Config cfg;
+	const char *out;
+
+	zassert_ok(run_cmd("meshtastic lora tx off", &out), "tx off failed");
+	zassert_not_null(strstr(out, "receive only"), "expected the muted confirmation, got: %s",
+			 out);
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "lora config read failed");
+	zassert_false(cfg.payload_variant.lora.tx_enabled, "tx_enabled should be stored false");
+
+	zassert_ok(run_cmd("meshtastic lora", &out), "lora show failed");
+	zassert_not_null(strstr(out, "NO — receive only"),
+			 "the show command should prove the mute, got: %s", out);
+
+	zassert_ok(run_cmd("meshtastic lora tx on", NULL), "tx on failed");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg),
+		   "lora config re-read failed");
+	zassert_true(cfg.payload_variant.lora.tx_enabled, "tx_enabled should be restored");
+}
+
+ZTEST(meshtastic_shell, test_managed_node_refuses_lora_tx_write)
+{
+	const char *out;
+
+	set_managed(true);
+	zassert_not_equal(run_cmd("meshtastic lora tx off", &out), 0,
+			  "a managed node must refuse the tx write");
+	zassert_not_null(strstr(out, "managed"), "expected a managed-node refusal, got: %s", out);
+}
+
 #else /* !CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 /* Compiled-out build: the mutating subcommands are gone and the dual

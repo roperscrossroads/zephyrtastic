@@ -2576,6 +2576,49 @@ static int cmd_lora_preset_set(const struct shell *sh, const char *name)
 		    meshtastic_preset_display_name(preset, true));
 	return 0;
 }
+
+/* The "receive only" switch, from the bench. Exists because the stored flag is
+ * the ONLY thing standing between the PA and an open antenna connector on a
+ * node with damaged RF hardware (agents-a4it.8) — that safety config must be
+ * settable before any config tool is paired, and provable afterwards
+ * (`meshtastic lora` / `meshtastic rf`). Unlike the preset, this applies LIVE:
+ * set_config -> apply_core -> mt.tx_enabled, no reboot involved. */
+static int cmd_lora_tx_set(const struct shell *sh, const char *arg)
+{
+	meshtastic_Config cfg;
+	bool enable;
+	int ret;
+
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+	if (strcmp(arg, "on") == 0) {
+		enable = true;
+	} else if (strcmp(arg, "off") == 0) {
+		enable = false;
+	} else {
+		shell_error(sh, "usage: meshtastic lora tx on|off");
+		return -EINVAL;
+	}
+
+	ret = meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg);
+	if (ret < 0) {
+		shell_error(sh, "lora get failed: %d", ret);
+		return ret;
+	}
+	cfg.which_payload_variant = meshtastic_Config_lora_tag;
+	cfg.payload_variant.lora.tx_enabled = enable;
+
+	ret = meshtastic_config_store_set_config(&cfg);
+	if (ret < 0) {
+		shell_error(sh, "lora set failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "tx %s (persisted, applied now%s)", enable ? "enabled" : "DISABLED",
+		    enable ? "" : " — receive only");
+	return 0;
+}
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
@@ -2584,8 +2627,9 @@ static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 		cmd_lora_show(sh);
 		return 0;
 	}
-	if (argc != 3U || strcmp(argv[1], "preset") != 0) {
-		shell_error(sh, "usage: meshtastic lora [preset <name>]");
+	if (argc != 3U ||
+	    (strcmp(argv[1], "preset") != 0 && strcmp(argv[1], "tx") != 0)) {
+		shell_error(sh, "usage: meshtastic lora [preset <name>] [tx on|off]");
 		return -EINVAL;
 	}
 #if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
@@ -2593,6 +2637,9 @@ static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
 	return -ENOTSUP;
 #else
+	if (strcmp(argv[1], "tx") == 0) {
+		return cmd_lora_tx_set(sh, argv[2]);
+	}
 	return cmd_lora_preset_set(sh, argv[2]);
 #endif
 }
@@ -2890,8 +2937,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(device, &meshtastic_device_cmds,
 		  SHELL_HELP("Device role and rebroadcast commands.", NULL), NULL),
 	SHELL_CMD(lora, NULL,
-		  SHELL_HELP("Show or set the LoRa modem preset (reboot to apply).",
-			     "[preset <name>]"),
+		  SHELL_HELP("Show or set the LoRa modem preset (reboot to apply) "
+			     "or the TX-enable switch (applies live).",
+			     "[preset <name>] [tx on|off]"),
 		  cmd_lora),
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
 	SHELL_CMD(text, &meshtastic_text_cmds, SHELL_HELP("Text message commands.", NULL), NULL),
