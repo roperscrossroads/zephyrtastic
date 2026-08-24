@@ -3836,6 +3836,112 @@ ZTEST(protocol_stack, test_config_local_write_stamps_the_section)
 		     "each local write must mint a strictly newer version");
 }
 
+/* The same rule, for the setters that write ONE FIELD of a shareable section
+ * instead of a whole one. set_config() was never the only writer: the shell's
+ * `device role` / `device rebroadcast` and admin's set/remove-fixed-position all
+ * reach the store through their own narrow setters, and for a long time none of
+ * the three stamped. The section then disagreed with every peer while claiming
+ * the version it held before the operator touched it. */
+ZTEST(protocol_stack, test_config_field_level_setters_stamp_their_section)
+{
+	struct meshtastic_hlc_stamp before, after;
+
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag, &before),
+		   "reading a stamp must succeed");
+	zassert_ok(meshtastic_config_store_set_device_role(
+			   meshtastic_Config_DeviceConfig_Role_ROUTER_LATE),
+		   "role set failed");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag, &after),
+		   "reading a stamp must succeed");
+	zassert_true(meshtastic_hlc_compare(&after, &before) > 0,
+		     "a role change is a local write of the device section and must version it");
+
+	before = after;
+	zassert_ok(meshtastic_config_store_set_rebroadcast_mode(
+			   meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY),
+		   "rebroadcast set failed");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag, &after),
+		   "reading a stamp must succeed");
+	zassert_true(meshtastic_hlc_compare(&after, &before) > 0,
+		     "a rebroadcast-mode change must version the device section too");
+
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_position_tag,
+							    &before),
+		   "reading a stamp must succeed");
+	zassert_ok(meshtastic_config_store_set_position_fixed(true), "fixed flag set failed");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_position_tag, &after),
+		   "reading a stamp must succeed");
+	zassert_true(meshtastic_hlc_compare(&after, &before) > 0,
+		     "the position section's fixed_position flag is shareable, so moving it "
+		     "must move the section's version");
+
+	/* Leave the store as this suite found it. */
+	zassert_ok(meshtastic_config_store_set_position_fixed(false), "fixed flag clear failed");
+	zassert_ok(meshtastic_config_store_set_rebroadcast_mode(
+			   meshtastic_Config_DeviceConfig_RebroadcastMode_ALL),
+		   "rebroadcast restore failed");
+	zassert_ok(meshtastic_config_store_set_device_role(
+			   meshtastic_Config_DeviceConfig_Role_CLIENT),
+		   "role restore failed");
+}
+
+/*
+ * WHY THE MISSING STAMP WAS A BUG AND NOT AN OMISSION: an unstamped edit does not
+ * merely fail to propagate, it gets silently overwritten. LWW compares versions,
+ * not recency of intent, so a peer write the operator's change happened AFTER
+ * still wins — and the store applies it without a word.
+ *
+ * The peer stamp here is constructed to sit strictly between the two, with no
+ * reliance on the sim clock advancing between calls: take our own pre-edit stamp
+ * and change only the author to a higher node id. Stamp order compares
+ * (physical, counter, node_id) in that order, so that stamp is strictly NEWER
+ * than the one we held before the edit — and strictly OLDER than anything
+ * hlc_local() mints afterwards, because a local mint always advances the
+ * physical component or the counter, both of which outrank the tiebreak.
+ */
+ZTEST(protocol_stack, test_config_field_level_edit_outranks_a_concurrent_peer_write)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	meshtastic_Config readback = meshtastic_Config_init_zero;
+	struct meshtastic_hlc_stamp before, peer;
+	int ret;
+
+	/* A versioned starting point, the ordinary way. */
+	cfg.which_payload_variant = meshtastic_Config_device_tag;
+	cfg.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "device set_config failed");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_device_tag, &before),
+		   "stamp read failed");
+
+	peer = before;
+	peer.node_id = before.node_id + 1U;
+	zassert_true(meshtastic_hlc_compare(&peer, &before) > 0,
+		     "the peer write must start out newer than what we hold, or this test "
+		     "proves nothing");
+
+	/* The operator edit, through the only device-section writer the shell offers. */
+	zassert_ok(meshtastic_config_store_set_device_role(
+			   meshtastic_Config_DeviceConfig_Role_ROUTER_LATE),
+		   "role set failed");
+
+	cfg.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE;
+	ret = meshtastic_config_store_merge_config(&cfg, &peer);
+	zassert_equal(ret, 0,
+		      "the peer write is older than the operator's edit and must be refused "
+		      "(got %d)",
+		      ret);
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag, &readback),
+		   "config read failed");
+	zassert_equal(readback.payload_variant.device.role,
+		      meshtastic_Config_DeviceConfig_Role_ROUTER_LATE,
+		      "an unstamped field-level edit is not just unpropagated — it is "
+		      "silently clobbered by a write it happened after");
+
+	zassert_ok(meshtastic_config_store_set_device_role(
+			   meshtastic_Config_DeviceConfig_Role_CLIENT),
+		   "role restore failed");
+}
+
 /* The LWW rule itself: a strictly newer peer stamp wins, an older one is refused
  * and the local value is kept. Both nodes run this same comparison and, because
  * the stamp order is total, reach the same answer with no coordination. */

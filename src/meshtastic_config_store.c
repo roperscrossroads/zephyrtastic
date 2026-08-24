@@ -159,7 +159,27 @@ static void store_unlock(void)
  *
  * Only genuine local edits stamp. The NVS load path restores the persisted stamp
  * instead, and seeding defaults leaves the stamp unset on purpose — a fresh node's
- * defaults must LOSE to a configured peer, which an unset stamp guarantees. */
+ * defaults must LOSE to a configured peer, which an unset stamp guarantees.
+ *
+ * THE RULE, written down because three setters broke it at once: a setter
+ * stamps exactly when it mutates store.configs[] or store.modules[].
+ * Those arrays are the units the stamp arrays version and the units the cluster
+ * document replicates, so a field-level edit is no less a new version than a
+ * whole-section one — set_device_role() changing one enum makes this node's
+ * `device` section disagree with every peer's just as surely as set_config()
+ * does. An unstamped edit is invisible to LWW twice over: our digest does not
+ * advertise it, and a peer holding an OLDER value still wins the comparison and
+ * silently overwrites it.
+ *
+ * Three deliberate non-stampers, all mutating state the stamp arrays have no key
+ * for: set_channel() (channels are not a Config section), set_owner() and
+ * set_fixed_position()/clear_fixed_position() (their own settings records; only
+ * the position section's `fixed_position` FLAG is shareable, and the setter that
+ * moves it does stamp). Also not edits: the merge path adopts the peer's stamp,
+ * the load path restores the persisted one, and apply_core()'s fem_lna_mode
+ * normalization states no opinion — it converges the stored value to what this
+ * hardware can do, identically on every boot, and stamping it would let a reboot
+ * alone win an LWW contest. */
 static void stamp_local(struct meshtastic_hlc_stamp *slot)
 {
 	meshtastic_hlc_local(&store.hlc, mt.node_id, slot);
@@ -971,6 +991,7 @@ int meshtastic_config_store_set_position_fixed(bool fixed)
 
 	store_lock();
 	store.configs[idx].payload_variant.position.fixed_position = fixed;
+	stamp_local(&store.config_stamps[idx]);
 	store_unlock();
 
 	store_schedule_save();
@@ -1181,12 +1202,13 @@ int meshtastic_config_store_set_device_role(meshtastic_Config_DeviceConfig_Role 
 {
 	int idx = index_for_config_tag(meshtastic_Config_device_tag);
 
-	if (role > meshtastic_Config_DeviceConfig_Role_CLIENT_BASE) {
+	if (idx < 0 || role > meshtastic_Config_DeviceConfig_Role_CLIENT_BASE) {
 		return -EINVAL;
 	}
 
 	store_lock();
 	store.configs[idx].payload_variant.device.role = role;
+	stamp_local(&store.config_stamps[idx]);
 	store_unlock();
 
 	meshtastic_set_device_role(role);
@@ -1199,12 +1221,13 @@ int meshtastic_config_store_set_rebroadcast_mode(
 {
 	int idx = index_for_config_tag(meshtastic_Config_device_tag);
 
-	if (mode > meshtastic_Config_DeviceConfig_RebroadcastMode_CORE_PORTNUMS_ONLY) {
+	if (idx < 0 || mode > meshtastic_Config_DeviceConfig_RebroadcastMode_CORE_PORTNUMS_ONLY) {
 		return -EINVAL;
 	}
 
 	store_lock();
 	store.configs[idx].payload_variant.device.rebroadcast_mode = mode;
+	stamp_local(&store.config_stamps[idx]);
 	store_unlock();
 
 	meshtastic_set_rebroadcast_mode(mode);

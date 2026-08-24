@@ -2681,6 +2681,76 @@ ZTEST(mesh_sim, test_cluster_pin_and_unpin_move_the_config_store)
 }
 
 /*
+ * THE DOCUMENTED WORKFLOW, on the section where it was quietly false.
+ *
+ * The origin marker refuses a promote of bytes the fleet already has, and
+ * CLUSTER-SYNC-M4.md §5 answers the obvious next question with "a local edit
+ * moves the store's stamp and lifts the refusal". For `device` that sentence
+ * depended on something nothing enforced: the shell's ONLY edit of that section
+ * is `meshtastic device role`, which goes through its own field-level setter,
+ * and that setter did not stamp. So the operator could change the role, watch it
+ * take effect on the radio, and still be told the fleet default was current —
+ * with no command anywhere able to say otherwise. The M4c bench proof had to run
+ * its shadowing demonstration on `bluetooth` for exactly this reason.
+ */
+ZTEST(mesh_sim, test_cluster_promote_is_lifted_by_a_local_role_edit)
+{
+	struct meshtastic_cluster_entry e;
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	meshtastic_Config_DeviceConfig_Role saved;
+	pb_istream_t is;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag, &cfg),
+		   "device read failed");
+	saved = cfg.payload_variant.device.role;
+
+	/* A local write first, so the store outranks whatever any earlier test left
+	 * at base/device and this promote is a promote rather than a no-op. */
+	cfg = (meshtastic_Config)meshtastic_Config_init_zero;
+	cfg.which_payload_variant = meshtastic_Config_device_tag;
+	cfg.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "device set_config failed");
+
+	zassert_ok(meshtastic_cluster_promote(meshtastic_Config_device_tag), "promote failed");
+	/* The reconciler writes the entry's own stamp back into the store; that
+	 * equality IS the origin marker (D10), so the next promote must refuse. */
+	k_sleep(K_MSEC(400));
+	zassert_equal(meshtastic_cluster_promote(meshtastic_Config_device_tag), -EALREADY,
+		      "re-promoting bytes the fleet already has must be refused");
+
+	/* The operator edit — one field, through the setter the shell actually calls. */
+	zassert_ok(meshtastic_config_store_set_device_role(
+			   meshtastic_Config_DeviceConfig_Role_ROUTER_LATE),
+		   "role set failed");
+	quiesce();
+	zassert_ok(meshtastic_cluster_promote(meshtastic_Config_device_tag),
+		   "a local edit must move the store's stamp and lift the refusal — "
+		   "otherwise the operator holds a changed device section they cannot "
+		   "publish and are told is already published");
+
+	zassert_true(doc_get(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, meshtastic_Config_device_tag, &e),
+		     "the promote must have written the base entry");
+	cfg = (meshtastic_Config)meshtastic_Config_init_zero;
+	is = pb_istream_from_buffer(e.payload, e.payload_len);
+	zassert_true(pb_decode(&is, meshtastic_Config_fields, &cfg), "base entry did not decode");
+	zassert_equal(cfg.payload_variant.device.role,
+		      meshtastic_Config_DeviceConfig_Role_ROUTER_LATE,
+		      "the fleet default must carry the value the operator actually set, not "
+		      "the one the store held before the edit went unversioned");
+
+	/* Restore. The restore mints a newer stamp than the base entry, so the
+	 * reconciler leaves it alone rather than putting ROUTER_LATE back. */
+	zassert_ok(meshtastic_config_store_set_device_role(saved), "role restore failed");
+	k_sleep(K_MSEC(300));
+	cluster_channel(false);
+}
+
+/*
  * PUSH-ON-CHANGE IS THE FIRST TIME THIS MODULE TRANSMITS UNINVITED, and local
  * writes have no natural rate. An operator on the up-arrow, a script in a loop,
  * a config that flaps between two values — each is a flood-relayed broadcast per

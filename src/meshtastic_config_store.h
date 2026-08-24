@@ -36,7 +36,9 @@ int meshtastic_config_store_get_config(pb_size_t tag, meshtastic_Config *config)
 int meshtastic_config_store_set_config(const meshtastic_Config *config);
 
 /** Set the position config's fixed_position flag (admin set/remove fixed
- * position). Persists via the coalesced save. */
+ * position). Persists via the coalesced save, and mints a new HLC version for
+ * the position section — the flag is shareable, so the edit has to be visible
+ * to LWW. */
 int meshtastic_config_store_set_position_fixed(bool fixed);
 
 /**
@@ -89,6 +91,14 @@ int meshtastic_config_store_merge_module(const meshtastic_ModuleConfig *module,
 
 int meshtastic_config_store_get_device_ui(meshtastic_DeviceUIConfig *device_ui);
 
+/**
+ * Field-level edits of the `device` section (shell `meshtastic device role` /
+ * `device rebroadcast`). Both mutate one field under a single lock hold and
+ * mint a new HLC version for the section, exactly as set_config() does for a
+ * whole one — see the rule above stamp_local() for why a field-level setter is
+ * no less a local write, and why routing these through set_config() instead
+ * would be worse on both counts.
+ */
 int meshtastic_config_store_set_device_role(meshtastic_Config_DeviceConfig_Role role);
 int meshtastic_config_store_set_rebroadcast_mode(
 	meshtastic_Config_DeviceConfig_RebroadcastMode mode);
