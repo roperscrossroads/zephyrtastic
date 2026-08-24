@@ -219,7 +219,12 @@ static void persist_entry(const struct meshtastic_cluster_entry *e)
 static int send_cluster_message(const zephyrtastic_ClusterMessage *msg, uint32_t to,
 				uint8_t ch_index)
 {
-	uint8_t buf[zephyrtastic_ClusterMessage_size];
+	/* Static, not stack: every caller runs on the single system workqueue
+	 * (the digest timer today, M4b's pull replies later), which serialises
+	 * them by construction — and this path continues into channel
+	 * encryption, whose PSA stack appetite is exactly what ejected the
+	 * first bench digest on a 2 KB sysworkq. Keep the frame off the stack. */
+	static uint8_t buf[zephyrtastic_ClusterMessage_size];
 	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
 	struct meshtastic_packet pkt = {0};
 
@@ -249,12 +254,15 @@ static uint32_t digest_period_ms(void)
 
 static void digest_work_fn(struct k_work *work)
 {
-	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	/* Static for the same sysworkq-stack reason as send_cluster_message's
+	 * buffer (single executor serialises access). */
+	static zephyrtastic_ClusterMessage msg;
 	struct meshtastic_hlc_stamp max;
 	uint8_t ch_index;
 	int ret;
 
 	ARG_UNUSED(work);
+	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
 
 	if (!cluster_channel_index(&ch_index)) {
 		if (!cluster.channel_missing_logged) {
@@ -431,6 +439,11 @@ int meshtastic_cluster_promote(uint16_t section)
 		/* Push-on-change is M4c; the next digest advertises this. */
 	}
 	return ret;
+}
+
+void meshtastic_cluster_digest_now(void)
+{
+	(void)k_work_reschedule(&digest_work, K_NO_WAIT);
 }
 
 /* ---- introspection -------------------------------------------------------- */

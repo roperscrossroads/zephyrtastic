@@ -20,6 +20,12 @@
 
 int meshtastic_cluster_init(void);
 
+/* Fire one digest immediately (queued to the system workqueue — the same
+ * context and code path as the timer, deliberately: this seam exists because
+ * the timer-only TX path reached hardware untested once and cost a bench
+ * cycle). Shell `cluster digest` and the sim tests use it. */
+void meshtastic_cluster_digest_now(void);
+
 /*
  * Promote MY current value of @p section (a meshtastic_Config payload-variant
  * tag) to the fleet base layer, stamped now. v1 allowlist: device, position,

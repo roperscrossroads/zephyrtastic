@@ -3253,6 +3253,16 @@ static int cmd_cluster_promote(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_cluster_digest(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_cluster_digest_now();
+	shell_print(sh, "digest queued");
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 			       SHELL_CMD(status, NULL,
 					 SHELL_HELP("Cluster doc, digest stats, channel binding.",
@@ -3262,6 +3272,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 					 SHELL_HELP("Promote my current section to fleet base.",
 						    "<device|position|power|display|bluetooth>"),
 					 cmd_cluster_promote),
+			       SHELL_CMD(digest, NULL,
+					 SHELL_HELP("Broadcast one digest now.", NULL),
+					 cmd_cluster_digest),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_CLUSTER */
 

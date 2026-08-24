@@ -345,6 +345,26 @@ ZTEST(mesh_sim, test_cluster_digest_divergence_noticed)
 	zassert_true(meshtastic_cluster_channel_resolved(&ch_index), "module must bind");
 	zassert_equal(ch_index, 2U);
 
+	/* TX first: fire one digest through the real send path (workqueue →
+	 * encode → channel-encrypt → radio) and capture it. This exact path
+	 * reached hardware untested once — timer-only, sim cadence pinned to
+	 * a day — and a sysworkq stack overflow cost a bench cycle. Never
+	 * again: the seam exists so the sim drives it. */
+	{
+		struct lora_sim_frame f;
+		const struct meshtastic_wire_header *h;
+
+		meshtastic_cluster_digest_now();
+		zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)),
+			   "digest TX never reached the radio");
+		h = (const struct meshtastic_wire_header *)f.data;
+		zassert_equal(sys_le32_to_cpu(h->dest), MESHTASTIC_NODE_BROADCAST,
+			      "digest must be a broadcast");
+		zassert_equal(h->channel, meshtastic_channels_get_hash(2U),
+			      "digest must ride the cluster channel's hash");
+		wait_rx_armed();
+	}
+
 	/* A digest claiming one entry — our doc is empty, so this diverges. */
 	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
 	msg.variant.digest.doc_hash = 0xDEADBEEFU;
