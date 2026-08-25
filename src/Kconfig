@@ -144,6 +144,7 @@ rsource "Kconfig.shell_uart0"
 rsource "Kconfig.thread_summary"
 rsource "Kconfig.wifi_diag"
 rsource "Kconfig.logring"
+rsource "Kconfig.phonelog"
 rsource "Kconfig.power"
 
 menu "LoRa transmit retry"

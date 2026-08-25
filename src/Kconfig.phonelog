@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_PHONELOG
+	bool "Forward the log stream to a connected phone (FromRadio.log_record)"
+	depends on MESHTASTIC_PHONEAPI
+	depends on LOG
+	depends on LOG_MODE_DEFERRED
+	select LOG_OUTPUT
+	default y
+	help
+	  Registers a log backend that wraps each log message as a
+	  FromRadio.log_record and hands it to every attached PhoneAPI transport.
+	  Costs ZERO airtime -- the record never reaches the radio -- and the
+	  official Android client already consumes it (its Debug panel, persisted
+	  to the app's MeshLog table).
+
+	  Added 2026-08-25, when the fleet went all-LoRa+BLE and lost the netlog:
+	  log_backend_net needs WiFi, which no node now has, leaving a USB console
+	  as the only way to see inside a node. This is the direct replacement for
+	  bench work -- anything you can stand next to with a phone.
+
+	  Not a replacement for MESHTASTIC_LOGRING, which is what survives a reset
+	  and keeps working in panic mode. This backend deliberately stands down
+	  once LOG_PANIC() runs: it takes mutexes and hands work to a BLE stack,
+	  neither of which is safe from that context.
+
+	  Requires deferred logging (the default). In immediate mode a backend runs
+	  on whatever thread -- or ISR -- emitted the message, where taking the
+	  PhoneAPI's mutexes would be wrong.
+
+if MESHTASTIC_PHONELOG
+
+config MESHTASTIC_PHONELOG_LEVEL
+	int "Maximum severity forwarded (0=off 1=ERR 2=WRN 3=INF 4=DBG)"
+	default 3
+	range 0 4
+	help
+	  Compile-time default for the runtime filter; change it live with
+	  `meshtastic phonelog <level>`. This filters what this backend FORWARDS,
+	  independently of what each module is compiled at and of what the console
+	  shows -- the same per-backend split MESHTASTIC_NETLOG_FILTER relies on.
+
+	  ⚠ DBG (4) is self-sustaining, by design of the code around it rather
+	  than of this backend: delivering a frame to the phone makes the BLE
+	  transport log "FromRadio staged" at DBG, which is another record, which
+	  is another delivery. At INF and below that line is filtered out and the
+	  cycle cannot start. At DBG it runs until MESHTASTIC_PHONELOG_RATE stops
+	  it -- bounded and visible (`meshtastic phonelog` shows the rate drops),
+	  but the node will be spending its log budget describing its own logging.
+	  Turn DBG on deliberately and for a specific question, not as a default.
+
+config MESHTASTIC_PHONELOG_LINE_MAX
+	int "Maximum characters per forwarded record"
+	default 160
+	range 64 384
+	help
+	  Bounds the formatting buffer and therefore the wire size of one record.
+	  384 is the schema's LogRecord.message ceiling (mesh.options). Longer
+	  lines are truncated, not split: a record is one log line.
+
+config MESHTASTIC_PHONELOG_RATE
+	int "Maximum records forwarded per second"
+	default 20
+	range 1 200
+	help
+	  A token bucket, refilled once a second, with the excess dropped and
+	  counted. Two reasons, both learned elsewhere in this project: a log flood
+	  must not be able to push real traffic through a bounded phone queue, and
+	  a bounded rate is the backstop against any feedback loop where forwarding
+	  a record causes another record.
+
+endif # MESHTASTIC_PHONELOG

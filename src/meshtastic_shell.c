@@ -54,6 +54,7 @@
 
 #include "meshtastic_tx_power.h"
 #include "meshtastic_sched.h"
+#include "meshtastic_phonelog.h"
 #include "meshtastic_settings.h"
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
 #include "meshtastic_telemetry_internal.h"
@@ -2071,6 +2072,61 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_gnss_cmds,
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_GNSS */
 
+#if defined(CONFIG_MESHTASTIC_PHONELOG)
+static const char *const phonelog_level_names[] = { "off", "err", "wrn", "inf", "dbg" };
+
+/* `meshtastic phonelog` -- state + counters; `meshtastic phonelog <level>` sets
+ * the ceiling; `meshtastic phonelog reset` zeroes the counters.
+ *
+ * The counters are the point. A phone that shows nothing could mean the level is
+ * too low, the queue is full because the app is not draining it, or the rate cap
+ * is eating a flood -- three very different problems that look identical from
+ * the phone end. */
+static int cmd_phonelog(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_phonelog_stats stats;
+	uint8_t level;
+
+	if (argc >= 2) {
+		if (strcmp(argv[1], "reset") == 0) {
+			meshtastic_phonelog_reset_stats();
+			shell_print(sh, "phonelog counters cleared");
+			return 0;
+		}
+
+		for (uint8_t i = 0; i < ARRAY_SIZE(phonelog_level_names); i++) {
+			if (strcmp(argv[1], phonelog_level_names[i]) == 0) {
+				int ret = meshtastic_phonelog_set_level(i);
+
+				if (ret < 0) {
+					shell_error(sh, "set level failed (%d)", ret);
+					return ret;
+				}
+				shell_print(sh, "phonelog level: %s", phonelog_level_names[i]);
+				return 0;
+			}
+		}
+
+		shell_error(sh, "usage: phonelog [off|err|wrn|inf|dbg|reset]");
+		return -EINVAL;
+	}
+
+	level = meshtastic_phonelog_get_level();
+	meshtastic_phonelog_get_stats(&stats);
+
+	shell_print(sh, "level     : %s%s",
+		    level < ARRAY_SIZE(phonelog_level_names) ? phonelog_level_names[level] : "?",
+		    stats.panicked ? " (STOOD DOWN: panic)" : "");
+	shell_print(sh, "forwarded : %u", stats.forwarded);
+	shell_print(sh, "dropped   : %u rate, %u queue-full, %u below level, %u log-core",
+		    stats.dropped_rate, stats.dropped_queue, stats.dropped_level,
+		    stats.dropped_core);
+	shell_print(sh, "rate cap  : %u/s", (unsigned int)CONFIG_MESHTASTIC_PHONELOG_RATE);
+
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_PHONELOG */
+
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
 static int cmd_metrics_send(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3957,6 +4013,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 			     "netlog on"),
 		  cmd_netlog),
 #endif
+#endif
+#if defined(CONFIG_MESHTASTIC_PHONELOG)
+	SHELL_CMD(phonelog, NULL,
+		  SHELL_HELP("Log forwarding to the phone: state + counters, or set the "
+			     "severity ceiling.",
+			     "[off|err|wrn|inf|dbg|reset]"),
+		  cmd_phonelog),
 #endif
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
 	SHELL_CMD(metrics, &meshtastic_metrics_cmds, SHELL_HELP("Device metrics commands.", NULL),

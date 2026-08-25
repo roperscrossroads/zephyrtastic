@@ -111,6 +111,20 @@ void meshtastic_phoneapi_enqueue_queue_status(struct meshtastic_phoneapi *api, i
 					      uint32_t mesh_packet_id);
 void meshtastic_phoneapi_handle_toradio(struct meshtastic_phoneapi *api, const uint8_t *buf,
 					size_t len);
+#if defined(CONFIG_MESHTASTIC_PHONELOG)
+/**
+ * @brief Fan a LogRecord out to every attached transport that has room.
+ *
+ * Deliberately does not reuse meshtastic_phoneapi_enqueue_fromradio(): that
+ * function logs on every path it takes, and logging from inside a log backend is
+ * a feedback loop. This one is silent, and drops on a full queue rather than
+ * evicting -- diagnostics must not push out the traffic they describe. @p
+ * dropped, when non-NULL, is incremented once per transport skipped.
+ *
+ * @return number of transports the record was queued on (0 if none attached).
+ */
+int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, uint32_t *dropped);
+#endif
 /*
  * @param decoded_mesh Optional fully decoded MeshPacket for this frame. When non-NULL it
  *        is delivered to the phone verbatim (carrying fields the flat struct cannot model,

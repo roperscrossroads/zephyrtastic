@@ -242,6 +242,12 @@ static bool fromradio_droppable(const meshtastic_FromRadio *from)
 	if (from->which_payload_variant == meshtastic_FromRadio_queueStatus_tag) {
 		return true;
 	}
+	if (from->which_payload_variant == meshtastic_FromRadio_log_record_tag) {
+		/* Diagnostics must never outrank the traffic they describe. A log
+		 * burst that evicted a text message or an admin reply would be a
+		 * debugging aid that breaks the thing being debugged. */
+		return true;
+	}
 	if (from->which_payload_variant == meshtastic_FromRadio_packet_tag &&
 	    from->packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
 		switch (from->packet.decoded.portnum) {
@@ -493,6 +499,94 @@ toradio_decoded:
 		break;
 	}
 }
+
+#if defined(CONFIG_MESHTASTIC_PHONELOG)
+/* Scratch for the log fan-out. Separate from on_packet_scratch even though both
+ * are FromRadio and both are taken under phoneapi_lock: the log backend runs on
+ * the logging thread and could otherwise be formatting a record into the same
+ * buffer a router thread is filling with a packet. CPU-only and never touched by
+ * DMA or an ISR, so PSRAM is fine where there is any. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR meshtastic_FromRadio log_scratch;
+
+/* Enqueue a LogRecord onto every transport that has room, and count the rest as
+ * dropped.
+ *
+ * This deliberately does NOT go through meshtastic_phoneapi_enqueue_fromradio(),
+ * and that is the whole point rather than a shortcut. That function logs on
+ * every path it takes -- LOG_DBG on a successful enqueue, LOG_DBG/LOG_WRN when
+ * it has to evict. Feeding a log backend through a function that logs closes a
+ * loop: one record produces one log line, which produces one record, forever.
+ * The rate cap in meshtastic_phonelog.c would bound it, but a node pinned at the
+ * cap logging about its own logging is not a working node -- and with the phone
+ * ceiling set to DBG (exactly what a bench session wants) that is what would
+ * happen. So the log path gets its own silent enqueue.
+ *
+ * Being separate also lets it DROP on a full queue instead of evicting, which is
+ * the right policy for diagnostics anyway: they must never be able to push out
+ * the traffic they were meant to help explain.
+ */
+int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, uint32_t *dropped)
+{
+	struct meshtastic_phoneapi *transports[MESHTASTIC_PHONEAPI_MAX_TRANSPORTS];
+	struct meshtastic_phoneapi_frame frame;
+	meshtastic_FromRadio *from = &log_scratch;
+	uint8_t count;
+	int sent = 0;
+
+	k_mutex_lock(&phoneapi_lock, K_FOREVER);
+
+	count = phoneapi.count;
+	if (count == 0U) {
+		/* Nobody attached: not a drop, there was never a reader. */
+		k_mutex_unlock(&phoneapi_lock);
+		return 0;
+	}
+	memcpy(transports, phoneapi.transports, count * sizeof(transports[0]));
+
+	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+	from->id = meshtastic_next_fromradio_id();
+	from->which_payload_variant = meshtastic_FromRadio_log_record_tag;
+	from->log_record = *record;
+
+	if (meshtastic_phoneapi_encode_fromradio_frame(from, &frame) < 0) {
+		/* encode_fromradio_frame LOG_ERRs on failure. That is one line for a
+		 * malformed record, not a per-record loop, and losing it would hide a
+		 * real bug -- so it stays. */
+		k_mutex_unlock(&phoneapi_lock);
+		if (dropped != NULL) {
+			(*dropped)++;
+		}
+		return 0;
+	}
+	/* Droppable: a later burst of anything may evict this. Diagnostics do not
+	 * outrank the traffic they describe. */
+	frame.protected = false;
+
+	for (uint8_t i = 0; i < count; i++) {
+		struct meshtastic_phoneapi *api = transports[i];
+
+		k_mutex_lock(&api->lock, K_FOREVER);
+		if (api->count >= api->queue_size) {
+			k_mutex_unlock(&api->lock);
+			if (dropped != NULL) {
+				(*dropped)++;
+			}
+			continue;
+		}
+		api->queue[api->head] = frame;
+		api->head = (uint8_t)((api->head + 1U) % api->queue_size);
+		api->count++;
+		k_mutex_unlock(&api->lock);
+
+		meshtastic_phoneapi_notify_data_ready(api);
+		sent++;
+	}
+
+	k_mutex_unlock(&phoneapi_lock);
+	return sent;
+}
+
+#endif /* CONFIG_MESHTASTIC_PHONELOG */
 
 void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet,
 				   const meshtastic_MeshPacket *decoded_mesh)
