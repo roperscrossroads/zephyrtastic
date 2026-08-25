@@ -36,6 +36,9 @@
 #include "meshtastic_admin_session.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+#include "meshtastic_cluster.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_POSITION)
 #include "meshtastic_position.h"
 #endif
@@ -890,6 +893,12 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 		(void)meshtastic_settings_wipe(true); /* keep config/security */
 #endif
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+		/* The replicated document lives in its own settings subtree, so the
+		 * config-store wipe above never touched it — a "factory reset" used to
+		 * leave the whole fleet document in flash. */
+		(void)meshtastic_cluster_reset();
+#endif
 		k_work_reschedule(&admin_reset_reboot_work, K_SECONDS(ADMIN_REBOOT_SECONDS));
 		break;
 
@@ -898,6 +907,12 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		meshtastic_config_store_set_save_suppressed(true);
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 		(void)meshtastic_settings_wipe(false); /* wipe everything incl. identity */
+#endif
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+		/* The replicated document lives in its own settings subtree, so the
+		 * config-store wipe above never touched it — a "factory reset" used to
+		 * leave the whole fleet document in flash. */
+		(void)meshtastic_cluster_reset();
 #endif
 		meshtastic_nodedb_reset(false);
 		k_work_reschedule(&admin_reset_reboot_work, K_SECONDS(ADMIN_REBOOT_SECONDS));

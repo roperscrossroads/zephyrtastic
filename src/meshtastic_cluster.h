@@ -122,6 +122,19 @@ int meshtastic_cluster_scope_select(int choice);
  * operator-chosen) rather than free to narrow itself under table pressure. */
 const char *meshtastic_cluster_scope_name(bool *pinned);
 
+/*
+ * Forget the replicated document: the table, every persisted record, and the
+ * recorded scope, returning the claim to this build's compiled default.
+ * Returns how many entries were dropped.
+ *
+ * LOCAL ONLY. It pushes nothing and cannot remove an entry from any other node,
+ * so a node cleared on its own pulls the document straight back from the first
+ * peer that still holds it (anti-entropy is level-triggered). Clearing a FLEET
+ * means clearing every member before any of them re-seeds the others — turn TX
+ * off everywhere first.
+ */
+int meshtastic_cluster_reset(void);
+
 struct meshtastic_cluster_stats {
 	/* digest_tx counts digests HANDED TO the send path. On a node whose
 	 * radio TX is disabled (config.lora.tx_enabled = false) the frame is

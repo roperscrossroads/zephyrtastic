@@ -824,4 +824,28 @@ ZTEST(meshtastic_shell, test_cluster_scope_command_sets_and_reads_back)
 	zassert_not_null(strstr(out, "auto"), "and so must an automatic one");
 }
 
+/*
+ * The one destructive verb here that the fleet cannot argue with. Every other
+ * write mints a versioned entry a peer can outrank; this throws away the whole
+ * local copy — so it asks, and it says what the operator has NOT achieved.
+ */
+ZTEST(meshtastic_shell, test_cluster_reset_needs_confirmation_and_says_what_it_did_not_do)
+{
+	const char *out = NULL;
+
+	provision_cluster_channel();
+
+	zassert_not_equal(run_cmd("meshtastic cluster reset", &out), 0,
+			  "a bare `reset` next to `status` must not empty the document");
+	zassert_not_null(strstr(out, "--confirm"), "and must say how to mean it");
+
+	zassert_ok(run_cmd("meshtastic cluster reset --confirm", &out), "confirmed reset failed");
+	zassert_not_null(strstr(out, "cleared"), "it should report what it dropped");
+	zassert_not_null(strstr(out, "told NOBODY"),
+			 "and must be explicit that the fleet has not forgotten anything — "
+			 "otherwise an operator reads a clean node as a clean fleet");
+	zassert_not_null(strstr(out, "lora tx off"),
+			 "including the way to actually clear a fleet");
+}
+
 #endif /* CONFIG_MESHTASTIC_CLUSTER */

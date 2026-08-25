@@ -873,3 +873,57 @@ ZTEST(cluster_doc, test_retain_is_idempotent_and_frees_room)
 	zassert_equal(meshtastic_cluster_doc_accept(&doc, &mine, &s, false, v, 1), 1,
 		      "and the room it freed is real");
 }
+
+/* Collector for the clear() callback — file scope, not a nested function. */
+static struct meshtastic_cluster_key cleared_keys[8];
+static uint16_t cleared_n;
+
+static void collect_cleared(const struct meshtastic_cluster_key *k, void *ctx)
+{
+	ARG_UNUSED(ctx);
+	if (cleared_n < ARRAY_SIZE(cleared_keys)) {
+		cleared_keys[cleared_n++] = *k;
+	}
+}
+
+/*
+ * Clearing is not expressible as a retain(): base is inside every scope by
+ * construction, so there is no scope meaning "nothing". It has to be its own
+ * operation, and it has to report every key it dropped — that report is what
+ * lets the module forget them in flash too, which is the whole point of
+ * offering a clean at all.
+ */
+ZTEST(cluster_doc, test_clear_empties_and_reports_every_key)
+{
+	struct meshtastic_cluster_key b = base_key(SEC_DEVICE);
+	struct meshtastic_cluster_key mine = node_key(NODE_A, SEC_DISPLAY);
+	struct meshtastic_cluster_key theirs = node_key(NODE_B, SEC_DEVICE);
+	struct meshtastic_hlc_stamp s1 = at(100, NODE_A);
+	uint8_t v[] = {0x33};
+
+	put(&b, 100, NODE_A);
+	put(&mine, 200, NODE_A);
+	put(&theirs, 300, NODE_B);
+	zassert_equal(doc.count, 3U);
+
+	cleared_n = 0U;
+	zassert_equal(meshtastic_cluster_doc_clear(&doc, collect_cleared, NULL), 3U);
+	zassert_equal(cleared_n, 3U,
+		      "every dropped key must be reported, or its flash record outlives the "
+		      "entry and comes back at the next boot");
+
+	zassert_equal(doc.count, 0U);
+	zassert_is_null(meshtastic_cluster_doc_find(&doc, &b));
+	zassert_is_null(meshtastic_cluster_doc_find(&doc, &mine));
+	zassert_is_null(meshtastic_cluster_doc_find(&doc, &theirs));
+	zassert_is_null(meshtastic_cluster_doc_effective(&doc, NODE_A, SEC_DISPLAY),
+			"and effective() must have nothing left to answer with");
+
+	/* Usable again immediately — a clean, not a brick. */
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &b, &s1, false, v, 1), 1);
+	zassert_equal(doc.count, 1U);
+	zassert_equal(meshtastic_cluster_doc_clear(&doc, NULL, NULL), 1U,
+		      "a NULL callback is allowed");
+	zassert_equal(meshtastic_cluster_doc_clear(&doc, NULL, NULL), 0U,
+		      "and clearing an empty document is a no-op, not an error");
+}

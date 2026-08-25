@@ -627,6 +627,61 @@ static void forget_scope(void)
 	(void)settings_delete(CLUSTER_SCOPE_REC_NAME);
 }
 
+/*
+ * Forget records in flash that the TABLE does not know about.
+ *
+ * Deleting what the table holds covers the ordinary case, but not every record
+ * has a table entry: one refused by the load-path checks (an older, laxer build
+ * wrote it) or dropped for capacity is skipped at boot and then invisible. A
+ * "clean" that leaves those behind is not clean — they come back the moment the
+ * rules or the capacity change.
+ *
+ * Collected then deleted, a bounded batch at a time: deleting from inside the
+ * backend's own walk is not safe, and buffering every possible key would put
+ * MAX_ENTRIES × a name on the caller's stack.
+ */
+#define CLUSTER_SWEEP_BATCH 8U
+
+struct cluster_sweep {
+	char names[CLUSTER_SWEEP_BATCH][40];
+	uint8_t count;
+};
+
+static int sweep_collect(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+			 void *param)
+{
+	struct cluster_sweep *sw = param;
+
+	ARG_UNUSED(len);
+	ARG_UNUSED(read_cb);
+	ARG_UNUSED(cb_arg);
+
+	if (sw->count < CLUSTER_SWEEP_BATCH) {
+		snprintf(sw->names[sw->count], sizeof(sw->names[0]), "mtclus/%s", key);
+		sw->count++;
+	}
+	return 0;
+}
+
+static void forget_subtree(void)
+{
+	/* One pass per batch, and a cap so a backend that never stops handing the
+	 * same key back cannot spin here forever. */
+	for (uint16_t pass = 0U;
+	     pass < (CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES / CLUSTER_SWEEP_BATCH) + 4U; pass++) {
+		struct cluster_sweep sw = {.count = 0U};
+
+		(void)settings_load_subtree_direct("mtclus", sweep_collect, &sw);
+		if (sw.count == 0U) {
+			return;
+		}
+		for (uint8_t i = 0U; i < sw.count; i++) {
+			(void)settings_delete(sw.names[i]);
+		}
+	}
+	LOG_WRN("cluster: the persisted document did not empty — records may remain");
+}
+
 static int cluster_settings_set(const char *key, size_t len, settings_read_cb read_cb,
 				void *cb_arg)
 {
@@ -742,6 +797,10 @@ static void forget_entry(const struct meshtastic_cluster_key *key, void *ctx)
 {
 	ARG_UNUSED(key);
 	ARG_UNUSED(ctx);
+}
+
+static void forget_subtree(void)
+{
 }
 
 static void persist_scope(uint8_t kind)
@@ -2647,6 +2706,67 @@ int meshtastic_cluster_scope_select(int choice)
 	 * comparison against this node just changed which set it covers. */
 	(void)k_work_reschedule(&digest_work, K_NO_WAIT);
 	return 0;
+}
+
+/*
+ * Forget the replicated document entirely — table, every persisted record, and
+ * the recorded scope — and go back to the claim this build was compiled with.
+ *
+ * There was no way to do this before, and a factory reset did NOT do it either:
+ * the wipe walks the config store's own keys under "meshtastic/", while the
+ * document lives in a separate "mtclus/" subtree, so `factory_reset_device`
+ * logged "full wipe" and left the whole fleet document behind.
+ *
+ * NOT a fleet operation, and that is what makes it safe to offer at all: it
+ * pushes nothing, announces nothing, and cannot remove an entry from anyone
+ * else. Anti-entropy is level-triggered, so a node cleared on its own simply
+ * pulls the document back from the first peer that still has it — which is also
+ * the warning the shell prints. Clearing a FLEET means clearing every member
+ * before any of them can re-seed the others; the reliable way is `lora tx off`
+ * everywhere first.
+ *
+ * Deliberately NOT gated on is_managed, unlike promote/pin/unpin. Those write
+ * to the fleet; this drops a local copy of what the fleet already holds, so
+ * refusing it on a managed node would remove a recovery tool without protecting
+ * anything.
+ */
+int meshtastic_cluster_reset(void)
+{
+	uint16_t dropped;
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	dropped = meshtastic_cluster_doc_clear(&cluster.doc, forget_entry, NULL);
+	forget_subtree();
+	forget_scope();
+
+	/* Back to the compiled claim: a scope narrowed under pressure is a fact
+	 * about a document that no longer exists. */
+#if defined(CONFIG_MESHTASTIC_CLUSTER_SCOPE_CORE)
+	cluster.scope_kind = MESHTASTIC_CLUSTER_SCOPE_CORE;
+	cluster.scope_pinned = true;
+#else
+	cluster.scope_kind = MESHTASTIC_CLUSTER_SCOPE_FULL;
+	cluster.scope_pinned = IS_ENABLED(CONFIG_MESHTASTIC_CLUSTER_SCOPE_FULL);
+#endif
+	cluster.stats.scope_demotions = 0U;
+	cluster.stats.entries_evicted = 0U;
+
+	/* Anything in flight describes a document that is gone. */
+	pull_reset_locked();
+	cluster.vec_dest = 0U;
+	cluster.ent_dest = 0U;
+	cluster.ent_count = 0U;
+	cluster.ent_next = 0U;
+	cluster.push_count = 0U;
+	cluster.push_head = 0U;
+	k_mutex_unlock(&cluster_lock);
+
+	LOG_WRN("cluster: document cleared — %u entr%s dropped, claim back to %s. Nothing was "
+		"told to forget anything: the next digest from a peer that still holds it "
+		"will bring it all back.",
+		dropped, dropped == 1U ? "y" : "ies",
+		cluster.scope_kind == MESHTASTIC_CLUSTER_SCOPE_CORE ? "CORE" : "FULL");
+	return (int)dropped;
 }
 
 const char *meshtastic_cluster_scope_name(bool *pinned)

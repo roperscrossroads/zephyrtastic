@@ -232,6 +232,23 @@ meshtastic_cluster_doc_want(const struct meshtastic_cluster_doc *doc,
  * declared set, and the declared set is the only thing a digest can honestly
  * describe.
  */
+/*
+ * Drop EVERYTHING, firing @p on_evict per key first so the caller can forget it
+ * in persistent storage too. Returns how many were dropped.
+ *
+ * Not expressible as a retain(): base is inside every scope by construction, so
+ * no scope means "nothing". This is a deliberate local act — an operator saying
+ * "forget the fleet's document and start again" — and it is safe precisely
+ * because it writes nothing to the fleet: anti-entropy is level-triggered, so a
+ * node cleared alone simply pulls the document back from a peer that still has
+ * it. Clearing a whole fleet therefore means clearing every member before any
+ * of them can re-seed the others.
+ */
+uint16_t meshtastic_cluster_doc_clear(struct meshtastic_cluster_doc *doc,
+				      void (*on_evict)(const struct meshtastic_cluster_key *key,
+						       void *ctx),
+				      void *ctx);
+
 uint16_t meshtastic_cluster_doc_retain(struct meshtastic_cluster_doc *doc,
 				       const struct meshtastic_cluster_scope *scope,
 				       void (*on_evict)(const struct meshtastic_cluster_key *key,

@@ -306,6 +306,23 @@ void meshtastic_cluster_doc_max_stamp(const struct meshtastic_cluster_doc *doc,
 	meshtastic_cluster_doc_max_stamp_scoped(doc, &full, out);
 }
 
+uint16_t meshtastic_cluster_doc_clear(struct meshtastic_cluster_doc *doc,
+				      void (*on_evict)(const struct meshtastic_cluster_key *key,
+						       void *ctx),
+				      void *ctx)
+{
+	uint16_t dropped = doc->count;
+
+	if (on_evict != NULL) {
+		for (uint16_t i = 0U; i < doc->count; i++) {
+			on_evict(&doc->entries[i].key, ctx);
+		}
+	}
+	memset(doc->entries, 0, (size_t)doc->count * sizeof(doc->entries[0]));
+	doc->count = 0U;
+	return dropped;
+}
+
 uint16_t meshtastic_cluster_doc_retain(struct meshtastic_cluster_doc *doc,
 				       const struct meshtastic_cluster_scope *scope,
 				       void (*on_evict)(const struct meshtastic_cluster_key *key,

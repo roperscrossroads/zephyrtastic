@@ -4217,4 +4217,63 @@ ZTEST(mesh_sim, test_cluster_z_unsolicited_push_cannot_force_a_narrowing)
 
 #endif /* CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES <= 18 */
 
+/*
+ * Clearing the document is a LOCAL act, and the fact that it tells nobody is
+ * the property that makes it safe to offer. It cannot remove an entry from
+ * another node, so it can never be used to erase fleet config — and the flip
+ * side, which the shell says out loud, is that a node cleared on its own pulls
+ * everything straight back from the first peer that still holds it.
+ *
+ * Deliberately the alphabetically LAST cluster case: it empties the document
+ * the rest of the suite has been building up.
+ */
+ZTEST(mesh_sim, test_cluster_zz_reset_forgets_everything_and_tells_nobody)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	zephyrtastic_ClusterMessage msg;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint32_t to = 0U;
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	len = encode_section(meshtastic_Config_power_tag, buf, sizeof(buf));
+	inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 280000), false, buf, len, 0x7F00U);
+	k_sleep(K_MSEC(400));
+	quiesce();
+	zassert_true(meshtastic_cluster_entry_count() > 0U, "the premise: we hold something");
+	meshtastic_cluster_stats_get(&before_st);
+
+	zassert_true(meshtastic_cluster_reset() > 0, "the clear must report what it dropped");
+	zassert_equal(meshtastic_cluster_entry_count(), 0U, "and the table must be empty");
+	zassert_equal(meshtastic_cluster_scope_name(NULL)[0], 'F',
+		      "a claim narrowed under pressure describes a document that no longer "
+		      "exists — the clear must restore the compiled one");
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.push_tx, before_st.push_tx,
+		      "a clear must not push: it is a local drop, not a fleet write");
+	zassert_equal(after_st.push_suppressed, before_st.push_suppressed,
+		      "nor even queue one");
+	k_sleep(K_MSEC(300));
+	zassert_false(take_cluster_tx(&msg, &to),
+		      "and nothing at all may go on the air because of it");
+
+	/* The honest other half: the fleet has not forgotten, so the document
+	 * comes back. Pinning it here so nobody later mistakes this for a bug. */
+	inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 281000), false, buf, len, 0x7F01U);
+	k_sleep(K_MSEC(400));
+	zassert_equal(meshtastic_cluster_entry_count(), 1U,
+		      "a node cleared alone re-converges — clearing a FLEET means clearing "
+		      "every member before any of them can re-seed the others");
+
+	(void)meshtastic_cluster_reset();
+	cluster_channel(false);
+}
+
 #endif /* CONFIG_MESHTASTIC_CLUSTER */

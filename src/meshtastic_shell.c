@@ -3708,6 +3708,35 @@ static int cmd_cluster_scope(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_cluster_reset(const struct shell *sh, size_t argc, char **argv)
+{
+	int dropped;
+
+	/* Confirmation required. Every other destructive verb here writes a
+	 * versioned entry that the fleet can argue with; this one throws away
+	 * the whole local copy, and a fat-fingered `cluster reset` next to
+	 * `cluster status` should not be able to do that silently. */
+	if (argc != 2 || strcmp(argv[1], "--confirm") != 0) {
+		shell_error(sh, "usage: meshtastic cluster reset --confirm");
+		shell_print(sh, "drops the ENTIRE document — every entry, the persisted "
+				"records, and any recorded scope.");
+		return -EINVAL;
+	}
+
+	dropped = meshtastic_cluster_reset();
+	if (dropped < 0) {
+		shell_error(sh, "reset failed (%d)", dropped);
+		return dropped;
+	}
+	shell_print(sh, "document cleared — %d entr%s dropped.", dropped,
+		    dropped == 1 ? "y" : "ies");
+	shell_print(sh, "This node told NOBODY to forget anything. The next digest from a "
+			"peer that still holds the document brings it all back — to clear a "
+			"fleet, `lora tx off` on every member first, reset them all, then "
+			"turn TX back on.");
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 			       SHELL_CMD(status, NULL,
 					 SHELL_HELP("Cluster doc, digest stats, channel binding.",
@@ -3727,6 +3756,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 						    "tombstone); follow the current base.",
 						    "<device|position|power|display|bluetooth>"),
 					 cmd_cluster_unpin),
+			       SHELL_CMD(reset, NULL,
+					 SHELL_HELP("Forget the whole document (local only — a "
+						    "peer that still holds it will re-seed).",
+						    "--confirm"),
+					 cmd_cluster_reset),
 			       SHELL_CMD(scope, NULL,
 					 SHELL_HELP("What this node claims to track. core = "
 						    "base + my own sections (constrained tier).",
