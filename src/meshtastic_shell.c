@@ -3377,6 +3377,23 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 				    st.entry_rx_out_of_scope, st.entries_evicted,
 				    st.want_no_space);
 		}
+		if (core) {
+			/* The one mechanism by which a narrowed node ever hears
+			 * about its OWN entries — worth being able to see. */
+			if (CONFIG_MESHTASTIC_CLUSTER_BACKSTOP_PERIODS == 0) {
+				shell_print(sh, "backstop: OFF — this node cannot recover "
+						"its own pins from the fleet");
+			} else {
+				shell_print(sh, "backstop: every %u digest periods, walks=%u%s",
+					    (unsigned int)
+						    CONFIG_MESHTASTIC_CLUSTER_BACKSTOP_PERIODS,
+					    st.backstop_walks,
+					    st.backstop_walks
+						    ? ""
+						    : "  (none yet — no peer claiming the "
+						      "whole document has been heard)");
+			}
+		}
 	}
 	/*
 	 * THE DRIFT HORIZON'S PRECONDITION, said out loud (agents-xhli.14).

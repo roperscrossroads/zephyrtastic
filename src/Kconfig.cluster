@@ -154,4 +154,21 @@ config MESHTASTIC_CLUSTER_SCOPE_FULL
 
 endchoice
 
+config MESHTASTIC_CLUSTER_BACKSTOP_PERIODS
+	int "Scoped backstop walk every N digest periods (0 = off)"
+	default 12
+	range 0 1000
+	help
+	  A narrowed node cannot compare an unnarrowed peer's triple — only
+	  the base leg — so its OWN entries are invisible to every digest it
+	  hears. After a factory reset that means §2.3 self-recovery never
+	  fires: nothing would ever tell the node its pins are sitting on a
+	  peer. This is the backstop: one scope-filtered vector walk every N
+	  digest periods, against the last peer that claimed everything.
+
+	  Only a narrowed node runs it — a node claiming everything already
+	  compares everything. A CORE claim is at most twice the allowlist, so
+	  the walk is a handful of rows; at the default cadence that is one
+	  small exchange an hour.
+
 endif # MESHTASTIC_CLUSTER

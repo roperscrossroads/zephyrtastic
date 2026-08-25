@@ -3747,6 +3747,183 @@ ZTEST(mesh_sim, test_cluster_vector_reply_is_trimmed_to_the_requesters_scope)
 	cluster_channel(false);
 }
 
+/* Make PEER known as a node that claims the whole document, without provoking a
+ * walk: echo our own base leg back so the comparison matches. */
+static void seed_backstop_peer(uint32_t seq)
+{
+	zephyrtastic_ClusterMessage mine, probe;
+	uint32_t to = 0U;
+
+	meshtastic_cluster_digest_now();
+	zassert_true(take_cluster_tx(&mine, &to), "a digest must go out");
+	wait_cluster_idle();
+	quiesce();
+
+	probe = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	probe.which_variant = zephyrtastic_ClusterMessage_digest_tag;
+	probe.variant.digest.scope = zephyrtastic_ClusterScope_SCOPE_FULL;
+	probe.variant.digest.base_hash = mine.variant.digest.base_hash;
+	probe.variant.digest.base_count = mine.variant.digest.base_count;
+	probe.variant.digest.has_max_stamp = true;
+	probe.variant.digest.max_stamp.physical_ms = TEST_EPOCH_MS + 1000;
+	probe.variant.digest.max_stamp.node_id = PEER_NODE_ID;
+	inject_cluster_bearer(&probe, MESHTASTIC_NODE_BROADCAST, 0x7E00U + seq);
+	k_sleep(K_MSEC(300));
+	quiesce();
+}
+
+/* Drive digests until the backstop walk goes out, and hand back its request. */
+static bool take_backstop_req(zephyrtastic_ClusterMessage *out)
+{
+	for (uint32_t i = 0U; i <= CONFIG_MESHTASTIC_CLUSTER_BACKSTOP_PERIODS + 1U; i++) {
+		uint32_t to = 0U;
+
+		meshtastic_cluster_digest_now();
+		while (take_cluster_tx(out, &to)) {
+			if (out->which_variant ==
+			    zephyrtastic_ClusterMessage_vector_req_tag) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+/*
+ * §2.3 SELF-RECOVERY, FOR THE CONSTRAINED TIER. This is the hole narrowing
+ * would otherwise leave, and it is not a slow recovery — it is none at all.
+ *
+ * A narrowed node can only compare the base leg of an unnarrowed peer's digest,
+ * so its own entries are invisible to every digest it hears; and level
+ * triggering means nobody volunteers them either, because a peer that is ahead
+ * never pushes uninvited. A factory-reset CORE node would therefore sit next to
+ * a peer holding its pins and never find out.
+ *
+ * One scheduled scope-filtered walk closes it.
+ */
+ZTEST(mesh_sim, test_cluster_core_backstop_recovers_this_nodes_own_entries)
+{
+	zephyrtastic_ClusterMessage msg;
+	struct meshtastic_cluster_stats before_st, after_st;
+	struct meshtastic_cluster_entry held;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	int64_t stamp_ms = TEST_EPOCH_MS + 40000;
+	uint32_t to = 0U;
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	zassert_ok(meshtastic_cluster_scope_select(MESHTASTIC_CLUSTER_SCOPE_CHOICE_CORE));
+	seed_backstop_peer(0U);
+
+	/* Beat whatever this key already holds, whoever planted it — ztest
+	 * orders by name and the document is shared, so an absolute stamp here
+	 * would be a hostage to the alphabet. */
+	if (doc_get(MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID,
+		    meshtastic_Config_bluetooth_tag, &held)) {
+		stamp_ms = held.stamp.physical_ms + 1000;
+	}
+
+	meshtastic_cluster_stats_get(&before_st);
+	zassert_true(take_backstop_req(&msg),
+		     "a narrowed node must walk a peer of its own accord — nothing else "
+		     "will ever mention its own entries to it");
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.backstop_walks, before_st.backstop_walks + 1U);
+	zassert_equal(msg.variant.vector_req.scope, zephyrtastic_ClusterScope_SCOPE_CORE,
+		      "and it must say what it claims, so the peer sends only rows it can "
+		      "actually keep");
+
+	/* The peer answers with one of OUR pins, newer than ours. */
+	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	msg.which_variant = zephyrtastic_ClusterMessage_vector_tag;
+	msg.variant.vector.entries_count = 1U;
+	msg.variant.vector.entries[0].has_key = true;
+	msg.variant.vector.entries[0].key.layer = zephyrtastic_ClusterLayer_NODE;
+	msg.variant.vector.entries[0].key.node_id = TEST_NODE_ID;
+	msg.variant.vector.entries[0].key.section = meshtastic_Config_bluetooth_tag;
+	msg.variant.vector.entries[0].has_stamp = true;
+	msg.variant.vector.entries[0].stamp.physical_ms = stamp_ms;
+	msg.variant.vector.entries[0].stamp.node_id = TEST_NODE_ID;
+	msg.variant.vector.total = 1U;
+	inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7E20U);
+
+	zassert_true(take_cluster_tx(&msg, &to), "the walk must ask for it");
+	zassert_equal(msg.which_variant, zephyrtastic_ClusterMessage_entry_req_tag,
+		      "our own row, newer elsewhere, is exactly what we came for");
+
+	len = encode_section(meshtastic_Config_bluetooth_tag, buf, sizeof(buf));
+	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+	msg.variant.entry.has_key = true;
+	msg.variant.entry.key.layer = zephyrtastic_ClusterLayer_NODE;
+	msg.variant.entry.key.node_id = TEST_NODE_ID;
+	msg.variant.entry.key.section = meshtastic_Config_bluetooth_tag;
+	msg.variant.entry.has_stamp = true;
+	msg.variant.entry.stamp.physical_ms = stamp_ms;
+	msg.variant.entry.stamp.node_id = TEST_NODE_ID;
+	msg.variant.entry.payload.size = (pb_size_t)len;
+	memcpy(msg.variant.entry.payload.bytes, buf, len);
+	inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7E21U);
+	k_sleep(K_MSEC(400));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.entry_rx_applied > before_st.entry_rx_applied,
+		     "and it must land — that is §2.3 working for a constrained node");
+	zassert_true(doc_get(MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID,
+			     meshtastic_Config_bluetooth_tag, &held));
+	zassert_equal(held.stamp.physical_ms, stamp_ms);
+
+	scope_restore_full();
+	cluster_channel(false);
+}
+
+/*
+ * The backstop finding nothing is its EXPECTED outcome, not a failure — most of
+ * the time a node's own entries are exactly where it left them. Counting those
+ * walks as fruitless would back off the one mechanism that is working, and a
+ * node that had backed it off would never recover anything again.
+ *
+ * Its rate bound is its own cadence, the same shape as the digest's, which is
+ * why it is exempt from the backoff rather than merely lucky.
+ */
+ZTEST(mesh_sim, test_cluster_core_backstop_is_never_counted_fruitless)
+{
+	zephyrtastic_ClusterMessage msg;
+	struct meshtastic_cluster_stats before_st, after_st;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	zassert_ok(meshtastic_cluster_scope_select(MESHTASTIC_CLUSTER_SCOPE_CHOICE_CORE));
+	seed_backstop_peer(1U);
+	meshtastic_cluster_stats_get(&before_st);
+
+	zassert_true(take_backstop_req(&msg), "the backstop must run");
+
+	/* Nothing to recover — the ordinary case. */
+	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	msg.which_variant = zephyrtastic_ClusterMessage_vector_tag;
+	msg.variant.vector.entries_count = 0U;
+	msg.variant.vector.total = 0U;
+	inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7E40U);
+	k_sleep(K_MSEC(400));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.pull_empty > before_st.pull_empty,
+		     "it did come back empty, and that is worth counting");
+	zassert_equal(after_st.pull_fruitless, before_st.pull_fruitless,
+		      "but it must NOT count as fruitless — backing off a scheduled "
+		      "self-check would disable the only recovery a narrowed node has");
+	zassert_equal(after_st.pull_held, before_st.pull_held);
+
+	scope_restore_full();
+	cluster_channel(false);
+}
+
 /*
  * ---- narrowing under real table pressure ----------------------------------
  *

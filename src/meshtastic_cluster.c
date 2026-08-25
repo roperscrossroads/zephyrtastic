@@ -49,6 +49,14 @@
  *   what could run away              bounded by
  *   ------------------------------   ------------------------------------------
  *   digests we send                  the Kconfig cadence
+ *   the narrowed node's backstop     its own Kconfig cadence, in digest
+ *   walk                             periods — a timer like the digest, which
+ *                                    is why the fruitless backoff does not
+ *                                    apply to it
+ *   narrowing the claim              one way, and at most once: a CORE claim
+ *                                    is twice the allowlist and MAX_ENTRIES
+ *                                    has a floor of exactly that
+ *   NVS deletes when narrowing       the table cap, once in a node's life
  *   our pulls                        one exchange at a time + a timeout; and
  *                                    consecutive FRUITLESS walks back off
  *                                    exponentially to a cap, so a peer we can
@@ -182,6 +190,7 @@ enum cluster_pull_state {
 enum cluster_pull_reason {
 	PULL_REASON_DIGEST = 0, /* a digest mismatch we noticed — judged */
 	PULL_REASON_SHELL,	/* `cluster pull <node>` — the operator's call */
+	PULL_REASON_BACKSTOP,	/* the narrowed node's scheduled self-check */
 };
 
 static struct {
@@ -197,6 +206,10 @@ static struct {
 	uint8_t scope_kind;
 	bool scope_pinned;   /* compiled FULL/CORE, or an operator's choice */
 	bool scope_id_warned;
+	/* The backstop: the last peer that claimed EVERYTHING, and how many
+	 * digests until we walk it. Only a narrowed node uses either. */
+	uint32_t backstop_peer;
+	uint16_t backstop_countdown;
 	struct meshtastic_hlc hlc;
 	struct meshtastic_cluster_stats stats;
 	bool channel_missing_logged;
@@ -244,6 +257,8 @@ static struct {
 } cluster;
 
 static void my_scope_locked(struct meshtastic_cluster_scope *out);
+static bool pull_start_locked(uint32_t peer, uint32_t delay_ms,
+			      enum cluster_pull_reason reason);
 
 /* How many reply walks may be served back-to-back before the rate limit bites.
  * A fleet coming up together has every member pull at once, and making them
@@ -1466,6 +1481,60 @@ static uint32_t digest_period_ms(void)
 	return base - jitter / 2U + (sys_rand32_get() % (jitter + 1U));
 }
 
+/*
+ * THE BACKSTOP: how a narrowed node ever learns about its OWN entries.
+ *
+ * A narrowed node can only compare the base leg of an unnarrowed peer's digest,
+ * because that peer never advertised one over the smaller set the two of them
+ * share. So nodes/<me> is invisible to every digest it hears — and level
+ * triggering means nobody will tell it either, since a peer that is ahead never
+ * pushes uninvited. After a factory reset that is not a slow recovery, it is no
+ * recovery: §2.3 simply does not fire for the constrained tier.
+ *
+ * One scope-filtered walk every N digest periods closes it. It also covers the
+ * pushes a narrowed node happens to miss — including a master's override of one
+ * of its sections, which arrives as a single broadcast and is otherwise gone.
+ *
+ * A node claiming everything does not run this: its digest comparison already
+ * covers every key it could want.
+ */
+static void backstop_tick(void)
+{
+	bool fire = false;
+	uint32_t peer = 0U;
+
+	if (CONFIG_MESHTASTIC_CLUSTER_BACKSTOP_PERIODS == 0) {
+		return;
+	}
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	if (cluster.scope_kind != MESHTASTIC_CLUSTER_SCOPE_CORE) {
+		cluster.backstop_countdown = 0U;
+	} else if (cluster.backstop_countdown > 0U) {
+		cluster.backstop_countdown--;
+	} else {
+		cluster.backstop_countdown =
+			(uint16_t)CONFIG_MESHTASTIC_CLUSTER_BACKSTOP_PERIODS;
+		peer = cluster.backstop_peer;
+		/* No peer that claims everything has been heard yet, so there
+		 * is nowhere our rows could be. Nothing to do, and nothing to
+		 * complain about: an all-narrowed fleet has no restore source
+		 * by construction (§7.7). */
+		if (peer != 0U) {
+			fire = pull_start_locked(peer, 0U, PULL_REASON_BACKSTOP);
+			if (fire) {
+				cluster.stats.backstop_walks++;
+			}
+		}
+	}
+	k_mutex_unlock(&cluster_lock);
+
+	if (fire) {
+		LOG_DBG("cluster: backstop walk against 0x%08x", peer);
+		(void)k_work_reschedule(&tx_work, K_NO_WAIT);
+	}
+}
+
 static void digest_work_fn(struct k_work *work)
 {
 	/* Static for the same sysworkq-stack reason as send_cluster_message's
@@ -1525,6 +1594,7 @@ static void digest_work_fn(struct k_work *work)
 		LOG_WRN("cluster: digest send failed (%d)", ret);
 	}
 
+	backstop_tick();
 	(void)k_work_reschedule(&digest_work, K_MSEC(digest_period_ms()));
 }
 
@@ -1581,7 +1651,14 @@ static bool pull_start_locked(uint32_t peer, uint32_t delay_ms,
 			cluster.pull_fruitless = 0U;
 		}
 	}
-	if (cluster.pull_fruitless >= CLUSTER_FRUITLESS_THRESHOLD) {
+	/* The backstop is a TIMER, not a reaction, and its rate bound is its own
+	 * Kconfig cadence — the same shape as the digest. Holding it back on a
+	 * fruitless run would suppress the one mechanism by which a narrowed
+	 * node ever recovers its own entries, which is the opposite of what the
+	 * backoff is for. (The judgement above still runs: it belongs to the
+	 * PREVIOUS walk, whoever opened this one.) */
+	if (reason != PULL_REASON_BACKSTOP &&
+	    cluster.pull_fruitless >= CLUSTER_FRUITLESS_THRESHOLD) {
 		uint32_t shift = MIN((uint32_t)cluster.pull_fruitless -
 					     CLUSTER_FRUITLESS_THRESHOLD,
 				     CLUSTER_FRUITLESS_MAX_SHIFT);
@@ -1638,6 +1715,14 @@ static bool digest_compare_locked(uint32_t from, const zephyrtastic_ClusterDiges
 	scope_from_pb(d->scope, from, &peer, &has_base_leg);
 	my_scope_locked(&mine);
 	meshtastic_cluster_scope_intersect(&mine, &peer, &inter);
+
+	if (peer.kind == MESHTASTIC_CLUSTER_SCOPE_FULL && from != meshtastic_get_node_id()) {
+		/* Worth walking later: it claims everything, so it is the kind
+		 * of peer that could be holding our own rows for us. A peer
+		 * that has narrowed too cannot help — CORE(x) never contains
+		 * nodes/us. */
+		cluster.backstop_peer = from;
+	}
 
 	if (scope_eq(&inter, &peer)) {
 		struct meshtastic_hlc_stamp max;
