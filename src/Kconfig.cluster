@@ -103,6 +103,27 @@ config MESHTASTIC_CLUSTER_SYNC_TIMEOUT_SEC
 	  when this fires: the documents still differ, so the next digest
 	  starts the walk again.
 
+config MESHTASTIC_CLUSTER_PEERS
+	int "Fleet-view capacity (peers whose digest agreement is remembered)"
+	default 8
+	range 2 64
+	help
+	  How many peers this node remembers the last digest verdict for. ~20 B
+	  each.
+
+	  A digest already tells a node whether a given peer's document agrees
+	  with its own — that comparison happens on every digest received, and
+	  until now only a counter survived it. Keeping the per-peer verdict is
+	  what lets a node answer "does the fleet agree with me RIGHT NOW", which
+	  is the pre-flight half of the straggler sweep (CONFIG-CONVERGENCE.md
+	  §7.9): before a fleet-wide preset move, confirm every member already
+	  holds the new config, because a member that misses it is orphaned rather
+	  than merely late.
+
+	  LRU by last-heard, so on an over-capacity fleet the peers that fall out
+	  are the ones already silent — which the fleet view reports as unknown
+	  rather than as agreeing.
+
 config MESHTASTIC_CLUSTER_MAX_ENTRIES
 	int "Cluster document capacity (entries)"
 	default 32

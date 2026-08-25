@@ -214,6 +214,15 @@ static struct {
 	struct meshtastic_cluster_stats stats;
 	bool channel_missing_logged;
 
+	/* THE FLEET VIEW (agents-xhli.11, §7.9). Every digest already answers
+	 * "does this peer agree with me"; until this table existed the answer was
+	 * thrown away the instant it was computed and only a counter survived. A
+	 * counter cannot answer the question a preset change actually asks, which
+	 * is not "how many agreements have I seen" but "is EVERY member agreeing
+	 * with me right now" — so the verdict is kept per peer. */
+	struct meshtastic_cluster_peer peers[CONFIG_MESHTASTIC_CLUSTER_PEERS];
+	uint16_t peer_count;
+
 	/* Requester half. */
 	enum cluster_pull_state pull_state;
 	uint8_t pull_reason; /* enum cluster_pull_reason — why this walk exists */
@@ -1813,6 +1822,141 @@ static bool digest_compare_locked(uint32_t from, const zephyrtastic_ClusterDiges
 	}
 }
 
+/* How recent a digest has to be for its verdict to still count.
+ *
+ * Derived from the configured digest period rather than being its own magic
+ * number: three periods is two missed broadcasts, which is the point at which
+ * "quiet" stops being jitter and starts being absence. Deriving it also means a
+ * fleet that slows its digests does not silently acquire a stale fleet view.
+ * Clamped so a pinned-slow build (the sim pins 86400) cannot make the window so
+ * wide that everything looks fresh forever. */
+#define CLUSTER_FLEET_WINDOW_SEC                                                                   \
+	MIN(3U * (uint32_t)CONFIG_MESHTASTIC_CLUSTER_DIGEST_PERIOD_SEC, 3600U)
+
+static uint32_t cluster_now_sec(void)
+{
+	return (uint32_t)k_uptime_seconds();
+}
+
+/* Record what a peer's digest said. Caller holds cluster_lock.
+ *
+ * LRU by last-heard when full: the peer that falls out is the one we have not
+ * heard from in longest, which the fleet view then reports as UNKNOWN rather
+ * than as agreeing. Evicting toward "I don't know" is the safe direction — the
+ * opposite would let a full table manufacture consensus. */
+static void peer_note_locked(uint32_t from, const zephyrtastic_ClusterDigest *d, bool comparable,
+			     bool agreed, uint32_t their_hash)
+{
+	struct meshtastic_cluster_peer *slot = NULL;
+	uint32_t oldest = UINT32_MAX;
+
+	if (from == 0U || from == meshtastic_get_node_id()) {
+		return;
+	}
+
+	for (uint16_t i = 0; i < cluster.peer_count; i++) {
+		if (cluster.peers[i].node_id == from) {
+			slot = &cluster.peers[i];
+			break;
+		}
+	}
+
+	if (slot == NULL && cluster.peer_count < ARRAY_SIZE(cluster.peers)) {
+		slot = &cluster.peers[cluster.peer_count++];
+	}
+
+	if (slot == NULL) {
+		for (uint16_t i = 0; i < cluster.peer_count; i++) {
+			if (cluster.peers[i].heard_uptime_sec <= oldest) {
+				oldest = cluster.peers[i].heard_uptime_sec;
+				slot = &cluster.peers[i];
+			}
+		}
+	}
+
+	if (slot == NULL) {
+		return;
+	}
+
+	slot->node_id = from;
+	slot->heard_uptime_sec = cluster_now_sec();
+	slot->doc_hash = their_hash;
+	slot->entry_count = (uint16_t)d->entry_count;
+	slot->scope = (uint8_t)d->scope;
+	slot->agreed = agreed;
+	slot->comparable = comparable;
+}
+
+bool meshtastic_cluster_fleet_converged(struct meshtastic_cluster_fleet *out)
+{
+	struct meshtastic_cluster_fleet f = { .window_sec = CLUSTER_FLEET_WINDOW_SEC };
+	uint32_t now;
+	bool ok;
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	now = cluster_now_sec();
+	f.known = cluster.peer_count;
+
+	for (uint16_t i = 0; i < cluster.peer_count; i++) {
+		const struct meshtastic_cluster_peer *p = &cluster.peers[i];
+		uint32_t age = (now > p->heard_uptime_sec) ? (now - p->heard_uptime_sec) : 0U;
+
+		if (age > f.window_sec) {
+			f.stale++;
+		} else if (!p->comparable) {
+			f.incomparable++;
+		} else if (p->agreed) {
+			f.agreed++;
+		} else {
+			f.diverged++;
+		}
+	}
+	k_mutex_unlock(&cluster_lock);
+
+	/* A fleet of one is not a converged fleet, it is an absence of evidence —
+	 * and this exists to be asked before an irreversible move, so "I have not
+	 * heard from anybody" must never read as "everybody agrees".
+	 *
+	 * incomparable counts against convergence too: a peer whose scope shares
+	 * no basis with ours is a peer we cannot say anything about, and the
+	 * question being asked does not accept "unknown" as a yes. */
+	ok = (f.known > 0U) && (f.agreed == f.known);
+
+	if (out != NULL) {
+		*out = f;
+	}
+	return ok;
+}
+
+bool meshtastic_cluster_peer_get(uint16_t idx, struct meshtastic_cluster_peer *out)
+{
+	bool found = false;
+
+	if (out == NULL) {
+		return false;
+	}
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	if (idx < cluster.peer_count) {
+		*out = cluster.peers[idx];
+		found = true;
+	}
+	k_mutex_unlock(&cluster_lock);
+
+	return found;
+}
+
+uint16_t meshtastic_cluster_peer_count(void)
+{
+	uint16_t n;
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	n = cluster.peer_count;
+	k_mutex_unlock(&cluster_lock);
+
+	return n;
+}
+
 static void on_digest(uint32_t from, const zephyrtastic_ClusterDigest *d)
 {
 	struct meshtastic_hlc_stamp theirs;
@@ -1828,6 +1972,7 @@ static void on_digest(uint32_t from, const zephyrtastic_ClusterDigest *d)
 	k_mutex_lock(&cluster_lock, K_FOREVER);
 	(void)meshtastic_hlc_observe(&cluster.hlc, &theirs);
 	comparable = digest_compare_locked(from, d, &theirs, &match, &hash, &theirs_hash);
+	peer_note_locked(from, d, comparable, comparable && match, theirs_hash);
 
 	if (!comparable) {
 		/* A peer from before scopes existed, heard by a node that has
@@ -2757,6 +2902,13 @@ int meshtastic_cluster_reset(void)
 #endif
 	cluster.stats.scope_demotions = 0U;
 	cluster.stats.entries_evicted = 0U;
+
+	/* And every agreement verdict on record was about the document that is
+	 * gone. Keeping them would let a freshly-cleared node answer "the fleet
+	 * agrees with me" on the strength of digests that matched a document it no
+	 * longer has — the exact false confidence the pre-flight exists to refuse. */
+	memset(cluster.peers, 0, sizeof(cluster.peers));
+	cluster.peer_count = 0U;
 
 	/* Anything in flight describes a document that is gone. */
 	pull_reset_locked();

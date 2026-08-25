@@ -3960,7 +3960,84 @@ static int cmd_cluster_reset(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* `cluster fleet` — who agrees with me, and can I safely make a fleet-wide move.
+ *
+ * The pre-flight half of the straggler sweep (CONFIG-CONVERGENCE.md §7.9). A
+ * fleet preset change orphans any member that misses it — new frequency, new
+ * channel hashes, mutually deaf — so the question worth answering BEFORE the
+ * move is "does every member already hold what I am about to make current".
+ *
+ * The verdict deliberately reports what it cannot see as loudly as what it can.
+ * A node that is already orphaned has no digest on record and so cannot appear
+ * as a disagreement; it is simply absent, and an absence must not read as
+ * assent. */
+static int cmd_cluster_fleet(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_cluster_fleet f;
+	uint16_t n = meshtastic_cluster_peer_count();
+	uint32_t now = (uint32_t)k_uptime_seconds();
+	bool converged;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	converged = meshtastic_cluster_fleet_converged(&f);
+
+	shell_print(sh, "my doc  : %08x / %u entries",
+		    (unsigned int)meshtastic_cluster_doc_hash_now(),
+		    meshtastic_cluster_entry_count());
+	shell_print(sh, "window  : %us (3x the digest period)", f.window_sec);
+
+	if (n == 0U) {
+		shell_print(sh, "peers   : none heard");
+	}
+	for (uint16_t i = 0; i < n; i++) {
+		struct meshtastic_cluster_peer p;
+		uint32_t age;
+		const char *verdict;
+
+		if (!meshtastic_cluster_peer_get(i, &p)) {
+			continue;
+		}
+		age = (now > p.heard_uptime_sec) ? (now - p.heard_uptime_sec) : 0U;
+
+		if (age > f.window_sec) {
+			verdict = "STALE";
+		} else if (!p.comparable) {
+			verdict = "not comparable";
+		} else if (p.agreed) {
+			verdict = "agrees";
+		} else {
+			verdict = "DIVERGED";
+		}
+
+		shell_print(sh, "  0x%08x %-14s doc=%08x/%-3u %us ago", p.node_id, verdict,
+			    (unsigned int)p.doc_hash, p.entry_count, age);
+	}
+
+	shell_print(sh, "totals  : %u known — %u agree, %u diverged, %u stale, %u incomparable",
+		    f.known, f.agreed, f.diverged, f.stale, f.incomparable);
+
+	if (converged) {
+		shell_print(sh, "verdict : every peer I KNOW OF agrees");
+	} else if (f.known == 0U) {
+		shell_print(sh, "verdict : NO — nothing heard, which is not the same as "
+				"agreement");
+	} else {
+		shell_print(sh, "verdict : NO — do not make a fleet-wide preset change");
+	}
+	shell_warn(sh, "a node already orphaned, asleep or out of range has no digest here "
+		       "and cannot fail this check — it is absent, not agreeing");
+
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
+			       SHELL_CMD(fleet, NULL,
+					 SHELL_HELP("Who agrees with my document — the "
+						    "pre-flight for a fleet-wide change.",
+						    NULL),
+					 cmd_cluster_fleet),
 			       SHELL_CMD(status, NULL,
 					 SHELL_HELP("Cluster doc, digest stats, channel binding.",
 						    NULL),

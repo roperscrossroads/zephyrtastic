@@ -57,6 +57,9 @@
 
 #define TEST_NODE_ID 0x0A0A0A0AU
 #define PEER_NODE_ID 0x0B0B0B0BU
+/* A second fake neighbour, for the fleet-view tests: "one member disagrees"
+ * needs two members. */
+#define PEER2_NODE_ID 0x0C0C0C0CU
 
 static const struct device *const lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
@@ -4456,4 +4459,180 @@ ZTEST(mesh_sim, test_rebroadcast_none_hears_but_does_not_relay)
 			  "traffic");
 
 	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_ALL);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The fleet view — pre-flight for a fleet-wide change (agents-xhli.11 §7.9)   */
+/* ------------------------------------------------------------------------- */
+
+/* Inject one digest as if from @p from, claiming @p hash over @p count entries.
+ *
+ * Agreement is a THREE-part comparison, not just the hash: hash, entry count AND
+ * max stamp must all match (digest_compare_locked). So an "agreeing" digest
+ * against a freshly-reset (empty) document is 0/0 with a ZEROED stamp — an
+ * earlier version of this helper sent a plausible-looking stamp and every
+ * agreement test failed, which is the comparison doing its job. */
+/* Port-256 frames are refused before interpretation unless the cluster channel
+ * is bound, so every fleet-view test provisions it. Idempotent: the module
+ * binds by name, and re-setting the same slot is a no-op for it. */
+static void ensure_cluster_channel(void)
+{
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
+	uint8_t ch_index;
+
+	ch.role = meshtastic_Channel_Role_SECONDARY;
+	ch.has_settings = true;
+	strncpy(ch.settings.name, CONFIG_MESHTASTIC_CLUSTER_CHANNEL_NAME,
+		sizeof(ch.settings.name) - 1U);
+	ch.settings.psk.size = 16U;
+	ch.settings.psk.bytes[0] = 0x42U;
+	zassert_ok(meshtastic_channels_set_slot(2U, &ch), "cluster channel set failed");
+	zassert_true(meshtastic_cluster_channel_resolved(&ch_index), "module must bind");
+}
+
+static void inject_digest_from(uint32_t from, uint32_t hash, uint32_t count, uint32_t id)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	uint8_t cbuf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(cbuf, sizeof(cbuf));
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
+	msg.variant.digest.doc_hash = hash;
+	msg.variant.digest.entry_count = count;
+	msg.variant.digest.scope = zephyrtastic_ClusterScope_SCOPE_FULL;
+	msg.variant.digest.has_max_stamp = true;
+	if (count != 0U) {
+		/* A non-empty document has a non-zero newest stamp; any value does,
+		 * since this path only ever needs to NOT match ours. */
+		msg.variant.digest.max_stamp.physical_ms = 12345;
+		msg.variant.digest.max_stamp.node_id = from;
+	}
+	zassert_true(pb_encode(&os, zephyrtastic_ClusterMessage_fields, &msg), "encode failed");
+
+	{
+		struct meshtastic_packet pkt = {
+			.from = from,
+			.to = MESHTASTIC_NODE_BROADCAST,
+			.id = id,
+			.portnum = MESHTASTIC_PORT_PRIVATE,
+			.payload = cbuf,
+			.payload_len = os.bytes_written,
+			.hop_limit = 3U,
+			.hop_start = 3U,
+			.channel_index = 2U,
+		};
+
+		zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "encode failed");
+	}
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	k_sleep(K_MSEC(200));
+}
+
+/* Nothing heard is NOT agreement.
+ *
+ * This is the assertion that matters most, because the failure it guards
+ * against is silent and irreversible: a lone node asked "may I move the fleet?"
+ * would answer yes if "no disagreements" were mistaken for "everyone agrees",
+ * and the preset change that followed would orphan every member it had not
+ * heard from. An absence of evidence must read as an absence of evidence. */
+ZTEST(mesh_sim, test_fleet_view_silence_is_not_consensus)
+{
+	struct meshtastic_cluster_fleet f;
+
+	ensure_cluster_channel();
+	zassert_ok(meshtastic_cluster_reset(), "reset failed");
+
+	zassert_false(meshtastic_cluster_fleet_converged(&f),
+		      "a node that has heard nobody must not report convergence");
+	zassert_equal(f.known, 0U, "and must say it knows of nobody");
+}
+
+/* An agreeing peer is recorded as agreeing, and one peer agreeing is enough for
+ * convergence — the check is "every member I know of", not a quorum. */
+ZTEST(mesh_sim, test_fleet_view_records_agreement)
+{
+	struct meshtastic_cluster_fleet f;
+	struct meshtastic_cluster_peer p;
+
+	ensure_cluster_channel();
+	zassert_ok(meshtastic_cluster_reset(), "reset failed");
+
+	/* Our document is empty after the reset, so an empty digest agrees. */
+	inject_digest_from(PEER_NODE_ID, 0U, 0U, 0xF001U);
+
+	zassert_equal(meshtastic_cluster_peer_count(), 1U, "the peer should be on record");
+	zassert_true(meshtastic_cluster_peer_get(0U, &p), "peer readback failed");
+	zassert_equal(p.node_id, PEER_NODE_ID, "wrong peer recorded");
+	zassert_true(p.comparable, "same scope, so comparable");
+	zassert_true(p.agreed, "an identical document must be recorded as agreement");
+
+	zassert_true(meshtastic_cluster_fleet_converged(&f),
+		     "one known peer, agreeing, is a converged fleet view");
+	zassert_equal(f.agreed, 1U);
+	zassert_equal(f.diverged, 0U);
+}
+
+/* One disagreeing member is enough to refuse. A preset change is all-or-nothing
+ * — the member left behind is orphaned, not outvoted — so this must never be a
+ * majority test. */
+ZTEST(mesh_sim, test_fleet_view_one_divergence_refuses)
+{
+	struct meshtastic_cluster_fleet f;
+
+	ensure_cluster_channel();
+	zassert_ok(meshtastic_cluster_reset(), "reset failed");
+
+	inject_digest_from(PEER_NODE_ID, 0U, 0U, 0xF010U);
+	wait_rx_armed();
+	inject_digest_from(PEER2_NODE_ID, 0xDEADBEEFU, 1U, 0xF011U);
+
+	zassert_false(meshtastic_cluster_fleet_converged(&f),
+		      "one diverged member must refuse the whole fleet, not be outvoted");
+	zassert_equal(f.known, 2U, "both peers should be on record");
+	zassert_equal(f.agreed, 1U);
+	zassert_equal(f.diverged, 1U);
+}
+
+/* A peer that later agrees updates its verdict rather than accumulating one
+ * record per digest — the table answers "where does it stand NOW". */
+ZTEST(mesh_sim, test_fleet_view_verdict_is_current_not_cumulative)
+{
+	struct meshtastic_cluster_fleet f;
+
+	ensure_cluster_channel();
+	zassert_ok(meshtastic_cluster_reset(), "reset failed");
+
+	inject_digest_from(PEER_NODE_ID, 0xDEADBEEFU, 1U, 0xF020U);
+	zassert_false(meshtastic_cluster_fleet_converged(&f), "precondition: diverged");
+	zassert_equal(f.known, 1U, "one peer, not one record per digest");
+
+	wait_rx_armed();
+	inject_digest_from(PEER_NODE_ID, 0U, 0U, 0xF021U);
+
+	zassert_true(meshtastic_cluster_fleet_converged(&f),
+		     "the same peer agreeing later must replace its earlier verdict");
+	zassert_equal(f.known, 1U, "still one peer");
+	zassert_equal(f.agreed, 1U);
+}
+
+/* Clearing the document must clear the agreements ABOUT it. Otherwise a
+ * freshly-reset node reports "the fleet agrees with me" on the strength of
+ * digests that matched a document it no longer holds. */
+ZTEST(mesh_sim, test_fleet_view_cleared_with_the_document)
+{
+	struct meshtastic_cluster_fleet f;
+
+	ensure_cluster_channel();
+	zassert_ok(meshtastic_cluster_reset(), "reset failed");
+	inject_digest_from(PEER_NODE_ID, 0U, 0U, 0xF030U);
+	zassert_true(meshtastic_cluster_fleet_converged(&f), "precondition: converged");
+
+	ensure_cluster_channel();
+	zassert_ok(meshtastic_cluster_reset(), "reset failed");
+
+	zassert_equal(meshtastic_cluster_peer_count(), 0U,
+		      "a cleared document must not leave agreements about it on record");
+	zassert_false(meshtastic_cluster_fleet_converged(&f), "and must not read as converged");
 }

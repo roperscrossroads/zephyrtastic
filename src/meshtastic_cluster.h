@@ -207,6 +207,60 @@ struct meshtastic_cluster_stats {
 
 void meshtastic_cluster_stats_get(struct meshtastic_cluster_stats *out);
 
+/* ------------------------------------------------------------------------ */
+/* The fleet view — the pre-flight half of the straggler sweep (§7.9)        */
+/* ------------------------------------------------------------------------ */
+
+/** What the last digest from one peer said. */
+struct meshtastic_cluster_peer {
+	uint32_t node_id;
+	uint32_t heard_uptime_sec; /* uptime at which its last digest arrived */
+	uint32_t doc_hash;         /* the hash IT advertised */
+	uint16_t entry_count;      /* ...and over how many entries */
+	uint8_t scope;             /* zephyrtastic_ClusterScope */
+	bool agreed;               /* its document matched ours at that moment */
+	bool comparable;           /* false: its scope and ours share no basis */
+};
+
+struct meshtastic_cluster_fleet {
+	uint16_t known;        /* peers with a digest on record */
+	uint16_t agreed;       /* heard recently AND matching */
+	uint16_t diverged;     /* heard recently, not matching */
+	uint16_t incomparable; /* heard recently, no shared basis to compare */
+	uint16_t stale;        /* on record but not heard inside the window */
+	uint32_t window_sec;   /* how recent "recently" is */
+};
+
+/**
+ * @brief Is every peer this node knows about currently agreeing with it?
+ *
+ * The pre-flight check a fleet-wide preset change needs: a member that misses
+ * the change is not late, it is ORPHANED — different frequency, different
+ * channel hashes, deaf to the fleet and the fleet deaf to it
+ * (CONFIG-CONVERGENCE.md §7.9). Confirming agreement first is what turns that
+ * from a coin flip into a decision.
+ *
+ * ⚠️ THE LIMIT IS THE WHOLE POINT AND MUST NOT BE FORGOTTEN. This can only see
+ * nodes it has HEARD. A node that is already orphaned, asleep, or out of range
+ * has no digest on record and therefore cannot fail this check — it is simply
+ * absent. So a true return means "every member I know of agrees", never "every
+ * member exists and agrees". It reduces the risk of CREATING an orphan; it
+ * cannot detect one that already exists. Finding those is the recovery half of
+ * the sweep, which needs a master to revisit the old preset and does not exist
+ * yet.
+ *
+ * @param out optional breakdown.
+ * @return true when at least one peer is known and every known peer was heard
+ *         inside the window and agreed.
+ */
+bool meshtastic_cluster_fleet_converged(struct meshtastic_cluster_fleet *out);
+
+/** Iterate the remembered peers, most recently heard first. */
+bool meshtastic_cluster_peer_get(uint16_t idx, struct meshtastic_cluster_peer *out);
+
+/** Number of peers currently on record. */
+uint16_t meshtastic_cluster_peer_count(void);
+
 /* Human-readable state of the anti-entropy exchange in flight, and (when
  * non-NULL) the peer it is with — 0 when idle. */
 const char *meshtastic_cluster_sync_state(uint32_t *peer);
