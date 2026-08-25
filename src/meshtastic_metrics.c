@@ -288,6 +288,12 @@ int meshtastic_collect_local_stats(meshtastic_LocalStats *stats)
 	return 0;
 }
 
+#if defined(CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE)
+/* Only the phone path encodes a bare Telemetry: the on-request mesh reply goes
+ * through meshtastic_telemetry_encode_packet() instead, which builds a whole
+ * reply packet. Scoped inside this guard so a LOCAL_STATS=y / TO_PHONE=n build
+ * does not carry -- or -Werror on -- a function nothing calls.
+ */
 static int local_stats_encode(meshtastic_LocalStats *stats, uint8_t *payload, size_t payload_size,
 			      size_t *written)
 {
@@ -313,7 +319,6 @@ static int local_stats_encode(meshtastic_LocalStats *stats, uint8_t *payload, si
 	return 0;
 }
 
-#if defined(CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE)
 /* Hand LocalStats straight to whatever phone transports are attached, without
  * touching the radio.
  *

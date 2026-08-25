@@ -34,6 +34,17 @@ float meshtastic_airtime_channel_util_percent(void);
 
 float meshtastic_airtime_tx_util_percent(void);
 
+/**
+ * @brief Minutes until the rolling TX-utilization window falls back under a ceiling.
+ *
+ * Answers "when can I send again" for the duty-cycle gate: each passing minute
+ * drops the oldest bucket out of the one-hour window, so this walks the window
+ * oldest-first and reports the first age at which the total is under
+ * @p duty_cycle_pct. 0 when already under it, 60 when even an empty window would
+ * not be (which cannot happen with a sane ceiling, but is the safe answer).
+ */
+uint8_t meshtastic_airtime_silent_minutes(float tx_percent, float duty_cycle_pct);
+
 #ifdef __cplusplus
 }
 #endif

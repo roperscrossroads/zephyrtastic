@@ -16,6 +16,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include <pb_encode.h>
 #include <psa/crypto.h>
 
 #include <zephyr/meshtastic/gnss.h>
@@ -27,6 +28,8 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_contention.h"
+#include "meshtastic_duty.h"
+#include "meshtastic_phoneapi.h"
 #include "meshtastic_tx_power.h"
 #include "meshtastic_core.h"
 #include "meshtastic_modules.h"
@@ -777,6 +780,41 @@ static int send_packet_complete(const struct meshtastic_packet *local,
 	return 0;
 }
 
+#if defined(CONFIG_MESHTASTIC_DUTY_CYCLE)
+/* Emit a ROUTING_APP NAK carrying DUTY_CYCLE_LIMIT straight to the phone.
+ *
+ * Not meshtastic_routing_send_error(): that one is the RX-path NAK, it refuses a
+ * request whose `from` is us, and it would go out over the radio — which is the
+ * one thing this situation forbids. This mirrors the local-admin reply path
+ * (meshtastic_admin.c admin_emit_reply, PhoneAPI branch): build the packet,
+ * hand it to the transports, never touch the air. */
+static void duty_nak_to_phone(const struct meshtastic_packet *blocked)
+{
+	meshtastic_Routing routing = meshtastic_Routing_init_zero;
+	uint8_t buf[16];
+	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet nak = {0};
+
+	routing.which_variant = meshtastic_Routing_error_reason_tag;
+	routing.error_reason = meshtastic_Routing_Error_DUTY_CYCLE_LIMIT;
+
+	if (!pb_encode(&stream, meshtastic_Routing_fields, &routing)) {
+		return;
+	}
+
+	nak.from = mt.node_id;
+	nak.to = mt.node_id;
+	nak.id = meshtastic_allocate_packet_id();
+	nak.request_id = blocked->id;
+	nak.portnum = meshtastic_PortNum_ROUTING_APP;
+	nak.payload = buf;
+	nak.payload_len = (uint16_t)stream.bytes_written;
+	nak.channel_index = blocked->channel_index;
+
+	meshtastic_phoneapi_on_packet(&nak, NULL);
+}
+#endif
+
 /* Lock-free send tail shared by both mesh-native entry points: schedule tier, airtime
  * gate, radio submit (own-CW contention for broadcasts), reliable tracking, TX_DONE +
  * MQTT uplink. Operates only on the materialised @p local + built @p wire — mt_ws is no
@@ -831,6 +869,22 @@ static int send_wire_tail(const struct meshtastic_packet *local,
 	} else {
 		ret = meshtastic_radio_send_wire_wait_prio(wire, pkt_len, tier, wait);
 	}
+
+#if defined(CONFIG_MESHTASTIC_DUTY_CYCLE)
+	if (ret == -ECANCELED) {
+		/* The regulatory gate refused this frame. Tell the client WHY rather
+		 * than letting a text message vanish: upstream NAKs the API with
+		 * DUTY_CYCLE_LIMIT here (Router::send -> abortSendAndNak), and a
+		 * silently dropped message is exactly the failure that gets reported
+		 * as "the radio is broken".
+		 *
+		 * Straight to the PhoneAPI, never over the air: the frame is ours, so
+		 * upstream's NAK is a local delivery too — and sending it on the radio
+		 * would be a transmission made because we were told not to transmit,
+		 * which would also recurse into this same gate. */
+		duty_nak_to_phone(local);
+	}
+#endif
 
 	if (ret >= 0) {
 		/* Track for retransmission if it is a want_ack unicast we originate

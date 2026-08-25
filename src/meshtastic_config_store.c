@@ -15,6 +15,7 @@
 #include <zephyr/sys/util.h>
 
 #include "meshtastic_channels.h"
+#include "meshtastic_duty.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_ext_ram.h"
@@ -731,6 +732,7 @@ int meshtastic_config_store_apply_core(void)
 	mt.modem_preset = lora.modem_preset;
 	mt.use_preset = lora.use_preset;
 	mt.config_ok_to_mqtt = lora.config_ok_to_mqtt;
+	meshtastic_duty_set_override(lora.override_duty_cycle);
 
 	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		ret = meshtastic_channels_set_slot(i, &channels[i]);
@@ -854,6 +856,12 @@ int meshtastic_config_store_apply_core(void)
 						  mt.use_preset, &plan);
 		if (ret == 0) {
 			mt.frequency = plan.frequency_hz;
+			/* The ceiling is now enforced, not just logged (DUTY). It has to
+			 * be latched here because this is the only place a plan is
+			 * resolved -- and it must be latched even when the ceiling is
+			 * 100, or a move from EU_868 to US would leave the old 10 %
+			 * limit in force. */
+			meshtastic_duty_set_region(region, plan.duty_cycle_pct);
 			LOG_DBG("region %d: slot %u/%u -> %u Hz (duty %d%%)", (int)region,
 				plan.slot, plan.num_slots, plan.frequency_hz,
 				(int)plan.duty_cycle_pct);

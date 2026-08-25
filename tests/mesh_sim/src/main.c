@@ -44,7 +44,10 @@
 #if defined(CONFIG_MESHTASTIC_RF_HIST)
 #include "meshtastic_rf_measure.h"
 #endif
+#include "meshtastic_airtime.h"
+#include "meshtastic_duty.h"
 #include "meshtastic_outbound.h"
+#include "meshtastic_phoneapi.h"
 #include "meshtastic_packet.h"
 /* after meshtastic_packet.h: it declares struct meshtastic_wire_header, which
  * meshtastic_router.h uses by pointer in a prototype. */
@@ -4277,3 +4280,140 @@ ZTEST(mesh_sim, test_cluster_zz_reset_forgets_everything_and_tells_nobody)
 }
 
 #endif /* CONFIG_MESHTASTIC_CLUSTER */
+
+/* ------------------------------------------------------------------------- */
+/* Regulatory duty cycle (DUTY): the gate is wired to the egress funnel        */
+/* ------------------------------------------------------------------------- */
+
+/* The unit tests in tests/airtime prove the ceiling arithmetic. This proves the
+ * thing that arithmetic is worthless without: that the gate is actually reached
+ * by real sends, that it stops RELAYS as well as our own traffic, that it does
+ * NOT stop reception, and that a refused local send tells the client why.
+ *
+ * A duty-cycle gate could be perfectly correct and wired to nothing at all, and
+ * every unit test would still pass.
+ */
+
+#define DUTY_TEST_QUEUE 4U
+
+static struct meshtastic_phoneapi_frame duty_q[DUTY_TEST_QUEUE];
+static struct meshtastic_phoneapi duty_api;
+static meshtastic_ToRadio duty_to_scratch;
+static meshtastic_FromRadio duty_from_scratch;
+static bool duty_api_registered;
+
+/* Pop everything queued for the phone and report the routing error the first
+ * ROUTING_APP frame carried, or -1 if there was none. */
+static int duty_take_routing_error(uint32_t *request_id)
+{
+	struct meshtastic_phoneapi_frame frame;
+	int err = -1;
+
+	while (meshtastic_phoneapi_pop_frame(&duty_api, &frame)) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t stream = pb_istream_from_buffer(frame.data, frame.len);
+		meshtastic_Routing routing = meshtastic_Routing_init_zero;
+
+		if (!pb_decode(&stream, meshtastic_FromRadio_fields, &from)) {
+			continue;
+		}
+		if (from.which_payload_variant != meshtastic_FromRadio_packet_tag ||
+		    from.packet.which_payload_variant != meshtastic_MeshPacket_decoded_tag ||
+		    from.packet.decoded.portnum != meshtastic_PortNum_ROUTING_APP) {
+			continue;
+		}
+
+		stream = pb_istream_from_buffer(from.packet.decoded.payload.bytes,
+						from.packet.decoded.payload.size);
+		if (!pb_decode(&stream, meshtastic_Routing_fields, &routing)) {
+			continue;
+		}
+		if (err < 0) {
+			err = (int)routing.error_reason;
+			if (request_id != NULL) {
+				*request_id = from.packet.decoded.request_id;
+			}
+		}
+	}
+
+	return err;
+}
+
+ZTEST(mesh_sim, test_duty_cycle_refuses_all_egress_and_tells_the_phone)
+{
+	struct lora_sim_frame f;
+	struct meshtastic_duty_stats stats;
+	struct meshtastic_packet pkt = {0};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t nak_request_id = 0U;
+	const char *body = "duty";
+
+	if (!duty_api_registered) {
+		meshtastic_phoneapi_init(&duty_api, "duty-test", duty_q, DUTY_TEST_QUEUE, NULL,
+					 NULL, NULL, NULL, &duty_to_scratch,
+					 &duty_from_scratch);
+		meshtastic_phoneapi_register(&duty_api);
+		duty_api_registered = true;
+	}
+	meshtastic_phoneapi_reset(&duty_api);
+	meshtastic_duty_stats_reset();
+
+	/* Baseline: unrestricted region, the node transmits. */
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "before"),
+		   "a node under no ceiling must transmit");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "no baseline TX captured");
+
+	/* Move to a restricted region and spend the hour's allowance. 400000 ms is
+	 * ~11.1% of an hour against EU_868's 10%. */
+	meshtastic_duty_set_region(meshtastic_Config_LoRaConfig_RegionCode_EU_868, 10.0f);
+	meshtastic_airtime_log(MESHTASTIC_AIRTIME_TX, 400000U);
+	zassert_true(meshtastic_duty_blocked(NULL), "precondition: over the ceiling");
+
+	/* 1. Our own send is refused, and nothing reaches the radio. */
+	pkt.to = MESHTASTIC_NODE_BROADCAST;
+	pkt.portnum = MESHTASTIC_PORT_TEXT_MESSAGE;
+	pkt.payload = (const uint8_t *)body;
+	pkt.payload_len = (uint16_t)strlen(body);
+	pkt.id = 0xD01FU;
+	zassert_not_equal(meshtastic_send_packet(&pkt, K_NO_WAIT), 0,
+			  "a send past the duty ceiling must FAIL, not be silently dropped");
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(200)), 0,
+			  "nothing may reach the radio while the ceiling is exceeded");
+
+	/* 2. The client is told WHY. A text that vanishes with no reason is the
+	 *    failure this NAK exists to prevent. */
+	zassert_equal(duty_take_routing_error(&nak_request_id),
+		      (int)meshtastic_Routing_Error_DUTY_CYCLE_LIMIT,
+		      "the phone must receive a DUTY_CYCLE_LIMIT NAK");
+	zassert_equal(nak_request_id, 0xD01FU,
+		      "the NAK must name the packet it refused, or the app cannot match it");
+
+	/* 3. RELAYS are refused too — airtime is airtime, whoever's packet it was.
+	 *    But reception is untouched: the frame is still delivered locally. This
+	 *    is the pair that matters. A gate that also deafened the node would be a
+	 *    much worse bug than the one it fixes. */
+	build_peer_text(0xD02FU, "relay me", wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)),
+		   "the duty gate must not stop the node RECEIVING");
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0,
+			  "a relay past the ceiling must be refused as well as our own traffic");
+
+	meshtastic_duty_stats_get(&stats);
+	zassert_true(stats.blocked >= 2U, "both refusals should be counted (got %u)",
+		     stats.blocked);
+	zassert_true(stats.blocked_relay >= 1U,
+		     "and the relay refusal counted apart from our own");
+
+	/* 4. Lifting the ceiling releases the gate — it is a window, not a latch. */
+	meshtastic_duty_set_region(meshtastic_Config_LoRaConfig_RegionCode_US, 100.0f);
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "after"),
+		   "the node must transmit again once the ceiling no longer applies");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "no TX captured after release");
+
+	/* Leave the hour window clean: every later test in this suite transmits,
+	 * and a leftover 11% would follow them around. */
+	(void)meshtastic_airtime_init();
+	meshtastic_duty_stats_reset();
+}

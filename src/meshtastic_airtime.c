@@ -171,6 +171,45 @@ float meshtastic_airtime_tx_util_percent(void)
 	return percent;
 }
 
+uint8_t meshtastic_airtime_silent_minutes(float tx_percent, float duty_cycle_pct)
+{
+	uint8_t minutes = MESHTASTIC_MINUTES_IN_HOUR;
+	float remaining = tx_percent;
+
+	if (tx_percent <= duty_cycle_pct) {
+		return 0U;
+	}
+
+	k_mutex_lock(&airtime.lock, K_FOREVER);
+	airtime_advance(now_seconds());
+
+	/* Walk the window OLDEST bucket first: one minute from now the oldest
+	 * bucket falls out, a minute later the next, and so on. The first age at
+	 * which the remaining sum drops under the ceiling is how long the caller
+	 * must wait. last_tx_tick indexes the CURRENT bucket, so the oldest is the
+	 * one immediately after it.
+	 *
+	 * Upstream's equivalent (airtime.cpp getSilentMinutes) walks a memmove'd
+	 * array from the far end and returns `MINUTES_IN_HOUR - 1 - i`, which is
+	 * one minute short -- the bucket it just subtracted has not expired yet at
+	 * the moment it answers. This returns the honest wait; it is a
+	 * user-facing hint either way, and rounding it DOWN would invite a retry
+	 * that is still refused. */
+	for (uint32_t age = 0U; age < MESHTASTIC_MINUTES_IN_HOUR; age++) {
+		uint32_t idx = (airtime.last_tx_tick + 1U + age) % MESHTASTIC_MINUTES_IN_HOUR;
+
+		remaining -= (float)airtime.utilization_tx[idx] /
+			     ((float)MESHTASTIC_MS_IN_HOUR / 100.0f);
+		if (remaining <= duty_cycle_pct) {
+			minutes = (uint8_t)(age + 1U);
+			break;
+		}
+	}
+
+	k_mutex_unlock(&airtime.lock);
+	return minutes;
+}
+
 int meshtastic_airtime_init(void)
 {
 	memset(&airtime, 0, sizeof(airtime));

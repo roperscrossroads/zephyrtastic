@@ -18,6 +18,7 @@
 #include "meshtastic_packet.h"
 
 #include "meshtastic_ble_peer.h"
+#include "meshtastic_duty.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_sched.h"
@@ -218,6 +219,38 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 	if (pkt == NULL || pkt_len == 0U || pkt_len > MESHTASTIC_PKT_MAX) {
 		return -EINVAL;
 	}
+
+#if defined(CONFIG_MESHTASTIC_DUTY_CYCLE)
+	/* The regulatory gate, at the one funnel every egress path reaches:
+	 * originated sends, relays, reliable retransmits, routing replies. Checked
+	 * before the queue rather than at the TX worker's dequeue, because a frame
+	 * that is already queued has nobody left to tell -- and telling the caller
+	 * is half the point (a locally-originated refusal becomes a
+	 * DUTY_CYCLE_LIMIT NAK to the phone; see send_wire_tail).
+	 *
+	 * Note this catches relays too, deliberately. The airtime gate further up
+	 * in send_wire_tail does not, and should not: that one is politeness toward
+	 * a busy channel and only throttles our own beacons. A legal ceiling does
+	 * not care whose packet it was. */
+	{
+		uint8_t silent = 0U;
+
+		if (meshtastic_duty_blocked(&silent)) {
+			bool is_relay = false;
+
+			if (pkt_len >= MESHTASTIC_HDR_LEN) {
+				const struct meshtastic_wire_header *h =
+					(const struct meshtastic_wire_header *)pkt;
+
+				is_relay = sys_le32_to_cpu(h->src) != meshtastic_get_node_id();
+			}
+			/* note_blocked owns the (throttled) logging: a refusal that
+			 * logged per frame would itself become the flood. */
+			meshtastic_duty_note_blocked(is_relay, silent);
+			return -ECANCELED;
+		}
+	}
+#endif
 
 	k_mutex_lock(&ob_lock, K_FOREVER);
 

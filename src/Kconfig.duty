@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_DUTY_CYCLE
+	bool "Enforce the regional regulatory duty cycle"
+	depends on MESHTASTIC_AIRTIME
+	default y
+	help
+	  Refuse egress once the rolling one-hour TX-utilization window exceeds the
+	  ceiling the active region mandates -- EU_868 10 %, EU_866 2.5 % (10 % for
+	  a router), EU_433 and TH 10 %, UA_868 1 %. Regions with no ceiling (US,
+	  ANZ, ...) carry 100 % and are unaffected, so this costs them nothing but
+	  a float compare per send.
+
+	  The ceilings have always been in the region tables; until now nothing
+	  read them, so a node in a restricted region transmitted past the legal
+	  limit without limit (docs/parity/OPEN-DIVERGENCES.md, DUTY).
+
+	  This is a REFUSAL, not a throttle, and it applies to RELAYS as well as to
+	  this node's own traffic -- airtime is airtime regardless of whose packet
+	  it was. It is a different mechanism from the airtime gate under `sched
+	  airtime.max`, which throttles only our own background beacons out of
+	  politeness to a busy channel. Both run.
+
+	  A refused frame that this node originated produces a DUTY_CYCLE_LIMIT
+	  routing NAK to the phone, so the app can say why a message did not go,
+	  and `meshtastic duty` reports the ceiling, the current window and the
+	  refusal counters.
+
+	  config.lora.override_duty_cycle disables enforcement at runtime, as
+	  upstream does. Turning it on logs a warning: it is a deliberate choice to
+	  transmit past a legal ceiling and the log is the only record of it.
