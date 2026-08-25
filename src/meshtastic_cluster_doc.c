@@ -32,6 +32,49 @@ int meshtastic_cluster_key_cmp(const struct meshtastic_cluster_key *a,
 	return (int)a->section - (int)b->section;
 }
 
+void meshtastic_cluster_scope_make(struct meshtastic_cluster_scope *out, uint8_t kind,
+				   uint32_t owner)
+{
+	out->kind = kind;
+	/* An owner is meaningless outside CORE, and leaving a stale one in the
+	 * struct would make two equal scopes compare unequal. */
+	out->owner = (kind == MESHTASTIC_CLUSTER_SCOPE_CORE) ? owner : 0U;
+}
+
+bool meshtastic_cluster_scope_contains(const struct meshtastic_cluster_scope *scope,
+				       const struct meshtastic_cluster_key *key)
+{
+	if (scope->kind == MESHTASTIC_CLUSTER_SCOPE_FULL) {
+		return true;
+	}
+	if (key->layer == MESHTASTIC_CLUSTER_LAYER_BASE) {
+		return true; /* base is inside every scope — that is what makes
+			      * it the leg any two nodes can always compare */
+	}
+	return (scope->kind == MESHTASTIC_CLUSTER_SCOPE_CORE) && (key->node_id == scope->owner);
+}
+
+void meshtastic_cluster_scope_intersect(const struct meshtastic_cluster_scope *a,
+					const struct meshtastic_cluster_scope *b,
+					struct meshtastic_cluster_scope *out)
+{
+	if (a->kind == MESHTASTIC_CLUSTER_SCOPE_FULL) {
+		*out = *b;
+		return;
+	}
+	if (b->kind == MESHTASTIC_CLUSTER_SCOPE_FULL) {
+		*out = *a;
+		return;
+	}
+	if (a->kind == MESHTASTIC_CLUSTER_SCOPE_CORE &&
+	    b->kind == MESHTASTIC_CLUSTER_SCOPE_CORE && a->owner == b->owner) {
+		*out = *a;
+		return;
+	}
+	/* Two different COREs, or anything with a BASE: only base is common. */
+	meshtastic_cluster_scope_make(out, MESHTASTIC_CLUSTER_SCOPE_BASE, 0U);
+}
+
 /* Sorted-insert position for @p key; *found tells whether it is already there. */
 static uint16_t doc_pos(const struct meshtastic_cluster_doc *doc,
 			const struct meshtastic_cluster_key *key, bool *found)
@@ -133,7 +176,31 @@ int meshtastic_cluster_doc_accept(struct meshtastic_cluster_doc *doc,
 	return 1;
 }
 
-uint32_t meshtastic_cluster_doc_hash(const struct meshtastic_cluster_doc *doc)
+/* The canonical 24-byte row: the ONLY bytes that ever reach the digest. */
+static void row_bytes(const struct meshtastic_cluster_entry *e, uint8_t row[24])
+{
+	uint8_t *p = row;
+
+	*p++ = e->key.layer;
+	for (int b = 0; b < 4; b++) {
+		*p++ = (uint8_t)(e->key.node_id >> (8 * b));
+	}
+	*p++ = (uint8_t)(e->key.section & 0xFFU);
+	*p++ = (uint8_t)(e->key.section >> 8);
+	for (int b = 0; b < 8; b++) {
+		*p++ = (uint8_t)((uint64_t)e->stamp.physical_ms >> (8 * b));
+	}
+	for (int b = 0; b < 4; b++) {
+		*p++ = (uint8_t)(e->stamp.counter >> (8 * b));
+	}
+	for (int b = 0; b < 4; b++) {
+		*p++ = (uint8_t)(e->stamp.node_id >> (8 * b));
+	}
+	*p++ = e->tombstone ? 1U : 0U;
+}
+
+uint32_t meshtastic_cluster_doc_hash_scoped(const struct meshtastic_cluster_doc *doc,
+					    const struct meshtastic_cluster_scope *scope)
 {
 	/* Canonical row bytes, little-endian, in sorted order — two docs with
 	 * the same rows hash identically regardless of arrival order (the
@@ -141,62 +208,135 @@ uint32_t meshtastic_cluster_doc_hash(const struct meshtastic_cluster_doc *doc)
 	uint32_t crc = 0U;
 
 	for (uint16_t i = 0U; i < doc->count; i++) {
-		const struct meshtastic_cluster_entry *e = &doc->entries[i];
-		uint8_t row[1 + 4 + 2 + 8 + 4 + 4 + 1];
-		uint8_t *p = row;
+		uint8_t row[24];
 
-		*p++ = e->key.layer;
-		for (int b = 0; b < 4; b++) {
-			*p++ = (uint8_t)(e->key.node_id >> (8 * b));
+		if (!meshtastic_cluster_scope_contains(scope, &doc->entries[i].key)) {
+			continue;
 		}
-		*p++ = (uint8_t)(e->key.section & 0xFFU);
-		*p++ = (uint8_t)(e->key.section >> 8);
-		for (int b = 0; b < 8; b++) {
-			*p++ = (uint8_t)((uint64_t)e->stamp.physical_ms >> (8 * b));
-		}
-		for (int b = 0; b < 4; b++) {
-			*p++ = (uint8_t)(e->stamp.counter >> (8 * b));
-		}
-		for (int b = 0; b < 4; b++) {
-			*p++ = (uint8_t)(e->stamp.node_id >> (8 * b));
-		}
-		*p++ = e->tombstone ? 1U : 0U;
-
+		row_bytes(&doc->entries[i], row);
 		crc = crc32_ieee_update(crc, row, sizeof(row));
 	}
 	return crc;
+}
+
+uint32_t meshtastic_cluster_doc_hash(const struct meshtastic_cluster_doc *doc)
+{
+	struct meshtastic_cluster_scope full;
+
+	meshtastic_cluster_scope_make(&full, MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+	return meshtastic_cluster_doc_hash_scoped(doc, &full);
+}
+
+uint16_t meshtastic_cluster_doc_count_scoped(const struct meshtastic_cluster_doc *doc,
+					     const struct meshtastic_cluster_scope *scope)
+{
+	uint16_t n = 0U;
+
+	for (uint16_t i = 0U; i < doc->count; i++) {
+		if (meshtastic_cluster_scope_contains(scope, &doc->entries[i].key)) {
+			n++;
+		}
+	}
+	return n;
+}
+
+enum meshtastic_cluster_want
+meshtastic_cluster_doc_want(const struct meshtastic_cluster_doc *doc,
+			    const struct meshtastic_cluster_scope *mine_scope,
+			    const struct meshtastic_cluster_key *key,
+			    const struct meshtastic_hlc_stamp *stamp)
+{
+	const struct meshtastic_cluster_entry *mine;
+
+	if (!key_is_valid(key) || meshtastic_hlc_stamp_is_unset(stamp)) {
+		return MESHTASTIC_CLUSTER_WANT_NO;
+	}
+	if (!meshtastic_cluster_scope_contains(mine_scope, key)) {
+		/* Not ours to track. NOT a capacity problem — reporting one
+		 * would make an already-narrowed node narrow itself again over
+		 * a row it deliberately does not want. */
+		return MESHTASTIC_CLUSTER_WANT_NO;
+	}
+	mine = meshtastic_cluster_doc_find(doc, key);
+	if (mine != NULL) {
+		/* An update needs no free slot, so capacity never blocks it. */
+		return meshtastic_hlc_newer(stamp, &mine->stamp) ? MESHTASTIC_CLUSTER_WANT_YES
+								: MESHTASTIC_CLUSTER_WANT_NO;
+	}
+	/* A new key is the "newer than unset" case accept() takes — but only if
+	 * there is somewhere to put it. Asking for a row a full table must
+	 * refuse turns the walk into a request loop that never terminates and
+	 * never achieves anything. */
+	return (doc->count < doc->cap) ? MESHTASTIC_CLUSTER_WANT_YES
+				       : MESHTASTIC_CLUSTER_WANT_NO_SPACE;
 }
 
 bool meshtastic_cluster_doc_wants(const struct meshtastic_cluster_doc *doc,
 				  const struct meshtastic_cluster_key *key,
 				  const struct meshtastic_hlc_stamp *stamp)
 {
-	const struct meshtastic_cluster_entry *mine;
+	struct meshtastic_cluster_scope full;
 
-	if (!key_is_valid(key) || meshtastic_hlc_stamp_is_unset(stamp)) {
-		return false;
+	meshtastic_cluster_scope_make(&full, MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+	return meshtastic_cluster_doc_want(doc, &full, key, stamp) ==
+	       MESHTASTIC_CLUSTER_WANT_YES;
+}
+
+void meshtastic_cluster_doc_max_stamp_scoped(const struct meshtastic_cluster_doc *doc,
+					     const struct meshtastic_cluster_scope *scope,
+					     struct meshtastic_hlc_stamp *out)
+{
+	memset(out, 0, sizeof(*out));
+	for (uint16_t i = 0U; i < doc->count; i++) {
+		if (!meshtastic_cluster_scope_contains(scope, &doc->entries[i].key)) {
+			continue;
+		}
+		if (meshtastic_hlc_newer(&doc->entries[i].stamp, out)) {
+			*out = doc->entries[i].stamp;
+		}
 	}
-	mine = meshtastic_cluster_doc_find(doc, key);
-	if (mine != NULL) {
-		/* An update needs no free slot, so capacity never blocks it. */
-		return meshtastic_hlc_newer(stamp, &mine->stamp);
-	}
-	/* A new key is the "newer than unset" case accept() takes — but only if
-	 * there is somewhere to put it. Asking for a row a full table must
-	 * refuse turns the walk into a request loop that never terminates and
-	 * never achieves anything. */
-	return doc->count < doc->cap;
 }
 
 void meshtastic_cluster_doc_max_stamp(const struct meshtastic_cluster_doc *doc,
 				      struct meshtastic_hlc_stamp *out)
 {
-	memset(out, 0, sizeof(*out));
+	struct meshtastic_cluster_scope full;
+
+	meshtastic_cluster_scope_make(&full, MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+	meshtastic_cluster_doc_max_stamp_scoped(doc, &full, out);
+}
+
+uint16_t meshtastic_cluster_doc_retain(struct meshtastic_cluster_doc *doc,
+				       const struct meshtastic_cluster_scope *scope,
+				       void (*on_evict)(const struct meshtastic_cluster_key *key,
+							void *ctx),
+				       void *ctx)
+{
+	uint16_t keep = 0U;
+	uint16_t dropped = 0U;
+
 	for (uint16_t i = 0U; i < doc->count; i++) {
-		if (meshtastic_hlc_newer(&doc->entries[i].stamp, out)) {
-			*out = doc->entries[i].stamp;
+		if (meshtastic_cluster_scope_contains(scope, &doc->entries[i].key)) {
+			if (keep != i) {
+				doc->entries[keep] = doc->entries[i];
+			}
+			keep++;
+			continue;
 		}
+		if (on_evict != NULL) {
+			on_evict(&doc->entries[i].key, ctx);
+		}
+		dropped++;
 	}
+	/* Clear the tail rather than leaving stale rows past count: nothing
+	 * reads them, but a half-live entry sitting in memory is exactly the
+	 * kind of thing a later bug finds. */
+	if (dropped > 0U) {
+		memset(&doc->entries[keep], 0,
+		       (size_t)(doc->count - keep) * sizeof(doc->entries[0]));
+		doc->count = keep;
+	}
+	return dropped;
 }
 
 const struct meshtastic_cluster_entry *

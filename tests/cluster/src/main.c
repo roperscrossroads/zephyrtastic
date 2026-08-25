@@ -582,3 +582,294 @@ ZTEST(cluster_doc, test_simultaneous_writers_break_the_tie_the_same_way)
 		      "a simultaneous write must resolve identically on both nodes");
 	zassert_equal(meshtastic_cluster_doc_hash(&doc), meshtastic_cluster_doc_hash(&doc2));
 }
+
+/* ---- scopes (agents-xhli.10) ---------------------------------------------- */
+
+static struct meshtastic_cluster_scope scope_of(uint8_t kind, uint32_t owner)
+{
+	struct meshtastic_cluster_scope s;
+
+	meshtastic_cluster_scope_make(&s, kind, owner);
+	return s;
+}
+
+static void put(const struct meshtastic_cluster_key *k, int64_t ms, uint32_t author)
+{
+	uint8_t v[] = {0x11};
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, k, &(struct meshtastic_hlc_stamp){
+							     .physical_ms = ms,
+							     .counter = 0U,
+							     .node_id = author},
+						    false, v, 1),
+		      1, "fixture write must land");
+}
+
+/*
+ * Membership is one function, and everything else in the design leans on it:
+ * the hash, the count, the max stamp, the diff predicate, the ingest gate, the
+ * vector filter and the persistence load filter all ask this and nothing else.
+ * If any two of them disagreed, a node would advertise a document it does not
+ * hold — the exact failure a declared scope exists to prevent.
+ */
+ZTEST(cluster_doc, test_scope_contains_is_the_only_membership_rule)
+{
+	struct meshtastic_cluster_key b = base_key(SEC_DEVICE);
+	struct meshtastic_cluster_key mine = node_key(NODE_A, SEC_DEVICE);
+	struct meshtastic_cluster_key theirs = node_key(NODE_B, SEC_DEVICE);
+	struct meshtastic_cluster_scope full = scope_of(MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+	struct meshtastic_cluster_scope core = scope_of(MESHTASTIC_CLUSTER_SCOPE_CORE, NODE_A);
+	struct meshtastic_cluster_scope basen = scope_of(MESHTASTIC_CLUSTER_SCOPE_BASE, 0U);
+
+	zassert_true(meshtastic_cluster_scope_contains(&full, &b));
+	zassert_true(meshtastic_cluster_scope_contains(&full, &mine));
+	zassert_true(meshtastic_cluster_scope_contains(&full, &theirs));
+
+	/* Base is inside EVERY scope. That is what makes it the one leg any two
+	 * nodes can compare whatever tier the other is on. */
+	zassert_true(meshtastic_cluster_scope_contains(&core, &b));
+	zassert_true(meshtastic_cluster_scope_contains(&basen, &b));
+
+	zassert_true(meshtastic_cluster_scope_contains(&core, &mine),
+		     "CORE(x) must keep x's own entries — they are what effective() reads");
+	zassert_false(meshtastic_cluster_scope_contains(&core, &theirs),
+		      "and must NOT claim another node's entries");
+	zassert_false(meshtastic_cluster_scope_contains(&basen, &mine));
+
+	/* An owner outside CORE is meaningless and must not make two equal
+	 * scopes compare unequal. */
+	zassert_equal(scope_of(MESHTASTIC_CLUSTER_SCOPE_FULL, NODE_A).owner, 0U);
+}
+
+ZTEST(cluster_doc, test_scope_intersection_is_the_smaller_of_two)
+{
+	struct meshtastic_cluster_scope full = scope_of(MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+	struct meshtastic_cluster_scope core_a = scope_of(MESHTASTIC_CLUSTER_SCOPE_CORE, NODE_A);
+	struct meshtastic_cluster_scope core_b = scope_of(MESHTASTIC_CLUSTER_SCOPE_CORE, NODE_B);
+	struct meshtastic_cluster_scope out;
+
+	meshtastic_cluster_scope_intersect(&full, &full, &out);
+	zassert_equal(out.kind, MESHTASTIC_CLUSTER_SCOPE_FULL);
+
+	meshtastic_cluster_scope_intersect(&full, &core_a, &out);
+	zassert_equal(out.kind, MESHTASTIC_CLUSTER_SCOPE_CORE);
+	zassert_equal(out.owner, NODE_A,
+		      "a FULL node can compare a CORE peer over that peer's whole claim");
+
+	meshtastic_cluster_scope_intersect(&core_a, &core_a, &out);
+	zassert_equal(out.kind, MESHTASTIC_CLUSTER_SCOPE_CORE);
+
+	/* Two different constrained nodes share only base — which is why the
+	 * base leg is not an optimisation but the thing that keeps an all-CORE
+	 * fleet converging at all. */
+	meshtastic_cluster_scope_intersect(&core_a, &core_b, &out);
+	zassert_equal(out.kind, MESHTASTIC_CLUSTER_SCOPE_BASE,
+		      "CORE(x) and CORE(y) have only base in common");
+}
+
+/*
+ * THE BACK-COMPATIBILITY CLAIM. A fleet where nobody has narrowed its claim
+ * must hash exactly as it did before scopes existed — otherwise shipping this
+ * would look, to every node, like the whole fleet diverging at once.
+ */
+ZTEST(cluster_doc, test_scoped_hash_equals_the_whole_doc_hash_at_full_scope)
+{
+	struct meshtastic_cluster_key b = base_key(SEC_DEVICE);
+	struct meshtastic_cluster_key mine = node_key(NODE_A, SEC_DISPLAY);
+	struct meshtastic_cluster_scope full = scope_of(MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+	struct meshtastic_hlc_stamp max_a, max_b;
+
+	put(&b, 100, NODE_A);
+	put(&mine, 200, NODE_A);
+
+	zassert_equal(meshtastic_cluster_doc_hash_scoped(&doc, &full),
+		      meshtastic_cluster_doc_hash(&doc));
+	zassert_equal(meshtastic_cluster_doc_count_scoped(&doc, &full), doc.count);
+	meshtastic_cluster_doc_max_stamp_scoped(&doc, &full, &max_a);
+	meshtastic_cluster_doc_max_stamp(&doc, &max_b);
+	zassert_equal(meshtastic_hlc_compare(&max_a, &max_b), 0);
+}
+
+ZTEST(cluster_doc, test_scoped_hash_ignores_everything_outside_the_scope)
+{
+	struct meshtastic_cluster_key b = base_key(SEC_DEVICE);
+	struct meshtastic_cluster_key mine = node_key(NODE_A, SEC_DISPLAY);
+	struct meshtastic_cluster_key theirs = node_key(NODE_B, SEC_DISPLAY);
+	struct meshtastic_cluster_scope core = scope_of(MESHTASTIC_CLUSTER_SCOPE_CORE, NODE_A);
+	uint32_t hash_before;
+	uint16_t count_before;
+	struct meshtastic_hlc_stamp max_before, max_after;
+
+	put(&b, 100, NODE_A);
+	put(&mine, 200, NODE_A);
+	hash_before = meshtastic_cluster_doc_hash_scoped(&doc, &core);
+	count_before = meshtastic_cluster_doc_count_scoped(&doc, &core);
+	meshtastic_cluster_doc_max_stamp_scoped(&doc, &core, &max_before);
+
+	/* A row this scope does not claim, and a LATER one so that a leg which
+	 * wrongly included it could not possibly go unnoticed. */
+	put(&theirs, 900, NODE_B);
+
+	zassert_equal(meshtastic_cluster_doc_hash_scoped(&doc, &core), hash_before,
+		      "a row outside the claim must not move the advertised hash");
+	zassert_equal(meshtastic_cluster_doc_count_scoped(&doc, &core), count_before);
+	meshtastic_cluster_doc_max_stamp_scoped(&doc, &core, &max_after);
+	zassert_equal(meshtastic_hlc_compare(&max_before, &max_after), 0,
+		      "nor the advertised max stamp — all three legs are scoped or none is");
+
+	/* And the unscoped legs still see everything, or a FULL peer could not
+	 * tell it was ahead. */
+	{
+		struct meshtastic_cluster_scope full =
+			scope_of(MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+
+		zassert_equal(meshtastic_cluster_doc_count_scoped(&doc, &full), 3U);
+	}
+}
+
+/*
+ * The bound that makes the constrained tier safe to enter: CORE cannot outgrow
+ * base + own, whatever happens. Six own tombstones is still six rows, because a
+ * tombstone REPLACES the entry at its key rather than adding one — which is the
+ * property that lets MAX_ENTRIES have a floor at all.
+ */
+ZTEST(cluster_doc, test_core_scope_cannot_exceed_twice_the_allowlist)
+{
+	struct meshtastic_cluster_scope core = scope_of(MESHTASTIC_CLUSTER_SCOPE_CORE, NODE_A);
+	const uint16_t sections = 6U; /* the v1 allowlist */
+
+	for (uint16_t i = 0U; i < sections; i++) {
+		struct meshtastic_cluster_key b = base_key((uint16_t)(SEC_DEVICE + i));
+		struct meshtastic_cluster_key n = node_key(NODE_A, (uint16_t)(SEC_DEVICE + i));
+
+		put(&b, 100 + i, NODE_A);
+		put(&n, 200 + i, NODE_A);
+	}
+	zassert_equal(meshtastic_cluster_doc_count_scoped(&doc, &core), 2U * sections);
+
+	/* Now tombstone every one of my own: still the same number of rows. */
+	for (uint16_t i = 0U; i < sections; i++) {
+		struct meshtastic_cluster_key n = node_key(NODE_A, (uint16_t)(SEC_DEVICE + i));
+		struct meshtastic_hlc_stamp t = at(500 + i, NODE_A);
+
+		zassert_equal(meshtastic_cluster_doc_accept(&doc, &n, &t, true, NULL, 0), 1);
+	}
+	zassert_equal(meshtastic_cluster_doc_count_scoped(&doc, &core), 2U * sections,
+		      "a tombstone replaces an entry; it does not add a row");
+}
+
+/*
+ * The two "no"s are not the same answer. Out of scope means "never mine, do
+ * nothing"; out of space means "mine, and this node has outgrown its table" —
+ * the honest signal that the claim must be narrowed. Conflating them either
+ * reinstates the request loop 23b47de closed, or makes an already-narrowed node
+ * narrow itself again over a row it does not want.
+ */
+ZTEST(cluster_doc, test_want_reports_no_space_instead_of_lying)
+{
+	struct meshtastic_cluster_scope full = scope_of(MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+	struct meshtastic_cluster_scope core = scope_of(MESHTASTIC_CLUSTER_SCOPE_CORE, NODE_A);
+	struct meshtastic_cluster_key theirs = node_key(NODE_B, SEC_DEVICE);
+	struct meshtastic_cluster_key mine = node_key(NODE_A, SEC_DEVICE);
+	struct meshtastic_hlc_stamp s = at(100, NODE_B);
+
+	zassert_equal(meshtastic_cluster_doc_want(&doc, &full, &theirs, &s),
+		      MESHTASTIC_CLUSTER_WANT_YES);
+	zassert_equal(meshtastic_cluster_doc_want(&doc, &core, &theirs, &s),
+		      MESHTASTIC_CLUSTER_WANT_NO,
+		      "a row we never claimed is simply not wanted");
+
+	/* Fill the table with rows CORE(NODE_A) does not claim. */
+	for (uint16_t i = 0U; i < CAP; i++) {
+		struct meshtastic_cluster_key k = node_key(NODE_B, (uint16_t)(SEC_DEVICE + i));
+
+		put(&k, 100 + i, NODE_B);
+	}
+	zassert_equal(doc.count, CAP);
+
+	zassert_equal(meshtastic_cluster_doc_want(&doc, &full, &mine, &s),
+		      MESHTASTIC_CLUSTER_WANT_NO_SPACE,
+		      "a row we DO claim and cannot store is the signal to narrow the claim");
+	zassert_equal(meshtastic_cluster_doc_want(&doc, &core, &theirs, &s),
+		      MESHTASTIC_CLUSTER_WANT_NO,
+		      "but a full table must never report NO_SPACE for a row outside the "
+		      "scope — that would make a narrowed node narrow itself again");
+
+	/* The legacy wrapper is exactly the FULL-scope YES case, so every
+	 * existing caller keeps its behaviour. */
+	zassert_false(meshtastic_cluster_doc_wants(&doc, &mine, &s));
+}
+
+ZTEST(cluster_doc, test_retain_keeps_base_and_my_own_and_reports_what_it_dropped)
+{
+	struct meshtastic_cluster_scope core = scope_of(MESHTASTIC_CLUSTER_SCOPE_CORE, NODE_A);
+	struct meshtastic_cluster_key b = base_key(SEC_DEVICE);
+	struct meshtastic_cluster_key mine = node_key(NODE_A, SEC_DISPLAY);
+	struct meshtastic_cluster_key theirs1 = node_key(NODE_B, SEC_DEVICE);
+	struct meshtastic_cluster_key theirs2 = node_key(NODE_B, SEC_DISPLAY);
+	const struct meshtastic_cluster_entry *eff_before, *eff_after;
+	uint8_t before_payload;
+	uint16_t dropped;
+
+	put(&b, 100, NODE_A);
+	put(&mine, 200, NODE_A);
+	put(&theirs1, 300, NODE_B);
+	put(&theirs2, 400, NODE_B);
+	zassert_equal(doc.count, 4U);
+
+	eff_before = meshtastic_cluster_doc_effective(&doc, NODE_A, SEC_DISPLAY);
+	zassert_not_null(eff_before);
+	before_payload = eff_before->payload[0];
+
+	dropped = meshtastic_cluster_doc_retain(&doc, &core, NULL, NULL);
+	zassert_equal(dropped, 2U, "exactly the rows outside the claim");
+	zassert_equal(doc.count, 2U);
+	zassert_not_null(meshtastic_cluster_doc_find(&doc, &b));
+	zassert_not_null(meshtastic_cluster_doc_find(&doc, &mine));
+	zassert_is_null(meshtastic_cluster_doc_find(&doc, &theirs1));
+	zassert_is_null(meshtastic_cluster_doc_find(&doc, &theirs2));
+
+	/* Sort order must survive, or the hash stops being arrival-order
+	 * independent and two converged nodes disagree. */
+	for (uint16_t i = 1U; i < doc.count; i++) {
+		zassert_true(meshtastic_cluster_key_cmp(&doc.entries[i - 1U].key,
+							&doc.entries[i].key) < 0,
+			     "retain must leave the table sorted");
+	}
+
+	/* THE PROPERTY THAT MAKES NARROWING SAFE: CORE(me) is exactly the
+	 * closure of effective(me, ·), so dropping everything else cannot
+	 * change what this node runs. */
+	eff_after = meshtastic_cluster_doc_effective(&doc, NODE_A, SEC_DISPLAY);
+	zassert_not_null(eff_after);
+	zassert_equal(eff_after->payload[0], before_payload);
+	zassert_not_null(meshtastic_cluster_doc_effective(&doc, NODE_A, SEC_DEVICE));
+}
+
+ZTEST(cluster_doc, test_retain_is_idempotent_and_frees_room)
+{
+	struct meshtastic_cluster_scope core = scope_of(MESHTASTIC_CLUSTER_SCOPE_CORE, NODE_A);
+	struct meshtastic_cluster_key mine = node_key(NODE_A, SEC_DEVICE);
+	struct meshtastic_hlc_stamp s = at(999, NODE_A);
+	uint32_t hash_after_first;
+	uint8_t v[] = {0x22};
+
+	for (uint16_t i = 0U; i < CAP; i++) {
+		struct meshtastic_cluster_key k = node_key(NODE_B, (uint16_t)(SEC_DEVICE + i));
+
+		put(&k, 100 + i, NODE_B);
+	}
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &mine, &s, false, v, 1), -ENOSPC,
+		      "the premise: a full table refuses a row it would otherwise take");
+
+	zassert_equal(meshtastic_cluster_doc_retain(&doc, &core, NULL, NULL), CAP);
+	zassert_equal(doc.count, 0U);
+	hash_after_first = meshtastic_cluster_doc_hash_scoped(&doc, &core);
+
+	zassert_equal(meshtastic_cluster_doc_retain(&doc, &core, NULL, NULL), 0U,
+		      "a second pass has nothing left to do");
+	zassert_equal(meshtastic_cluster_doc_hash_scoped(&doc, &core), hash_after_first);
+
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &mine, &s, false, v, 1), 1,
+		      "and the room it freed is real");
+}

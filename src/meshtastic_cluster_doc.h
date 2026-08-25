@@ -63,6 +63,65 @@ struct meshtastic_cluster_doc {
 	uint16_t count;
 };
 
+/*
+ * A SCOPE: the set of keys a node CLAIMS to track (agents-xhli.10,
+ * docs/CLUSTER-SYNC-M4.md §6.1).
+ *
+ * The document has always been able to run out of table, and until now the
+ * digest was taken over what a node HAPPENED TO HOLD. That is why eviction was
+ * unbuildable: drop a row and you advertise a hash nobody else has, so you
+ * mismatch every peer forever. Declaring a scope inverts it — the digest covers
+ * what the node says it tracks, holding less than that is a bug rather than a
+ * policy, and a node that cannot hold everything narrows its claim instead of
+ * lying about it.
+ *
+ *   FULL     every key
+ *   CORE(x)  base ∪ nodes/x
+ *   BASE     base alone — an INTERSECTION RESULT only; nothing declares it
+ *
+ * Two properties make this work, and both are load-bearing:
+ *
+ * 1. EVERY SCOPE IS EXACTLY EVALUABLE BY A RECEIVER, from the sender's node id
+ *    alone. So a receiver can re-take its own hash over the sender's scope and
+ *    compare like for like. Any future scope must keep that property exactly —
+ *    an approximate membership test (a bloom filter, say) makes two nodes
+ *    disagree about whether a key is in scope, so their hashes differ over
+ *    identical content and they never converge.
+ *
+ * 2. CORE(me) IS EXACTLY THE CLOSURE OF effective(me, ·) — it reads nodes/me
+ *    and base, and nothing else. Narrowing to CORE therefore cannot change what
+ *    this node runs. It costs only the ability to serve OTHER nodes their
+ *    entries back (§2.3), which is precisely the "capability tier, not a
+ *    different protocol" the design register §7.7 promised.
+ */
+enum meshtastic_cluster_scope_kind {
+	MESHTASTIC_CLUSTER_SCOPE_BASE = 0,
+	MESHTASTIC_CLUSTER_SCOPE_CORE = 1,
+	MESHTASTIC_CLUSTER_SCOPE_FULL = 2,
+};
+
+struct meshtastic_cluster_scope {
+	uint8_t kind;   /* enum meshtastic_cluster_scope_kind */
+	uint32_t owner; /* whose CORE this is; ignored for BASE and FULL */
+};
+
+void meshtastic_cluster_scope_make(struct meshtastic_cluster_scope *out, uint8_t kind,
+				   uint32_t owner);
+
+/* THE ONE MEMBERSHIP RULE. Hash, count, max-stamp, want, ingest, the vector
+ * filter and the persistence load filter all go through this and nothing else.
+ * The moment two of them disagree, a node advertises a document it does not
+ * hold — which is the failure this whole mechanism exists to prevent. */
+bool meshtastic_cluster_scope_contains(const struct meshtastic_cluster_scope *scope,
+				       const struct meshtastic_cluster_key *key);
+
+/* The keys BOTH scopes claim — the only set two nodes can meaningfully compare.
+ * CORE(x) ∩ CORE(y) is BASE for x != y, which is why base is the leg every
+ * node can always compare against whatever tier its peer is on. */
+void meshtastic_cluster_scope_intersect(const struct meshtastic_cluster_scope *a,
+					const struct meshtastic_cluster_scope *b,
+					struct meshtastic_cluster_scope *out);
+
 void meshtastic_cluster_doc_init(struct meshtastic_cluster_doc *doc,
 				 struct meshtastic_cluster_entry *storage, uint16_t cap);
 
@@ -97,6 +156,18 @@ int meshtastic_cluster_doc_accept(struct meshtastic_cluster_doc *doc,
  * engineer one — is already trusted for more (CLUSTER-SYNC-M4.md §4). */
 uint32_t meshtastic_cluster_doc_hash(const struct meshtastic_cluster_doc *doc);
 
+/* The same three legs, restricted to @p scope. The unscoped forms above are
+ * exactly the FULL-scope case — same bytes, same CRC — so a fleet where nobody
+ * has narrowed its claim hashes identically to one built before scopes existed.
+ * A receiver takes these over the SENDER's scope to compare like with like. */
+uint32_t meshtastic_cluster_doc_hash_scoped(const struct meshtastic_cluster_doc *doc,
+					    const struct meshtastic_cluster_scope *scope);
+uint16_t meshtastic_cluster_doc_count_scoped(const struct meshtastic_cluster_doc *doc,
+					     const struct meshtastic_cluster_scope *scope);
+void meshtastic_cluster_doc_max_stamp_scoped(const struct meshtastic_cluster_doc *doc,
+					     const struct meshtastic_cluster_scope *scope,
+					     struct meshtastic_hlc_stamp *out);
+
 /* Max stamp across the doc; the unset stamp when empty. */
 void meshtastic_cluster_doc_max_stamp(const struct meshtastic_cluster_doc *doc,
 				      struct meshtastic_hlc_stamp *out);
@@ -123,6 +194,49 @@ void meshtastic_cluster_doc_max_stamp(const struct meshtastic_cluster_doc *doc,
 bool meshtastic_cluster_doc_wants(const struct meshtastic_cluster_doc *doc,
 				  const struct meshtastic_cluster_key *key,
 				  const struct meshtastic_hlc_stamp *stamp);
+
+/*
+ * The same predicate, scope-aware, and telling the two "no"s apart — because
+ * they call for opposite responses.
+ *
+ *   NO        stale, malformed, or OUTSIDE the scope we advertise. Nothing to
+ *             do: we never claimed it, so no peer expects it of us.
+ *   YES       fetch it.
+ *   NO_SPACE  we would fetch it and the table is full. The honest signal that
+ *             this node has outgrown MAX_ENTRIES, and the trigger for narrowing
+ *             the claim (§6.1) rather than silently tracking less than we say.
+ *
+ * An out-of-scope key must never report NO_SPACE: a node that has already
+ * narrowed its claim must not narrow it again over a row it does not want.
+ */
+enum meshtastic_cluster_want {
+	MESHTASTIC_CLUSTER_WANT_NO = 0,
+	MESHTASTIC_CLUSTER_WANT_YES,
+	MESHTASTIC_CLUSTER_WANT_NO_SPACE,
+};
+
+enum meshtastic_cluster_want
+meshtastic_cluster_doc_want(const struct meshtastic_cluster_doc *doc,
+			    const struct meshtastic_cluster_scope *mine,
+			    const struct meshtastic_cluster_key *key,
+			    const struct meshtastic_hlc_stamp *stamp);
+
+/*
+ * Drop everything outside @p scope, in one compacting pass that preserves sort
+ * order. @p on_evict (may be NULL) is called once per dropped key BEFORE it is
+ * overwritten, so the caller can forget it in persistent storage too. Returns
+ * how many were dropped.
+ *
+ * This is the whole eviction policy. There is no victim choice and no LRU, and
+ * that is the point: a per-entry policy makes the held set diverge from the
+ * declared set, and the declared set is the only thing a digest can honestly
+ * describe.
+ */
+uint16_t meshtastic_cluster_doc_retain(struct meshtastic_cluster_doc *doc,
+				       const struct meshtastic_cluster_scope *scope,
+				       void (*on_evict)(const struct meshtastic_cluster_key *key,
+							void *ctx),
+				       void *ctx);
 
 /*
  * effective(me, section): the NODE entry for @p node_id when present and not
