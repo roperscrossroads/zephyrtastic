@@ -1190,17 +1190,40 @@ static void shell_print_node_summary(const struct shell *sh,
 	int32_t snr = scaled_tenths(node->snr);
 	const char *long_name = node->has_user ? node->long_name : "";
 	const char *short_name = node->has_user ? node->short_name : "";
+	char heard[24];
+
+	/*
+	 * last_heard_uptime_sec is the UPTIME AT WHICH we last heard the node,
+	 * not an age — and zero means "not this boot" (the load path resets it
+	 * deliberately, resolving age from the persisted epoch instead). Printing
+	 * the raw number after "last=" invites exactly the opposite reading, and
+	 * did: on 2026-08-25 a stale entry showing `last=0s snr=13.0` was read as
+	 * "heard just now, strong signal" when the node had not been heard at all
+	 * and both numbers were leftovers from a previous boot.
+	 *
+	 * So say it in the units a reader assumes: an age, or "never".
+	 */
+	if (node->last_heard_uptime_sec == 0U) {
+		strncpy(heard, "never-this-boot", sizeof(heard) - 1U);
+		heard[sizeof(heard) - 1U] = '\0';
+	} else {
+		uint32_t now = (uint32_t)(k_uptime_get() / MSEC_PER_SEC);
+		uint32_t age = (now > node->last_heard_uptime_sec)
+				       ? (now - node->last_heard_uptime_sec)
+				       : 0U;
+
+		snprintk(heard, sizeof(heard), "%us ago", age);
+	}
 
 	if (node->has_hops_away) {
-		shell_print(sh, "0x%08x last=%us snr=%d.%u hops=%u via=%s long=\"%s\" short=\"%s\"",
-			    node->num, node->last_heard_uptime_sec, scaled_whole(snr, 10),
-			    scaled_fraction(snr, 10), node->hops_away,
-			    node->via_mqtt ? "yes" : "no", long_name, short_name);
-	} else {
-		shell_print(sh, "0x%08x last=%us snr=%d.%u hops=? via=%s long=\"%s\" short=\"%s\"",
-			    node->num, node->last_heard_uptime_sec, scaled_whole(snr, 10),
-			    scaled_fraction(snr, 10), node->via_mqtt ? "yes" : "no", long_name,
+		shell_print(sh, "0x%08x last=%s snr=%d.%u hops=%u via=%s long=\"%s\" short=\"%s\"",
+			    node->num, heard, scaled_whole(snr, 10), scaled_fraction(snr, 10),
+			    node->hops_away, node->via_mqtt ? "yes" : "no", long_name,
 			    short_name);
+	} else {
+		shell_print(sh, "0x%08x last=%s snr=%d.%u hops=? via=%s long=\"%s\" short=\"%s\"",
+			    node->num, heard, scaled_whole(snr, 10), scaled_fraction(snr, 10),
+			    node->via_mqtt ? "yes" : "no", long_name, short_name);
 	}
 }
 
