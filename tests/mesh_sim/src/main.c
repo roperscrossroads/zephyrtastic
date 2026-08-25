@@ -3442,4 +3442,309 @@ ZTEST(mesh_sim, test_cluster_full_node_compares_a_core_peer_on_its_own_scope)
 	cluster_channel(false);
 }
 
+/* Put the claim back where the rest of the suite expects it. */
+static void scope_restore_full(void)
+{
+	int ret = meshtastic_cluster_scope_select(MESHTASTIC_CLUSTER_SCOPE_CHOICE_AUTO);
+
+	zassert_true(ret == 0 || ret == -EALREADY, "restoring the FULL claim must work");
+	zassert_equal(meshtastic_cluster_scope_name(NULL)[0], 'F');
+	wait_cluster_idle();
+	quiesce();
+}
+
+/*
+ * NARROWING KEEPS EXACTLY WHAT effective(me, .) READS, and that is the whole
+ * reason it is safe rather than merely cheap. CORE(me) is base + nodes/me, and
+ * effective() consults base and nodes/me and nothing else — so a node can drop
+ * every other node's rows without changing one byte of what it runs. It gives
+ * up only the ability to hand those rows back to their owner (§2.3, §7.7).
+ */
+ZTEST(mesh_sim, test_cluster_core_scope_keeps_what_effective_reads)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	len = encode_section(meshtastic_Config_power_tag, buf, sizeof(buf));
+	inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 6000), false, buf, len, 0x7C00U);
+	inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_NODE, PEER_NODE_ID,
+		     (TEST_EPOCH_MS + 6100), false, buf, len, 0x7C01U);
+	len = encode_section(meshtastic_Config_bluetooth_tag, buf, sizeof(buf));
+	inject_entry(meshtastic_Config_bluetooth_tag, zephyrtastic_ClusterLayer_NODE, TEST_NODE_ID,
+		     (TEST_EPOCH_MS + 31000), false, buf, len, 0x7C02U);
+	k_sleep(K_MSEC(500));
+	quiesce();
+
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_NODE, PEER_NODE_ID,
+			     meshtastic_Config_power_tag),
+		     "the premise: we hold a row belonging to another node");
+	meshtastic_cluster_stats_get(&before_st);
+
+	zassert_ok(meshtastic_cluster_scope_select(MESHTASTIC_CLUSTER_SCOPE_CHOICE_CORE));
+	zassert_equal(meshtastic_cluster_scope_name(NULL)[0], 'C');
+
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, meshtastic_Config_power_tag),
+		     "base is inside every claim and must survive");
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID,
+			     meshtastic_Config_bluetooth_tag),
+		     "and so must this node's own pin — effective() reads it");
+	zassert_false(doc_has(MESHTASTIC_CLUSTER_LAYER_NODE, PEER_NODE_ID,
+			      meshtastic_Config_power_tag),
+		      "another node's row is exactly what a CORE claim gives up");
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.entries_evicted > before_st.entries_evicted,
+		     "and the eviction must be counted, not silent");
+	zassert_equal(after_st.sections_applied, before_st.sections_applied,
+		      "narrowing must not reconcile: it cannot change what this node runs, "
+		      "so a reconcile pass would be pure churn");
+
+	scope_restore_full();
+	cluster_channel(false);
+}
+
+/*
+ * A NARROWED NODE COMPARES ONLY THE BASE LEG. It cannot evaluate an unnarrowed
+ * peer's triple — that peer never advertised one over the smaller set both
+ * nodes claim — so the base leg is the entire basis for the comparison, and the
+ * peer's first three fields must be ignored completely. If they leaked in, a
+ * CORE node would diverge from every healthy peer in the fleet, permanently.
+ */
+ZTEST(mesh_sim, test_cluster_core_compares_only_the_base_leg)
+{
+	zephyrtastic_ClusterMessage mine, probe;
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint32_t to = 0U;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	zassert_ok(meshtastic_cluster_scope_select(MESHTASTIC_CLUSTER_SCOPE_CHOICE_CORE));
+
+	meshtastic_cluster_digest_now();
+	zassert_true(take_cluster_tx(&mine, &to), "a digest must go out");
+	zassert_equal(mine.variant.digest.scope, zephyrtastic_ClusterScope_SCOPE_CORE,
+		      "a narrowed node must SAY it has narrowed");
+	wait_cluster_idle();
+	quiesce();
+
+	/* An unnarrowed peer whose base agrees with ours. Its triple is
+	 * deliberate nonsense: covering the whole fleet, it can never equal
+	 * ours, and a node that let it in would diverge for ever. */
+	probe = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	probe.which_variant = zephyrtastic_ClusterMessage_digest_tag;
+	probe.variant.digest.scope = zephyrtastic_ClusterScope_SCOPE_FULL;
+	probe.variant.digest.doc_hash = 0xFEEDFACEU;
+	probe.variant.digest.entry_count = 250U;
+	probe.variant.digest.has_max_stamp = true;
+	probe.variant.digest.max_stamp.physical_ms = TEST_EPOCH_MS + 1000;
+	probe.variant.digest.max_stamp.node_id = PEER_NODE_ID;
+	probe.variant.digest.base_hash = mine.variant.digest.base_hash;
+	probe.variant.digest.base_count = mine.variant.digest.base_count;
+
+	meshtastic_cluster_stats_get(&before_st);
+	inject_cluster_bearer(&probe, MESHTASTIC_NODE_BROADCAST, 0x7C20U);
+	k_sleep(K_MSEC(300));
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.digest_rx_match, before_st.digest_rx_match + 1U,
+		      "agreeing on base is agreement, whatever the peer's own claim covers");
+	zassert_equal(after_st.digest_rx_mismatch, before_st.digest_rx_mismatch,
+		      "the peer's whole-document triple must not leak into the verdict");
+
+	/* And the base leg really is what decides it. */
+	probe.variant.digest.base_hash ^= 0x1U;
+	meshtastic_cluster_stats_get(&before_st);
+	inject_cluster_bearer(&probe, MESHTASTIC_NODE_BROADCAST, 0x7C21U);
+	k_sleep(K_MSEC(300));
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.digest_rx_mismatch, before_st.digest_rx_mismatch + 1U,
+		      "a base leg that differs IS a divergence, and must open a walk");
+
+	scope_restore_full();
+	cluster_channel(false);
+}
+
+/*
+ * A PEER FROM BEFORE SCOPES EXISTED, heard by a node that has narrowed. It
+ * carries no base leg, so nothing it advertised describes a set we can re-hash.
+ *
+ * The only safe answer is to do NOTHING. Treating it as a mismatch would open a
+ * walk on a comparison that can never be established — once per digest period,
+ * for the life of the deployment — which is the unbounded conversation this
+ * module's bounds table forbids. The scheduled backstop walk is what covers the
+ * gap instead.
+ */
+ZTEST(mesh_sim, test_cluster_legacy_digest_is_incomparable_not_divergent)
+{
+	zephyrtastic_ClusterMessage probe, unused;
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint32_t to = 0U;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	zassert_ok(meshtastic_cluster_scope_select(MESHTASTIC_CLUSTER_SCOPE_CHOICE_CORE));
+	wait_cluster_idle();
+	quiesce();
+
+	probe = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	probe.which_variant = zephyrtastic_ClusterMessage_digest_tag;
+	/* scope left at SCOPE_UNSPECIFIED — an absent field on the wire. */
+	probe.variant.digest.doc_hash = 0x0BADF00DU;
+	probe.variant.digest.entry_count = 9U;
+	probe.variant.digest.has_max_stamp = true;
+	probe.variant.digest.max_stamp.physical_ms = TEST_EPOCH_MS + 1000;
+	probe.variant.digest.max_stamp.node_id = PEER_NODE_ID;
+
+	meshtastic_cluster_stats_get(&before_st);
+	inject_cluster_bearer(&probe, MESHTASTIC_NODE_BROADCAST, 0x7C30U);
+	k_sleep(K_MSEC(300));
+	meshtastic_cluster_stats_get(&after_st);
+
+	zassert_equal(after_st.digest_rx_incomparable, before_st.digest_rx_incomparable + 1U,
+		      "it must be recognised as uncomparable and counted as such");
+	zassert_equal(after_st.digest_rx_mismatch, before_st.digest_rx_mismatch,
+		      "NOT as a divergence");
+	zassert_equal(after_st.pull_started, before_st.pull_started,
+		      "and above all it must not open a walk");
+	zassert_false(take_cluster_tx(&unused, &to), "nothing may go out over it");
+
+	scope_restore_full();
+	cluster_channel(false);
+}
+
+/*
+ * A narrowed node meets rows it does not claim constantly — every broadcast
+ * push of another node's pin. Refusing them is right, and counting them as
+ * REFUSALS would be wrong: entry_rx_refused earns its capital letters in the
+ * shell by meaning "something tried to put something it should not in here",
+ * and drowning it in ordinary traffic destroys the only signal it carries.
+ *
+ * Refusing at ingest is safe here in a way it is not for `lora`, and for a
+ * precise reason: the digest we advertise EXCLUDES these keys, so no peer ever
+ * expects them of us and no mismatch survives the refusal.
+ */
+ZTEST(mesh_sim, test_cluster_core_refuses_out_of_scope_entries_without_crying_attack)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	zassert_ok(meshtastic_cluster_scope_select(MESHTASTIC_CLUSTER_SCOPE_CHOICE_CORE));
+	meshtastic_cluster_stats_get(&before_st);
+
+	len = encode_section(meshtastic_Config_power_tag, buf, sizeof(buf));
+	inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_NODE, PEER_NODE_ID,
+		     (TEST_EPOCH_MS + 32000), false, buf, len, 0x7C40U);
+	k_sleep(K_MSEC(400));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.entry_rx_out_of_scope, before_st.entry_rx_out_of_scope + 1U,
+		      "a row outside the claim must be counted on its own line");
+	zassert_equal(after_st.entry_rx_refused, before_st.entry_rx_refused,
+		      "and must NOT be counted as a refusal — on a narrowed node this is the "
+		      "ordinary case, and folding it in blinds the counter that matters");
+	zassert_false(doc_has(MESHTASTIC_CLUSTER_LAYER_NODE, PEER_NODE_ID,
+			      meshtastic_Config_power_tag),
+		      "nor may it reach the table");
+
+	/* A row we DO claim still lands, or the gate is just a mute button. */
+	len = encode_section(meshtastic_Config_display_tag, buf, sizeof(buf));
+	inject_entry(meshtastic_Config_display_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 33000), false, buf, len, 0x7C41U);
+	k_sleep(K_MSEC(400));
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, meshtastic_Config_display_tag),
+		     "base is inside every claim");
+
+	scope_restore_full();
+	cluster_channel(false);
+}
+
+/*
+ * Serving a walk to a peer that claims less than the whole document. Two
+ * cursors are needed and getting them confused is subtle: offset/total are the
+ * REQUESTER's coordinates and must count only the rows it can see, while the
+ * resume point is an index into our own table. Mix them and the requester's
+ * end-of-walk test (offset + count >= total) either fires early — truncating
+ * the walk — or never fires at all.
+ */
+ZTEST(mesh_sim, test_cluster_vector_reply_is_trimmed_to_the_requesters_scope)
+{
+	zephyrtastic_ClusterMessage msg;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint32_t rows = 0U;
+	uint32_t total = 0U;
+	uint32_t to = 0U;
+	size_t len;
+	bool saw_mine = false;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	/* One row on each side of CORE(PEER): a pin of OURS is what that claim
+	 * excludes, and base is what it includes. */
+	len = encode_section(meshtastic_Config_bluetooth_tag, buf, sizeof(buf));
+	inject_entry(meshtastic_Config_bluetooth_tag, zephyrtastic_ClusterLayer_NODE, TEST_NODE_ID,
+		     (TEST_EPOCH_MS + 34000), false, buf, len, 0x7C50U);
+	len = encode_section(meshtastic_Config_power_tag, buf, sizeof(buf));
+	inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 34100), false, buf, len, 0x7C51U);
+	k_sleep(K_MSEC(500));
+	quiesce();
+
+	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	msg.which_variant = zephyrtastic_ClusterMessage_vector_req_tag;
+	msg.variant.vector_req.scope = zephyrtastic_ClusterScope_SCOPE_CORE;
+	inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7C52U);
+
+	/* Drain the whole walk and check it terminates on the requester's own
+	 * arithmetic, not ours. */
+	while (take_cluster_tx(&msg, &to)) {
+		if (msg.which_variant != zephyrtastic_ClusterMessage_vector_tag) {
+			continue;
+		}
+		zassert_equal(msg.variant.vector.offset, rows,
+			      "offsets must be contiguous in the REQUESTER's coordinates");
+		total = msg.variant.vector.total;
+		for (uint32_t i = 0U; i < msg.variant.vector.entries_count; i++) {
+			const zephyrtastic_ClusterKey *k = &msg.variant.vector.entries[i].key;
+
+			if (k->layer == zephyrtastic_ClusterLayer_NODE &&
+			    k->node_id == TEST_NODE_ID) {
+				saw_mine = true;
+			}
+			rows++;
+		}
+		if (rows >= total) {
+			break;
+		}
+	}
+
+	zassert_true(total > 0U, "the walk must have served something");
+	zassert_equal(rows, total,
+		      "total must count the rows the requester can actually see, or its "
+		      "end-of-walk test never fires");
+	zassert_false(saw_mine,
+		      "a CORE(peer) requester must not be walked through OUR pins — it would "
+		      "refuse every one of them at ingest");
+
+	wait_cluster_idle();
+	cluster_channel(false);
+}
+
 #endif /* CONFIG_MESHTASTIC_CLUSTER */

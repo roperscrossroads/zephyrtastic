@@ -106,10 +106,52 @@ config MESHTASTIC_CLUSTER_SYNC_TIMEOUT_SEC
 config MESHTASTIC_CLUSTER_MAX_ENTRIES
 	int "Cluster document capacity (entries)"
 	default 32
-	range 8 256
+	range 12 256
 	help
 	  base sections + per-node pins the document can hold. 32 covers a
-	  five-node fleet pinning everything. ~150 B RAM per entry (PSRAM on
+	  five-node fleet pinning everything. ~168 B RAM per entry (PSRAM on
 	  boards that have it).
+
+	  The floor is twice the shareable-section allowlist, because that is
+	  what a CORE-scope node needs to hold its own claim (base + its own
+	  sections) and a node that cannot hold its own claim cannot honestly
+	  advertise one. A BUILD_ASSERT in meshtastic_cluster.c ties the two
+	  together, so growing the allowlist fails the build rather than
+	  shipping a node that is over capacity the moment it boots.
+
+choice
+	prompt "Document scope this node advertises"
+	default MESHTASTIC_CLUSTER_SCOPE_AUTO
+	help
+	  What this node CLAIMS to track (docs/CLUSTER-SYNC-M4.md §6.1). The
+	  digest is taken over the claim, not over what happens to be held, so
+	  a node too small for the whole fleet narrows its claim instead of
+	  advertising a document nobody else has.
+
+config MESHTASTIC_CLUSTER_SCOPE_AUTO
+	bool "auto — claim everything, narrow to CORE under table pressure"
+	help
+	  Start FULL and fall back to CORE the first time the table cannot
+	  hold something this node wanted. The right answer for a board with
+	  room, because it is a restore source for the fleet right up until
+	  the moment it genuinely cannot be.
+
+config MESHTASTIC_CLUSTER_SCOPE_CORE
+	bool "core — base plus this node's own sections (constrained tier)"
+	help
+	  For boards that will never hold a whole fleet's document (256 KB
+	  parts with no PSRAM). CORE is exactly the closure of effective(me,
+	  .), so this costs nothing in what the node RUNS; it only stops the
+	  node being able to serve other nodes their entries back.
+
+config MESHTASTIC_CLUSTER_SCOPE_FULL
+	bool "full — claim everything, never narrow"
+	help
+	  Pins the claim at FULL. A table that fills then stops tracking part
+	  of the fleet and cannot heal — the pre-agents-xhli.10 condition,
+	  reinstated deliberately. Choose it only for a node whose job is to
+	  be the fleet's restore source, and watch entry_rx_no_space.
+
+endchoice
 
 endif # MESHTASTIC_CLUSTER

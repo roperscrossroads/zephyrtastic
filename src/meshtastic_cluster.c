@@ -190,8 +190,13 @@ static struct {
 	 * leg, the diff predicate, the ingest gate, the vector filter and the
 	 * persistence load filter are taken over this and nothing else — the
 	 * moment two of them disagree, this node advertises a document it does
-	 * not hold, which is the one failure the mechanism exists to prevent. */
-	struct meshtastic_cluster_scope scope;
+	 * not hold, which is the one failure the mechanism exists to prevent.
+	 *
+	 * Held as a KIND, not a whole scope: the owner of a CORE claim is this
+	 * node's id, which is not necessarily known when the module starts. */
+	uint8_t scope_kind;
+	bool scope_pinned;	 /* compiled FULL/CORE, or an operator's choice */
+	bool scope_id_warned;
 	struct meshtastic_hlc hlc;
 	struct meshtastic_cluster_stats stats;
 	bool channel_missing_logged;
@@ -207,7 +212,11 @@ static struct {
 	/* Responder half: a vector walk (resumable by offset) and a burst of
 	 * entry replies, each aimed at one peer. */
 	uint32_t vec_dest;
-	uint16_t vec_offset;
+	uint16_t vec_offset;	/* table index the walk resumes from */
+	uint16_t vec_emitted;	/* rows already sent — the wire offset, which is
+				 * in FILTERED coordinates when the requester
+				 * claims less than the whole document */
+	uint8_t vec_scope_kind; /* the REQUESTER's claim, held for the walk */
 	uint32_t ent_dest;
 	struct meshtastic_cluster_key ent_keys[CLUSTER_PULL_KEYS];
 	uint8_t ent_count;
@@ -233,6 +242,8 @@ static struct {
 	int64_t refuse_log_next_ms; /* refusal-warning throttle */
 	uint32_t refuse_since_log;
 } cluster;
+
+static void my_scope_locked(struct meshtastic_cluster_scope *out);
 
 /* How many reply walks may be served back-to-back before the rate limit bites.
  * A fleet coming up together has every member pull at once, and making them
@@ -265,6 +276,14 @@ static const uint16_t shareable_sections[] = {
 	meshtastic_Config_lora_tag, /* replicable; promote refuses it separately */
 	meshtastic_Config_bluetooth_tag,
 };
+
+/* A CORE-scope node holds base + its own sections, so its claim is exactly
+ * twice the allowlist. A node that cannot hold its own claim cannot honestly
+ * advertise one — so growing the allowlist must fail the build, not ship a
+ * node that is over capacity at boot. Kconfig's `range` cannot see this array;
+ * this is the gate that actually holds. */
+BUILD_ASSERT(2U * ARRAY_SIZE(shareable_sections) <= CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES,
+	     "MAX_ENTRIES must hold base + this node's own sections (a CORE scope)");
 
 static bool section_shareable(uint16_t section)
 {
@@ -538,6 +557,25 @@ static void persist_entry(const struct meshtastic_cluster_entry *e)
 	}
 }
 
+/*
+ * Forget one key in flash. The retain() callback, so a narrowed claim does not
+ * quietly refill itself from NVS on the next boot.
+ *
+ * Correctness must not depend on these deletes landing. A crash part-way leaves
+ * records for keys we no longer claim, and the LOAD PATH's scope filter is what
+ * makes that harmless — the same reasoning that already re-runs the allowlist
+ * on load so an upgrade drops what a laxer build accepted. These deletes are
+ * flash housekeeping, not a correctness step.
+ */
+static void forget_entry(const struct meshtastic_cluster_key *key, void *ctx)
+{
+	char name[40];
+
+	ARG_UNUSED(ctx);
+	rec_name(key, name, sizeof(name));
+	(void)settings_delete(name);
+}
+
 static int cluster_settings_set(const char *key, size_t len, settings_read_cb read_cb,
 				void *cb_arg)
 {
@@ -583,6 +621,21 @@ static int cluster_settings_set(const char *key, size_t len, settings_read_cb re
 	}
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
+	{
+		/* The same scope filter the air is held to. A record for a key
+		 * this build no longer claims must not come back at boot: it
+		 * would put the table out of step with the digest before the
+		 * first frame goes out, and on a narrowed node it is also how
+		 * the table refills itself into overflow again. */
+		struct meshtastic_cluster_scope mine;
+
+		my_scope_locked(&mine);
+		if (!meshtastic_cluster_scope_contains(&mine, &k)) {
+			k_mutex_unlock(&cluster_lock);
+			forget_entry(&k, NULL);
+			return 0;
+		}
+	}
 	(void)meshtastic_cluster_doc_accept(&cluster.doc, &k, &stamp, rec.tombstone != 0U,
 					    rec.payload, plen);
 	(void)meshtastic_hlc_observe(&cluster.hlc, &stamp);
@@ -599,6 +652,12 @@ SETTINGS_STATIC_HANDLER_DEFINE(mtclus, "mtclus", NULL, cluster_settings_set, NUL
 static void persist_entry(const struct meshtastic_cluster_entry *e)
 {
 	ARG_UNUSED(e);
+}
+
+static void forget_entry(const struct meshtastic_cluster_key *key, void *ctx)
+{
+	ARG_UNUSED(key);
+	ARG_UNUSED(ctx);
 }
 
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
@@ -865,6 +924,32 @@ static void base_scope(struct meshtastic_cluster_scope *out)
 	meshtastic_cluster_scope_make(out, MESHTASTIC_CLUSTER_SCOPE_BASE, 0U);
 }
 
+/*
+ * The scope this node advertises, resolved now. CORE names an owner and the
+ * owner is this node's id, which the module cannot assume it had at init — so
+ * resolve at use rather than caching a scope with a stale owner in it.
+ *
+ * A CORE claim with no node id would be a claim over nobody's entries, which
+ * would evict this node's own rows and advertise a document it does not hold.
+ * Fall back to FULL and say so once: over-claiming is recoverable (the walk
+ * simply refuses what it cannot store), under-claiming your own keys is not.
+ */
+static void my_scope_locked(struct meshtastic_cluster_scope *out)
+{
+	uint32_t me = meshtastic_get_node_id();
+
+	if (cluster.scope_kind == MESHTASTIC_CLUSTER_SCOPE_CORE && me == 0U) {
+		if (!cluster.scope_id_warned) {
+			cluster.scope_id_warned = true;
+			LOG_WRN("cluster: CORE scope asked for before this node has an id — "
+				"claiming FULL until it does");
+		}
+		meshtastic_cluster_scope_make(out, MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+		return;
+	}
+	meshtastic_cluster_scope_make(out, cluster.scope_kind, me);
+}
+
 static void pull_reset_locked(void)
 {
 	cluster.pull_state = PULL_IDLE;
@@ -1017,22 +1102,35 @@ static uint32_t tx_next_locked(zephyrtastic_ClusterMessage *msg)
 	if (cluster.vec_dest != 0U) {
 		zephyrtastic_ClusterVector *v = &msg->variant.vector;
 		uint32_t dest = cluster.vec_dest;
+		struct meshtastic_cluster_scope want;
+
+		/* Serve only what the REQUESTER claims. Two cursors, because
+		 * offset/total are the requester's coordinates and must count
+		 * the rows it can actually see: vec_emitted is what goes on the
+		 * wire, vec_offset is where to resume in our own table. Mixing
+		 * them breaks the receiver's end-of-walk test. */
+		meshtastic_cluster_scope_make(&want, cluster.vec_scope_kind, dest);
 
 		msg->which_variant = zephyrtastic_ClusterMessage_vector_tag;
-		v->offset = cluster.vec_offset;
-		v->total = cluster.doc.count;
+		v->offset = cluster.vec_emitted;
+		v->total = meshtastic_cluster_doc_count_scoped(&cluster.doc, &want);
 		while (v->entries_count < CLUSTER_VECTOR_ROWS &&
 		       cluster.vec_offset < cluster.doc.count) {
 			const struct meshtastic_cluster_entry *e =
 				&cluster.doc.entries[cluster.vec_offset];
-			zephyrtastic_KeyStamp *row = &v->entries[v->entries_count];
+			zephyrtastic_KeyStamp *row;
 
+			cluster.vec_offset++;
+			if (!meshtastic_cluster_scope_contains(&want, &e->key)) {
+				continue;
+			}
+			row = &v->entries[v->entries_count];
 			key_to_pb(&e->key, &row->key);
 			row->has_key = true;
 			stamp_to_pb(&e->stamp, &row->stamp);
 			row->has_stamp = true;
 			v->entries_count++;
-			cluster.vec_offset++;
+			cluster.vec_emitted++;
 		}
 		if (cluster.vec_offset >= cluster.doc.count) {
 			cluster.vec_dest = 0U;
@@ -1062,9 +1160,14 @@ static uint32_t tx_next_locked(zephyrtastic_ClusterMessage *msg)
 		return dest;
 	}
 
-	/* 4. Our own vector request. */
+	/* 4. Our own vector request, carrying what we claim so the responder
+	 * does not walk us through rows we would refuse at ingest anyway. */
 	if (cluster.pull_state == PULL_SEND_VECTOR_REQ) {
+		struct meshtastic_cluster_scope mine;
+
+		my_scope_locked(&mine);
 		msg->which_variant = zephyrtastic_ClusterMessage_vector_req_tag;
+		msg->variant.vector_req.scope = scope_to_pb(&mine);
 		cluster.pull_state = PULL_AWAIT_VECTOR;
 		return cluster.pull_peer;
 	}
@@ -1181,6 +1284,54 @@ static void tx_work_fn(struct k_work *work)
 	}
 }
 
+/* ---- the declared scope, and narrowing it --------------------------------- */
+
+static void forget_entry(const struct meshtastic_cluster_key *key, void *ctx);
+
+/*
+ * Change what this node claims, and make the table match the claim in the same
+ * breath. Called with the lock held.
+ *
+ * The order matters and is the opposite of the intuitive one: narrow the CLAIM
+ * first, then drop the rows. A digest that went out in between would advertise
+ * the old claim over the new content — briefly describing a document nobody
+ * has, which is precisely the state this whole mechanism exists to make
+ * impossible. Both happen under the lock, so no digest can be built between
+ * them.
+ *
+ * Eviction is the whole of the policy: one pass, no victim choice, no LRU. A
+ * per-entry policy is exactly what makes the held set diverge from the declared
+ * set, and only the declared set can be honestly advertised.
+ *
+ * No reconcile is submitted, deliberately. CORE(me) is exactly the closure of
+ * effective(me, ·), so narrowing cannot change what this node runs, and a
+ * reconcile pass would be pure churn — a claim about the fleet, not about us.
+ */
+static void scope_set_locked(uint8_t kind, bool pinned)
+{
+	struct meshtastic_cluster_scope now;
+	uint16_t dropped;
+
+	cluster.scope_kind = kind;
+	cluster.scope_pinned = pinned;
+	my_scope_locked(&now);
+
+	dropped = meshtastic_cluster_doc_retain(&cluster.doc, &now, forget_entry, NULL);
+	cluster.stats.entries_evicted += dropped;
+
+	if (dropped > 0U) {
+		/* An in-flight exchange may be carrying keys we have just
+		 * stopped claiming, and a walk in progress is describing a
+		 * document that no longer exists. Both are cheap to abandon:
+		 * the next digest re-opens whatever still matters. */
+		pull_reset_locked();
+		cluster.vec_dest = 0U;
+		cluster.ent_dest = 0U;
+		cluster.ent_count = 0U;
+		cluster.ent_next = 0U;
+	}
+}
+
 /* ---- digest TX ------------------------------------------------------------ */
 
 static uint32_t digest_period_ms(void)
@@ -1198,6 +1349,7 @@ static void digest_work_fn(struct k_work *work)
 	/* Static for the same sysworkq-stack reason as send_cluster_message's
 	 * buffer (single executor serialises access). */
 	static zephyrtastic_ClusterMessage msg;
+	struct meshtastic_cluster_scope mine;
 	struct meshtastic_hlc_stamp max;
 	uint8_t ch_index;
 	int ret;
@@ -1218,15 +1370,15 @@ static void digest_work_fn(struct k_work *work)
 
 	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
 	k_mutex_lock(&cluster_lock, K_FOREVER);
+	my_scope_locked(&mine);
 	/* The three legs cover what we CLAIM, not what we hold — which for a
 	 * node that has never narrowed is the same thing, so a fleet where
 	 * nobody has narrowed advertises byte-identically to a pre-scope one. */
-	msg.variant.digest.doc_hash = meshtastic_cluster_doc_hash_scoped(&cluster.doc,
-									&cluster.scope);
+	msg.variant.digest.doc_hash = meshtastic_cluster_doc_hash_scoped(&cluster.doc, &mine);
 	msg.variant.digest.entry_count =
-		meshtastic_cluster_doc_count_scoped(&cluster.doc, &cluster.scope);
-	meshtastic_cluster_doc_max_stamp_scoped(&cluster.doc, &cluster.scope, &max);
-	msg.variant.digest.scope = scope_to_pb(&cluster.scope);
+		meshtastic_cluster_doc_count_scoped(&cluster.doc, &mine);
+	meshtastic_cluster_doc_max_stamp_scoped(&cluster.doc, &mine, &max);
+	msg.variant.digest.scope = scope_to_pb(&mine);
 	{
 		/* The second leg. Base is the one set inside every scope, so it
 		 * is what a peer on a different tier can always compare. */
@@ -1358,11 +1510,12 @@ static bool digest_compare_locked(uint32_t from, const zephyrtastic_ClusterDiges
 				  const struct meshtastic_hlc_stamp *theirs, bool *match,
 				  uint32_t *ours, uint32_t *theirs_hash)
 {
-	struct meshtastic_cluster_scope peer, inter;
+	struct meshtastic_cluster_scope mine, peer, inter;
 	bool has_base_leg;
 
 	scope_from_pb(d->scope, from, &peer, &has_base_leg);
-	meshtastic_cluster_scope_intersect(&cluster.scope, &peer, &inter);
+	my_scope_locked(&mine);
+	meshtastic_cluster_scope_intersect(&mine, &peer, &inter);
 
 	if (scope_eq(&inter, &peer)) {
 		struct meshtastic_hlc_stamp max;
@@ -1509,7 +1662,7 @@ static void serve_started_locked(void)
 	}
 }
 
-static void on_vector_req(uint32_t from)
+static void on_vector_req(uint32_t from, const zephyrtastic_ClusterVectorReq *r)
 {
 	bool serve;
 
@@ -1520,8 +1673,19 @@ static void on_vector_req(uint32_t from)
 	} else if (!may_serve_locked()) {
 		serve = false;
 	} else {
+		struct meshtastic_cluster_scope req;
+		bool unused;
+
+		/* Held for the whole walk: it spans several tx_work turns, and
+		 * a requester that claimed less than everything must keep
+		 * getting the same filtered view or the offsets stop lining up.
+		 * A requester predating scopes says nothing, which resolves to
+		 * FULL — the old behaviour, unchanged. */
+		scope_from_pb(r->scope, from, &req, &unused);
+		cluster.vec_scope_kind = req.kind;
 		cluster.vec_dest = from;
 		cluster.vec_offset = 0U;
+		cluster.vec_emitted = 0U;
 		serve_started_locked();
 	}
 	k_mutex_unlock(&cluster_lock);
@@ -1533,10 +1697,12 @@ static void on_vector_req(uint32_t from)
 
 static void on_vector(uint32_t from, const zephyrtastic_ClusterVector *v)
 {
+	struct meshtastic_cluster_scope mine;
 	bool fire = false;
 	bool last;
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
+	my_scope_locked(&mine);
 	if (cluster.pull_state != PULL_AWAIT_VECTOR || from != cluster.pull_peer) {
 		/* A later chunk from the peer we WERE walking is not unsolicited,
 		 * it is late: a full batch of keys ends the vector phase early, so
@@ -1572,8 +1738,18 @@ static void on_vector(uint32_t from, const zephyrtastic_ClusterVector *v)
 			continue;
 		}
 		(void)meshtastic_hlc_observe(&cluster.hlc, &stamp);
-		if (meshtastic_cluster_doc_wants(&cluster.doc, &key, &stamp)) {
+		switch (meshtastic_cluster_doc_want(&cluster.doc, &mine, &key, &stamp)) {
+		case MESHTASTIC_CLUSTER_WANT_YES:
 			cluster.pull_keys[cluster.pull_key_count++] = key;
+			break;
+		case MESHTASTIC_CLUSTER_WANT_NO_SPACE:
+			/* We claim this row and cannot hold it: this node has
+			 * outgrown its table. Counted here; acted on in the
+			 * commit that makes narrowing automatic. */
+			cluster.stats.want_no_space++;
+			break;
+		default:
+			break;
 		}
 	}
 
@@ -1677,6 +1853,42 @@ static void on_entry(uint32_t from, const zephyrtastic_ClusterEntry *e)
 	if (!section_shareable(key.section)) {
 		refuse_entry("not a shareable section", key.section);
 		return;
+	}
+
+	/*
+	 * Outside what we claim to track. Cheapest gate that rejects the most
+	 * traffic on a narrowed node — every broadcast push of another node's
+	 * pin lands here — and it leaks nothing, so it goes ahead of the
+	 * authorship check rather than after it.
+	 *
+	 * This is safe in a way the `lora` case was not. Refusing lora at
+	 * ingest would strand this node's document from the fleet's forever,
+	 * because we still advertise a hash that says we hold it. A row outside
+	 * our scope is different: the digest we advertise EXCLUDES it, so no
+	 * peer ever expects it of us and no mismatch survives the refusal. That
+	 * argument holds only while the refusal predicate and the hash
+	 * predicate are the same function — which is why both call
+	 * meshtastic_cluster_scope_contains() and nothing else.
+	 *
+	 * Counted apart from refusals on purpose. entry_rx_refused means
+	 * something tried to put something it should not into this document;
+	 * on a narrowed node in a busy fleet this path is simply the normal
+	 * case, and folding it in would drown the counter that matters.
+	 */
+	{
+		struct meshtastic_cluster_scope mine;
+		bool in_scope;
+
+		k_mutex_lock(&cluster_lock, K_FOREVER);
+		my_scope_locked(&mine);
+		in_scope = meshtastic_cluster_scope_contains(&mine, &key);
+		if (!in_scope) {
+			cluster.stats.entry_rx_out_of_scope++;
+		}
+		k_mutex_unlock(&cluster_lock);
+		if (!in_scope) {
+			return;
+		}
 	}
 	if (!entry_authorized(&key, &stamp)) {
 		refuse_entry("author is not a master", stamp.node_id);
@@ -1829,7 +2041,7 @@ static void cluster_on_packet(const struct meshtastic_packet *packet,
 		on_digest(packet->from, &msg.variant.digest);
 		break;
 	case zephyrtastic_ClusterMessage_vector_req_tag:
-		on_vector_req(packet->from);
+		on_vector_req(packet->from, &msg.variant.vector_req);
 		break;
 	case zephyrtastic_ClusterMessage_vector_tag:
 		on_vector(packet->from, &msg.variant.vector);
@@ -2158,6 +2370,59 @@ int meshtastic_cluster_pull(uint32_t node_id)
 	return 0;
 }
 
+int meshtastic_cluster_scope_select(int choice)
+{
+	uint8_t kind;
+	bool pinned;
+
+	switch (choice) {
+	case MESHTASTIC_CLUSTER_SCOPE_CHOICE_AUTO:
+		kind = MESHTASTIC_CLUSTER_SCOPE_FULL;
+		pinned = false;
+		break;
+	case MESHTASTIC_CLUSTER_SCOPE_CHOICE_FULL:
+		kind = MESHTASTIC_CLUSTER_SCOPE_FULL;
+		pinned = true;
+		break;
+	case MESHTASTIC_CLUSTER_SCOPE_CHOICE_CORE:
+		kind = MESHTASTIC_CLUSTER_SCOPE_CORE;
+		pinned = true;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	if (cluster.scope_kind == kind && cluster.scope_pinned == pinned) {
+		k_mutex_unlock(&cluster_lock);
+		return -EALREADY;
+	}
+	scope_set_locked(kind, pinned);
+	k_mutex_unlock(&cluster_lock);
+
+	LOG_INF("cluster: now claiming %s%s", kind == MESHTASTIC_CLUSTER_SCOPE_CORE
+						      ? "CORE (base + my own sections)"
+						      : "FULL (the whole document)",
+		pinned ? "" : " — free to narrow under table pressure");
+	/* Say so at once rather than waiting for the cadence: every peer's
+	 * comparison against this node just changed which set it covers. */
+	(void)k_work_reschedule(&digest_work, K_NO_WAIT);
+	return 0;
+}
+
+const char *meshtastic_cluster_scope_name(bool *pinned)
+{
+	const char *name;
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	name = (cluster.scope_kind == MESHTASTIC_CLUSTER_SCOPE_CORE) ? "CORE" : "FULL";
+	if (pinned != NULL) {
+		*pinned = cluster.scope_pinned;
+	}
+	k_mutex_unlock(&cluster_lock);
+	return name;
+}
+
 void meshtastic_cluster_digest_now(void)
 {
 	(void)k_work_reschedule(&digest_work, K_NO_WAIT);
@@ -2230,7 +2495,15 @@ int meshtastic_cluster_init(void)
 {
 	meshtastic_cluster_doc_init(&cluster.doc, cluster_storage,
 				    ARRAY_SIZE(cluster_storage));
-	meshtastic_cluster_scope_make(&cluster.scope, MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+#if defined(CONFIG_MESHTASTIC_CLUSTER_SCOPE_CORE)
+	cluster.scope_kind = MESHTASTIC_CLUSTER_SCOPE_CORE;
+	cluster.scope_pinned = true;
+#else
+	/* AUTO and FULL both start out claiming everything; they differ only in
+	 * whether table pressure is allowed to narrow the claim later. */
+	cluster.scope_kind = MESHTASTIC_CLUSTER_SCOPE_FULL;
+	cluster.scope_pinned = IS_ENABLED(CONFIG_MESHTASTIC_CLUSTER_SCOPE_FULL);
+#endif
 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 	/* Persisted entries load through the settings handler; the config

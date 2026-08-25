@@ -94,6 +94,34 @@ int meshtastic_cluster_unpin(uint16_t section);
  */
 int meshtastic_cluster_pull(uint32_t node_id);
 
+/*
+ * WHAT THIS NODE CLAIMS TO TRACK (agents-xhli.10, docs/CLUSTER-SYNC-M4.md §6.1).
+ *
+ *   AUTO  claim everything, and narrow to CORE the first time the table cannot
+ *         hold something we wanted
+ *   FULL  claim everything and never narrow — a dedicated restore source, and
+ *         the pre-agents-xhli.10 behaviour when the table fills
+ *   CORE  base + this node's own sections
+ *
+ * Selecting CORE evicts everything outside the claim immediately, including
+ * from persistent storage. It cannot change what this node RUNS — CORE(me) is
+ * exactly the closure of effective(me, ·) — only whether it can serve other
+ * nodes their entries back.
+ *
+ * Returns 0, -EALREADY (already that claim), -EINVAL (not a choice), or
+ * -ENOSYS when the cluster module is not running.
+ */
+enum meshtastic_cluster_scope_choice {
+	MESHTASTIC_CLUSTER_SCOPE_CHOICE_AUTO = 0,
+	MESHTASTIC_CLUSTER_SCOPE_CHOICE_FULL,
+	MESHTASTIC_CLUSTER_SCOPE_CHOICE_CORE,
+};
+int meshtastic_cluster_scope_select(int choice);
+
+/* "FULL"/"CORE" plus, when non-NULL, whether the claim is pinned (compiled or
+ * operator-chosen) rather than free to narrow itself under table pressure. */
+const char *meshtastic_cluster_scope_name(bool *pinned);
+
 struct meshtastic_cluster_stats {
 	/* digest_tx counts digests HANDED TO the send path. On a node whose
 	 * radio TX is disabled (config.lora.tx_enabled = false) the frame is
@@ -126,6 +154,14 @@ struct meshtastic_cluster_stats {
 	uint32_t entry_rx_stale;   /* arrived, ours was newer — LWW kept ours */
 	uint32_t entry_rx_refused;  /* secret boundary, D4 authorship, unknown owner */
 	uint32_t entry_rx_no_space; /* table full — the fleet outgrew MAX_ENTRIES */
+	/* Rows for keys outside what this node claims. On a narrowed node in a
+	 * busy fleet this is the ORDINARY case, not an attack — which is
+	 * exactly why it is not folded into entry_rx_refused, whose whole value
+	 * is that a non-zero reading means something tried to put something it
+	 * should not into this document. */
+	uint32_t entry_rx_out_of_scope;
+	uint32_t want_no_space;	    /* rows we claim and could not have stored */
+	uint32_t entries_evicted;   /* dropped by narrowing the claim */
 	uint32_t entry_rx_future;   /* stamped beyond the clock drift horizon */
 	uint32_t rx_unsolicited;   /* a reply we had not asked for */
 	uint32_t tx_busy;	   /* a peer asked while we were serving another */

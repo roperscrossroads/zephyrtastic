@@ -765,4 +765,63 @@ ZTEST(meshtastic_shell, test_cluster_pull_needs_a_channel_and_a_peer)
 	zassert_not_equal(run_cmd("meshtastic cluster pull 0x12345678", &out), 0,
 			  "pulling from ourselves is not a walk");
 }
+/*
+ * The claim has to be legible, because nothing else on the node would ever say
+ * that this one has stopped being a place the fleet can recover a pin from.
+ * CORE costs nothing in what the node RUNS, which is exactly why it would
+ * otherwise be invisible.
+ */
+ZTEST(meshtastic_shell, test_cluster_status_names_the_scope_and_what_core_costs)
+{
+	const char *out = NULL;
+
+	provision_cluster_channel();
+
+	zassert_ok(run_cmd("meshtastic cluster status", &out), "status failed");
+	zassert_not_null(strstr(out, "scope   : FULL"),
+			 "status must name what this node claims to track");
+	zassert_not_null(strstr(out, "tracking the whole fleet"),
+			 "and say plainly what that means");
+
+	zassert_ok(run_cmd("meshtastic cluster scope core", &out), "narrowing failed");
+	zassert_ok(run_cmd("meshtastic cluster status", &out), "status failed");
+	zassert_not_null(strstr(out, "scope   : CORE"), "a narrowed claim must show as CORE");
+	zassert_not_null(strstr(out, "NOT a restore source"),
+			 "and must say what the fleet has lost, since the node itself is "
+			 "running exactly what it was");
+
+	zassert_ok(run_cmd("meshtastic cluster scope auto", &out), "restoring failed");
+}
+
+ZTEST(meshtastic_shell, test_cluster_scope_command_sets_and_reads_back)
+{
+	const char *out = NULL;
+
+	provision_cluster_channel();
+	zassert_ok(run_cmd("meshtastic cluster scope auto", &out), "baseline");
+
+	zassert_not_equal(run_cmd("meshtastic cluster scope", &out), 0,
+			  "a scope change is not something to do by accident");
+	zassert_not_equal(run_cmd("meshtastic cluster scope enormous", &out), 0,
+			  "an unknown claim must be refused, not guessed at");
+	zassert_not_null(strstr(out, "full, core or auto"), "the refusal should list the choices");
+
+	zassert_ok(run_cmd("meshtastic cluster scope core", &out), "narrowing failed");
+	zassert_not_null(strstr(out, "no longer a restore source"),
+			 "the operator must be told what they gave up");
+	zassert_not_null(strstr(out, "what it RUNS is unchanged"),
+			 "and what they did not");
+
+	zassert_ok(run_cmd("meshtastic cluster scope core", &out), "a repeat must not error");
+	zassert_not_null(strstr(out, "already claiming that"), "it should say so");
+
+	/* FULL pinned is a real choice with a real cost, and the shell says so:
+	 * it reinstates the table that fills and never heals. */
+	zassert_ok(run_cmd("meshtastic cluster scope full", &out), "widening failed");
+	zassert_not_null(strstr(out, "pinned"), "a pinned claim must announce itself");
+
+	zassert_ok(run_cmd("meshtastic cluster scope auto", &out), "restoring failed");
+	zassert_not_null(strstr(out, "auto"), "and so must an automatic one");
+}
+
 #endif /* CONFIG_MESHTASTIC_CLUSTER */

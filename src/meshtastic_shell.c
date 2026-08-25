@@ -3343,6 +3343,36 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		    meshtastic_cluster_entry_count() == 1U ? "y" : "ies",
 		    (unsigned int)meshtastic_cluster_doc_hash_now());
 	/*
+	 * WHAT THIS NODE CLAIMS TO TRACK — printed next to the document because
+	 * the two only mean something together: the hash above is taken over
+	 * the claim, not over the table.
+	 *
+	 * CORE says so loudly. It is not a fault and it costs this node nothing
+	 * in what it RUNS (CORE is exactly the closure of effective(me, ·)),
+	 * but it does mean the fleet has one fewer place to recover a node's
+	 * pins from, and nothing else on the node would ever say so.
+	 */
+	{
+		bool pinned;
+		const char *scope = meshtastic_cluster_scope_name(&pinned);
+		bool core = (scope[0] == 'C');
+
+		shell_print(sh, "scope   : %s (%s) — %u of %u entries%s", scope,
+			    pinned ? "pinned" : "auto",
+			    (unsigned int)meshtastic_cluster_entry_count(),
+			    (unsigned int)CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES,
+			    core ? "" : ", tracking the whole fleet");
+		if (core) {
+			shell_print(sh, "        : base + MY OWN sections only — this node is "
+					"NOT a restore source for other nodes (§7.7)");
+		}
+		if (st.entry_rx_out_of_scope || st.entries_evicted || st.want_no_space) {
+			shell_print(sh, "        : out_of_scope=%u evicted=%u no_space=%u",
+				    st.entry_rx_out_of_scope, st.entries_evicted,
+				    st.want_no_space);
+		}
+	}
+	/*
 	 * THE DRIFT HORIZON'S PRECONDITION, said out loud (agents-xhli.14).
 	 *
 	 * The horizon (D12) is measured against the wall clock, so a node whose
@@ -3607,6 +3637,52 @@ static int cmd_cluster_pull(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_cluster_scope(const struct shell *sh, size_t argc, char **argv)
+{
+	int choice;
+	int ret;
+
+	if (argc != 2) {
+		shell_error(sh, "usage: meshtastic cluster scope <full|core|auto>");
+		return -EINVAL;
+	}
+	if (strcmp(argv[1], "auto") == 0) {
+		choice = MESHTASTIC_CLUSTER_SCOPE_CHOICE_AUTO;
+	} else if (strcmp(argv[1], "full") == 0) {
+		choice = MESHTASTIC_CLUSTER_SCOPE_CHOICE_FULL;
+	} else if (strcmp(argv[1], "core") == 0) {
+		choice = MESHTASTIC_CLUSTER_SCOPE_CHOICE_CORE;
+	} else {
+		shell_error(sh, "unknown scope \"%s\" — full, core or auto", argv[1]);
+		return -EINVAL;
+	}
+
+	ret = meshtastic_cluster_scope_select(choice);
+	if (ret == -EALREADY) {
+		shell_print(sh, "already claiming that");
+		return 0;
+	}
+	if (ret != 0) {
+		shell_error(sh, "scope change failed (%d)", ret);
+		return ret;
+	}
+
+	if (choice == MESHTASTIC_CLUSTER_SCOPE_CHOICE_CORE) {
+		shell_print(sh, "now claiming CORE — base + this node's own sections. "
+				"Everything else has been dropped, from flash too. This node "
+				"is no longer a restore source for other nodes; what it RUNS "
+				"is unchanged.");
+	} else {
+		shell_print(sh, "now claiming FULL%s. The fleet's rows come back on the "
+				"next walk.",
+			    choice == MESHTASTIC_CLUSTER_SCOPE_CHOICE_AUTO
+				    ? " (auto — free to narrow again under table pressure)"
+				    : " (pinned — it will NOT narrow, so a full table stops "
+				      "tracking part of the fleet)");
+	}
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 			       SHELL_CMD(status, NULL,
 					 SHELL_HELP("Cluster doc, digest stats, channel binding.",
@@ -3626,6 +3702,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 						    "tombstone); follow the current base.",
 						    "<device|position|power|display|bluetooth>"),
 					 cmd_cluster_unpin),
+			       SHELL_CMD(scope, NULL,
+					 SHELL_HELP("What this node claims to track. core = "
+						    "base + my own sections (constrained tier).",
+						    "<full|core|auto>"),
+					 cmd_cluster_scope),
 			       SHELL_CMD(digest, NULL,
 					 SHELL_HELP("Broadcast one digest now.", NULL),
 					 cmd_cluster_digest),
