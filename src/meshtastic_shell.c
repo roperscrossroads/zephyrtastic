@@ -328,6 +328,95 @@ static const char *clock_quality_name(enum meshtastic_clock_quality q)
  * operator's host clock) at NTP quality, the same trust class as a phone
  * set_time_only, so a later GPS fix still outranks it and a mesh-relayed
  * value cannot clobber it. */
+/*
+ * meshtastic owner [set <long> [short]]
+ *
+ * The owner names were the one piece of node identity the shell could not
+ * touch: it already writes channels, device role, rebroadcast mode, the LoRa
+ * preset, admin keys and the clock, but the only owner writers were the phone
+ * app and the remote-admin client (agents-xhli.15/.14 sessions). That gap is
+ * not academic — it makes two states unrecoverable without a second node:
+ *
+ *   - a node whose admin_key list is EMPTY cannot be renamed by anything,
+ *     because nothing is permitted to administer it;
+ *   - a node that cannot TRANSMIT on the mesh (config.lora.tx_enabled = false)
+ *     cannot answer the getter that must precede any mutating admin op, so
+ *     remote admin cannot reach it over the radio at all — which is exactly the
+ *     bench's receive-only node.
+ *
+ * Both have a working USB console. So the console can do it.
+ *
+ * Gated like every other config write: compiled out with
+ * MESHTASTIC_SHELL_CONFIG_WRITE=n, and refused at runtime on a managed node.
+ * Setting the owner does NOT mint an HLC version (the owner is not a shareable
+ * Config section), so this never touches the cluster document.
+ */
+static int cmd_owner(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 1U) {
+		bool licensed = false;
+		bool unmessagable = false;
+
+		meshtastic_config_store_get_owner_flags(&licensed, &unmessagable);
+		shell_print(sh, "owner: long=\"%s\" short=\"%s\"",
+			    meshtastic_config_store_long_name(),
+			    meshtastic_config_store_short_name());
+		shell_print(sh, "flags: licensed=%s unmessagable=%s", licensed ? "yes" : "no",
+			    unmessagable ? "yes" : "no");
+		return 0;
+	}
+
+	if ((strcmp(argv[1], "set") != 0) || argc < 3U || argc > 4U) {
+		shell_error(sh, "usage: meshtastic owner [set <long> [short]]");
+		return -EINVAL;
+	}
+
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	shell_error(sh, "refused: shell config writes are compiled out "
+			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
+	return -ENOTSUP;
+#else
+	{
+		meshtastic_User user = meshtastic_User_init_zero;
+		bool licensed = false;
+		bool unmessagable = false;
+		int ret;
+
+		if (shell_config_write_refused(sh)) {
+			return -EACCES;
+		}
+
+		/*
+		 * Carry the CURRENT flags through. set_owner takes a whole User and
+		 * reads is_licensed from it as a plain proto3 bool — an unset field
+		 * is indistinguishable from an explicit false — so building one from
+		 * zero here would silently clear a licence as a side effect of a
+		 * rename. (has_is_unmessagable does have presence, but pass it too so
+		 * both flags are handled the same way rather than one by luck.)
+		 */
+		meshtastic_config_store_get_owner_flags(&licensed, &unmessagable);
+		user.is_licensed = licensed;
+		user.has_is_unmessagable = true;
+		user.is_unmessagable = unmessagable;
+
+		strncpy(user.long_name, argv[2], sizeof(user.long_name) - 1U);
+		if (argc == 4U) {
+			strncpy(user.short_name, argv[3], sizeof(user.short_name) - 1U);
+		}
+
+		ret = meshtastic_config_store_set_owner(&user);
+		if (ret < 0) {
+			shell_error(sh, "owner set failed: %d", ret);
+			return ret;
+		}
+		shell_print(sh, "owner set to long=\"%s\" short=\"%s\"",
+			    meshtastic_config_store_long_name(),
+			    meshtastic_config_store_short_name());
+		return 0;
+	}
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+}
+
 static int cmd_time(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc == 1U) {
@@ -3566,6 +3655,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(time, NULL,
 		  SHELL_HELP("Show or set the wall clock.", "[set <unix-epoch-seconds>]"),
 		  cmd_time),
+	SHELL_CMD(owner, NULL,
+		  SHELL_HELP("Show or set this node's owner names.",
+			     "[set <long> [short]]"),
+		  cmd_owner),
 #if defined(CONFIG_NETWORKING)
 	SHELL_CMD(netpause, NULL,
 		  SHELL_HELP("Take the network down for N seconds, then restore it. "

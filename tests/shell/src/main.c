@@ -495,6 +495,91 @@ ZTEST(meshtastic_shell, test_rf_reports_unknown_readback_as_unknown)
 
 #endif /* CONFIG_MESHTASTIC_RF_PATH_REPORT */
 
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+/*
+ * `meshtastic owner set` — the local writer that did not exist.
+ *
+ * Worth having tests rather than just a command, because the shell is the ONLY
+ * way to name two states of node: one whose admin_key list is empty (nothing may
+ * administer it) and one that cannot transmit on the mesh (it cannot answer the
+ * getter that must precede a remote set). Both have a console and nothing else.
+ */
+ZTEST(meshtastic_shell, test_owner_set_and_readback)
+{
+	const char *out = NULL;
+
+	zassert_ok(run_cmd("meshtastic owner set \"RX Unit\" rxru", &out), "owner set failed");
+	zassert_ok(run_cmd("meshtastic owner", &out), "owner show failed");
+	zassert_not_null(strstr(out, "long=\"RX Unit\""), "the long name must read back");
+	zassert_not_null(strstr(out, "short=\"rxru\""), "the short name must read back");
+}
+
+/* The long name alone is a legal call: the short name is optional, and an empty
+ * one means "leave it alone" (upstream handleSetOwner parity), NOT "clear it". */
+ZTEST(meshtastic_shell, test_owner_set_without_short_name_keeps_the_short_name)
+{
+	const char *out = NULL;
+
+	zassert_ok(run_cmd("meshtastic owner set First aaaa", &out), "owner set failed");
+	zassert_ok(run_cmd("meshtastic owner set Second", &out), "owner set failed");
+	zassert_ok(run_cmd("meshtastic owner", &out), "owner show failed");
+	zassert_not_null(strstr(out, "long=\"Second\""), "the long name must have changed");
+	zassert_not_null(strstr(out, "short=\"aaaa\""),
+			 "omitting the short name must leave it alone, not clear it");
+}
+
+/*
+ * THE TRAP THIS TEST EXISTS FOR. set_owner takes a whole User and reads
+ * is_licensed as a plain proto3 bool, so an unset field is indistinguishable
+ * from an explicit false — building a User from zero for a rename would clear an
+ * operator's licence as a silent side effect, and with it the transmit power
+ * that was resolved under it.
+ */
+ZTEST(meshtastic_shell, test_owner_set_does_not_clear_the_licence)
+{
+	meshtastic_User licensed_user = meshtastic_User_init_zero;
+	const char *out = NULL;
+	bool licensed = false;
+
+	strcpy(licensed_user.long_name, "Licensed");
+	strcpy(licensed_user.short_name, "lic1");
+	licensed_user.is_licensed = true;
+	zassert_ok(meshtastic_config_store_set_owner(&licensed_user), "owner write failed");
+
+	meshtastic_config_store_get_owner_flags(&licensed, NULL);
+	zassert_true(licensed, "setup: the licence must be set before the rename");
+
+	zassert_ok(run_cmd("meshtastic owner set Renamed rnm1", &out), "owner set failed");
+
+	meshtastic_config_store_get_owner_flags(&licensed, NULL);
+	zassert_true(licensed, "a rename must not clear the operator licence");
+
+	/* Leave the licence off — it changes the resolved TX power, and later tests
+	 * must not inherit an elevated one. */
+	licensed_user.is_licensed = false;
+	zassert_ok(meshtastic_config_store_set_owner(&licensed_user), "owner restore failed");
+}
+
+#else /* !CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+
+/* The other half of the build coverage: with writes compiled out the command
+ * must still EXIST and still report, and only the setter is refused. A command
+ * that vanished entirely would look like a missing feature rather than a
+ * deliberate build choice. */
+ZTEST(meshtastic_shell, test_owner_set_is_refused_when_writes_are_compiled_out)
+{
+	const char *out = NULL;
+
+	zassert_ok(run_cmd("meshtastic owner", &out), "showing the owner must still work");
+	zassert_not_null(strstr(out, "long="), "the report must still be produced");
+
+	zassert_not_equal(run_cmd("meshtastic owner set Nope nope", &out), 0,
+			  "a compiled-out write must be refused, not silently accepted");
+	zassert_not_null(strstr(out, "compiled out"), "the refusal should name the reason");
+}
+
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+
 #if defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
 /*
  * `admin remote <node> set-time` with no epoch relays OUR clock, which means a
