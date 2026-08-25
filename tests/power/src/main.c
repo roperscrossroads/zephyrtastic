@@ -266,4 +266,42 @@ ZTEST(power, test_manual_cleared_by_reset)
 	zassert_false(meshtastic_power_manual_inhibit(), "accessor clear after reset");
 }
 
+/* A node nobody has configured yet must not carry other people's traffic.
+ *
+ * A fresh config is LONG_FAST + the default PSK + a real region, which IS the
+ * public mesh — so with the reference's rebroadcast default of ALL, a node
+ * starts relaying strangers' packets within seconds of its first boot. That was
+ * observed on a XIAO on 2026-08-24 (agents-tosb), before anyone had touched it.
+ * The Kconfig seed is what closes that window.
+ *
+ * Tested by driving the seeding path DIRECTLY rather than by reading whatever
+ * the store happens to hold. Reading the live store is what the obvious version
+ * of this test does, and it is wrong twice over: the protocol suite has half a
+ * dozen admin/set_config tests that legitimately overwrite the device section
+ * (an admin set_config carrying a zeroed DeviceConfig lands rebroadcast_mode =
+ * 0), so the check would pass or fail on test ORDER; and a suite that never
+ * seeds the store at all reads an empty record and fails for a third,
+ * unrelated reason. Seeding here makes the assertion about the seed and nothing
+ * else.
+ */
+ZTEST(power, test_fresh_config_seeds_no_rebroadcast)
+{
+	struct meshtastic_config init = {0};
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_seed(&init), "seeding the store failed");
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag, &cfg),
+		   "device config unavailable");
+	zassert_equal(cfg.which_payload_variant, meshtastic_Config_device_tag, "wrong variant");
+	zassert_equal(cfg.payload_variant.device.rebroadcast_mode,
+		      (meshtastic_Config_DeviceConfig_RebroadcastMode)
+			      CONFIG_MESHTASTIC_DEFAULT_REBROADCAST_MODE,
+		      "the fresh config must carry the seeded rebroadcast mode");
+	zassert_equal(cfg.payload_variant.device.rebroadcast_mode,
+		      meshtastic_Config_DeviceConfig_RebroadcastMode_NONE,
+		      "and this build's seed is NONE — a never-configured node stays out of "
+		      "a mesh its operator never chose");
+}
+
 ZTEST_SUITE(power, NULL, NULL, power_before, NULL, NULL);

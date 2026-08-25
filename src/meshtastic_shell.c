@@ -2852,10 +2852,37 @@ static void cmd_lora_show(const struct shell *sh)
 						       cfg.payload_variant.lora.region, licensed);
 		drive = meshtastic_tx_power_chip_drive(radiated, licensed);
 
-		shell_print(sh, "tx power:     %d dBm at the antenna%s (radio drive %d dBm%s)",
-			    radiated,
-			    (cfg.payload_variant.lora.tx_power == 0) ? " [region default]" : "",
-			    drive, (drive != radiated) ? ", FEM makes up the rest" : "");
+		const char *fem = meshtastic_radio_fem_name();
+		const char *dflt =
+			(cfg.payload_variant.lora.tx_power == 0) ? " [region default]" : "";
+
+		if (drive == radiated) {
+			shell_print(sh, "tx power:     %d dBm at the antenna%s (radio drive "
+					"%d dBm)", radiated, dflt, drive);
+		} else if (fem != NULL) {
+			shell_print(sh, "tx power:     %d dBm at the antenna%s (radio drive "
+					"%d dBm; %s makes up the rest)",
+				    radiated, dflt, drive, fem);
+		} else {
+			/* No front end, so nothing makes up the difference — the drive IS
+			 * what leaves the antenna, and the requested figure is simply not
+			 * reachable on this board.
+			 *
+			 * The old text said "FEM makes up the rest" whenever the two
+			 * numbers differed, which on a bare transceiver was a claim about
+			 * hardware that is not fitted: a XIAO + Wio-SX1262 in region US
+			 * resolves 30 dBm, clamps the chip to 22, and reported "30 dBm at
+			 * the antenna (FEM makes up the rest)" while radiating 22 into an
+			 * antenna with no FEM behind it (agents-tosb). Report what the
+			 * board will actually do, and say why it is not what was asked
+			 * for. (`meshtastic rf path` had this right already — it gates the
+			 * gain claim on fem_name — which is where the correct model came
+			 * from.) */
+			shell_print(sh, "tx power:     %d dBm at the antenna (requested %d%s, "
+					"clamped to the radio's %d dBm max; no front end to "
+					"make up the difference)",
+				    drive, radiated, dflt, drive);
+		}
 	}
 
 	/* The other two knobs a config tool can set that change what the radio

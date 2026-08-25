@@ -4417,3 +4417,43 @@ ZTEST(mesh_sim, test_duty_cycle_refuses_all_egress_and_tells_the_phone)
 	(void)meshtastic_airtime_init();
 	meshtastic_duty_stats_reset();
 }
+
+/* The harm agents-tosb actually named: an unconfigured node relaying a
+ * stranger's packet on the public mesh.
+ *
+ * The seed test in tests/protocol proves a fresh config carries NONE. This
+ * proves NONE does the thing it is being seeded for — and, just as important,
+ * that it does NOT cost the node its hearing. A "safe default" that made a
+ * fresh node deaf would be a worse bug than the one it fixes, so both halves
+ * are asserted together.
+ */
+ZTEST(mesh_sim, test_rebroadcast_none_hears_but_does_not_relay)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct lora_sim_frame f;
+
+	/* Baseline: with ALL (what the before-hook sets) this frame IS relayed, so
+	 * a missing TX below means the mode did it, not that the frame was
+	 * unrelayable to begin with. */
+	build_peer_text(0x7001U, "relay baseline", wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "baseline frame not delivered");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)),
+		   "precondition: this frame is relayed under ALL");
+	wait_rx_armed();
+
+	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_NONE);
+
+	build_peer_text(0x7002U, "do not relay me", wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)),
+		   "a non-rebroadcasting node must still HEAR the mesh — it is quiet, "
+		   "not deaf");
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0,
+			  "a node that has never been configured must not carry a stranger's "
+			  "traffic");
+
+	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_ALL);
+}

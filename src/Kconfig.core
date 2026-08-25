@@ -175,6 +175,39 @@ config MESHTASTIC_TX_ENABLED_DEFAULT
 	  A stored config (shell `meshtastic lora tx on|off`, phone, admin)
 	  overrides this seed either way.
 
+config MESHTASTIC_DEFAULT_REBROADCAST_MODE
+	int "Rebroadcast mode seeded on a fresh node"
+	default 4
+	range 0 5
+	help
+	  Seeds config.device.rebroadcast_mode on first boot, as a
+	  meshtastic_Config_DeviceConfig_RebroadcastMode value: 0 ALL,
+	  1 ALL_SKIP_DECODING, 2 LOCAL_ONLY, 3 KNOWN_ONLY, 4 NONE,
+	  5 CORE_PORTNUMS_ONLY.
+
+	  DEFAULT 4 (NONE), which differs from the reference firmware's ALL, and
+	  the difference is deliberate.
+
+	  A fresh config comes up on LONG_FAST with the default PSK and a real
+	  region, which IS the public mesh. With ALL, a node that nobody has yet
+	  told which mesh it belongs to starts carrying strangers' traffic within
+	  seconds of its first boot — observed on a XIAO on 2026-08-24, which
+	  relayed a stranger's packet before anyone had touched it. Beaconing its
+	  own presence is one thing; silently becoming a relay for a mesh the
+	  operator never chose is another, and it is what the standing "the public
+	  LongFast mesh is read-only territory" rule exists to prevent.
+
+	  So a NEVER-CONFIGURED node stays out of other people's traffic. It still
+	  transmits its own — it is discoverable, pairable and configurable, and
+	  `meshtastic status` says "rebroadcasting: no" so the state is visible
+	  rather than mysterious.
+
+	  This is a SEED, not a policy: writing the device config from the phone,
+	  the admin API or `meshtastic device rebroadcast` replaces it, and the
+	  phone app sends ALL unless told otherwise, so a node configured the
+	  ordinary way ends up relaying like any other. Set this to 0 for a build
+	  that should behave exactly like the reference out of the box.
+
 config MESHTASTIC_TX_POWER
 	int "Fallback TX power for a region with no declared limit (dBm)"
 	default 17

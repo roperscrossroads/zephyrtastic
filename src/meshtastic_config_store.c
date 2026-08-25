@@ -546,7 +546,16 @@ static void seed_config_defaults(const struct meshtastic_config *cfg)
 
 	idx = index_for_config_tag(meshtastic_Config_device_tag);
 	store.configs[idx].payload_variant.device.role = meshtastic_device_role();
-	store.configs[idx].payload_variant.device.rebroadcast_mode = meshtastic_rebroadcast_mode();
+	/* Seeded from Kconfig, NOT from the live runtime value, and defaulting to
+	 * NONE rather than the reference's ALL. A fresh config is LONG_FAST + the
+	 * default PSK + a real region, which is the public mesh — so with ALL a node
+	 * nobody has configured yet starts relaying strangers' traffic seconds after
+	 * its first boot (observed, agents-tosb). Its own traffic still goes out, so
+	 * it stays discoverable and configurable; it just does not carry a mesh the
+	 * operator never chose. Any config write replaces this. */
+	store.configs[idx].payload_variant.device.rebroadcast_mode =
+		(meshtastic_Config_DeviceConfig_RebroadcastMode)
+			CONFIG_MESHTASTIC_DEFAULT_REBROADCAST_MODE;
 	store.configs[idx].payload_variant.device.serial_enabled =
 		IS_ENABLED(CONFIG_MESHTASTIC_SERIAL);
 

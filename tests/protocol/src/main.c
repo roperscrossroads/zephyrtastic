@@ -2014,6 +2014,22 @@ ZTEST(protocol_stack, test_undecodable_broadcast_is_not_naked)
 		      "relayed frame keeps the original sender");
 }
 
+/* NONE has to have teeth for an ordinary CLIENT. The proto comment says NONE is
+ * "only permitted for SENSOR, TRACKER and TAK_TRACKER roles", which would make
+ * the seed above a decorative no-op if this port enforced it — it does not, and
+ * this is the assertion that keeps it that way. */
+ZTEST(protocol_stack, test_rebroadcast_none_applies_to_a_plain_client)
+{
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+
+	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_NONE);
+	zassert_false(meshtastic_is_rebroadcaster(),
+		      "NONE must inhibit rebroadcast on a CLIENT, not only on sensor roles");
+
+	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_ALL);
+	zassert_true(meshtastic_is_rebroadcaster(), "and ALL must restore it");
+}
+
 /* A device/config factory reset clears every peer: only the local node survives,
  * and the learned routes toward the wiped peers are gone. */
 ZTEST(protocol_stack, test_nodedb_reset_removes_all_peers)
@@ -3998,10 +4014,15 @@ ZTEST(protocol_stack, test_config_field_level_setters_stamp_their_section)
 		     "the position section's fixed_position flag is shareable, so moving it "
 		     "must move the section's version");
 
-	/* Leave the store as this suite found it. */
+	/* Leave the store as this suite found it — restoring the SEED, not a
+	 * literal that happens to match it today. Written as
+	 * RebroadcastMode_ALL until 2026-08-25, when the fresh-config seed became
+	 * NONE (agents-tosb) and this line silently started handing the next test
+	 * a store the node would never actually boot with. */
 	zassert_ok(meshtastic_config_store_set_position_fixed(false), "fixed flag clear failed");
 	zassert_ok(meshtastic_config_store_set_rebroadcast_mode(
-			   meshtastic_Config_DeviceConfig_RebroadcastMode_ALL),
+			   (meshtastic_Config_DeviceConfig_RebroadcastMode)
+				   CONFIG_MESHTASTIC_DEFAULT_REBROADCAST_MODE),
 		   "rebroadcast restore failed");
 	zassert_ok(meshtastic_config_store_set_device_role(
 			   meshtastic_Config_DeviceConfig_Role_CLIENT),
