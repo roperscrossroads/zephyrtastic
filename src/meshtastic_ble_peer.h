@@ -158,6 +158,15 @@ bool meshtastic_ble_slot_info(unsigned int index, char *addr, size_t addr_len, i
 
 /* Advertiser state, tracked in meshtastic_ble.c (a4it.2). */
 bool meshtastic_ble_adv_active(void);
+
+/**
+ * @brief The name this node advertises: <prefix><owner short name>, or
+ *        <prefix><node id suffix> when the short name is unset.
+ *
+ * Composed rather than constant so two nodes running the same image are
+ * distinguishable in a phone's scan list. Recomposed on call.
+ */
+const char *meshtastic_ble_adv_name(void);
 uint32_t meshtastic_ble_adv_starts(void);
 
 #else /* !CONFIG_MESHTASTIC_BLE_PEER */

@@ -49,11 +49,21 @@ config MESHTASTIC_BLE_ADV
 	  Start connectable advertising for the Meshtastic service after the
 	  Bluetooth stack is enabled.
 
-config MESHTASTIC_BLE_DEVICE_NAME
-	string "Bluetooth advertising name"
-	default "Zephyr Meshtastic"
+config MESHTASTIC_BLE_NAME_PREFIX
+	string "Prefix for the composed Bluetooth advertising name"
+	default "zeph-"
 	help
-	  Complete local name included in Meshtastic BLE advertisements.
+	  The advertised name is composed at advert time as
+	  <prefix><owner short name> — e.g. "zeph-rzr3".
+
+	  It used to be one compile-time constant, which meant every node built
+	  from this tree advertised the SAME name and a phone could not tell two
+	  bench boards apart. The short name is the node's identity everywhere
+	  else, so the advert carries it too.
+
+	  A node whose short name is unset falls back to <prefix><node id
+	  suffix>, NOT to a shared constant: an unnamed node is exactly the case
+	  that used to collide, so the fallback has to stay unique.
 
 config MESHTASTIC_BLE_FROMRADIO_QUEUE_SIZE
 	int "FromRadio queue depth"

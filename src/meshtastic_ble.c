@@ -15,8 +15,10 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include "meshtastic_ble_name.h"
 #include "meshtastic_ble_peer.h"
 #include "meshtastic_ble_registry.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_phoneapi.h"
 
@@ -774,6 +776,39 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 #endif
 };
 
+/*
+ * THE ADVERTISED NAME — composed, because a constant one is a bug.
+ *
+ * This was CONFIG_MESHTASTIC_BLE_DEVICE_NAME verbatim, so every node built from
+ * this tree advertised the identical name and a phone offered a list of
+ * indistinguishable entries (agents-xhli.15 — found with four bench nodes up,
+ * one of them deliberately parked out of USB reach). The owner short name is the
+ * node's identity everywhere else on the mesh; the advert now carries it too.
+ *
+ * The rule itself lives in meshtastic_ble_name.c, which is BT-free so it can be
+ * unit-tested without a controller; this only supplies the two runtime values
+ * and owns the buffer the advert points at.
+ *
+ * Length is bounded by construction: the scan response has 31 bytes and carries
+ * only this field (2 header + name), the prefix is a build constant and the
+ * short name is 4 characters. The composer truncates rather than overruns if
+ * either ever grows.
+ */
+static char adv_name[24];
+
+static uint8_t adv_name_compose(void)
+{
+	return (uint8_t)meshtastic_ble_adv_name_compose(adv_name, sizeof(adv_name),
+							meshtastic_config_store_short_name(),
+							mt.node_id);
+}
+
+const char *meshtastic_ble_adv_name(void)
+{
+	(void)adv_name_compose();
+	return adv_name;
+}
+
 static int start_advertising(void)
 {
 	static const uint8_t flags[] = {
@@ -785,8 +820,8 @@ static int start_advertising(void)
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 	/*
 	 * Peer builds add the node number as manufacturer-specific data so two
-	 * nodes running the same image can tell each other apart (the scan
-	 * response's device name is a compile-time constant). File-static
+	 * nodes running the same image can tell each other apart from the
+	 * ADVERT alone, without waiting for a scan response. File-static
 	 * mutable storage: the node num is a runtime value and the blob must
 	 * outlive bt_le_adv_start() and survive re-arms.
 	 *
@@ -811,9 +846,12 @@ static int start_advertising(void)
 		BT_DATA(BT_DATA_UUID128_ALL, service_uuid, sizeof(service_uuid)),
 	};
 #endif
-	static const struct bt_data sd[] = {
-		BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_MESHTASTIC_BLE_DEVICE_NAME,
-			sizeof(CONFIG_MESHTASTIC_BLE_DEVICE_NAME) - 1U),
+	/* Composed, not constant — see adv_name_compose(). Non-const because
+	 * data_len is only known once the name exists; the buffer it points at is
+	 * file-static so it outlives bt_le_adv_start() and survives re-arms,
+	 * exactly like the peer blob above. */
+	static struct bt_data sd[] = {
+		BT_DATA(BT_DATA_NAME_COMPLETE, adv_name, 0),
 	};
 
 	int ret;
@@ -823,6 +861,12 @@ static int start_advertising(void)
 	 * but a re-arm after any later change keeps the advert truthful. */
 	meshtastic_ble_peer_adv_encode(peer_mfg_blob, mt.node_id);
 #endif
+	/* Same reason, and the same limit: a rename lands in the advert at the
+	 * next re-arm (a disconnect, or a reboot), not the instant it is written.
+	 * Nothing here is worth forcing an advertising restart for — a phone that
+	 * is already connected does not read the advert, and one that is not will
+	 * see the new name on its next scan. */
+	sd[0].data_len = adv_name_compose();
 
 	k_mutex_lock(&ble.lock, K_FOREVER);
 	if (meshtastic_ble_reg_active() >= MESHTASTIC_BLE_REG_SLOTS) {

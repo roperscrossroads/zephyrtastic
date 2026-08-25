@@ -100,6 +100,7 @@ if(CONFIG_MESHTASTIC)
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE
     meshtastic_ble.c
+    meshtastic_ble_name.c
     meshtastic_ble_registry.c
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE_PEER
