@@ -2722,8 +2722,15 @@ int meshtastic_cluster_scope_select(int choice)
  * else. Anti-entropy is level-triggered, so a node cleared on its own simply
  * pulls the document back from the first peer that still has it — which is also
  * the warning the shell prints. Clearing a FLEET means clearing every member
- * before any of them can re-seed the others; the reliable way is `lora tx off`
- * everywhere first.
+ * before any of them can re-seed the others.
+ *
+ * ⚠️ AND ISOLATING A MEMBER TAKES BOTH BEARERS. `lora tx off` is not enough: a
+ * pull is a unicast, so it diverts to a live BLE peer link, and a LoRa-mute
+ * node converges over it — the property M4b was built to prove. The peer links
+ * have to come down too (`blepeer scan off` + `blepeer disconnect` on the
+ * central side). Learned the hard way on the bench, 2026-08-25: four nodes were
+ * cleared, all four read 0, and the document reassembled itself over a
+ * kit2 → kit1 → rxru BLE chain that LoRa TX state said nothing about.
  *
  * Deliberately NOT gated on is_managed, unlike promote/pin/unpin. Those write
  * to the fleet; this drops a local copy of what the fleet already holds, so

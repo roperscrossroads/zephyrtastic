@@ -130,8 +130,10 @@ const char *meshtastic_cluster_scope_name(bool *pinned);
  * LOCAL ONLY. It pushes nothing and cannot remove an entry from any other node,
  * so a node cleared on its own pulls the document straight back from the first
  * peer that still holds it (anti-entropy is level-triggered). Clearing a FLEET
- * means clearing every member before any of them re-seeds the others — turn TX
- * off everywhere first.
+ * means clearing every member before any of them re-seeds the others — and
+ * isolating a member takes BOTH bearers, because a pull is a unicast that
+ * diverts to a live BLE peer link. `lora tx off` alone leaves the document free
+ * to reassemble over the peer chain.
  */
 int meshtastic_cluster_reset(void);
 

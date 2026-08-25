@@ -846,6 +846,9 @@ ZTEST(meshtastic_shell, test_cluster_reset_needs_confirmation_and_says_what_it_d
 			 "otherwise an operator reads a clean node as a clean fleet");
 	zassert_not_null(strstr(out, "lora tx off"),
 			 "including the way to actually clear a fleet");
+	zassert_not_null(strstr(out, "blepeer"),
+			 "and BOTH bearers — `lora tx off` alone leaves a pull free to divert "
+			 "to a BLE peer link, which is how a bench clear undid itself");
 }
 
 #endif /* CONFIG_MESHTASTIC_CLUSTER */

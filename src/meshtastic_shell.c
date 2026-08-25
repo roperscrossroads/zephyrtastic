@@ -3731,9 +3731,12 @@ static int cmd_cluster_reset(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "document cleared — %d entr%s dropped.", dropped,
 		    dropped == 1 ? "y" : "ies");
 	shell_print(sh, "This node told NOBODY to forget anything. The next digest from a "
-			"peer that still holds the document brings it all back — to clear a "
-			"fleet, `lora tx off` on every member first, reset them all, then "
-			"turn TX back on.");
+			"peer that still holds the document brings it all back.");
+	shell_print(sh, "To clear a FLEET, isolate every member on BOTH bearers first — "
+			"`lora tx off` AND `blepeer scan off` + `blepeer disconnect` on the "
+			"central side of each peer link. A cluster pull is a unicast, so it "
+			"diverts to a live BLE link and a LoRa-mute node still converges: "
+			"that is the peer-transport property working, not a fault.");
 	return 0;
 }
 
