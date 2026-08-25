@@ -103,6 +103,11 @@ struct meshtastic_cluster_stats {
 	uint32_t digest_tx;
 	uint32_t digest_rx_match;
 	uint32_t digest_rx_mismatch;
+	/* A digest whose scope this node cannot compare against anything it
+	 * claims — in practice a peer from before scopes existed, heard by a
+	 * node that has narrowed. Deliberately NOT counted as a mismatch: a
+	 * mismatch we cannot even establish must not open a walk. */
+	uint32_t digest_rx_incomparable;
 	uint32_t rx_wrong_channel; /* port-256 frames not on the cluster channel */
 	uint32_t rx_undecodable;
 	uint32_t rx_not_implemented; /* a verb this build does not know */

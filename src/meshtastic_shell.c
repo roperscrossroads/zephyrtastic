@@ -3376,9 +3376,13 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 	 * frames dropped further down, at the radio choke point. A digest is a
 	 * broadcast, so no peer bearer carries it either — on such a node this
 	 * number counts digests that never left. */
-	shell_print(sh, "digests : queued=%u%s rx match=%u MISMATCH=%u", st.digest_tx,
-		    mt.tx_enabled ? "" : " (radio TX OFF — none of these aired)",
-		    st.digest_rx_match, st.digest_rx_mismatch);
+	shell_print(sh, "digests : queued=%u%s rx match=%u MISMATCH=%u incomparable=%u%s",
+		    st.digest_tx, mt.tx_enabled ? "" : " (radio TX OFF — none of these aired)",
+		    st.digest_rx_match, st.digest_rx_mismatch, st.digest_rx_incomparable,
+		    st.digest_rx_incomparable ? "  (a peer declares no document scope — an "
+						"older build; it cannot be compared, only "
+						"waited out)"
+					      : "");
 	if (sync_peer != 0U) {
 		shell_print(sh, "sync    : %s with 0x%08x", sync, sync_peer);
 	} else {

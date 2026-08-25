@@ -3312,4 +3312,134 @@ ZTEST(mesh_sim, test_cluster_walk_that_wants_nothing_is_bounded)
 	cluster_channel(false);
 }
 
+/*
+ * The digest must SAY what it covers. Until agents-xhli.10 the three legs were
+ * taken over whatever the sender happened to hold, which is why a node could
+ * never drop a row: it would advertise a hash nobody else has and mismatch
+ * every peer forever. Declaring the scope is what makes narrowing expressible.
+ *
+ * The base leg is the second half of that. It covers the BASE layer alone —
+ * the one set inside every scope — so two nodes on different tiers always have
+ * something comparable. This pins that it really is a narrower set and not a
+ * copy of the first leg under another name.
+ */
+ZTEST(mesh_sim, test_cluster_digest_declares_a_scope_and_a_base_leg)
+{
+	zephyrtastic_ClusterMessage msg;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint32_t to = 0U;
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	/* One row on each side of the base/node line. Low stamps, so anything a
+	 * later test writes to the same keys still wins. */
+	len = encode_section(meshtastic_Config_power_tag, buf, sizeof(buf));
+	inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 5000), false, buf, len, 0x7B00U);
+	inject_entry(meshtastic_Config_power_tag, zephyrtastic_ClusterLayer_NODE, PEER_NODE_ID,
+		     (TEST_EPOCH_MS + 5100), false, buf, len, 0x7B01U);
+	k_sleep(K_MSEC(400));
+	quiesce();
+
+	meshtastic_cluster_digest_now();
+	zassert_true(take_cluster_tx(&msg, &to), "a digest must go out");
+	zassert_equal(msg.which_variant, zephyrtastic_ClusterMessage_digest_tag);
+	zassert_equal(to, MESHTASTIC_NODE_BROADCAST);
+
+	zassert_equal(msg.variant.digest.scope, zephyrtastic_ClusterScope_SCOPE_FULL,
+		      "a node that has not narrowed must say so explicitly — SCOPE_UNSPECIFIED "
+		      "is reserved for builds that predate scopes and carry no base leg");
+
+	/* An un-narrowed node claims everything, so its legs are exactly the
+	 * whole-document ones. This is the back-compatibility claim on the
+	 * wire: a fleet where nobody has narrowed advertises what it always did. */
+	zassert_equal(msg.variant.digest.doc_hash, meshtastic_cluster_doc_hash_now());
+	zassert_equal(msg.variant.digest.entry_count, meshtastic_cluster_entry_count());
+
+	zassert_true(msg.variant.digest.base_count >= 1U, "there is a base row to count");
+	zassert_true(msg.variant.digest.base_count < msg.variant.digest.entry_count,
+		     "and a node row that the base leg must NOT count");
+	zassert_not_equal(msg.variant.digest.base_hash, msg.variant.digest.doc_hash,
+			  "the base leg must be taken over the narrower set, not be a second "
+			  "name for the first");
+
+	cluster_channel(false);
+}
+
+/*
+ * THE COMPARISON IS OVER THE INTERSECTION OF THE TWO CLAIMS, and that has to be
+ * more than a label. The same three numbers mean different things depending on
+ * the scope they were taken over: read as a whole-document triple they can
+ * match us exactly, and read as a constrained peer's triple — a strictly
+ * smaller set — the same numbers must not.
+ *
+ * Getting this wrong in the permissive direction is the serious one: a node
+ * would conclude "converged" against a peer that had only ever claimed part of
+ * the document, and stop pulling the rest.
+ */
+ZTEST(mesh_sim, test_cluster_full_node_compares_a_core_peer_on_its_own_scope)
+{
+	zephyrtastic_ClusterMessage mine, replay;
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint32_t to = 0U;
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	/* A row OUTSIDE CORE(PEER) must exist, or the two scopes cover the same
+	 * keys here and the test proves nothing. nodes/<me> is the only such
+	 * row an injected frame can create; bluetooth is the section the
+	 * invented-nodes test already designated harmless to pin. */
+	len = encode_section(meshtastic_Config_bluetooth_tag, buf, sizeof(buf));
+	inject_entry(meshtastic_Config_bluetooth_tag, zephyrtastic_ClusterLayer_NODE,
+		     TEST_NODE_ID, (TEST_EPOCH_MS + 30000), false, buf, len, 0x7B10U);
+	k_sleep(K_MSEC(400));
+	quiesce();
+
+	/* Our own digest is the ground truth for "a peer that agrees with us". */
+	meshtastic_cluster_digest_now();
+	zassert_true(take_cluster_tx(&mine, &to), "a digest must go out");
+	zassert_true(mine.variant.digest.entry_count > mine.variant.digest.base_count,
+		     "the premise: we hold rows a CORE(peer) claim would not cover");
+	wait_cluster_idle();
+	quiesce();
+
+	/* Replayed as a whole-document claim: identical, so converged. */
+	meshtastic_cluster_stats_get(&before_st);
+	replay = mine;
+	replay.variant.digest.scope = zephyrtastic_ClusterScope_SCOPE_FULL;
+	inject_cluster_bearer(&replay, MESHTASTIC_NODE_BROADCAST, 0x7B20U);
+	k_sleep(K_MSEC(300));
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.digest_rx_match, before_st.digest_rx_match + 1U,
+		      "our own legs read back as a FULL claim must be a match");
+	zassert_equal(after_st.digest_rx_mismatch, before_st.digest_rx_mismatch,
+		      "and must not also be counted as a divergence");
+
+	/* The very same numbers, claimed over base + that peer's own rows. They
+	 * cannot describe that smaller set as well, so this must diverge. */
+	meshtastic_cluster_stats_get(&before_st);
+	replay = mine;
+	replay.variant.digest.scope = zephyrtastic_ClusterScope_SCOPE_CORE;
+	inject_cluster_bearer(&replay, MESHTASTIC_NODE_BROADCAST, 0x7B21U);
+	k_sleep(K_MSEC(300));
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.digest_rx_mismatch, before_st.digest_rx_mismatch + 1U,
+		      "a whole-document triple presented as a constrained peer's claim must "
+		      "NOT read as converged — that would stop us pulling the rest");
+	zassert_equal(after_st.digest_rx_incomparable, before_st.digest_rx_incomparable,
+		      "a declared scope is always comparable to a node that claims everything");
+
+	wait_cluster_idle();
+	cluster_channel(false);
+}
+
 #endif /* CONFIG_MESHTASTIC_CLUSTER */

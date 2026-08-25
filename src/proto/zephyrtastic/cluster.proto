@@ -36,16 +36,64 @@ message KeyStamp {
   HlcStamp stamp = 2;
 }
 
-// Broadcast at the digest cadence. Triple-compare against the local doc:
-// any field differing means the two documents differ somewhere.
+// What a node CLAIMS to track (agents-xhli.10, CLUSTER-SYNC-M4.md §6.1). The
+// digest's first three fields are taken over the sender's scope, not over
+// whatever it happens to hold, which is what lets a node too small for the
+// whole fleet narrow its claim instead of advertising a document nobody has.
+//
+// A receiver evaluates a scope from the SENDER's node id alone — the owner of a
+// CORE scope is never carried on the wire, or one node could ask about another
+// node's rows.
+//
+// 3..15 are free for a richer scope later. Whatever it is, it MUST be an exact,
+// receiver-evaluable predicate. An approximate membership test (a bloom filter,
+// a bitmap with collisions) is permanently disqualified: a false positive makes
+// two nodes disagree about whether a key is inside the scope, so their hashes
+// differ over identical content and they mismatch forever — the very failure
+// this field exists to fix. The intended successor is an id RANGE
+// (base + self + [lo,hi]): exact, eight bytes, and unlike an all-or-nothing
+// tier it keeps §2.3 self-recovery alive in an all-constrained fleet, because
+// each node then holds a different band and every pin still lives on several.
+enum ClusterScope {
+  SCOPE_UNSPECIFIED = 0; // a sender predating scopes: treat as FULL, and note
+                         // that it carries NO base leg
+  SCOPE_FULL = 1;        // every key
+  SCOPE_CORE = 2;        // base + the sender's own entries
+}
+
+// Broadcast at the digest cadence. Triple-compare against the local doc,
+// restricted to the intersection of the two scopes: any field differing means
+// the two documents differ somewhere inside the set both nodes claim.
 message ClusterDigest {
   fixed32 doc_hash = 1;   // CRC-32 over the sorted (key, stamp, tombstone) rows
-  uint32 entry_count = 2;
+  uint32 entry_count = 2; //   ...all three taken over `scope`, below
   HlcStamp max_stamp = 3;
+  ClusterScope scope = 4;
+
+  // The second leg: the same hash and count over the BASE layer alone. Base is
+  // the one set inside EVERY scope, so this is what two nodes on different
+  // tiers can always compare — a CORE receiver cannot evaluate a FULL sender's
+  // leg above, because that sender never advertised one over the smaller set.
+  //
+  // No base max_stamp, deliberately. D2's third leg exists because max-stamp
+  // alone hides interleaved gaps across a large set; base is capped at the
+  // allowlist (six rows), where hash+count is already the stronger pair, and a
+  // CRC collision there only delays convergence to the next change or backstop
+  // walk. A third leg would cost bytes on every digest, forever, for nothing.
+  fixed32 base_hash = 5;
+  uint32 base_count = 6;
+
+  reserved 7;    // a richer scope descriptor (see ClusterScope above)
+  reserved 8, 9; // level-triggered clock relay (agents-xhli.14): a clockless
+                 // node advertising that fact, a time-bearing node answering
 }
 
 // Unicast to a digest sender whose triple mismatched ours.
 message ClusterVectorReq {
+  // Return only rows inside the REQUESTER's scope. Without this a constrained
+  // node is walked through rows it will refuse at ingest, every time.
+  ClusterScope scope = 1;
+  reserved 2; // a richer scope descriptor, as above
 }
 
 // Unicast reply: the (key, stamp) rows, no payloads. Resumable when the doc

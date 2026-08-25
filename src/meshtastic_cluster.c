@@ -186,6 +186,12 @@ enum cluster_pull_reason {
 
 static struct {
 	struct meshtastic_cluster_doc doc;
+	/* WHAT THIS NODE CLAIMS TO TRACK (agents-xhli.10, §6.1). Every digest
+	 * leg, the diff predicate, the ingest gate, the vector filter and the
+	 * persistence load filter are taken over this and nothing else — the
+	 * moment two of them disagree, this node advertises a document it does
+	 * not hold, which is the one failure the mechanism exists to prevent. */
+	struct meshtastic_cluster_scope scope;
 	struct meshtastic_hlc hlc;
 	struct meshtastic_cluster_stats stats;
 	bool channel_missing_logged;
@@ -810,6 +816,55 @@ static void key_from_pb(const zephyrtastic_ClusterKey *in, struct meshtastic_clu
 	out->section = (in->section <= UINT16_MAX) ? (uint16_t)in->section : 0U;
 }
 
+/*
+ * The scope a digest sender is claiming. The OWNER comes from the mesh header,
+ * never from the frame: a wire-carried owner would let one node advertise a
+ * claim over another node's rows, and every receiver would believe it.
+ *
+ * A sender predating scopes says nothing, which decodes as SCOPE_UNSPECIFIED.
+ * Its first three legs do cover its whole document, so treat it as FULL — but
+ * it carries no base leg, and *has_base_leg says so. Getting that wrong is not
+ * cosmetic: with SCOPE_FULL == 0 an absent field would read as "FULL with a
+ * base hash of zero", and a narrowed receiver would mismatch such a peer
+ * forever — exactly the permanent divergence this change exists to remove.
+ */
+static void scope_from_pb(zephyrtastic_ClusterScope in, uint32_t from,
+			  struct meshtastic_cluster_scope *out, bool *has_base_leg)
+{
+	switch (in) {
+	case zephyrtastic_ClusterScope_SCOPE_CORE:
+		meshtastic_cluster_scope_make(out, MESHTASTIC_CLUSTER_SCOPE_CORE, from);
+		*has_base_leg = true;
+		break;
+	case zephyrtastic_ClusterScope_SCOPE_FULL:
+		meshtastic_cluster_scope_make(out, MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+		*has_base_leg = true;
+		break;
+	default:
+		meshtastic_cluster_scope_make(out, MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
+		*has_base_leg = false;
+		break;
+	}
+}
+
+static zephyrtastic_ClusterScope scope_to_pb(const struct meshtastic_cluster_scope *scope)
+{
+	return (scope->kind == MESHTASTIC_CLUSTER_SCOPE_CORE)
+		       ? zephyrtastic_ClusterScope_SCOPE_CORE
+		       : zephyrtastic_ClusterScope_SCOPE_FULL;
+}
+
+static bool scope_eq(const struct meshtastic_cluster_scope *a,
+		     const struct meshtastic_cluster_scope *b)
+{
+	return (a->kind == b->kind) && (a->owner == b->owner);
+}
+
+static void base_scope(struct meshtastic_cluster_scope *out)
+{
+	meshtastic_cluster_scope_make(out, MESHTASTIC_CLUSTER_SCOPE_BASE, 0U);
+}
+
 static void pull_reset_locked(void)
 {
 	cluster.pull_state = PULL_IDLE;
@@ -1163,9 +1218,26 @@ static void digest_work_fn(struct k_work *work)
 
 	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
 	k_mutex_lock(&cluster_lock, K_FOREVER);
-	msg.variant.digest.doc_hash = meshtastic_cluster_doc_hash(&cluster.doc);
-	msg.variant.digest.entry_count = cluster.doc.count;
-	meshtastic_cluster_doc_max_stamp(&cluster.doc, &max);
+	/* The three legs cover what we CLAIM, not what we hold — which for a
+	 * node that has never narrowed is the same thing, so a fleet where
+	 * nobody has narrowed advertises byte-identically to a pre-scope one. */
+	msg.variant.digest.doc_hash = meshtastic_cluster_doc_hash_scoped(&cluster.doc,
+									&cluster.scope);
+	msg.variant.digest.entry_count =
+		meshtastic_cluster_doc_count_scoped(&cluster.doc, &cluster.scope);
+	meshtastic_cluster_doc_max_stamp_scoped(&cluster.doc, &cluster.scope, &max);
+	msg.variant.digest.scope = scope_to_pb(&cluster.scope);
+	{
+		/* The second leg. Base is the one set inside every scope, so it
+		 * is what a peer on a different tier can always compare. */
+		struct meshtastic_cluster_scope only_base;
+
+		base_scope(&only_base);
+		msg.variant.digest.base_hash =
+			meshtastic_cluster_doc_hash_scoped(&cluster.doc, &only_base);
+		msg.variant.digest.base_count =
+			meshtastic_cluster_doc_count_scoped(&cluster.doc, &only_base);
+	}
 	k_mutex_unlock(&cluster_lock);
 	msg.variant.digest.has_max_stamp = true;
 	stamp_to_pb(&max, &msg.variant.digest.max_stamp);
@@ -1259,27 +1331,92 @@ static bool pull_start_locked(uint32_t peer, uint32_t delay_ms,
 	return true;
 }
 
+/*
+ * COMPARING TWO DIGESTS THAT MAY NOT COVER THE SAME KEYS.
+ *
+ * The general rule is: compare over the INTERSECTION of the two declared
+ * scopes, because that is the only set both nodes have said anything about.
+ * Two cases fall out of it, and no others:
+ *
+ *  - The intersection IS the sender's whole scope (we claim everything they
+ *    claim). Their triple describes exactly the set we can re-hash, so compare
+ *    it directly. Between two un-narrowed nodes this is the whole document and
+ *    the arithmetic is identical to what shipped before scopes existed.
+ *
+ *  - It is smaller — we are narrowed and they are not, or we are two different
+ *    constrained nodes. Then their triple covers rows we never claimed, and the
+ *    only thing both advertised is base. Compare the base leg.
+ *
+ * And one non-case: a sender predating scopes carries no base leg at all, so a
+ * narrowed receiver has nothing comparable and must do NOTHING rather than
+ * declare a mismatch it can never resolve. That gap is what the scheduled
+ * backstop walk covers.
+ *
+ * Returns false when the two digests are not comparable at all.
+ */
+static bool digest_compare_locked(uint32_t from, const zephyrtastic_ClusterDigest *d,
+				  const struct meshtastic_hlc_stamp *theirs, bool *match,
+				  uint32_t *ours, uint32_t *theirs_hash)
+{
+	struct meshtastic_cluster_scope peer, inter;
+	bool has_base_leg;
+
+	scope_from_pb(d->scope, from, &peer, &has_base_leg);
+	meshtastic_cluster_scope_intersect(&cluster.scope, &peer, &inter);
+
+	if (scope_eq(&inter, &peer)) {
+		struct meshtastic_hlc_stamp max;
+
+		*ours = meshtastic_cluster_doc_hash_scoped(&cluster.doc, &peer);
+		*theirs_hash = d->doc_hash;
+		meshtastic_cluster_doc_max_stamp_scoped(&cluster.doc, &peer, &max);
+		*match = (*ours == d->doc_hash) &&
+			 (meshtastic_cluster_doc_count_scoped(&cluster.doc, &peer) ==
+			  d->entry_count) &&
+			 (meshtastic_hlc_compare(&max, theirs) == 0);
+		return true;
+	}
+
+	if (!has_base_leg) {
+		return false;
+	}
+
+	{
+		struct meshtastic_cluster_scope only_base;
+
+		base_scope(&only_base);
+		*ours = meshtastic_cluster_doc_hash_scoped(&cluster.doc, &only_base);
+		*theirs_hash = d->base_hash;
+		*match = (*ours == d->base_hash) &&
+			 (meshtastic_cluster_doc_count_scoped(&cluster.doc, &only_base) ==
+			  d->base_count);
+		return true;
+	}
+}
+
 static void on_digest(uint32_t from, const zephyrtastic_ClusterDigest *d)
 {
-	struct meshtastic_hlc_stamp max;
 	struct meshtastic_hlc_stamp theirs;
-	uint32_t hash;
-	uint16_t count;
+	uint32_t hash = 0U;
+	uint32_t theirs_hash = 0U;
 	uint32_t delay = 0U;
-	bool match;
+	bool match = false;
+	bool comparable;
 	bool pulling = false;
 
 	stamp_from_pb(&d->max_stamp, &theirs);
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
-	hash = meshtastic_cluster_doc_hash(&cluster.doc);
-	count = cluster.doc.count;
-	meshtastic_cluster_doc_max_stamp(&cluster.doc, &max);
 	(void)meshtastic_hlc_observe(&cluster.hlc, &theirs);
+	comparable = digest_compare_locked(from, d, &theirs, &match, &hash, &theirs_hash);
 
-	match = (hash == d->doc_hash) && (count == d->entry_count) &&
-		(meshtastic_hlc_compare(&max, &theirs) == 0);
-	if (match) {
+	if (!comparable) {
+		/* A peer from before scopes existed, heard by a node that has
+		 * narrowed its claim. Nothing it advertised describes a set we
+		 * can re-hash. Counted, not chased: pulling on a mismatch we
+		 * cannot even establish is the unbounded conversation. */
+		cluster.stats.digest_rx_incomparable++;
+	} else if (match) {
 		cluster.stats.digest_rx_match++;
 	} else {
 		cluster.stats.digest_rx_mismatch++;
@@ -1291,13 +1428,16 @@ static void on_digest(uint32_t from, const zephyrtastic_ClusterDigest *d)
 	}
 	k_mutex_unlock(&cluster_lock);
 
-	if (!match) {
-		LOG_INF("cluster: DIVERGED from 0x%08x — hash %08x/%u vs local %08x/%u%s", from,
-			(unsigned int)d->doc_hash, (unsigned int)d->entry_count,
-			(unsigned int)hash, (unsigned int)count,
+	if (!comparable) {
+		LOG_INF("cluster: digest from 0x%08x declares no scope — nothing this node "
+			"claims is comparable with it (pre-scope build?)",
+			from);
+	} else if (!match) {
+		LOG_INF("cluster: DIVERGED from 0x%08x — hash %08x vs local %08x%s", from,
+			(unsigned int)theirs_hash, (unsigned int)hash,
 			pulling ? " — pulling" : " (an exchange is already in flight)");
 	} else {
-		LOG_DBG("cluster: digest from 0x%08x matches (%u entries)", from, count);
+		LOG_DBG("cluster: digest from 0x%08x matches", from);
 	}
 
 	if (pulling && !k_work_delayable_is_pending(&tx_work)) {
@@ -2090,6 +2230,7 @@ int meshtastic_cluster_init(void)
 {
 	meshtastic_cluster_doc_init(&cluster.doc, cluster_storage,
 				    ARRAY_SIZE(cluster_storage));
+	meshtastic_cluster_scope_make(&cluster.scope, MESHTASTIC_CLUSTER_SCOPE_FULL, 0U);
 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 	/* Persisted entries load through the settings handler; the config
