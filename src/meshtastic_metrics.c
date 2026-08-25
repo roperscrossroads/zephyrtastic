@@ -16,6 +16,28 @@
 #include "meshtastic_modules.h"
 #include "meshtastic_telemetry_internal.h"
 #include "meshtastic_airtime.h"
+#include "meshtastic_sched.h"
+
+#if defined(CONFIG_MESHTASTIC_LOCAL_STATS)
+#include <zephyr/sys/sys_heap.h>
+
+#include "meshtastic_clock.h"
+#include "meshtastic_phoneapi.h"
+#if defined(CONFIG_MESHTASTIC_NODEDB)
+#include <zephyr/meshtastic/nodedb.h>
+#endif
+/* The kernel only DEFINES _system_heap when a pool was actually asked for
+ * (K_HEAP_MEM_POOL_SIZE > 0 in kernel/mempool.c), so both halves of this guard
+ * are load-bearing: a build with runtime stats on and no pool compiles fine and
+ * then fails at link. See meshtastic_watchdog.c for why this
+ * undocumented-public symbol is the right one to read -- it is the pool
+ * k_malloc(), and on the ESP32 port the vendored HAL's heap_caps_malloc(),
+ * actually allocates from. */
+#if defined(CONFIG_SYS_HEAP_RUNTIME_STATS) && (CONFIG_HEAP_MEM_POOL_SIZE > 0)
+#define MESHTASTIC_LOCAL_STATS_HAVE_HEAP 1
+extern struct k_heap _system_heap;
+#endif
+#endif /* CONFIG_MESHTASTIC_LOCAL_STATS */
 
 #include <zephyr/meshtastic/telemetry.h>
 
@@ -129,6 +151,217 @@ int meshtastic_send_device_metrics(uint32_t dest, k_timeout_t wait)
 				    wait);
 }
 
+#if defined(CONFIG_MESHTASTIC_LOCAL_STATS)
+
+/* Upstream's NUM_ONLINE_SECS (NodeDB.cpp): a node heard inside the last two
+ * hours counts as online. */
+#define LOCAL_STATS_ONLINE_SEC (2U * 60U * 60U)
+
+#if defined(CONFIG_MESHTASTIC_NODEDB)
+/* Age of a NodeDB entry in seconds, or UINT32_MAX when it cannot be known.
+ *
+ * Two clocks, deliberately in this order. last_heard_uptime_sec is the uptime AT
+ * WHICH we last heard the node, and the NVS load path zeroes it — so non-zero
+ * means "heard this boot" and can be differenced against uptime directly. Zero
+ * does NOT mean "just now"; reading it that way is exactly the bug 3e57727 fixed
+ * in the shell. It means "not heard this boot", and then only the persisted
+ * wall-clock epoch can date the entry — and only if a clock has ever been
+ * seeded. With neither, the age is unknown, and an unknown age must not be
+ * counted as online: on a fleet with no time source that would report every
+ * restored entry as live. */
+uint32_t meshtastic_local_stats_node_age_sec(const struct meshtastic_nodedb_node *node)
+{
+	if (node->last_heard_uptime_sec != 0U) {
+		uint32_t now = (uint32_t)k_uptime_seconds();
+
+		return (now > node->last_heard_uptime_sec) ? (now - node->last_heard_uptime_sec)
+							   : 0U;
+	}
+
+	if (node->last_heard_epoch != 0U && meshtastic_clock_valid()) {
+		uint32_t now = meshtastic_clock_now_epoch();
+
+		return (now > node->last_heard_epoch) ? (now - node->last_heard_epoch) : 0U;
+	}
+
+	return UINT32_MAX;
+}
+#endif /* CONFIG_MESHTASTIC_NODEDB */
+
+static void collect_node_counts(meshtastic_LocalStats *stats)
+{
+#if defined(CONFIG_MESHTASTIC_NODEDB)
+	size_t total = meshtastic_nodedb_count();
+	uint32_t online = 0U;
+
+	for (size_t i = 0; i < total; i++) {
+		struct meshtastic_nodedb_node node;
+
+		if (meshtastic_nodedb_get_by_index(i, &node) != 0) {
+			continue;
+		}
+		if (meshtastic_local_stats_node_age_sec(&node) < LOCAL_STATS_ONLINE_SEC) {
+			online++;
+		}
+	}
+
+	stats->num_total_nodes = (uint32_t)total;
+	stats->num_online_nodes = online;
+#else
+	ARG_UNUSED(stats);
+#endif
+}
+
+static void collect_heap(meshtastic_LocalStats *stats)
+{
+#if defined(MESHTASTIC_LOCAL_STATS_HAVE_HEAP)
+	struct sys_memory_stats heap;
+
+	/* _system_heap backs k_malloc(); the same symbol the watchdog heartbeat
+	 * and Zephyr's own `kernel heap` shell command read. free+allocated is
+	 * the pool size as the allocator sees it, which is what the wire field
+	 * means (upstream fills it from memGet.getHeapSize()). */
+	if (sys_heap_runtime_stats_get(&_system_heap.heap, &heap) == 0) {
+		stats->heap_free_bytes = (uint32_t)heap.free_bytes;
+		stats->heap_total_bytes = (uint32_t)(heap.free_bytes + heap.allocated_bytes);
+	}
+#else
+	ARG_UNUSED(stats);
+#endif
+}
+
+int meshtastic_collect_local_stats(meshtastic_LocalStats *stats)
+{
+	struct meshtastic_status status;
+	struct meshtastic_sched_stats sched;
+	int ret;
+
+	if (stats == NULL) {
+		return -EINVAL;
+	}
+
+	*stats = (meshtastic_LocalStats)meshtastic_LocalStats_init_zero;
+
+	ret = meshtastic_get_status(&status);
+	if (ret < 0) {
+		return ret;
+	}
+	meshtastic_sched_stats_get(&sched);
+
+	stats->uptime_seconds = (uint32_t)k_uptime_seconds();
+
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+	/* Same two numbers device_metrics already carries. Note the standing
+	 * caution in docs/OPTIMIZATION-IDEAS.md / MULTI-PRESET-OPERATION.md §4.3:
+	 * the airtime ring has no notion of WHICH preset the airtime went to, so
+	 * under time-slicing both fields blend two channels. Reported here for
+	 * parity — do not build a gauge on them until per-preset accounting lands. */
+	stats->channel_utilization = meshtastic_airtime_channel_util_percent();
+	stats->air_util_tx = meshtastic_airtime_tx_util_percent();
+#endif
+
+	stats->num_packets_tx = status.tx_packets;
+	/* The wire says num_packets_rx is "both good and bad" and num_packets_rx_bad
+	 * is the malformed subset of it. That is exactly how the router counts:
+	 * decode_failures is incremented and then rx_packets is incremented on the
+	 * same pass (meshtastic_router.c:700/713, no early return between), so a bad
+	 * frame lands in both. Do not "fix" this into a disjoint pair. */
+	stats->num_packets_rx = status.rx_packets;
+	stats->num_packets_rx_bad = status.decode_failures;
+	stats->num_rx_dupe = status.duplicate_packets;
+	stats->num_tx_relay = status.relayed_packets;
+	stats->num_tx_relay_canceled = sched.relay_cancelled;
+
+	for (size_t i = 0; i < ARRAY_SIZE(sched.tx_drop); i++) {
+		stats->num_tx_dropped += sched.tx_drop[i];
+	}
+
+	collect_node_counts(stats);
+	collect_heap(stats);
+
+	/* noise_floor is left at 0. Nothing in this port measures one:
+	 * meshtastic_rf_measure.c records per-RECEPTION RSSI/SNR, which is a
+	 * different quantity (a property of a frame that arrived, not of the
+	 * channel when nothing is on it). Upstream also leaves it 0 wherever the
+	 * radio driver cannot supply an average noise floor. */
+
+	return 0;
+}
+
+static int local_stats_encode(meshtastic_LocalStats *stats, uint8_t *payload, size_t payload_size,
+			      size_t *written)
+{
+	meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_zero;
+	pb_ostream_t stream;
+	int ret;
+
+	ret = meshtastic_collect_local_stats(stats);
+	if (ret < 0) {
+		return ret;
+	}
+
+	telemetry.which_variant = meshtastic_Telemetry_local_stats_tag;
+	telemetry.variant.local_stats = *stats;
+
+	stream = pb_ostream_from_buffer(payload, payload_size);
+	if (!pb_encode(&stream, meshtastic_Telemetry_fields, &telemetry)) {
+		LOG_ERR("LocalStats encode failed: %s", PB_GET_ERROR(&stream));
+		return -ENOMEM;
+	}
+
+	*written = stream.bytes_written;
+	return 0;
+}
+
+#if defined(CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE)
+/* Hand LocalStats straight to whatever phone transports are attached, without
+ * touching the radio.
+ *
+ * This is the whole point of the layer and it mirrors upstream exactly:
+ * DeviceTelemetryModule::sendLocalStatsToPhone() calls service->sendToPhone(),
+ * never sendToMesh(). LocalStats is a node describing ITSELF to its own client,
+ * so broadcasting it would spend airtime telling the mesh things the mesh has no
+ * use for. The only way it ever reaches the air is as a reply to an explicit
+ * Telemetry(local_stats) request — see the alloc_reply handler below.
+ *
+ * meshtastic_phoneapi_on_packet() is the established local-emit path (the admin
+ * module uses it the same way for its PhoneAPI-bound replies): it wraps the
+ * packet as a FromRadio and fans it out to every registered transport. A
+ * TELEMETRY_APP frame is already classified droppable by the queue, so a phone
+ * that is not reading cannot starve real traffic out of the queue. */
+int meshtastic_send_local_stats_to_phone(void)
+{
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_LocalStats stats;
+	struct meshtastic_packet pkt = {0};
+	size_t len;
+	int ret;
+
+	ret = local_stats_encode(&stats, payload, sizeof(payload), &len);
+	if (ret < 0) {
+		return ret;
+	}
+
+	pkt.portnum = MESHTASTIC_PORT_TELEMETRY;
+	pkt.from = meshtastic_get_node_id();
+	pkt.to = MESHTASTIC_NODE_BROADCAST;
+	pkt.id = meshtastic_allocate_packet_id();
+	pkt.payload = payload;
+	pkt.payload_len = (uint16_t)len;
+
+	meshtastic_phoneapi_on_packet(&pkt, NULL);
+
+	LOG_DBG("LocalStats to phone: up=%us tx=%u rx=%u bad=%u dupe=%u relay=%u/%u nodes=%u/%u",
+		stats.uptime_seconds, stats.num_packets_tx, stats.num_packets_rx,
+		stats.num_packets_rx_bad, stats.num_rx_dupe, stats.num_tx_relay,
+		stats.num_tx_relay_canceled, stats.num_online_nodes, stats.num_total_nodes);
+
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE */
+
+#endif /* CONFIG_MESHTASTIC_LOCAL_STATS */
+
 #if defined(CONFIG_MESHTASTIC_TELEMETRY_WANT_RESPONSE)
 
 #define DEVICE_TELEMETRY_PEER_SLOTS 4
@@ -187,6 +420,7 @@ static int meshtastic_module_device_telemetry_alloc_reply(const struct meshtasti
 	meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_zero;
 	meshtastic_DeviceMetrics metrics;
 	struct device_telemetry_peer *peer;
+	bool want_local_stats = false;
 	int64_t now_ms;
 	int ret;
 
@@ -205,8 +439,15 @@ static int meshtastic_module_device_telemetry_alloc_reply(const struct meshtasti
 		return -ENOENT;
 	}
 
+#if defined(CONFIG_MESHTASTIC_LOCAL_STATS)
+	/* Upstream answers a local_stats request on this same port and module
+	 * (DeviceTelemetry.cpp allocReply()). This is the ONLY way LocalStats ever
+	 * costs airtime: somebody asked for it by name. */
+	want_local_stats = (request.which_variant == meshtastic_Telemetry_local_stats_tag);
+#endif
+
 	if (request.which_variant != meshtastic_Telemetry_device_metrics_tag &&
-	    request.which_variant != 0U) {
+	    request.which_variant != 0U && !want_local_stats) {
 		return -ENOENT;
 	}
 
@@ -223,17 +464,33 @@ static int meshtastic_module_device_telemetry_alloc_reply(const struct meshtasti
 	peer->last_reply_ms = now_ms;
 	k_mutex_unlock(&device_telemetry_state.lock);
 
-	ret = meshtastic_collect_device_metrics(&metrics);
-	if (ret < 0) {
-		return ret;
-	}
+#if defined(CONFIG_MESHTASTIC_LOCAL_STATS)
+	if (want_local_stats) {
+		meshtastic_LocalStats stats;
 
-	telemetry.which_variant = meshtastic_Telemetry_device_metrics_tag;
-	telemetry.variant.device_metrics = metrics;
+		ret = meshtastic_collect_local_stats(&stats);
+		if (ret < 0) {
+			return ret;
+		}
+
+		telemetry.which_variant = meshtastic_Telemetry_local_stats_tag;
+		telemetry.variant.local_stats = stats;
+	} else
+#endif
+	{
+		ret = meshtastic_collect_device_metrics(&metrics);
+		if (ret < 0) {
+			return ret;
+		}
+
+		telemetry.which_variant = meshtastic_Telemetry_device_metrics_tag;
+		telemetry.variant.device_metrics = metrics;
+	}
 
 	ret = meshtastic_telemetry_encode_packet(req->from, req->id, &telemetry, payload, reply);
 	if (ret == 0) {
-		LOG_INF("Device telemetry request from 0x%08x, sending response", req->from);
+		LOG_INF("Device telemetry request from 0x%08x, sending %s response", req->from,
+			want_local_stats ? "LocalStats" : "DeviceMetrics");
 	}
 
 	return ret;
@@ -245,8 +502,10 @@ MESHTASTIC_MODULE_DEFINE(device_telemetry, MESHTASTIC_PORT_TELEMETRY, 0, NULL,
 #endif /* CONFIG_MESHTASTIC_TELEMETRY_WANT_RESPONSE */
 
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND) ||                                         \
+	defined(CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE) ||                                         \
 	(defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                         \
 	 defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND))
+#define MESHTASTIC_TELEMETRY_THREAD 1
 /* 2026-08-05: the "~300 B measured peak" below was stale — it measured the
  * bounded build+encode helper in isolation, not the actual call this thread
  * makes. meshtastic_send_device_metrics() calls into meshtastic_send_data(),
@@ -260,40 +519,101 @@ MESHTASTIC_MODULE_DEFINE(device_telemetry, MESHTASTIC_PORT_TELEMETRY, 0, NULL,
 static K_THREAD_STACK_DEFINE(telemetry_stack, 6144);
 static struct k_thread telemetry_thread;
 
-static uint32_t telemetry_period_sec(void)
-{
-	uint32_t period = UINT32_MAX;
+/*
+ * One thread, several senders, each on its OWN period.
+ *
+ * The previous loop slept for the MINIMUM of the configured intervals and then
+ * fired every enabled sender on each tick, so two senders with different
+ * intervals both effectively ran at the shorter one. That was invisible while
+ * both intervals defaulted to 3600 s — and it stops being invisible the moment
+ * anything on this thread wants a shorter period. The LocalStats push does
+ * (900 s, matching upstream), and under the old loop that would have quietly
+ * made the device-metrics BROADCAST 4x chattier on the air: exactly the
+ * regression the 3600 s default was chosen to avoid ("900 s was ~4x chattier",
+ * Kconfig.device_metrics). So each sender now carries its own deadline.
+ */
+struct telemetry_job {
+	uint32_t interval_sec;
+	uint32_t due_sec; /* uptime second at which this sender is next due */
+	void (*fire)(void);
+};
 
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND)
-	period = MIN(period, (uint32_t)CONFIG_MESHTASTIC_DEVICE_METRICS_INTERVAL_SEC);
-#endif
-#if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                              \
-	defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND)
-	period = MIN(period, (uint32_t)CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_INTERVAL_SEC);
+static void fire_device_metrics(void)
+{
+	(void)meshtastic_send_device_metrics(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
+}
 #endif
 
-	return period;
+#if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                              \
+	defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND)
+static void fire_environment(void)
+{
+	(void)meshtastic_send_environment(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
 }
+#endif
+
+#if defined(CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE)
+static void fire_local_stats(void)
+{
+	(void)meshtastic_send_local_stats_to_phone();
+}
+#endif
 
 static void telemetry_thread_fn(void *p1, void *p2, void *p3)
 {
+	static struct telemetry_job jobs[] = {
+#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND)
+		{ .interval_sec = CONFIG_MESHTASTIC_DEVICE_METRICS_INTERVAL_SEC,
+		  .fire = fire_device_metrics },
+#endif
+#if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                              \
+	defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND)
+		{ .interval_sec = CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_INTERVAL_SEC,
+		  .fire = fire_environment },
+#endif
+#if defined(CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE)
+		{ .interval_sec = CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE_SEC,
+		  .fire = fire_local_stats },
+#endif
+	};
+	uint32_t now = (uint32_t)k_uptime_seconds();
+
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
-	while (true) {
-		k_sleep(K_SECONDS(telemetry_period_sec()));
+	for (size_t i = 0; i < ARRAY_SIZE(jobs); i++) {
+		jobs[i].due_sec = now + jobs[i].interval_sec;
+	}
 
-#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND)
-		(void)meshtastic_send_device_metrics(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
-#endif
-#if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                              \
-	defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND)
-		(void)meshtastic_send_environment(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
-#endif
+	while (true) {
+		uint32_t sleep_sec = UINT32_MAX;
+
+		now = (uint32_t)k_uptime_seconds();
+		for (size_t i = 0; i < ARRAY_SIZE(jobs); i++) {
+			uint32_t remaining =
+				(jobs[i].due_sec > now) ? (jobs[i].due_sec - now) : 0U;
+
+			sleep_sec = MIN(sleep_sec, remaining);
+		}
+
+		/* Never a zero sleep: a job that is already overdue is fired below,
+		 * and a rounding-down of sub-second remainder must not spin. */
+		k_sleep(K_SECONDS(MAX(sleep_sec, 1U)));
+
+		now = (uint32_t)k_uptime_seconds();
+		for (size_t i = 0; i < ARRAY_SIZE(jobs); i++) {
+			if (now >= jobs[i].due_sec) {
+				jobs[i].fire();
+				/* Next deadline measured from NOW, not from the missed
+				 * one — a slow send must not queue up a catch-up burst. */
+				jobs[i].due_sec = now + jobs[i].interval_sec;
+			}
+		}
 	}
 }
-#endif
+#endif /* MESHTASTIC_TELEMETRY_THREAD */
 
 int meshtastic_metrics_init(void)
 {
@@ -310,9 +630,7 @@ int meshtastic_metrics_init(void)
 	k_mutex_init(&device_telemetry_state.lock);
 #endif
 
-#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND) ||                                         \
-	(defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                         \
-	 defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND))
+#if defined(MESHTASTIC_TELEMETRY_THREAD)
 	k_thread_create(&telemetry_thread, telemetry_stack, K_THREAD_STACK_SIZEOF(telemetry_stack),
 			telemetry_thread_fn, NULL, NULL, NULL, CONFIG_MESHTASTIC_THREAD_PRIORITY, 0,
 			K_NO_WAIT);

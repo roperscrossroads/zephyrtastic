@@ -34,3 +34,40 @@ config MESHTASTIC_FUEL_GAUGE
 	  those properties.
 
 endif # MESHTASTIC_DEVICE_METRICS
+
+menuconfig MESHTASTIC_LOCAL_STATS
+	bool "Meshtastic LocalStats telemetry"
+	default y
+	depends on MESHTASTIC_DEVICE_METRICS
+	help
+	  Enable Telemetry.local_stats -- the mesh-statistics variant: uptime,
+	  channel/airtime utilization, packet and relay counters, node counts and
+	  heap. Every counter it reports is one the stack already keeps; this only
+	  puts them on the wire in the shape clients already render (the Android
+	  app ships a dedicated LocalStats home-screen widget).
+
+	  Note the deliberate asymmetry with device_metrics, which mirrors
+	  upstream's DeviceTelemetryModule: LocalStats is pushed to a connected
+	  PHONE only and is never broadcast over LoRa on a timer. It costs no
+	  airtime. The mesh only ever sees it as a reply to an explicit
+	  Telemetry(local_stats) request.
+
+if MESHTASTIC_LOCAL_STATS
+
+config MESHTASTIC_LOCAL_STATS_TO_PHONE
+	bool "Push LocalStats to a connected phone periodically"
+	default y
+	depends on MESHTASTIC_PHONEAPI
+	help
+	  Enqueue a LocalStats frame onto every registered PhoneAPI transport on
+	  a timer. Zero airtime -- the frame never reaches the radio.
+
+config MESHTASTIC_LOCAL_STATS_TO_PHONE_SEC
+	int "LocalStats to-phone interval in seconds"
+	default 900
+	range 30 86400
+	depends on MESHTASTIC_LOCAL_STATS_TO_PHONE
+	help
+	  Matches upstream's sendStatsToPhoneIntervalMs (15 minutes).
+
+endif # MESHTASTIC_LOCAL_STATS

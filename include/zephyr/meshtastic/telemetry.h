@@ -56,6 +56,25 @@ int meshtastic_send_device_metrics(uint32_t dest, k_timeout_t wait);
  */
 int meshtastic_send_environment(uint32_t dest, k_timeout_t wait);
 
+/**
+ * @brief Hand LocalStats to every attached phone transport. Costs no airtime.
+ *
+ * LocalStats is a node's description of its own mesh behaviour — uptime,
+ * packet/relay/dupe counters, node counts, heap. It goes to the phone and only
+ * to the phone, matching upstream's DeviceTelemetryModule, which calls
+ * sendToPhone() and never sendToMesh() for this variant. The mesh sees
+ * LocalStats only as a reply to an explicit Telemetry(local_stats) request.
+ *
+ * Requires @kconfig{CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE}. Called on a timer
+ * by the telemetry thread; exposed so the shell (and tests) can force one.
+ *
+ * @retval 0        Enqueued to every registered transport.
+ * @retval -EINVAL  Stack not initialized.
+ * @retval -ENOMEM  Protobuf encoding failed.
+ * @retval -ENOTSUP Not compiled in.
+ */
+int meshtastic_send_local_stats_to_phone(void);
+
 #ifdef __cplusplus
 }
 #endif
