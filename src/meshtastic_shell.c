@@ -806,7 +806,19 @@ static void shell_print_channel_line(const struct shell *sh, uint8_t index)
 		return;
 	}
 
-	name = meshtastic_channels_get_name(index);
+	/* An EMPTY name means "the default channel for the active preset", and
+	 * get_name() substitutes that preset name because it is protocol data —
+	 * hashed for the channel byte and the frequency slot. On a DISABLED slot
+	 * that substitution is just misleading: it makes an unused slot read as a
+	 * configured channel with a real name. Report what is stored instead.
+	 *
+	 * Found 2026-08-25 when a phone showed three channels — 0 ShortTurbo,
+	 * 1 ShortTurbo, 2 cluster — and slot 1 turned out to be a disabled slot
+	 * with no name, no PSK and hash 0x00. */
+	name = (ch->role == meshtastic_Channel_Role_DISABLED &&
+		(!ch->has_settings || ch->settings.name[0] == '\0'))
+		       ? "(unset)"
+		       : meshtastic_channels_get_name(index);
 	shell_print(sh, "[%u] role=%s name=\"%s\" hash=0x%02x uplink=%s downlink=%s",
 		    (unsigned int)index, shell_channel_role_name(ch->role), name,
 		    meshtastic_channels_get_hash(index),
