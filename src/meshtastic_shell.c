@@ -3358,13 +3358,19 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		bool core = (scope[0] == 'C');
 
 		shell_print(sh, "scope   : %s (%s) — %u of %u entries%s", scope,
-			    pinned ? "pinned" : "auto",
+			    st.scope_demotions ? "narrowed under table pressure"
+					       : (pinned ? "pinned" : "auto"),
 			    (unsigned int)meshtastic_cluster_entry_count(),
 			    (unsigned int)CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES,
 			    core ? "" : ", tracking the whole fleet");
 		if (core) {
 			shell_print(sh, "        : base + MY OWN sections only — this node is "
 					"NOT a restore source for other nodes (§7.7)");
+		}
+		if (st.scope_demotions) {
+			shell_print(sh, "        : the fleet outgrew this table — raise "
+					"MESHTASTIC_CLUSTER_MAX_ENTRIES and reflash to claim "
+					"everything again");
 		}
 		if (st.entry_rx_out_of_scope || st.entries_evicted || st.want_no_space) {
 			shell_print(sh, "        : out_of_scope=%u evicted=%u no_space=%u",
@@ -3435,7 +3441,9 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		    st.entry_rx_applied, st.entry_rx_stale, st.entry_rx_refused,
 		    st.rx_unsolicited, st.tx_busy,
 		    st.entry_rx_no_space ? "  ** DOCUMENT TABLE FULL — pushed entries are "
-					   "being dropped **"
+					   "being dropped (a walk would narrow the claim "
+					   "instead; an unsolicited push deliberately does "
+					   "not) **"
 					 : "");
 	/* suppressed>0 is the rate bound working, not a fault: a push is a
 	 * latency optimisation over the digest, so dropping one costs a digest

@@ -3747,4 +3747,297 @@ ZTEST(mesh_sim, test_cluster_vector_reply_is_trimmed_to_the_requesters_scope)
 	cluster_channel(false);
 }
 
+/*
+ * ---- narrowing under real table pressure ----------------------------------
+ *
+ * Only in a build small enough to overflow. The default cap is 32, and the
+ * owner-existence gate means the sim can plant at most base + nodes/<me> +
+ * nodes/<peer> across the allowlist, so a full table is simply not reachable
+ * there — which is also why agents-xhli.10 was never reproducible on the bench.
+ * The meshtastic.mesh_sim.cluster_small_table.native_sim scenario builds the
+ * whole suite at a cap these tests can actually reach.
+ */
+#if CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES <= 18
+
+/* Every key an injected frame is allowed to create here: base, this node's
+ * pins, and the one peer the NodeDB knows. lora is left out deliberately — it
+ * replicates but is held, and a HOLD in the middle of a capacity test only
+ * muddies what failed. */
+struct probe_key {
+	uint8_t layer;
+	uint32_t owner;
+	uint16_t section;
+};
+
+static const uint16_t probe_sections[] = {
+	meshtastic_Config_device_tag,	 meshtastic_Config_position_tag,
+	meshtastic_Config_power_tag,	 meshtastic_Config_display_tag,
+	meshtastic_Config_bluetooth_tag,
+};
+
+static void probe_candidates(struct probe_key *out, size_t *n)
+{
+	size_t k = 0U;
+
+	for (size_t i = 0U; i < ARRAY_SIZE(probe_sections); i++) {
+		out[k++] = (struct probe_key){MESHTASTIC_CLUSTER_LAYER_BASE, 0U,
+					      probe_sections[i]};
+		out[k++] = (struct probe_key){MESHTASTIC_CLUSTER_LAYER_NODE, PEER_NODE_ID,
+					      probe_sections[i]};
+		out[k++] = (struct probe_key){MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID,
+					      probe_sections[i]};
+	}
+	*n = k;
+}
+
+/*
+ * Fill the table to capacity and hand back one key it does NOT hold. @p skip,
+ * when non-NULL, is a key to leave alone whatever happens — the caller may need
+ * a free slot in a particular place.
+ *
+ * Planting only keys the doc lacks keeps this independent of whatever earlier
+ * tests left behind, which matters: ztest orders by name, and the suite's
+ * document is shared.
+ */
+static bool fill_table(struct probe_key *free_key, const struct probe_key *skip, int64_t base_ms)
+{
+	struct probe_key cand[3U * ARRAY_SIZE(probe_sections)];
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t n;
+	bool found = false;
+
+	probe_candidates(cand, &n);
+	for (size_t i = 0U; i < n; i++) {
+		bool held = doc_has(cand[i].layer, cand[i].owner, cand[i].section);
+		bool skipped = (skip != NULL && skip->layer == cand[i].layer &&
+				skip->owner == cand[i].owner && skip->section == cand[i].section);
+
+		if (held) {
+			continue;
+		}
+		if (skipped || meshtastic_cluster_entry_count() >=
+					CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES) {
+			if (!found && !skipped) {
+				*free_key = cand[i];
+				found = true;
+			}
+			continue;
+		}
+		{
+			size_t len = encode_section(cand[i].section, buf, sizeof(buf));
+
+			inject_entry(cand[i].section,
+				     cand[i].layer == MESHTASTIC_CLUSTER_LAYER_BASE
+					     ? zephyrtastic_ClusterLayer_BASE
+					     : zephyrtastic_ClusterLayer_NODE,
+				     cand[i].owner, base_ms + (int64_t)i * 10, false, buf, len,
+				     (uint32_t)(0x7D00U + i));
+			k_sleep(K_MSEC(60));
+		}
+	}
+	k_sleep(K_MSEC(300));
+	return found && meshtastic_cluster_entry_count() >=
+				CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES;
+}
+
+/* Open an anti-entropy walk and get as far as awaiting the peer's vector. */
+static bool open_walk(uint32_t seq)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	uint32_t to = 0U;
+
+	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
+	msg.variant.digest.scope = zephyrtastic_ClusterScope_SCOPE_FULL;
+	msg.variant.digest.doc_hash = 0xD00D0000U + seq;
+	msg.variant.digest.entry_count = 99U;
+	msg.variant.digest.base_hash = 0xD11D0000U + seq;
+	msg.variant.digest.base_count = 99U;
+	msg.variant.digest.has_max_stamp = true;
+	msg.variant.digest.max_stamp.physical_ms = (TEST_EPOCH_MS + 262000) + (int64_t)seq;
+	msg.variant.digest.max_stamp.node_id = PEER_NODE_ID;
+	inject_cluster_bearer(&msg, MESHTASTIC_NODE_BROADCAST, 0x7D80U + seq * 8U);
+
+	return take_cluster_tx(&msg, &to) &&
+	       msg.which_variant == zephyrtastic_ClusterMessage_vector_req_tag;
+}
+
+/*
+ * THE BEAD, REPRODUCED AND THEN CLOSED. A full table used to be permanent: the
+ * node quietly stopped tracking part of the fleet, said so only in a counter,
+ * and could not recover — because dropping a row would have meant advertising a
+ * hash nobody else has.
+ *
+ * With a declared claim there is a third option between "hold it" and "lie
+ * about it": say you track less. The walk finds a row it wants and cannot
+ * store, the claim narrows to CORE, and the digest is honest again at once.
+ */
+ZTEST(mesh_sim, test_cluster_z_full_table_narrows_instead_of_diverging)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	struct probe_key free_key;
+	zephyrtastic_ClusterMessage msg;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	zassert_true(fill_table(&free_key, NULL, TEST_EPOCH_MS + 260000),
+		     "the premise: a table filled to capacity with a key still outside it");
+	quiesce();
+	meshtastic_cluster_stats_get(&before_st);
+	zassert_equal(before_st.scope_demotions, 0U, "nothing should have narrowed yet");
+
+	zassert_true(open_walk(1U), "the mismatch must open a walk");
+
+	/* The peer offers exactly the row we lack and cannot hold. */
+	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	msg.which_variant = zephyrtastic_ClusterMessage_vector_tag;
+	msg.variant.vector.entries_count = 1U;
+	msg.variant.vector.entries[0].has_key = true;
+	msg.variant.vector.entries[0].key.layer =
+		(free_key.layer == MESHTASTIC_CLUSTER_LAYER_BASE)
+			? zephyrtastic_ClusterLayer_BASE
+			: zephyrtastic_ClusterLayer_NODE;
+	msg.variant.vector.entries[0].key.node_id = free_key.owner;
+	msg.variant.vector.entries[0].key.section = free_key.section;
+	msg.variant.vector.entries[0].has_stamp = true;
+	msg.variant.vector.entries[0].stamp.physical_ms = TEST_EPOCH_MS + 263000;
+	msg.variant.vector.entries[0].stamp.node_id = PEER_NODE_ID;
+	msg.variant.vector.total = 1U;
+	inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7D90U);
+	k_sleep(K_MSEC(500));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.want_no_space > before_st.want_no_space,
+		     "the diff must report the row as wanted-but-unstorable, not merely "
+		     "unwanted");
+	zassert_equal(after_st.scope_demotions, before_st.scope_demotions + 1U,
+		      "and that is the signal to narrow the claim");
+	zassert_equal(meshtastic_cluster_scope_name(NULL)[0], 'C');
+	zassert_true(after_st.entries_evicted > before_st.entries_evicted,
+		     "narrowing must actually free the table");
+	zassert_true(meshtastic_cluster_entry_count() <
+			     CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES,
+		     "a narrowed node must have room again — a claim it cannot hold would "
+		     "be the same lie in a smaller font");
+
+	/* The digest that follows describes what the node now holds, which is
+	 * the whole point: honest at every instant, never a hash nobody has. */
+	wait_cluster_idle();
+	quiesce();
+	meshtastic_cluster_digest_now();
+	{
+		uint32_t to = 0U;
+
+		zassert_true(take_cluster_tx(&msg, &to), "a digest must follow the change");
+		zassert_equal(msg.variant.digest.scope, zephyrtastic_ClusterScope_SCOPE_CORE,
+			      "and it must declare the narrower claim immediately");
+		zassert_equal(msg.variant.digest.entry_count, meshtastic_cluster_entry_count(),
+			      "a narrowed node holds exactly what it claims");
+	}
+
+	scope_restore_full();
+	cluster_channel(false);
+}
+
+/*
+ * The same overflow met from the operator's side. Before this, `cluster pin`
+ * on a full table simply failed -- for reasons entirely about OTHER nodes'
+ * rows, which is a baffling thing to be told when you are configuring your own
+ * node. Narrowing frees exactly those rows, so the retry is not hope: a CORE
+ * claim fits inside the table's floor by construction.
+ */
+ZTEST(mesh_sim, test_cluster_z_local_write_that_runs_out_of_table_narrows_and_succeeds)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	struct probe_key free_key, mine = {MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID, 0U};
+	bool have_mine = false;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	/* A section of ours the document does not pin yet — that is the write
+	 * that will need a slot the table does not have. */
+	for (size_t i = 0U; i < ARRAY_SIZE(probe_sections) && !have_mine; i++) {
+		if (!doc_has(MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID, probe_sections[i])) {
+			mine.section = probe_sections[i];
+			have_mine = true;
+		}
+	}
+	zassert_true(have_mine,
+		     "this test needs one unpinned section of our own; if every one is "
+		     "pinned by an earlier case, give it a section of its own");
+
+	zassert_true(fill_table(&free_key, &mine, TEST_EPOCH_MS + 265000),
+		     "the premise: a full table with our own section still unpinned");
+	quiesce();
+	meshtastic_cluster_stats_get(&before_st);
+
+	zassert_ok(meshtastic_cluster_pin(mine.section),
+		   "a local write must SUCCEED by narrowing, not fail with a message about "
+		   "other nodes");
+	k_sleep(K_MSEC(400));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.scope_demotions, before_st.scope_demotions + 1U,
+		      "and it must be the write that narrowed the claim");
+	zassert_true(doc_has(MESHTASTIC_CLUSTER_LAYER_NODE, TEST_NODE_ID, mine.section),
+		     "the pin must actually be in the document afterwards");
+
+	scope_restore_full();
+	cluster_channel(false);
+}
+
+/*
+ * AND THE ONE SIGNAL THAT MUST NOT NARROW ANYTHING. An unsolicited push is an
+ * arbitrary frame from whoever holds the channel key. If it could force a
+ * narrowing, a channel member would have a one-frame way to take the fleet's
+ * restore source out of service — cheaper than any of the attacks the
+ * adversarial pass closed, and permanent until someone noticed.
+ *
+ * Ignoring it costs nothing: a real entry still shows up in the sender's
+ * digest, and our own walk then reaches the same conclusion on our own terms.
+ */
+ZTEST(mesh_sim, test_cluster_z_unsolicited_push_cannot_force_a_narrowing)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	struct probe_key free_key;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	zassert_true(fill_table(&free_key, NULL, TEST_EPOCH_MS + 268000),
+		     "the premise: a table filled to capacity with a key still outside it");
+	quiesce();
+	meshtastic_cluster_stats_get(&before_st);
+
+	len = encode_section(free_key.section, buf, sizeof(buf));
+	inject_entry(free_key.section,
+		     free_key.layer == MESHTASTIC_CLUSTER_LAYER_BASE
+			     ? zephyrtastic_ClusterLayer_BASE
+			     : zephyrtastic_ClusterLayer_NODE,
+		     free_key.owner, TEST_EPOCH_MS + 269000, false, buf, len, 0x7DA0U);
+	k_sleep(K_MSEC(400));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.entry_rx_no_space > before_st.entry_rx_no_space,
+		     "the push must be counted as not fitting");
+	zassert_equal(after_st.scope_demotions, before_st.scope_demotions,
+		      "but it must NOT narrow the claim — that would hand a channel member a "
+		      "one-frame way to retire the fleet's restore source");
+	zassert_equal(meshtastic_cluster_scope_name(NULL)[0], 'F');
+
+	scope_restore_full();
+	cluster_channel(false);
+}
+
+#endif /* CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES <= 18 */
+
 #endif /* CONFIG_MESHTASTIC_CLUSTER */

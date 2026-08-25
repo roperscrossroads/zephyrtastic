@@ -195,7 +195,7 @@ static struct {
 	 * Held as a KIND, not a whole scope: the owner of a CORE claim is this
 	 * node's id, which is not necessarily known when the module starts. */
 	uint8_t scope_kind;
-	bool scope_pinned;	 /* compiled FULL/CORE, or an operator's choice */
+	bool scope_pinned;   /* compiled FULL/CORE, or an operator's choice */
 	bool scope_id_warned;
 	struct meshtastic_hlc hlc;
 	struct meshtastic_cluster_stats stats;
@@ -576,6 +576,42 @@ static void forget_entry(const struct meshtastic_cluster_key *key, void *ctx)
 	(void)settings_delete(name);
 }
 
+/*
+ * The claim, remembered. A node that narrowed because it genuinely could not
+ * hold the fleet's document would otherwise refill from the fleet on every
+ * boot, overflow again, and evict again — and since every accepted entry is
+ * persisted, that is flash WEAR repeated every boot on the weakest node in the
+ * fleet. That is what settles this: not the airtime, the wear.
+ *
+ * The obvious objection to remembering it is sticky-wrong state, and the cap
+ * recorded alongside is what kills that cheaply. Raise MAX_ENTRIES, reflash,
+ * and the record is discarded on sight — "give it a bigger table" becomes the
+ * natural cure rather than something an operator has to know to undo.
+ */
+struct cluster_scope_rec {
+	uint8_t kind;
+	uint16_t cap;
+} __packed;
+
+#define CLUSTER_SCOPE_REC_NAME "mtclus/scope"
+
+static void persist_scope(uint8_t kind)
+{
+	struct cluster_scope_rec rec = {
+		.kind = kind,
+		.cap = (uint16_t)CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES,
+	};
+
+	if (settings_save_one(CLUSTER_SCOPE_REC_NAME, &rec, sizeof(rec)) != 0) {
+		LOG_WRN("cluster: could not record the scope — it will not survive a reboot");
+	}
+}
+
+static void forget_scope(void)
+{
+	(void)settings_delete(CLUSTER_SCOPE_REC_NAME);
+}
+
 static int cluster_settings_set(const char *key, size_t len, settings_read_cb read_cb,
 				void *cb_arg)
 {
@@ -586,6 +622,39 @@ static int cluster_settings_set(const char *key, size_t len, settings_read_cb re
 	unsigned int section;
 	char layer;
 	size_t plen;
+
+	/* The claim comes first — it is not a key, and it decides which keys are
+	 * even loadable below. Init loads this record's own subtree before the
+	 * entries so the order is not left to however flash happens to be laid
+	 * out. */
+	if (strcmp(key, "scope") == 0) {
+		struct cluster_scope_rec srec;
+
+		if (len != sizeof(srec) || read_cb(cb_arg, &srec, len) != (ssize_t)len) {
+			return -EINVAL;
+		}
+		if (!IS_ENABLED(CONFIG_MESHTASTIC_CLUSTER_SCOPE_AUTO)) {
+			/* A compiled choice is an explicit statement about THIS
+			 * build; a record is a decision an earlier one made. The
+			 * build wins, or "never narrow" would not mean it. */
+			return 0;
+		}
+		if (CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES > srec.cap) {
+			LOG_INF("cluster: capacity grew from %u to %u — discarding the "
+				"recorded scope and claiming everything again",
+				srec.cap,
+				(unsigned int)CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES);
+			forget_scope();
+			return 0;
+		}
+		if (srec.kind == MESHTASTIC_CLUSTER_SCOPE_CORE ||
+		    srec.kind == MESHTASTIC_CLUSTER_SCOPE_FULL) {
+			k_mutex_lock(&cluster_lock, K_FOREVER);
+			cluster.scope_kind = srec.kind;
+			k_mutex_unlock(&cluster_lock);
+		}
+		return 0;
+	}
 
 	/* key is the remainder after "mtclus/": "<l><node-hex>/<sec>" */
 	if (sscanf(key, "%c%8x/%u", &layer, &node_id, &section) != 3) {
@@ -658,6 +727,15 @@ static void forget_entry(const struct meshtastic_cluster_key *key, void *ctx)
 {
 	ARG_UNUSED(key);
 	ARG_UNUSED(ctx);
+}
+
+static void persist_scope(uint8_t kind)
+{
+	ARG_UNUSED(kind);
+}
+
+static void forget_scope(void)
+{
 }
 
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
@@ -1332,6 +1410,50 @@ static void scope_set_locked(uint8_t kind, bool pinned)
 	}
 }
 
+/*
+ * Narrow the claim because the table could not hold something we wanted.
+ * Called with the lock held.
+ *
+ * WHICH SIGNALS MAY DO THIS, and the asymmetry is deliberate. A row the diff
+ * predicate wanted, or one of our OWN writes, is evidence about this node: we
+ * chose the peer, or we made the write, and running out of table is then a fact
+ * about our capacity. An UNSOLICITED push that will not fit is not evidence
+ * about anything — it is an arbitrary frame from whoever holds the channel key,
+ * and letting it force a narrowing would hand a channel member a cheap way to
+ * knock the fleet's restore source out of service. Nothing is lost by ignoring
+ * it: if the entry is real, the peer's digest still mismatches and our own walk
+ * reaches the same conclusion on our own terms.
+ *
+ * One way only. Re-widening on its own would refill, overflow and narrow again
+ * on a cycle, flipping the advertised claim each time and forcing every peer to
+ * switch which leg it compares. Widening again is an operator's act
+ * (`cluster scope auto|full`) or a bigger table plus a reflash, which the
+ * recorded capacity turns into an automatic cure.
+ *
+ * It can fire at most once: a CORE claim is at most twice the allowlist, and
+ * MAX_ENTRIES has a floor of exactly that, so a narrowed node can always hold
+ * everything it claims.
+ */
+static void demote_locked(const char *why)
+{
+	if (cluster.scope_pinned || cluster.scope_kind == MESHTASTIC_CLUSTER_SCOPE_CORE) {
+		return;
+	}
+
+	scope_set_locked(MESHTASTIC_CLUSTER_SCOPE_CORE, false);
+	cluster.stats.scope_demotions++;
+	persist_scope(MESHTASTIC_CLUSTER_SCOPE_CORE);
+
+	LOG_WRN("cluster: table full (%u) — %s. Now claiming CORE: base + my own sections. "
+		"What this node RUNS is unchanged; the fleet has one fewer place to recover "
+		"another node's pins from. Raise MESHTASTIC_CLUSTER_MAX_ENTRIES to undo it.",
+		(unsigned int)CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES, why);
+
+	/* Say so at once: every peer's comparison against this node has just
+	 * changed which set it covers. */
+	(void)k_work_reschedule(&digest_work, K_NO_WAIT);
+}
+
 /* ---- digest TX ------------------------------------------------------------ */
 
 static uint32_t digest_period_ms(void)
@@ -1698,6 +1820,7 @@ static void on_vector_req(uint32_t from, const zephyrtastic_ClusterVectorReq *r)
 static void on_vector(uint32_t from, const zephyrtastic_ClusterVector *v)
 {
 	struct meshtastic_cluster_scope mine;
+	bool no_space = false;
 	bool fire = false;
 	bool last;
 
@@ -1744,13 +1867,25 @@ static void on_vector(uint32_t from, const zephyrtastic_ClusterVector *v)
 			break;
 		case MESHTASTIC_CLUSTER_WANT_NO_SPACE:
 			/* We claim this row and cannot hold it: this node has
-			 * outgrown its table. Counted here; acted on in the
-			 * commit that makes narrowing automatic. */
+			 * outgrown its table. THE honest trigger — we chose to
+			 * walk this peer and we wanted this row. */
 			cluster.stats.want_no_space++;
+			no_space = true;
 			break;
 		default:
 			break;
 		}
+	}
+
+	if (no_space) {
+		/* Narrow first, then abandon the walk: the keys we collected
+		 * describe a document we have just stopped claiming, and the
+		 * next digest re-opens whatever still matters. */
+		demote_locked("the fleet's document no longer fits");
+		cluster.pull_key_count = 0U;
+		pull_reset_locked();
+		k_mutex_unlock(&cluster_lock);
+		return;
 	}
 
 	last = (v->total == 0U) || ((uint32_t)v->offset + v->entries_count >= v->total);
@@ -1954,7 +2089,9 @@ static void on_entry(uint32_t from, const zephyrtastic_ClusterEntry *e)
 		 * 23b47de the diff predicate is capacity-aware and never asks
 		 * for a new key a full table would refuse (tests/cluster:
 		 * test_full_table_stops_asking_for_what_it_cannot_store). What
-		 * reaches here is therefore an UNSOLICITED push. */
+		 * reaches here is therefore an UNSOLICITED push — which is also
+		 * why this path counts and does NOT narrow the claim: see the
+		 * asymmetry argued at demote_locked(). */
 		cluster.stats.entry_rx_no_space++;
 	} else {
 		cluster.stats.rx_undecodable++;
@@ -2120,6 +2257,17 @@ static int doc_write_local(const struct meshtastic_cluster_key *key,
 	meshtastic_hlc_local(&cluster.hlc, meshtastic_get_node_id(), minted);
 	ret = meshtastic_cluster_doc_accept(&cluster.doc, key, minted, tombstone, payload,
 					    payload_len);
+	if (ret == -ENOSPC) {
+		/* Our OWN write, refused for room. The most honest overflow
+		 * signal there is -- nobody chose this key for us -- and the one
+		 * an operator actually meets, as `cluster pin display` failing
+		 * for reasons about other nodes' rows. Narrowing frees exactly
+		 * those, so the retry is not optimism: a CORE claim is inside
+		 * the table's floor by construction, and this key is in it. */
+		demote_locked("a local write had nowhere to go");
+		ret = meshtastic_cluster_doc_accept(&cluster.doc, key, minted, tombstone,
+						    payload, payload_len);
+	}
 	if (ret == 1) {
 		persist_entry(meshtastic_cluster_doc_find(&cluster.doc, key));
 		push_enqueue_locked(key);
@@ -2398,6 +2546,12 @@ int meshtastic_cluster_scope_select(int choice)
 		return -EALREADY;
 	}
 	scope_set_locked(kind, pinned);
+	if (choice == MESHTASTIC_CLUSTER_SCOPE_CHOICE_AUTO) {
+		/* "auto" is how an operator says: forget what you decided. */
+		forget_scope();
+	} else {
+		persist_scope(kind);
+	}
 	k_mutex_unlock(&cluster_lock);
 
 	LOG_INF("cluster: now claiming %s%s", kind == MESHTASTIC_CLUSTER_SCOPE_CORE
@@ -2508,7 +2662,13 @@ int meshtastic_cluster_init(void)
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 	/* Persisted entries load through the settings handler; the config
 	 * store's subtree load has already run by the time we are called, so
-	 * pull ours explicitly rather than depending on a global load. */
+	 * pull ours explicitly rather than depending on a global load.
+	 *
+	 * The CLAIM first, in its own pass. It decides which entries are even
+	 * loadable, and flash hands records back in whatever order it stored
+	 * them — leaving that to luck would let a narrowed node refill itself
+	 * with rows it does not claim on some boots and not others. */
+	(void)settings_load_subtree(CLUSTER_SCOPE_REC_NAME);
 	(void)settings_load_subtree("mtclus");
 #endif
 

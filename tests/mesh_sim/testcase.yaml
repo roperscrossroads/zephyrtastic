@@ -35,3 +35,13 @@ tests:
       - CONFIG_MESHTASTIC_SCANNER=y
       - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
       - CONFIG_MESHTASTIC_SCANNER_DWELL_MS=1000
+
+  # A cap the tests can actually reach. The default 32 cannot overflow here at
+  # all: the owner-existence gate limits an injected frame to base + this node's
+  # pins + the one peer the NodeDB knows, so the table tops out well short --
+  # which is the same reason agents-xhli.10 was never reproducible on the bench.
+  # The whole suite reruns at this cap, which is the point: narrowing must not
+  # disturb anything else.
+  meshtastic.mesh_sim.cluster_small_table.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES=14

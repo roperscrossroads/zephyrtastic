@@ -162,6 +162,7 @@ struct meshtastic_cluster_stats {
 	uint32_t entry_rx_out_of_scope;
 	uint32_t want_no_space;	    /* rows we claim and could not have stored */
 	uint32_t entries_evicted;   /* dropped by narrowing the claim */
+	uint32_t scope_demotions;   /* times table pressure narrowed the claim */
 	uint32_t entry_rx_future;   /* stamped beyond the clock drift horizon */
 	uint32_t rx_unsolicited;   /* a reply we had not asked for */
 	uint32_t tx_busy;	   /* a peer asked while we were serving another */
