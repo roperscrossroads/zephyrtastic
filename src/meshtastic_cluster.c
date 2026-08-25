@@ -53,7 +53,10 @@
  *                                    consecutive FRUITLESS walks back off
  *                                    exponentially to a cap, so a peer we can
  *                                    never converge with costs a probe, not a
- *                                    conversation
+ *                                    conversation. Fruitless counts BOTH
+ *                                    shapes: a walk that asked for entries and
+ *                                    merged none, and a walk that asked for
+ *                                    nothing because we were already ahead
  *   frames we serve on request       one walk at a time (never rewound) AND a
  *                                    minimum interval between walks, so one
  *                                    small request cannot buy unbounded airtime
@@ -166,6 +169,21 @@ enum cluster_pull_state {
 	PULL_SEND_ENTRY_REQ,  /* rows diffed; owe pull_peer a ClusterEntryReq */
 };
 
+/*
+ * WHY a walk was opened — because it decides whether the walk gets JUDGED.
+ *
+ * The fruitless-walk backoff bounds a conversation that can never succeed, and
+ * "never succeeds" is only a meaningful verdict on the walks this node opens on
+ * its own account, on a cadence, about a mismatch it did not choose. An
+ * operator typing `cluster pull` has already decided the round trip is worth
+ * it. Judging a walk somebody asked for would let the backoff suppress the
+ * cadence that is the actual bound.
+ */
+enum cluster_pull_reason {
+	PULL_REASON_DIGEST = 0, /* a digest mismatch we noticed — judged */
+	PULL_REASON_SHELL,	/* `cluster pull <node>` — the operator's call */
+};
+
 static struct {
 	struct meshtastic_cluster_doc doc;
 	struct meshtastic_hlc hlc;
@@ -174,6 +192,7 @@ static struct {
 
 	/* Requester half. */
 	enum cluster_pull_state pull_state;
+	uint8_t pull_reason; /* enum cluster_pull_reason — why this walk exists */
 	uint32_t pull_peer;
 	int64_t pull_deadline_ms;
 	struct meshtastic_cluster_key pull_keys[CLUSTER_PULL_KEYS];
@@ -1167,7 +1186,8 @@ static void digest_work_fn(struct k_work *work)
 
 /* Open an anti-entropy exchange with @p peer after @p delay_ms. Called with the
  * lock held. Returns false if one is already in flight (§3.3: one per node). */
-static bool pull_start_locked(uint32_t peer, uint32_t delay_ms)
+static bool pull_start_locked(uint32_t peer, uint32_t delay_ms,
+			      enum cluster_pull_reason reason)
 {
 	int64_t now = k_uptime_get();
 
@@ -1195,6 +1215,14 @@ static bool pull_start_locked(uint32_t peer, uint32_t delay_ms)
 	 * merge anywhere clears the whole thing (see on_entry), so recovery is
 	 * immediate the moment the situation changes — which matters, because
 	 * the usual cure is an operator adding a key, not the peer changing.
+	 *
+	 * A FRUITLESS WALK HAS TWO SHAPES, and this half only sees one of them.
+	 * The other is a walk that fetched a vector, found nothing worth asking
+	 * for, and stopped — the "we are strictly AHEAD of that peer" case. It
+	 * merges nothing by construction, so there is nothing to wait for and
+	 * on_vector() judges it on the spot. Both feed the same counter; the
+	 * split exists only because one verdict is available immediately and the
+	 * other is not until entries have had time to arrive.
 	 */
 	if (cluster.pull_asked_entries) {
 		cluster.pull_asked_entries = false;
@@ -1221,6 +1249,7 @@ static bool pull_start_locked(uint32_t peer, uint32_t delay_ms)
 				      MSEC_PER_SEC * (1 << shift);
 	}
 	cluster.pull_state = PULL_SEND_VECTOR_REQ;
+	cluster.pull_reason = (uint8_t)reason;
 	cluster.pull_peer = peer;
 	cluster.pull_key_count = 0U;
 	cluster.pull_deadline_ms = k_uptime_get() + (int64_t)delay_ms +
@@ -1258,7 +1287,7 @@ static void on_digest(uint32_t from, const zephyrtastic_ClusterDigest *d)
 		 * diverged member hears the same one and would otherwise pull
 		 * from the same sender in the same slot. */
 		delay = sys_rand32_get() % (CONFIG_MESHTASTIC_CLUSTER_PULL_DELAY_MS + 1U);
-		pulling = pull_start_locked(from, delay);
+		pulling = pull_start_locked(from, delay, PULL_REASON_DIGEST);
 	}
 	k_mutex_unlock(&cluster_lock);
 
@@ -1418,7 +1447,31 @@ static void on_vector(uint32_t from, const zephyrtastic_ClusterVector *v)
 			fire = true;
 		} else {
 			/* Their document holds nothing we lack. If they are the
-			 * ones behind, our digest is already inviting them. */
+			 * ones behind, our digest is already inviting them.
+			 *
+			 * This walk is over and it merged nothing, so judge it
+			 * NOW rather than deferring to the next one: unlike the
+			 * entry-request case there is nothing still in flight
+			 * that could change the verdict. Without this the "we
+			 * are permanently ahead of that peer" mismatch — a peer
+			 * on an older build, or one that structurally refuses
+			 * something we hold — costs a vector exchange every
+			 * digest period for the life of the deployment, which
+			 * is precisely what the backoff exists to stop.
+			 *
+			 * Only for a walk WE chose to open on a mismatch. An
+			 * operator's `cluster pull` is not evidence about the
+			 * fleet. (The deferred half above stays reason-agnostic
+			 * on purpose: asking for entries and merging none says
+			 * something is structurally wrong whoever asked.)
+			 */
+			cluster.stats.pull_empty++;
+			if (cluster.pull_reason == (uint8_t)PULL_REASON_DIGEST) {
+				if (cluster.pull_fruitless < UINT8_MAX) {
+					cluster.pull_fruitless++;
+				}
+				cluster.stats.pull_fruitless++;
+			}
 			pull_reset_locked();
 		}
 	}
@@ -1542,11 +1595,14 @@ static void on_entry(uint32_t from, const zephyrtastic_ClusterEntry *e)
 	} else if (ret == -ENOSPC) {
 		/* Counted apart from malformed input because it means something
 		 * completely different and needs a different response: the frame
-		 * was fine, this node has simply run out of table. The walk will
-		 * keep asking for this key every round and keep failing — the
-		 * diff predicate is not capacity-aware (tests/cluster pins that)
-		 * — so a climbing number here is the fleet outgrowing
-		 * MESHTASTIC_CLUSTER_MAX_ENTRIES, not an attack. */
+		 * was fine, this node has simply run out of table. A climbing
+		 * number here is the fleet outgrowing MAX_ENTRIES, not an attack.
+		 *
+		 * It does NOT mean we are re-requesting this key forever: since
+		 * 23b47de the diff predicate is capacity-aware and never asks
+		 * for a new key a full table would refuse (tests/cluster:
+		 * test_full_table_stops_asking_for_what_it_cannot_store). What
+		 * reaches here is therefore an UNSOLICITED push. */
 		cluster.stats.entry_rx_no_space++;
 	} else {
 		cluster.stats.rx_undecodable++;
@@ -1953,7 +2009,7 @@ int meshtastic_cluster_pull(uint32_t node_id)
 	}
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
-	started = pull_start_locked(node_id, 0U);
+	started = pull_start_locked(node_id, 0U, PULL_REASON_SHELL);
 	k_mutex_unlock(&cluster_lock);
 	if (!started) {
 		return -EBUSY;

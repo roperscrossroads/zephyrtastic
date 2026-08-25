@@ -110,7 +110,9 @@ struct meshtastic_cluster_stats {
 	/* The anti-entropy walk (M4b). */
 	uint32_t pull_started;	  /* exchanges we opened on a digest mismatch */
 	uint32_t pull_timed_out;  /* opened, no vector came back in time */
-	uint32_t pull_fruitless;  /* asked for entries, merged none */
+	uint32_t pull_fruitless;  /* walks that merged nothing (either shape) */
+	uint32_t pull_empty;	  /* ...of those, the ones that asked for nothing:
+				   * the vector said we were already ahead */
 	uint32_t pull_held;	  /* suppressed by the fruitless-walk backoff */
 	uint32_t vector_tx;	  /* vector chunks we served */
 	uint32_t vector_rx;	  /* vector chunks we consumed */

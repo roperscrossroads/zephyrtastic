@@ -3204,4 +3204,112 @@ ZTEST(mesh_sim, test_cluster_hopeless_pulls_back_off)
 	cluster_channel(false);
 }
 
+/*
+ * A walk that fetches a vector and finds NOTHING worth asking for. This is the
+ * "we are strictly ahead of that peer" shape — the peer's digest will not match
+ * ours until the peer catches up, so level-triggering restates the mismatch
+ * every digest period and we walk again, forever, merging nothing.
+ *
+ * Returns false once the backoff starts suppressing the walk.
+ */
+static bool run_empty_walk(uint32_t seq)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	uint32_t to = 0U;
+
+	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
+	msg.variant.digest.doc_hash = 0xE0E00000U + seq;
+	msg.variant.digest.entry_count = 77U;
+	msg.variant.digest.has_max_stamp = true;
+	msg.variant.digest.max_stamp.physical_ms = (TEST_EPOCH_MS + 40000) + (int64_t)seq;
+	msg.variant.digest.max_stamp.node_id = PEER_NODE_ID;
+	inject_cluster_bearer(&msg, MESHTASTIC_NODE_BROADCAST, 0x7A00U + seq * 8U);
+
+	if (!take_cluster_tx(&msg, &to) ||
+	    msg.which_variant != zephyrtastic_ClusterMessage_vector_req_tag) {
+		return false;
+	}
+
+	/* An empty document: nothing we could possibly want. */
+	msg = (zephyrtastic_ClusterMessage)zephyrtastic_ClusterMessage_init_zero;
+	msg.which_variant = zephyrtastic_ClusterMessage_vector_tag;
+	msg.variant.vector.entries_count = 0U;
+	msg.variant.vector.total = 0U;
+	inject_cluster_bearer(&msg, TEST_NODE_ID, 0x7A01U + seq * 8U);
+	k_sleep(K_MSEC(300));
+
+	/* The walk must END here. Asking for entries we do not want would be a
+	 * different bug entirely. */
+	zassert_false(take_cluster_tx(&msg, &to),
+		      "a vector holding nothing we lack must not produce an entry request");
+	return true;
+}
+
+/*
+ * THE SECOND SHAPE OF A FRUITLESS WALK, and the one the original bound missed.
+ *
+ * The backoff was keyed on "we asked for entries and merged none", which never
+ * fires for a walk that asked for nothing — so a peer we are permanently AHEAD
+ * of (an older build, or one that structurally refuses something we hold) cost
+ * a vector exchange every digest period for the life of the deployment. Cheap
+ * per round and unbounded in total, which is exactly the class of loop this
+ * module's bounds table exists to forbid.
+ *
+ * Deliberately the alphabetically LAST cluster case (ztest orders by name): it
+ * arms the backoff on purpose, and clears it again at the end so nothing
+ * inherits a suppressed pull.
+ */
+ZTEST(mesh_sim, test_cluster_walk_that_wants_nothing_is_bounded)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	meshtastic_cluster_stats_get(&before_st);
+
+	for (uint32_t i = 0U; i < 6U; i++) {
+		if (!run_empty_walk(i)) {
+			break; /* suppressed — which is the point */
+		}
+	}
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.pull_empty > before_st.pull_empty,
+		     "a walk that asked for nothing must be counted as such");
+	zassert_true(after_st.pull_fruitless > before_st.pull_fruitless,
+		     "and it must count as fruitless — it merged nothing and nothing was "
+		     "in flight that could change that");
+	zassert_true(after_st.pull_held > before_st.pull_held,
+		     "after enough of them the walk must be SUPPRESSED; without this a peer "
+		     "we can never converge with costs a vector exchange forever");
+	zassert_equal(after_st.entry_rx_applied, before_st.entry_rx_applied,
+		      "nothing should have merged; that is the premise");
+
+	/* Recovery, and the clean-up: one real merge forgives the whole run. A
+	 * per-node entry for the PEER is the entry with no local side effects —
+	 * effective(me, ...) reads only base and nodes/<me>, so this cannot
+	 * change what this node runs. */
+	{
+		uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+		size_t len = encode_section(meshtastic_Config_bluetooth_tag, buf, sizeof(buf));
+
+		/* Newer than the +21100 this key was planted at by the
+		 * invented-nodes test (which sorts earlier), and still INSIDE
+		 * the HLC drift horizon — a stamp past it is refused, not
+		 * merged, and the "recovery" would prove nothing. */
+		inject_entry(meshtastic_Config_bluetooth_tag, zephyrtastic_ClusterLayer_NODE,
+			     PEER_NODE_ID, (TEST_EPOCH_MS + 250000), false, buf, len, 0x7A80U);
+		k_sleep(K_MSEC(300));
+	}
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_true(after_st.entry_rx_applied > before_st.entry_rx_applied,
+		     "the recovery merge must land");
+	zassert_true(run_empty_walk(9U),
+		     "one successful merge must clear the backoff immediately");
+
+	cluster_channel(false);
+}
+
 #endif /* CONFIG_MESHTASTIC_CLUSTER */

@@ -3392,15 +3392,16 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 	 * authored by a master this node does not trust. held>0 means the
 	 * backoff has taken over, which is the bound doing its job, not a
 	 * fault. */
-	shell_print(sh, "        : fruitless=%u held=%u%s", st.pull_fruitless, st.pull_held,
+	shell_print(sh, "        : fruitless=%u (empty=%u) held=%u%s", st.pull_fruitless,
+		    st.pull_empty, st.pull_held,
 		    st.pull_held ? "  (backing off — an unresolvable mismatch; check "
 				   "`admin trust` on both ends)"
 				 : "");
 	shell_print(sh, "merge   : applied=%u stale=%u REFUSED=%u unsolicited=%u busy=%u%s",
 		    st.entry_rx_applied, st.entry_rx_stale, st.entry_rx_refused,
 		    st.rx_unsolicited, st.tx_busy,
-		    st.entry_rx_no_space ? "  ** DOCUMENT TABLE FULL — entries are being "
-					   "dropped and re-requested forever **"
+		    st.entry_rx_no_space ? "  ** DOCUMENT TABLE FULL — pushed entries are "
+					   "being dropped **"
 					 : "");
 	/* suppressed>0 is the rate bound working, not a fault: a push is a
 	 * latency optimisation over the digest, so dropping one costs a digest
