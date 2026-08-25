@@ -3743,6 +3743,129 @@ ZTEST(protocol_stack, test_clock_quality_ladder_blocks_downgrade)
 		       "a fresh GPS fix must re-apply and update the clock");
 }
 
+/*
+ * RELAYED TIME IS ITS OWN TRUST LEVEL (agents-xhli.14).
+ *
+ * A node with no wall clock has no LWW drift horizon and accepts a stamp from
+ * any year, so a fleet member with a clock needs to be able to hand one to a
+ * member without. The risk that creates is the mirror image: if a relayed time
+ * ranked as high as a local one, any admin-trusted peer could rewind a
+ * GPS-disciplined node's clock — a strictly worse problem than the one being
+ * solved.
+ *
+ * MESHTASTIC_CLOCK_QUALITY_NET is the answer the ladder already carried, unused,
+ * since the clock landed: "time relayed from another mesh node", ranked below
+ * both NTP and GPS. This pins both halves of that.
+ */
+ZTEST(protocol_stack, test_clock_relayed_time_seeds_but_never_overwrites_a_local_source)
+{
+	const uint32_t relayed = 1700000000U;   /* 2023-11-14 */
+	const uint32_t local_ntp = 1720000000U; /* 2024-07-03 */
+	const uint32_t local_gps = 1750000000U; /* 2025-06-15 */
+
+	/* The seam exists because the clock is process-global and several suites
+	 * leave GPS time in it, which would make every assertion here vacuous. */
+	meshtastic_clock_test_reset();
+
+	/* A node with nothing takes what it is given — the whole point. */
+	meshtastic_clock_set_epoch(relayed, MESHTASTIC_CLOCK_QUALITY_NET);
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_NET,
+		      "a relayed time must seed a node that has no clock at all");
+	zassert_within(meshtastic_clock_now_epoch(), relayed, 5U,
+		       "the relayed epoch must actually be applied");
+
+	/* A local source outranks it, both of them. */
+	meshtastic_clock_set_epoch(local_ntp, MESHTASTIC_CLOCK_QUALITY_NTP);
+	zassert_within(meshtastic_clock_now_epoch(), local_ntp, 5U,
+		       "the node's own SNTP sync must beat a relayed time");
+
+	meshtastic_clock_set_epoch(local_gps, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_within(meshtastic_clock_now_epoch(), local_gps, 5U,
+		       "the node's own GNSS fix must beat everything");
+
+	/* THE ASSERTION THIS TEST EXISTS FOR: having accepted a relayed time once,
+	 * the node must never accept one back over a source of its own. Otherwise
+	 * a single admin-trusted peer can rewind every epoch-stamped field on a
+	 * GPS-disciplined node. */
+	meshtastic_clock_set_epoch(relayed, MESHTASTIC_CLOCK_QUALITY_NET);
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_GPS,
+		      "a relayed time must not downgrade the clock's trust level");
+	zassert_within(meshtastic_clock_now_epoch(), local_gps, 5U,
+		       "a relayed time must never clobber a local fix");
+}
+
+/*
+ * The same rule end to end, through the admin path, where the provenance is
+ * actually decided: the SAME AdminMessage means different things depending on
+ * which door it came through. From the phone it is NTP-class; from a mesh peer
+ * it is a relay, and must land at NET.
+ */
+ZTEST(protocol_stack, test_admin_set_time_trust_depends_on_which_door_it_came_through)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	const uint32_t epoch = 1700000000U;
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	uint8_t payload[128];
+	pb_ostream_t os;
+	meshtastic_Channel saved;
+	struct meshtastic_packet pkt = {0};
+	meshtastic_MeshPacket local = meshtastic_MeshPacket_init_zero;
+
+	/* --- the phone's door: NTP --- */
+	meshtastic_clock_test_reset();
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_time_only_tag;
+	am.payload_variant.set_time_only = epoch;
+	os = pb_ostream_from_buffer(payload, sizeof(payload));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+
+	local.from = TEST_NODE_ID;
+	local.id = 0xADD17001U;
+	local.decoded.payload.size = (pb_size_t)os.bytes_written;
+	memcpy(local.decoded.payload.bytes, payload, os.bytes_written);
+	zassert_true(meshtastic_admin_handle_local(&local), "local admin must be consumed");
+	k_sleep(K_MSEC(30));
+
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_NTP,
+		      "a phone's set_time_only is an NTP-class source");
+
+	/* --- the mesh's door: NET --- */
+	meshtastic_clock_test_reset();
+
+	enable_legacy_admin_channel(true);
+	swap_primary_channel_name("admin", &saved);
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+
+	am.session_passkey.size = (pb_size_t)sizeof(key);
+	memcpy(am.session_passkey.bytes, key, sizeof(key));
+	os = pb_ostream_from_buffer(payload, sizeof(payload));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+
+	pkt.from = PEER_NODE_ID;
+	pkt.to = TEST_NODE_ID;
+	pkt.id = 0xADD17002U;
+	pkt.portnum = MESHTASTIC_PORT_ADMIN;
+	pkt.channel_index = meshtastic_channels_primary_index();
+	pkt.payload = payload;
+	pkt.payload_len = os.bytes_written;
+	meshtastic_admin_handle_remote(&pkt, NULL);
+	k_sleep(K_MSEC(30));
+
+	zassert_within(meshtastic_clock_now_epoch(), epoch, 5U,
+		       "a peer must be able to seed a clockless node — that is the point");
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_NET,
+		      "the identical message from a PEER must land at NET, not NTP — "
+		      "otherwise any admin-trusted peer outranks the node's own SNTP");
+
+	/* Restore what this test moved. */
+	zassert_ok(meshtastic_channels_set_slot(meshtastic_channels_primary_index(), &saved),
+		   "channel restore failed");
+	enable_legacy_admin_channel(false);
+	meshtastic_clock_test_reset();
+	meshtastic_clock_set_epoch(1750000000U, MESHTASTIC_CLOCK_QUALITY_GPS);
+}
+
 /* --- T-E: millisecond clock anchor (sub-second sources) ------------------- */
 
 /* The anchor is held in ms so a source that knows its sub-second part keeps it.

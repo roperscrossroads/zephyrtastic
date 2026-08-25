@@ -26,6 +26,7 @@
 
 #include <zephyr/meshtastic/meshtastic.h>
 
+#include "meshtastic_clock.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
@@ -494,7 +495,41 @@ ZTEST(meshtastic_shell, test_rf_reports_unknown_readback_as_unknown)
 
 #endif /* CONFIG_MESHTASTIC_RF_PATH_REPORT */
 
+#if defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
+/*
+ * `admin remote <node> set-time` with no epoch relays OUR clock, which means a
+ * node with no clock has nothing to relay (agents-xhli.14).
+ *
+ * Refusing is not politeness. An unset clock reads epoch 0, the target's sanity
+ * window rejects it, and the operator would see a request "sent" that silently
+ * did nothing — the least debuggable outcome available.
+ */
+ZTEST(meshtastic_shell, test_admin_set_time_refuses_when_this_node_has_no_clock)
+{
+	const char *out = NULL;
+
+	meshtastic_clock_test_reset();
+
+	zassert_not_equal(run_cmd("meshtastic admin remote 0x12345678 set-time", &out), 0,
+			  "a node with no clock must not offer itself as a time source");
+	zassert_not_null(strstr(out, "clock is unset"), "the refusal should name the reason");
+
+	/* With a clock, it gets as far as the passkey gate instead — which proves
+	 * the refusal above was about the clock and not about the peer. */
+	meshtastic_clock_set_epoch(1750000000U, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_not_equal(run_cmd("meshtastic admin remote 0x12345678 set-time", &out), 0,
+			  "no passkey is cached for that node, so this must still fail");
+	zassert_not_null(strstr(out, "session passkey"),
+			 "with a clock in hand the next gate is the passkey, not the clock");
+
+	/* As above: leave it unset so a GPS-quality clock does not outrank a later
+	 * test's `meshtastic time set`. */
+	meshtastic_clock_test_reset();
+}
+#endif /* CONFIG_MESHTASTIC_ADMIN_CLIENT */
+
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
+
 /* ---- Cluster sync commands ------------------------------------------------ */
 
 /*
@@ -518,6 +553,44 @@ static void provision_cluster_channel(void)
 	ch.settings.psk.size = 16U;
 	ch.settings.psk.bytes[0] = 0x42U;
 	zassert_ok(meshtastic_channels_set_slot(2U, &ch), "cluster channel set failed");
+}
+
+/*
+ * A NODE WITH NO CLOCK HAS NO DRIFT HORIZON, and until agents-xhli.14 nothing
+ * said so. The horizon (D12) is measured against the wall clock, so an unset
+ * clock means every stamp is accepted — including one dated 2100, which would
+ * then win every LWW comparison for good.
+ *
+ * Keeping that behaviour is deliberate: a node that cannot say when anything
+ * happened has no basis to refuse, and refusing everything would strand a fresh
+ * node permanently. What was not deliberate was the silence. This asserts the
+ * status report names it, for the same reason `sections_held` exists — a
+ * deliberate non-enforcement nobody can see is indistinguishable from a broken
+ * one.
+ */
+ZTEST(meshtastic_shell, test_cluster_status_names_a_missing_horizon)
+{
+	const char *out = NULL;
+
+	provision_cluster_channel();
+
+	meshtastic_clock_test_reset();
+	zassert_ok(run_cmd("meshtastic cluster status", &out), "status failed");
+	zassert_not_null(strstr(out, "horizon"), "status must report the horizon at all");
+	zassert_not_null(strstr(out, "NONE"),
+			 "with no clock the report must say the horizon is absent, not "
+			 "leave the reader to infer it from a missing line");
+
+	meshtastic_clock_set_epoch(1750000000U, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_ok(run_cmd("meshtastic cluster status", &out), "status failed");
+	zassert_is_null(strstr(out, "NONE"), "with a clock the horizon must not read as absent");
+	zassert_not_null(strstr(out, "horizon"), "the horizon line must still be present");
+
+	/* Leave the clock UNSET, not GPS. ztest orders by name, and a GPS-quality
+	 * clock legitimately refuses the NTP-class write that `meshtastic time set`
+	 * performs — so parking GPS here breaks a later test for a reason that looks
+	 * nothing like the cause. */
+	meshtastic_clock_test_reset();
 }
 
 ZTEST(meshtastic_shell, test_cluster_status_reports_channel_binding)

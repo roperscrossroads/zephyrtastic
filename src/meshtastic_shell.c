@@ -45,6 +45,7 @@
 #include "meshtastic_build.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
+#include "meshtastic_hlc.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_region_presets.h"
@@ -3102,6 +3103,7 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
 /* meshtastic admin remote <node> get owner
  *                        <node> get config <type 0-8>
  *                        <node> set-owner <long> [short]
+ *                        <node> set-time [<unix-epoch-seconds>]  (default: ours)
  * Responses arrive asynchronously on the RX path and print as `admin client:`
  * log lines; a getter also caches the target's session passkey for the
  * mutating op that follows. */
@@ -3132,6 +3134,41 @@ static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 		} else {
 			goto usage;
 		}
+	} else if (strcmp(argv[2], "set-time") == 0) {
+		/*
+		 * Relay a wall clock to a peer (agents-xhli.14). With no explicit
+		 * epoch, relay OUR OWN — which is the whole point: a node that has a
+		 * time source hands one to a node that does not.
+		 *
+		 * Refusing when our own clock is unset is not a nicety. An unset
+		 * clock reads epoch 0, which the target's sanity window rejects, so
+		 * the request would look sent and do nothing; and a node that cannot
+		 * say when anything happened has no business being a time source.
+		 */
+		uint32_t epoch;
+
+		if (argc >= 4U) {
+			ret = parse_u32(sh, argv[3], &epoch);
+			if (ret < 0) {
+				return ret;
+			}
+		} else {
+			epoch = meshtastic_clock_now_epoch();
+			if (epoch == 0U) {
+				shell_error(sh, "refused: this node's own clock is unset, so "
+						"it cannot be a time source (set it first, or "
+						"pass an explicit epoch)");
+				return -EAGAIN;
+			}
+		}
+
+		if (!meshtastic_admin_client_have_passkey(node_num)) {
+			shell_error(sh, "no fresh session passkey for 0x%08x — run "
+				    "`meshtastic admin remote 0x%08x get owner` first",
+				    node_num, node_num);
+			return -EACCES;
+		}
+		ret = meshtastic_admin_client_set_time(node_num, epoch);
 	} else if (strcmp(argv[2], "set-owner") == 0 && argc >= 4U) {
 		if (!meshtastic_admin_client_have_passkey(node_num)) {
 			shell_error(sh, "no fresh session passkey for 0x%08x — run "
@@ -3156,7 +3193,8 @@ static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 usage:
 	shell_error(sh, "usage: meshtastic admin remote <node> get owner\n"
 		    "       meshtastic admin remote <node> get config <type 0-8>\n"
-		    "       meshtastic admin remote <node> set-owner <long> [short]");
+		    "       meshtastic admin remote <node> set-owner <long> [short]\n"
+		    "       meshtastic admin remote <node> set-time [<unix-epoch-seconds>]");
 	return -EINVAL;
 }
 #endif /* CONFIG_MESHTASTIC_ADMIN_CLIENT */
@@ -3215,6 +3253,35 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		    (unsigned int)meshtastic_cluster_entry_count(),
 		    meshtastic_cluster_entry_count() == 1U ? "y" : "ies",
 		    (unsigned int)meshtastic_cluster_doc_hash_now());
+	/*
+	 * THE DRIFT HORIZON'S PRECONDITION, said out loud (agents-xhli.14).
+	 *
+	 * The horizon (D12) is measured against the wall clock, so a node whose
+	 * clock is unset has NO horizon and accepts a stamp from any year — one
+	 * entry dated 2100 would then win every comparison for good. That is the
+	 * deliberate choice (a node that cannot say when anything happened has no
+	 * basis to refuse, and refusing everything would strand a fresh node
+	 * permanently — the same unrecoverable trade the lora ingest gate turned
+	 * down). What was NOT deliberate was that nothing said so: the horizon
+	 * simply never fired and the status was silent about it.
+	 *
+	 * So it is a line in status now, for the same reason `sections_held` is:
+	 * a deliberate non-enforcement that nobody can see is indistinguishable
+	 * from a broken one. Fix it with `admin remote <us> set-time` from a node
+	 * that has a clock.
+	 */
+	{
+		uint32_t epoch = meshtastic_clock_now_epoch();
+
+		if (epoch == 0U) {
+			shell_print(sh, "horizon : ⚠ NONE — clock unset, so EVERY stamp is "
+					"accepted (see CLUSTER-SYNC-M4.md D12)");
+		} else {
+			shell_print(sh, "horizon : ±%u min around epoch %u (clock source %s)",
+				    (unsigned int)(MESHTASTIC_HLC_MAX_DRIFT_MS / 60000U), epoch,
+				    clock_quality_name(meshtastic_clock_get_quality()));
+		}
+	}
 	/* "queued", not "sent": the counter increments where the digest enters
 	 * the send path, and a node with config.lora.tx_enabled = false has its
 	 * frames dropped further down, at the radio choke point. A digest is a
@@ -3484,7 +3551,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_admin_cmds,
 			       SHELL_CMD(remote, NULL,
 					 SHELL_HELP("Administer a peer node (PKC, any bearer).",
 						    "<node> get owner | get config <t> | "
-						    "set-owner <long> [short]"),
+						    "set-owner <long> [short] | "
+						    "set-time [<epoch>]"),
 					 cmd_admin_remote),
 #endif
 			       SHELL_SUBCMD_SET_END);

@@ -59,6 +59,16 @@ tests:
       # explicitly and a spontaneous digest would race their assertions.
       - CONFIG_MESHTASTIC_CLUSTER_DIGEST_PERIOD_SEC=86400
 
+  # Compiles the shell WITH the remote-admin CLIENT — and, until this row
+  # existed, nothing in twister did at all. meshtastic_admin_client.c and the
+  # whole `admin remote …` shell block sat behind CONFIG_MESHTASTIC_ADMIN_CLIENT,
+  # which no test config set, so both only ever compiled in a hardware build.
+  # Same escape class as the scanner and cluster rows above; found while adding
+  # `set-time` (agents-xhli.14) and realising the new code had no build coverage.
+  meshtastic.shell.admin_client.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_ADMIN_CLIENT=y
+
   # The a4it.8 compile-time safety seed: a build with the default off boots
   # receive-only before any config write exists.
   meshtastic.shell.tx_default_off.native_sim:

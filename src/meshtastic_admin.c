@@ -849,16 +849,36 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		}
 		break;
 
-	/* Phone-supplied wall clock (epoch seconds). Seeds the clock so peer
-	 * last_heard / own position time can be reported as epoch. */
-	case meshtastic_AdminMessage_set_time_only_tag:
-		LOG_INF("admin: set_time_only epoch=%u",
-			admin_req.payload_variant.set_time_only);
-		/* Phone time is NTP-class (mirrors AdminModule perhapsSetRTC(RTCQualityNTP)):
-		 * it may seed or drift-correct the clock but must not clobber a live GPS fix. */
-		meshtastic_clock_set_epoch(admin_req.payload_variant.set_time_only,
-					   MESHTASTIC_CLOCK_QUALITY_NTP);
+	/* Wall clock supplied by whoever is administering us (epoch seconds).
+	 * Seeds the clock so peer last_heard / own position time can be reported
+	 * as epoch — and, since agents-xhli.14, so a node that has no time source
+	 * of its own gets a drift horizon at all. */
+	case meshtastic_AdminMessage_set_time_only_tag: {
+		/*
+		 * PROVENANCE DECIDES TRUST, and the ladder already had the word for
+		 * it. A phone is an NTP-class source (mirrors AdminModule
+		 * perhapsSetRTC(RTCQualityNTP)). A mesh PEER is not: it is relaying a
+		 * time it got from somewhere else, which is exactly what
+		 * MESHTASTIC_CLOCK_QUALITY_NET means — "time relayed from another
+		 * mesh node" — and the enum has carried that value, unused, since the
+		 * clock landed.
+		 *
+		 * The ranking is the safety property, not a cosmetic label: NET(2)
+		 * loses to NTP(3) and GPS(4), so a peer can seed a node that has no
+		 * clock but can never overwrite one that has its own GNSS fix or SNTP
+		 * sync. Tagging relayed time NTP would let any admin-trusted peer
+		 * rewind a GPS-disciplined node's clock, which is a strictly worse
+		 * trade than the problem being solved.
+		 */
+		enum meshtastic_clock_quality q = ctx.remote ? MESHTASTIC_CLOCK_QUALITY_NET
+							    : MESHTASTIC_CLOCK_QUALITY_NTP;
+
+		LOG_INF("admin: set_time_only epoch=%u from %s",
+			admin_req.payload_variant.set_time_only,
+			ctx.remote ? "a mesh peer (NET)" : "the phone (NTP)");
+		meshtastic_clock_set_epoch(admin_req.payload_variant.set_time_only, q);
 		break;
+	}
 
 	/* Reset ops. The ACK below goes out first; the reset-reboot fires 7 s later
 	 * on a no-flush work item so the wiped store isn't re-persisted. Mirrors

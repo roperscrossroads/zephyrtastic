@@ -34,6 +34,20 @@
 int meshtastic_admin_client_get_owner(uint32_t node);
 int meshtastic_admin_client_get_config(uint32_t node, uint32_t config_type);
 
+/*
+ * Mutating op: relay OUR wall clock to @p node (epoch seconds).
+ *
+ * The target applies it at NET quality — below its own GNSS/SNTP — so this seeds
+ * a node with no time source and never overwrites one that has its own. Exists
+ * because a node with no wall clock also has no LWW drift horizon and will accept
+ * a stamp from any year (agents-xhli.14).
+ *
+ * Requires a passkey cached from a recent getter response for THIS node, like any
+ * mutating op. Returns -EINVAL for an epoch outside the sane [2020, ~2060]
+ * window, rather than sending one the target would silently ignore.
+ */
+int meshtastic_admin_client_set_time(uint32_t node, uint32_t epoch);
+
 /* Mutating op: set the target's owner names. Requires a passkey cached from a
  * recent getter response for THIS node; -EACCES with none/stale (re-run a
  * get). Empty long/short skips that field (target keeps its current value). */

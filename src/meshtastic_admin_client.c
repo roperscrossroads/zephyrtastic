@@ -20,6 +20,7 @@
 
 #include "meshtastic_admin_client.h"
 #include "meshtastic_admin_session.h"
+#include "meshtastic_clock.h"
 #include "meshtastic_core.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -106,12 +107,15 @@ int meshtastic_admin_client_get_config(uint32_t node, uint32_t config_type)
 	return client_send(node, &msg, true, false);
 }
 
-int meshtastic_admin_client_set_owner(uint32_t node, const char *long_name,
-				      const char *short_name)
+/*
+ * Stamp the cached session passkey into a mutating request, or refuse.
+ *
+ * Factored the moment there were two mutating ops: this staleness rule IS the
+ * client's half of the security boundary, and two copies of it are two places
+ * for it to drift. Caller must not hold client_lock.
+ */
+static int stamp_passkey(uint32_t node, meshtastic_AdminMessage *msg)
 {
-	meshtastic_AdminMessage msg = meshtastic_AdminMessage_init_zero;
-	meshtastic_User *user = &msg.payload_variant.set_owner;
-
 	k_mutex_lock(&client_lock, K_FOREVER);
 	if (!client.have_passkey || client.target != node ||
 	    (k_uptime_get() - client.passkey_ms) > CLIENT_PASSKEY_MAX_AGE_MS) {
@@ -119,9 +123,55 @@ int meshtastic_admin_client_set_owner(uint32_t node, const char *long_name,
 		LOG_WRN("admin client: no fresh passkey for 0x%08x — run a get first", node);
 		return -EACCES;
 	}
-	msg.session_passkey.size = MESHTASTIC_ADMIN_SESSION_KEY_LEN;
-	memcpy(msg.session_passkey.bytes, client.passkey, MESHTASTIC_ADMIN_SESSION_KEY_LEN);
+	msg->session_passkey.size = MESHTASTIC_ADMIN_SESSION_KEY_LEN;
+	memcpy(msg->session_passkey.bytes, client.passkey, MESHTASTIC_ADMIN_SESSION_KEY_LEN);
 	k_mutex_unlock(&client_lock);
+	return 0;
+}
+
+/*
+ * Relay our wall clock to a peer (agents-xhli.14).
+ *
+ * The peer applies it at NET quality — below its own GNSS or SNTP — so this can
+ * seed a node that has no time source and can never overwrite one that has.
+ *
+ * The epoch is validated HERE as well as at the target. The target silently
+ * ignores an out-of-range value (meshtastic_clock_set_epoch's sanity window), so
+ * without this a caller relaying a bad clock would see a successful send and no
+ * effect, which is the least debuggable outcome available.
+ */
+int meshtastic_admin_client_set_time(uint32_t node, uint32_t epoch)
+{
+	meshtastic_AdminMessage msg = meshtastic_AdminMessage_init_zero;
+	int ret;
+
+	if ((epoch < MESHTASTIC_EPOCH_MIN) || (epoch > MESHTASTIC_EPOCH_MAX)) {
+		LOG_WRN("admin client: refusing to relay epoch %u — outside the sane window",
+			epoch);
+		return -EINVAL;
+	}
+
+	ret = stamp_passkey(node, &msg);
+	if (ret < 0) {
+		return ret;
+	}
+
+	msg.which_payload_variant = meshtastic_AdminMessage_set_time_only_tag;
+	msg.payload_variant.set_time_only = epoch;
+
+	return client_send(node, &msg, false, true);
+}
+
+int meshtastic_admin_client_set_owner(uint32_t node, const char *long_name,
+				      const char *short_name)
+{
+	meshtastic_AdminMessage msg = meshtastic_AdminMessage_init_zero;
+	meshtastic_User *user = &msg.payload_variant.set_owner;
+	int ret = stamp_passkey(node, &msg);
+
+	if (ret < 0) {
+		return ret;
+	}
 
 	msg.which_payload_variant = meshtastic_AdminMessage_set_owner_tag;
 	if (long_name != NULL && long_name[0] != '\0') {
