@@ -251,11 +251,17 @@ int meshtastic_collect_local_stats(meshtastic_LocalStats *stats)
 	stats->uptime_seconds = (uint32_t)k_uptime_seconds();
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-	/* Same two numbers device_metrics already carries. Note the standing
-	 * caution in docs/OPTIMIZATION-IDEAS.md / MULTI-PRESET-OPERATION.md §4.3:
-	 * the airtime ring has no notion of WHICH preset the airtime went to, so
-	 * under time-slicing both fields blend two channels. Reported here for
-	 * parity — do not build a gauge on them until per-preset accounting lands. */
+	/* Same two numbers device_metrics already carries, and since the per-preset
+	 * split both are now meaningful under time-slicing rather than a blend:
+	 *
+	 *   channel_utilization is scoped to the preset the radio is ON, which is
+	 *   the only channel the figure could describe — two presets cannot hear
+	 *   each other.
+	 *   air_util_tx is deliberately BAND-WIDE. It is the duty-cycle figure, and
+	 *   the regulator counts every second the PA is keyed regardless of preset.
+	 *
+	 * The earlier caution here ("do not build a gauge on these until per-preset
+	 * accounting lands") is discharged. See MULTI-PRESET-OPERATION.md §4.3. */
 	stats->channel_utilization = meshtastic_airtime_channel_util_percent();
 	stats->air_util_tx = meshtastic_airtime_tx_util_percent();
 #endif

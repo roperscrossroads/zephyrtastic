@@ -18,6 +18,7 @@
 
 #include "meshtastic_airtime.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_core.h"
 #include "meshtastic_duty.h"
 
 #define MS_FOR_11_PERCENT 400000U
@@ -33,6 +34,10 @@ static void duty_before(void *fixture)
 	/* Default every test to an unrestricted region; the ones that care set
 	 * their own. */
 	meshtastic_duty_set_region(meshtastic_Config_LoRaConfig_RegionCode_US, 100.0f);
+	/* The per-preset tests move the radio's notion of where it is; put it back
+	 * so a later test does not inherit somebody else's channel. */
+	mt.use_preset = true;
+	mt.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
 }
 
 ZTEST_SUITE(duty, NULL, NULL, duty_before, NULL, NULL);
@@ -223,4 +228,120 @@ ZTEST(duty, test_relay_refusals_are_counted_separately)
 	meshtastic_duty_stats_reset();
 	meshtastic_duty_stats_get(&stats);
 	zassert_equal(stats.blocked, 0U, "reset clears");
+}
+
+/* ------------------------------------------------------------------------- */
+/* Per-preset channel utilization (MULTI-PRESET-OPERATION.md §4.3)            */
+/* ------------------------------------------------------------------------- */
+
+/* Presets are doubly orthogonal — different frequency AND different spreading
+ * factor — so two presets are two channels that cannot hear each other. The
+ * split exists because CSMA backoff and the beacon gate read channel
+ * utilization, and a blended number makes both decisions wrong on both
+ * channels.
+ *
+ * The TX ring is deliberately NOT split, and the test below says so out loud,
+ * because "finish the job and split TX too" is the obvious next edit and it
+ * would be a regulatory bug.
+ */
+
+#define MS_FOR_1PC_CHANNEL 600U /* channel% = ms / 600 over the 60 s window */
+
+static void use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset preset)
+{
+	mt.use_preset = true;
+	mt.modem_preset = preset;
+}
+
+ZTEST(duty, test_channel_util_is_scoped_to_the_current_preset)
+{
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX, MS_FOR_1PC_CHANNEL * 10U);
+
+	zassert_within(meshtastic_airtime_channel_util_percent(), 10.0f, 0.2f,
+		       "the preset we logged on should show the traffic");
+
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO);
+	zassert_within(meshtastic_airtime_channel_util_percent(), 0.0f, 0.001f,
+		       "a DIFFERENT channel must not inherit it — that blend is what makes "
+		       "CSMA back off against traffic it never heard");
+
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	zassert_within(meshtastic_airtime_channel_util_percent(), 10.0f, 0.2f,
+		       "and coming back must find it still there");
+}
+
+/* THE ONE NOT TO 'FIX'. TX utilization feeds the regulatory duty cycle, which
+ * is a property of the BAND: two presets a node slices between sit in the same
+ * regional allocation, and the regulator counts every second the PA is keyed
+ * whatever spreading factor it was keyed at. Splitting this per preset would
+ * let a slicing node transmit up to the ceiling twice. */
+ZTEST(duty, test_tx_utilization_stays_band_wide_across_presets)
+{
+	float before, after;
+
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	meshtastic_airtime_log(MESHTASTIC_AIRTIME_TX, MS_FOR_1_PERCENT * 3U);
+	before = meshtastic_airtime_tx_util_percent();
+	zassert_within(before, 3.0f, 0.1f, "precondition: 3%% of the hour spent transmitting");
+
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO);
+	after = meshtastic_airtime_tx_util_percent();
+
+	zassert_within(after, before, 0.001f,
+		       "TX utilization must NOT be scoped to a preset: the duty cycle is a "
+		       "band limit, and per-preset rings would let a slicing node spend the "
+		       "allowance twice");
+}
+
+/* And the duty gate must see that band-wide figure, not a per-channel slice —
+ * the same property one level up, asserted through the thing that consumes it. */
+ZTEST(duty, test_duty_gate_follows_the_node_across_a_preset_switch)
+{
+	meshtastic_duty_set_region(meshtastic_Config_LoRaConfig_RegionCode_EU_868, 10.0f);
+
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	meshtastic_airtime_log(MESHTASTIC_AIRTIME_TX, MS_FOR_11_PERCENT);
+	zassert_true(meshtastic_duty_blocked(NULL), "precondition: over the ceiling");
+
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO);
+	zassert_true(meshtastic_duty_blocked(NULL),
+		     "changing preset must not hand the node a fresh allowance");
+}
+
+/* Every ring ages, not only the one in use. A slicing or scanning node leaves a
+ * preset and returns to it; if the idle rings were frozen it would come back to
+ * a stale picture of a channel it has not been listening to, and back off
+ * against traffic that finished minutes ago. */
+ZTEST(duty, test_idle_preset_rings_still_expire)
+{
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX, MS_FOR_1PC_CHANNEL * 10U);
+	zassert_within(meshtastic_airtime_channel_util_percent(), 10.0f, 0.2f, "precondition");
+
+	/* Spend the whole window somewhere else. */
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO);
+	k_sleep(K_SECONDS(70));
+
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	zassert_within(meshtastic_airtime_channel_util_percent(), 0.0f, 0.001f,
+		       "an idle ring must read as quiet, not as frozen");
+}
+
+/* A custom radio config has no preset identity, so it accounts to its own slot
+ * rather than to whichever preset value happens to be left in mt.modem_preset —
+ * which would attribute a custom channel's traffic to a preset the node is not
+ * on. */
+ZTEST(duty, test_custom_config_gets_its_own_slot)
+{
+	use_preset_slot(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX, MS_FOR_1PC_CHANNEL * 10U);
+
+	mt.use_preset = false; /* modem_preset deliberately left at LONG_FAST */
+	zassert_equal(meshtastic_airtime_current_slot(), MESHTASTIC_AIRTIME_SLOT_CUSTOM,
+		      "a custom config must not account to a preset slot");
+	zassert_within(meshtastic_airtime_channel_util_percent(), 0.0f, 0.001f,
+		       "and must not inherit that preset's channel business");
+
+	mt.use_preset = true;
 }

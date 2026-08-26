@@ -11,6 +11,27 @@
 extern "C" {
 #endif
 
+/* One channel-utilization ring per modem preset, plus one for a custom
+ * (use_preset=false) radio config. ModemPreset runs 0..13.
+ *
+ * WHY PER PRESET, AND WHY *ONLY* CHANNEL UTILIZATION. Presets are doubly
+ * orthogonal — different frequency AND different spreading factor — so two
+ * presets are two different channels that cannot hear each other. Channel
+ * utilization is a statement about ONE channel's business, and it drives CSMA
+ * backoff and the background-beacon gate; blending two channels' traffic into
+ * one number makes both decisions wrong (MULTI-PRESET-OPERATION.md §4.3).
+ *
+ * TX utilization is deliberately NOT split, and that is not an omission. It
+ * feeds the regulatory duty cycle, which is a property of the BAND, not of the
+ * channel: two presets a node slices between sit in the same regional
+ * allocation, and the regulator counts every second the PA is keyed regardless
+ * of which spreading factor it was keyed at. Splitting it per preset would let
+ * a slicing node transmit up to the ceiling TWICE — which is why the ring stays
+ * whole and meshtastic_duty.c keeps reading it.
+ */
+#define MESHTASTIC_AIRTIME_PRESET_SLOTS 15
+#define MESHTASTIC_AIRTIME_SLOT_CUSTOM  (MESHTASTIC_AIRTIME_PRESET_SLOTS - 1)
+
 #define MESHTASTIC_CHANNEL_UTILIZATION_PERIODS 6
 #define MESHTASTIC_MINUTES_IN_HOUR             60
 #define MESHTASTIC_SECONDS_IN_MINUTE           60
@@ -30,8 +51,32 @@ uint32_t meshtastic_airtime_packet_ms(uint32_t wire_len);
 
 void meshtastic_airtime_log(enum meshtastic_airtime_type type, uint32_t ms);
 
+/**
+ * @brief Channel utilization (%) of the preset the radio is on RIGHT NOW.
+ *
+ * The 60 s window, scoped to the current channel — what CSMA backoff and the
+ * background-beacon gate must see.
+ */
 float meshtastic_airtime_channel_util_percent(void);
 
+/**
+ * @brief Channel utilization (%) of one preset slot, for diagnostics.
+ *
+ * @param slot 0..MESHTASTIC_AIRTIME_PRESET_SLOTS-1; the last is the custom
+ *             (use_preset=false) slot. Out of range returns 0.
+ */
+float meshtastic_airtime_channel_util_percent_slot(uint8_t slot);
+
+/** @brief The slot the radio's current configuration accounts to. */
+uint8_t meshtastic_airtime_current_slot(void);
+
+/**
+ * @brief TX utilization (%) over the last hour, across EVERY preset.
+ *
+ * Band-wide on purpose — see the note on MESHTASTIC_AIRTIME_PRESET_SLOTS. This
+ * is the number the regulatory duty cycle is measured against, and it must stay
+ * whole even on a node that slices between presets.
+ */
 float meshtastic_airtime_tx_util_percent(void);
 
 /**

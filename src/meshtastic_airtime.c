@@ -27,7 +27,10 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 struct meshtastic_airtime_state {
 	struct k_mutex lock;
-	uint32_t channel_utilization[MESHTASTIC_CHANNEL_UTILIZATION_PERIODS];
+	/* One 60 s ring per preset — see the note in meshtastic_airtime.h for why
+	 * this is split and the TX ring below is not. */
+	uint32_t channel_utilization[MESHTASTIC_AIRTIME_PRESET_SLOTS]
+				    [MESHTASTIC_CHANNEL_UTILIZATION_PERIODS];
 	uint32_t utilization_tx[MESHTASTIC_MINUTES_IN_HOUR];
 	/* Absolute bucket counts (not indices) at the last advance, so a gap of
 	 * any length is handled correctly: channel-util counts 10 s buckets, TX
@@ -43,6 +46,30 @@ static struct meshtastic_airtime_state airtime;
 static uint32_t now_seconds(void)
 {
 	return (uint32_t)(k_uptime_get() / 1000);
+}
+
+/* Which ring the radio's current configuration accounts to.
+ *
+ * A custom (use_preset = false) config has no preset identity, so it gets its
+ * own slot rather than being folded into whichever preset enum value happens to
+ * be left over in mt.modem_preset — folding it in would attribute a custom
+ * channel's traffic to a preset the node is not on. */
+static uint8_t airtime_slot(void)
+{
+	uint32_t preset;
+
+	if (!mt.use_preset) {
+		return MESHTASTIC_AIRTIME_SLOT_CUSTOM;
+	}
+
+	preset = (uint32_t)mt.modem_preset;
+	if (preset >= MESHTASTIC_AIRTIME_SLOT_CUSTOM) {
+		/* Unknown to this build. Not silently folded onto slot 0, which is
+		 * a real preset (LONG_FAST) whose CSMA decisions would then be made
+		 * from a different channel's business. */
+		return MESHTASTIC_AIRTIME_SLOT_CUSTOM;
+	}
+	return (uint8_t)preset;
 }
 
 static uint8_t period_util_minute(uint32_t sec)
@@ -74,14 +101,25 @@ static void airtime_advance(uint32_t sec)
 		return;
 	}
 
-	/* Channel utilization: 6 × 10 s buckets (60 s window). */
+	/* Channel utilization: 6 × 10 s buckets (60 s window), per preset.
+	 *
+	 * EVERY slot ages, not just the one the radio is on. A slicing or scanning
+	 * node leaves a preset and comes back to it, and if the rings it was not
+	 * using had been frozen it would return to a minute-old picture of a
+	 * channel it has not been listening to — and back off against traffic that
+	 * finished long ago. Expiring all of them is what makes an idle ring read
+	 * as quiet rather than as stale. */
 	elapsed = util_tick - airtime.last_util_tick;
 	if (elapsed >= MESHTASTIC_CHANNEL_UTILIZATION_PERIODS) {
 		memset(airtime.channel_utilization, 0, sizeof(airtime.channel_utilization));
 	} else {
 		for (uint32_t i = 1U; i <= elapsed; i++) {
-			airtime.channel_utilization[(airtime.last_util_tick + i) %
-						    MESHTASTIC_CHANNEL_UTILIZATION_PERIODS] = 0U;
+			uint32_t b = (airtime.last_util_tick + i) %
+				     MESHTASTIC_CHANNEL_UTILIZATION_PERIODS;
+
+			for (size_t sl = 0; sl < MESHTASTIC_AIRTIME_PRESET_SLOTS; sl++) {
+				airtime.channel_utilization[sl][b] = 0U;
+			}
 		}
 	}
 	airtime.last_util_tick = util_tick;
@@ -102,23 +140,28 @@ static void airtime_advance(uint32_t sec)
 void meshtastic_airtime_log(enum meshtastic_airtime_type type, uint32_t ms)
 {
 	uint32_t sec = now_seconds();
+	uint8_t slot;
 
 	k_mutex_lock(&airtime.lock, K_FOREVER);
 	airtime_advance(sec);
 
+	slot = airtime_slot();
+
 	switch (type) {
 	case MESHTASTIC_AIRTIME_TX:
 		LOG_DBG("Packet TX: %u ms", ms);
+		/* The TX ring is band-wide (duty cycle); the channel ring is this
+		 * preset's alone (CSMA). Same event, two different questions. */
 		airtime.utilization_tx[period_util_hour(sec)] += ms;
-		airtime.channel_utilization[period_util_minute(sec)] += ms;
+		airtime.channel_utilization[slot][period_util_minute(sec)] += ms;
 		break;
 	case MESHTASTIC_AIRTIME_RX:
 		LOG_DBG("Packet RX: %u ms", ms);
-		airtime.channel_utilization[period_util_minute(sec)] += ms;
+		airtime.channel_utilization[slot][period_util_minute(sec)] += ms;
 		break;
 	case MESHTASTIC_AIRTIME_RX_ALL:
 		LOG_DBG("Packet RX (noise?): %u ms", ms);
-		airtime.channel_utilization[period_util_minute(sec)] += ms;
+		airtime.channel_utilization[slot][period_util_minute(sec)] += ms;
 		break;
 	default:
 		break;
@@ -136,22 +179,49 @@ uint32_t meshtastic_airtime_packet_ms(uint32_t wire_len)
 	return lora_airtime(mt.lora_dev, wire_len);
 }
 
-float meshtastic_airtime_channel_util_percent(void)
+static float channel_util_slot_locked(uint8_t slot)
 {
 	uint32_t sum = 0U;
+
+	for (size_t i = 0; i < MESHTASTIC_CHANNEL_UTILIZATION_PERIODS; i++) {
+		sum += airtime.channel_utilization[slot][i];
+	}
+
+	return ((float)sum / (float)(MESHTASTIC_CHANNEL_UTILIZATION_PERIODS * 10U * 1000U)) *
+	       100.0f;
+}
+
+float meshtastic_airtime_channel_util_percent(void)
+{
 	float percent;
 
 	k_mutex_lock(&airtime.lock, K_FOREVER);
 	airtime_advance(now_seconds());
-	for (size_t i = 0; i < MESHTASTIC_CHANNEL_UTILIZATION_PERIODS; i++) {
-		sum += airtime.channel_utilization[i];
-	}
+	percent = channel_util_slot_locked(airtime_slot());
 	k_mutex_unlock(&airtime.lock);
 
-	percent = ((float)sum / (float)(MESHTASTIC_CHANNEL_UTILIZATION_PERIODS * 10U * 1000U)) *
-		  100.0f;
+	return percent;
+}
+
+float meshtastic_airtime_channel_util_percent_slot(uint8_t slot)
+{
+	float percent;
+
+	if (slot >= MESHTASTIC_AIRTIME_PRESET_SLOTS) {
+		return 0.0f;
+	}
+
+	k_mutex_lock(&airtime.lock, K_FOREVER);
+	airtime_advance(now_seconds());
+	percent = channel_util_slot_locked(slot);
+	k_mutex_unlock(&airtime.lock);
 
 	return percent;
+}
+
+uint8_t meshtastic_airtime_current_slot(void)
+{
+	return airtime_slot();
 }
 
 float meshtastic_airtime_tx_util_percent(void)
