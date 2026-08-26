@@ -22,7 +22,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/hwinfo.h>
 
-#include "meshtastic_bootlog.h"
+#include <zephyr/meshtastic/bootlog.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/net_event.h>
 #include <zephyr/net/net_if.h>

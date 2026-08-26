@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include <zephyr/device.h>
+#include <zephyr/meshtastic/bootlog.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/watchdog.h>
 #include <zephyr/kernel.h>
@@ -29,7 +30,6 @@
 
 #include <zephyr/meshtastic/diagnostics.h>
 
-#include "meshtastic_bootlog.h"
 #include "meshtastic_core.h" /* meshtastic_radio_cad_/agc_ counter getters */
 #include "meshtastic_watchdog.h"
 

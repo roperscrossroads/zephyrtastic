@@ -17,6 +17,7 @@
  */
 
 #include <zephyr/device.h>
+#include <zephyr/meshtastic/bootlog.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
@@ -29,7 +30,6 @@
 #include <cmsis_core.h>
 #endif
 
-#include "meshtastic_bootlog.h"
 #include "meshtastic_dfu_trigger.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);

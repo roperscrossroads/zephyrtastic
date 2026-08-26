@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/meshtastic/bootlog.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/version.h>
@@ -48,7 +49,6 @@
 #include "meshtastic_hlc.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
-#include "meshtastic_bootlog.h"
 #include "meshtastic_preset.h"
 #include "meshtastic_region_presets.h"
 #include "meshtastic_powermon.h"
@@ -3194,7 +3194,7 @@ static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "cause       unavailable — register empty, or consumed by the "
 				"bootloader before the app ran");
 	}
-	shell_print(sh, "uptime      %lld s", k_uptime_seconds());
+	shell_print(sh, "uptime      %lld s", (long long)k_uptime_seconds());
 
 	n = meshtastic_bootlog_history(hist, ARRAY_SIZE(hist));
 	if (n == 0U) {

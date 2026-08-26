@@ -2,12 +2,14 @@
  *
  * Why did this node reboot? A per-boot record that outlives the boot.
  */
-#ifndef MESHTASTIC_BOOTLOG_H_
-#define MESHTASTIC_BOOTLOG_H_
+#ifndef ZEPHYR_MESHTASTIC_BOOTLOG_H_
+#define ZEPHYR_MESHTASTIC_BOOTLOG_H_
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include <zephyr/sys/util.h>
 
 /** One boot. Twelve bytes, so a useful history costs ~100 B of retained RAM. */
 struct meshtastic_boot_record {
@@ -58,4 +60,4 @@ void meshtastic_bootlog_report(void);
  */
 void meshtastic_bootlog_heartbeat(uint32_t uptime_s);
 
-#endif /* MESHTASTIC_BOOTLOG_H_ */
+#endif /* ZEPHYR_MESHTASTIC_BOOTLOG_H_ */

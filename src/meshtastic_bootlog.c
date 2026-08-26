@@ -50,7 +50,7 @@
 #include <zephyr/drivers/hwinfo.h>
 #endif
 
-#include "meshtastic_bootlog.h"
+#include <zephyr/meshtastic/bootlog.h>
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
