@@ -2,25 +2,30 @@
 # SPDX-License-Identifier: GPL-3.0
 
 config MESHTASTIC_OTA
-	bool "OTA firmware update over SMP/UDP (mcumgr)"
-	depends on NETWORKING && NET_UDP && BOOTLOADER_MCUBOOT
+	bool "Firmware update into the MCUboot second slot over SMP (mcumgr)"
+	depends on BOOTLOADER_MCUBOOT
 	select MCUMGR
 	select NET_BUF          # mcumgr core dependency
 	select ZCBOR            # mcumgr core dependency
 	select CRC              # SMP framing checksum
-	select MCUMGR_TRANSPORT_UDP
 	select MCUMGR_GRP_IMG
 	select MCUMGR_GRP_OS
 	select IMG_MANAGER
 	select STREAM_FLASH
 	help
-	  Run an mcumgr SMP server over UDP so the node can be updated over WiFi
-	  into the MCUboot slot1 partition (image upload -> test -> reset -> swap ->
-	  confirm), with automatic MCUboot revert if a swapped image is never
-	  confirmed. The UDP transport self-starts, so no application code is
-	  required for the core update path. Requires the MCUboot A/B build
-	  (sysbuild); opt-in per variant (the net profiles enable it). Only the net (WiFi)
-	  variant can carry it — netserial does not build and ble has no IP stack.
+	  Run an mcumgr SMP server so the node can be updated into the MCUboot
+	  slot1 partition (image upload -> test -> reset -> swap -> confirm), with
+	  automatic MCUboot revert if a swapped image is never confirmed. Requires
+	  the MCUboot A/B build (sysbuild).
+
+	  This symbol is the SUBSYSTEM only — it deliberately selects no transport.
+	  The transport is chosen by the overlay that enables it, because it is the
+	  only part of the update path that depends on what radio a board has:
+	    overlay-ota.conf        SMP over UDP (WiFi boards; the net profiles)
+	    overlay-ota-shell.conf  SMP over the shell's serial console (any board
+	                            with a console; the XIAO's USB CDC)
+	  A BLE transport (MCUMGR_TRANSPORT_BT) goes beside them. The transports
+	  self-start, so no application code is required for the core update path.
 
 if MESHTASTIC_OTA
 
