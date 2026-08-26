@@ -120,6 +120,19 @@ int meshtastic_outbound_cancel(uint32_t src, uint32_t id);
  *
  * @return number of frames moved (0 if ours already went out, or was already late).
  */
+/**
+ * @brief Frames queued for transmission, plus one for a frame already handed to
+ *        the radio and not yet finished.
+ *
+ * The second half is the point. The worker dequeues before it transmits, so a
+ * bare queue count reads zero while a frame is being keyed — and a caller using
+ * this to decide "nothing of mine is still going out" (the preset-hop drain
+ * interlock, docs/MULTI-PRESET-OPERATION.md §4.4) would retune underneath it.
+ *
+ * Zero therefore means the radio owes this node nothing.
+ */
+uint8_t meshtastic_outbound_pending(void);
+
 int meshtastic_outbound_defer_late(uint32_t src, uint32_t id, uint32_t delay_ms);
 
 #ifdef __cplusplus

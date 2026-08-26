@@ -54,6 +54,16 @@ void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing,
  */
 void meshtastic_reliable_on_implicit_ack(uint32_t id);
 
+/**
+ * @brief How many originated want_ack unicasts are still awaiting an ACK.
+ *
+ * The preset-hop interlock reads this (docs/MULTI-PRESET-OPERATION.md §4.4):
+ * a retransmit is only useful if the destination is still listening on the
+ * preset the original went out on, so a node must not hop out from underneath
+ * its own retry window. Non-zero means "someone is still expecting me here".
+ */
+uint8_t meshtastic_reliable_pending(void);
+
 /** Drop all pending trackers and cancel the retransmit timer (test/reset use). */
 void meshtastic_reliable_reset(void);
 
@@ -83,6 +93,13 @@ static inline void meshtastic_reliable_on_implicit_ack(uint32_t id)
 
 static inline void meshtastic_reliable_reset(void)
 {
+}
+
+/* No tracker, so nothing is ever in flight — the hop interlock reads a constant
+ * zero rather than needing its own #ifdef at the call site. */
+static inline uint8_t meshtastic_reliable_pending(void)
+{
+	return 0U;
 }
 
 #endif /* CONFIG_MESHTASTIC_RELIABLE_DELIVERY */

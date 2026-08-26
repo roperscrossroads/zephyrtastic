@@ -19,6 +19,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
+#include "meshtastic_preset.h"
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 #include "meshtastic_scanner.h"
 #endif
@@ -369,6 +370,7 @@ int meshtastic_radio_retune(void)
 
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 {
+	uint32_t settle;
 	int ret;
 	int retries;
 	int busy_retries = 0;
@@ -441,6 +443,28 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 		return -EPERM;
 	}
 #endif
+
+	/* The settle window (docs/MULTI-PRESET-OPERATION.md §4.4, third interlock).
+	 * The radio was retuned very recently, so the AGC has not settled on the new
+	 * bandwidth — and the first thing this transmit does is ask the chip to
+	 * listen before it talks (LORA_CAD_MODE_LBT, below). A CAD taken on an
+	 * unsettled front end can read a busy channel as quiet, which turns
+	 * listen-before-talk into a collision.
+	 *
+	 * A wait, not a refusal: the frame is unambiguously on the new preset (the
+	 * freeze above refused everything composed while the switch was in flight),
+	 * so nothing is wrong with it except its timing.
+	 *
+	 * Waited out while HOLDING mt_radio_sem, deliberately. Outside it, a retune
+	 * could land between the wait and the transmit and put the frame on a radio
+	 * that is unsettled all over again — the wait would have measured a tuning
+	 * that no longer applies. It costs at most
+	 * CONFIG_MESHTASTIC_PRESET_SETTLE_MS, once per switch. */
+	settle = meshtastic_preset_settle_remaining_ms();
+	if (settle > 0U) {
+		meshtastic_preset_note_settle_wait();
+		k_sleep(K_MSEC(settle));
+	}
 
 	/*
 	 * Continuous async RX must be stopped first: the SX126x driver

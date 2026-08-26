@@ -150,6 +150,21 @@ static bool resolve_locked(uint32_t id)
 	return true;
 }
 
+uint8_t meshtastic_reliable_pending(void)
+{
+	uint8_t n = 0U;
+
+	k_mutex_lock(&pend_lock, K_FOREVER);
+	for (int i = 0; i < PEND_MAX; i++) {
+		if (pend[i].active) {
+			n++;
+		}
+	}
+	k_mutex_unlock(&pend_lock);
+
+	return n;
+}
+
 void meshtastic_reliable_reset(void)
 {
 	k_mutex_lock(&pend_lock, K_FOREVER);

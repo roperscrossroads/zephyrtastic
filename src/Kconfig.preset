@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: GPL-3.0
+
+menu "Preset switching"
+
+config MESHTASTIC_PRESET_SETTLE_MS
+	int "Radio settle window after a preset switch, in milliseconds"
+	default 20
+	range 0 1000
+	help
+	  How long the transmit path waits after a preset switch before keying the
+	  PA. The TX path already asks the radio to listen before it talks
+	  (LORA_CAD_MODE_LBT), so this is not about politeness — it is about the
+	  first CAD after a retune being taken on an AGC that has not settled on
+	  the new bandwidth yet, which can read a busy channel as quiet.
+
+	  Costs nothing in steady state: the window is armed by a switch and is
+	  already expired by the time the next frame is composed. 0 disables it.
+
+	  docs/MULTI-PRESET-OPERATION.md §4.4, third interlock.
+
+config MESHTASTIC_PRESET_DRAIN_MS
+	int "How long a scheduled hop waits for the TX queue to drain"
+	default 500
+	range 0 30000
+	help
+	  A frame is composed for the preset the node was on when it was queued —
+	  for a default (empty-name) channel the wire channel hash is derived from
+	  the preset's display name, so transmitting it after a hop puts the wrong
+	  hash on the new preset's frequency. meshtastic_preset_hop() therefore
+	  refuses to leave until the outbound queue is empty.
+
+	  This is the bound on that wait. Exceeding it is not an error: the hop is
+	  refused, the node stays where it is, and a slot-driven caller simply
+	  tries again at the next boundary.
+
+	  docs/MULTI-PRESET-OPERATION.md §4.4, fourth interlock.
+
+endmenu

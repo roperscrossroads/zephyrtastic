@@ -30,11 +30,11 @@
 #include "meshtastic/config.pb.h"
 #include "zephyrtastic/cluster.pb.h"
 
-#include "meshtastic_clock.h"
 #include "meshtastic_cluster.h"
 #include "meshtastic_cluster_doc.h"
 #include "meshtastic_hlc.h"
 #endif
+#include "meshtastic_clock.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
@@ -862,6 +862,383 @@ ZTEST(mesh_sim, test_preset_switch_rejects_unknown_atomically)
 	zassert_equal(sf_after, sf_before, "a refused switch must not move the SF");
 	zassert_equal(bw_after, bw_before, "a refused switch must not move the bandwidth");
 	zassert_equal(mt.ch_hash, hash_before, "a refused switch must not move the channel hash");
+}
+
+/* --- The hop interlocks: docs/MULTI-PRESET-OPERATION.md §4.4 ---------------
+ *
+ * meshtastic_preset_switch() obeys. meshtastic_preset_hop() decides. Everything
+ * below is about the difference — a switch driven by a slot boundary has no
+ * human to notice that it is about to hop out from under work in flight, so the
+ * noticing has to be code, and code that is asserted on.
+ *
+ * The shared fixture for these: park on LongFast, clear the counters, and give
+ * the node a clock, since without one every hop is refused before any other
+ * interlock is even consulted.
+ */
+static bool hop_seeded_the_clock;
+
+/* @p from is the preset to park on. It is a parameter rather than a constant
+ * because time-on-air is not a detail here: a LongFast broadcast takes most of
+ * a second to transmit, which is longer than the whole drain bound, so a test
+ * that must watch a queued frame actually GO OUT has to start somewhere fast.
+ * The tests that only watch a refusal do not care and use LongFast. */
+static void hop_baseline(meshtastic_Config_LoRaConfig_ModemPreset from)
+{
+	zassert_ok(meshtastic_preset_switch(from, NULL), "baseline switch failed");
+	hop_seeded_the_clock = !meshtastic_clock_valid();
+	if (hop_seeded_the_clock) {
+		meshtastic_clock_set_epoch(1750000000U, MESHTASTIC_CLOCK_QUALITY_NTP);
+	}
+	zassert_true(meshtastic_clock_valid(), "the interlock tests need a clock");
+	meshtastic_preset_stats_reset();
+}
+
+/* Put back what hop_baseline() borrowed. The clock half is not tidiness: this
+ * suite's cluster tests build HLC stamps against the wall clock, so a seeded
+ * clock left behind by one of these tests changes what a LATER, unrelated test
+ * measures — which is how it was found. Restores the ABSENCE of a clock rather
+ * than a literal default, for the same reason handoff trap 3 exists. */
+static void hop_teardown(void)
+{
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "restore failed");
+	if (hop_seeded_the_clock) {
+		meshtastic_clock_test_reset();
+		hop_seeded_the_clock = false;
+	}
+}
+
+/* Wait until the radio owes this node nothing. lora_sim_take_tx() returns as
+ * soon as the frame is captured, which is DURING the send — the worker clears
+ * its in-flight mark just after. A test that reads meshtastic_preset_hold_check()
+ * straight after a capture is therefore reading a queue that is empty-but-busy,
+ * and would see MESHTASTIC_PRESET_HOLD_TX_QUEUED for a frame already on the air. */
+static void wait_tx_idle(void)
+{
+	for (int i = 0; i < 500 && meshtastic_outbound_pending() > 0U; i++) {
+		k_msleep(2);
+	}
+	zassert_equal(meshtastic_outbound_pending(), 0U, "the TX queue never went idle");
+}
+
+/* Build a wire frame this node originated, for the queue-level tests. They care
+ * about a frame occupying a queue slot, not about what is in it. */
+static void build_own_text(uint32_t id, const char *text, uint8_t *wire, uint32_t *wire_len)
+{
+	struct meshtastic_packet packet = {
+		.from          = TEST_NODE_ID,
+		.to            = MESHTASTIC_NODE_BROADCAST,
+		.id            = id,
+		.portnum       = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload       = (const uint8_t *)text,
+		.payload_len   = strlen(text),
+		.hop_limit     = 3U,
+		.hop_start     = 3U,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	zassert_ok(meshtastic_build_wire_packet(&packet, wire, wire_len),
+		   "build_wire_packet failed");
+}
+
+/* Interlock 2, and the reason it is first in the reporting order: slot =
+ * f(epoch) is not merely inaccurate without an epoch, it is meaningless. A node
+ * that hopped anyway would be slicing against a schedule no other node is on,
+ * which is worse than not slicing at all — it would be absent from its own
+ * preset half the time and present on the other one at the wrong moments.
+ *
+ * So the refusal is unconditional, and it is checked before everything else:
+ * a node with no time source stays where it was configured. */
+ZTEST(mesh_sim, test_preset_hop_refuses_without_a_clock)
+{
+	bool had_clock = meshtastic_clock_valid();
+	int64_t saved_ms = meshtastic_clock_now_epoch_ms();
+	enum meshtastic_clock_quality saved_quality = meshtastic_clock_get_quality();
+	uint32_t freq_before = 0U, freq_after = 0U;
+	uint8_t sf = 0U, bw = 0U;
+
+	hop_baseline(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq_before, &sf, &bw), "radio unconfigured");
+
+	meshtastic_clock_test_reset();
+	zassert_false(meshtastic_clock_valid(), "the clock should be unset for this test");
+
+	zassert_equal(meshtastic_preset_hold_check(), MESHTASTIC_PRESET_HOLD_NO_CLOCK,
+		      "no clock must be the reported hold, and must outrank the others");
+	zassert_equal(meshtastic_preset_hop(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
+					    NULL), -EBUSY, "a clockless hop must be refused");
+
+	/* Refused means the node did not move — not that it moved and came back. */
+	zassert_equal(mt.modem_preset, meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+		      "a refused hop must leave the preset alone");
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq_after, &sf, &bw), "radio unconfigured");
+	zassert_equal(freq_after, freq_before, "a refused hop must not touch the radio");
+	zassert_equal(meshtastic_preset_hops(), 0U, "a refused hop must not be counted as one");
+	zassert_equal(meshtastic_preset_holds(MESHTASTIC_PRESET_HOLD_NO_CLOCK), 1U,
+		      "the refusal must be counted under its own reason");
+
+	/* And the same hop goes through the moment a time source appears — the
+	 * interlock is a hold, not a permanent disqualification. */
+	meshtastic_clock_set_epoch(1750000000U, MESHTASTIC_CLOCK_QUALITY_NTP);
+	zassert_ok(meshtastic_preset_hop(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
+					 NULL), "a hop with a valid clock must succeed");
+	zassert_equal(meshtastic_preset_hops(), 1U, "a completed hop must be counted");
+
+	/* Restore whatever the suite had, rather than a literal: "the default" is
+	 * exactly the thing that stops being the default (handoff trap 3). This
+	 * test clears the clock itself, so it cannot leave that to hop_teardown() —
+	 * that only knows about a clock IT seeded. */
+	meshtastic_clock_test_reset();
+	hop_seeded_the_clock = false;
+	if (had_clock) {
+		meshtastic_clock_set_epoch_ms(saved_ms, saved_quality);
+	}
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					    NULL), "restore failed");
+}
+
+/* Interlock 1. A retransmit is only useful if the destination is still listening
+ * where the original went out, so hopping with one outstanding does not merely
+ * delay the retry — it spends the sender's whole retry budget on a preset the
+ * destination cannot hear, and the send fails as if the node were gone.
+ *
+ * Refused rather than waited on, deliberately: a reliable send can stay pending
+ * for the full retry budget (seconds), which is many slot boundaries. Waiting
+ * would mean a busy node never slices at all, and would do it by stalling.
+ */
+ZTEST(mesh_sim, test_preset_hop_refuses_while_a_reliable_send_is_unacked)
+{
+	struct meshtastic_packet dm = {
+		.from = 0U, /* filled in with our node id */
+		.to = PEER_NODE_ID,
+		.id = 0x51CE0001U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"hi",
+		.payload_len = 2U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_ack = true,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+	struct lora_sim_frame f;
+
+	hop_baseline(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+
+	zassert_ok(meshtastic_send_packet(&dm, K_NO_WAIT), "reliable DM send failed");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "the DM never reached the radio");
+
+	/* The frame is on the air and off the queue; what remains is the tracker
+	 * waiting for an ACK that this test never sends. */
+	zassert_equal(meshtastic_reliable_pending(), 1U, "the DM should be awaiting an ACK");
+	zassert_equal(meshtastic_preset_hold_check(), MESHTASTIC_PRESET_HOLD_RELIABLE,
+		      "an unacked reliable send must be the reported hold");
+	zassert_equal(meshtastic_preset_hop(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
+					    NULL), -EBUSY,
+		      "hopping out from under an unacked reliable send must be refused");
+	zassert_equal(mt.modem_preset, meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+		      "a refused hop must leave the preset alone");
+	zassert_equal(meshtastic_preset_holds(MESHTASTIC_PRESET_HOLD_RELIABLE), 1U,
+		      "the refusal must be counted under its own reason");
+
+	/* Resolve the send (an ACK, a NAK or exhaustion all land here) and the hold
+	 * clears on its own. */
+	meshtastic_reliable_reset();
+	wait_tx_idle();
+	zassert_equal(meshtastic_preset_hold_check(), MESHTASTIC_PRESET_HOLD_NONE,
+		      "nothing should be holding the hop off now");
+	zassert_ok(meshtastic_preset_hop(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
+					 NULL), "the hop must go through once nothing is pending");
+
+	hop_teardown();
+}
+
+/* Interlock 4, the half that WAITS.
+ *
+ * A deferred frame (the contention window) is the deterministic way to hold a
+ * queue slot open for a known interval, which is exactly the shape of the
+ * condition being tested: something is queued for the preset we are on, and it
+ * will clear on its own shortly.
+ *
+ * The assertion that matters is not just "the hop succeeded" but "the queued
+ * frame was transmitted first". Draining is not a freeze — those frames are
+ * addressed to the preset the node is still on, and letting them go out on it
+ * is the entire reason for waiting instead of hopping immediately.
+ */
+ZTEST(mesh_sim, test_preset_hop_drains_the_tx_queue_before_leaving)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct lora_sim_frame f;
+
+	/* ShortTurbo, so the queued frame's time-on-air (tens of ms) leaves room
+	 * inside the drain bound for the drain to be what is measured. On LongFast
+	 * the frame alone outlasts CONFIG_MESHTASTIC_PRESET_DRAIN_MS and the test
+	 * would be measuring the modem, not the interlock. */
+	hop_baseline(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO);
+	build_own_text(0xD5A10001U, "queued", wire, &wire_len);
+
+	/* Deferred well inside CONFIG_MESHTASTIC_PRESET_DRAIN_MS, so the drain is
+	 * expected to succeed rather than time out. */
+	zassert_ok(meshtastic_radio_send_wire_after(wire, wire_len, MT_SCHED_TIER_NORMAL, 150U),
+		   "deferred enqueue failed");
+	zassert_true(meshtastic_outbound_pending() > 0U, "the frame should be queued");
+	zassert_equal(meshtastic_preset_hold_check(), MESHTASTIC_PRESET_HOLD_TX_QUEUED,
+		      "a queued frame must be the reported hold");
+
+	zassert_ok(meshtastic_preset_hop(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
+					 NULL), "the hop should have waited for the drain, not failed");
+	zassert_equal(meshtastic_preset_hops(), 1U, "a completed hop must be counted");
+	zassert_equal(meshtastic_preset_holds(MESHTASTIC_PRESET_HOLD_TX_QUEUED), 0U,
+		      "a drain that succeeded is not a refusal");
+
+	/* THE assertion: the frame went out, and it went out before the retune. A
+	 * hop that discarded it would leave nothing to take here. */
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)),
+		   "the queued frame must be transmitted, not discarded, by the drain");
+	zassert_equal(meshtastic_preset_tx_stale(), 0U,
+		      "a frame the drain waited for is not stale — it went out on its own preset");
+
+	hop_teardown();
+}
+
+/* Interlock 4, the half that GIVES UP.
+ *
+ * The drain is bounded, and exceeding the bound is not an error: the node stays
+ * where it is and the next slot boundary tries again. That is the whole reason
+ * a slicer can be built on refusals — slot = f(epoch) means a missed boundary
+ * costs one slot, not synchronisation.
+ */
+ZTEST(mesh_sim, test_preset_hop_gives_up_on_a_queue_that_will_not_drain)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t freq_before = 0U, freq_after = 0U;
+	uint8_t sf = 0U, bw = 0U;
+	struct lora_sim_frame f;
+
+	hop_baseline(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq_before, &sf, &bw), "radio unconfigured");
+	build_own_text(0xD5A10002U, "stuck", wire, &wire_len);
+
+	/* Deferred past the drain bound, so the queue cannot empty in time. */
+	zassert_ok(meshtastic_radio_send_wire_after(wire, wire_len, MT_SCHED_TIER_NORMAL,
+						    CONFIG_MESHTASTIC_PRESET_DRAIN_MS + 400U),
+		   "deferred enqueue failed");
+
+	zassert_equal(meshtastic_preset_hop(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
+					    NULL), -EBUSY,
+		      "a queue that will not drain in time must refuse the hop");
+	zassert_equal(meshtastic_preset_holds(MESHTASTIC_PRESET_HOLD_TX_QUEUED), 1U,
+		      "the refusal must be counted under its own reason");
+	zassert_equal(meshtastic_preset_hops(), 0U, "a refused hop must not be counted as one");
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq_after, &sf, &bw), "radio unconfigured");
+	zassert_equal(freq_after, freq_before, "a refused hop must not touch the radio");
+
+	/* The frame was never the casualty: it is still queued, and still goes out
+	 * on the preset it was composed for. */
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(2000)),
+		   "the frame the hop refused for must still be transmitted");
+	zassert_equal(meshtastic_preset_tx_stale(), 0U, "the node never left, so nothing is stale");
+
+	hop_teardown();
+}
+
+/* What the drain cannot cover, and why the generation stamp exists.
+ *
+ * A drain empties the queue, but the queue can refill: between "pending == 0"
+ * and the retune finishing there is a window in which a frame can be composed
+ * against the old channel hash and land in a slot. On a default (empty-name)
+ * channel that hash is derived from the preset's DISPLAY NAME, so after the
+ * retune the frame is addressed to a channel nobody on the new preset is
+ * listening for — audible to no one, and indistinguishable at any receiver from
+ * a corrupt frame.
+ *
+ * Driven here through meshtastic_preset_switch() rather than _hop(), because
+ * that IS the case being modelled: a switch with no drain at all, which is also
+ * what an operator's `lora preset` or an admin config change performs. The
+ * stamp has to hold for those too.
+ */
+ZTEST(mesh_sim, test_a_frame_that_outlives_its_preset_is_dropped_not_transmitted)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t gen_before;
+	struct lora_sim_frame f;
+
+	hop_baseline(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	gen_before = meshtastic_preset_generation();
+	build_own_text(0xD5A10003U, "orphan", wire, &wire_len);
+
+	zassert_ok(meshtastic_radio_send_wire_after(wire, wire_len, MT_SCHED_TIER_NORMAL, 120U),
+		   "deferred enqueue failed");
+	zassert_true(meshtastic_outbound_pending() > 0U, "the frame should be queued");
+
+	/* Leave without draining — the frame is now addressed to a preset the node
+	 * is no longer on. */
+	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
+					    NULL), "switch failed");
+	zassert_equal(meshtastic_preset_generation(), gen_before + 1U,
+		      "a completed switch must bump the generation exactly once");
+
+	/* THE assertion: when the deferred frame finally comes due it is dropped,
+	 * not transmitted. Waited out on the capture queue rather than on a sleep,
+	 * so a frame that DID go out fails this rather than slipping past a timer. */
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), 0,
+			  "a frame composed for the old preset must not reach the radio");
+	zassert_equal(meshtastic_preset_tx_stale(), 1U,
+		      "the drop must be counted — otherwise it is indistinguishable from "
+		      "ordinary packet loss");
+	zassert_equal(meshtastic_outbound_pending(), 0U, "the stale frame must leave the queue");
+
+	/* And the node transmits normally again: the stamp drops the frames that
+	 * outlived a preset, not the node's ability to send. */
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "after"),
+		   "a frame composed after the switch must be transmitted");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "no TX captured after the switch");
+	zassert_equal(meshtastic_preset_tx_stale(), 1U, "only the orphaned frame should be stale");
+
+	hop_teardown();
+}
+
+/* Interlock 3, the settle window.
+ *
+ * The TX path asks the chip to listen before it talks (LORA_CAD_MODE_LBT), and
+ * a CAD taken on a front end that has just been reconfigured onto a different
+ * bandwidth can read a busy channel as quiet — which turns listen-before-talk
+ * into a collision. So the first transmit after a retune waits the window out.
+ *
+ * A wait rather than a refusal, because unlike the stale-frame case there is
+ * nothing wrong with the frame: it is unambiguously on the new preset, and only
+ * its timing is early.
+ */
+ZTEST(mesh_sim, test_the_first_transmit_after_a_switch_waits_out_the_settle_window)
+{
+	struct lora_sim_frame f;
+
+	hop_baseline(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+
+	/* hop_baseline() switched, so the window is armed and running. */
+	zassert_true(meshtastic_preset_settle_remaining_ms() > 0U,
+		     "a switch must arm the settle window");
+	zassert_true(meshtastic_preset_settle_remaining_ms() <=
+			     CONFIG_MESHTASTIC_PRESET_SETTLE_MS,
+		     "the window must never exceed what was configured");
+
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "early"), "send failed");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "the frame must still go out");
+	zassert_equal(meshtastic_preset_settle_waits(), 1U,
+		      "the first transmit after a switch must have waited out the window");
+	zassert_equal(meshtastic_preset_settle_remaining_ms(), 0U,
+		      "the window must be spent once it has been waited out");
+
+	/* Steady state costs nothing: the window is armed by a switch and is long
+	 * expired by the time the next frame is composed. */
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "later"), "send failed");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "the frame must go out");
+	zassert_equal(meshtastic_preset_settle_waits(), 1U,
+		      "a transmit outside the window must not wait");
+
+	hop_teardown();
 }
 
 /* The scanner's tuning entry point. Deliberately separate from

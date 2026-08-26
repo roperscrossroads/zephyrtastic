@@ -23,6 +23,8 @@
 #include "meshtastic_outbound.h"
 #include "meshtastic_sched.h"
 
+#include "meshtastic_preset.h"
+
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -44,6 +46,12 @@ struct ob_item {
 	 * flag. Without it a node hearing repeated copies would re-clamp on each
 	 * one and never actually transmit. */
 	bool late;
+	/* The preset generation this frame was composed under
+	 * (meshtastic_preset_generation()). For a default, empty-name channel the
+	 * wire channel hash comes from the preset's display name, so a frame that
+	 * outlives a preset switch is addressed to a channel nobody on the new
+	 * preset is listening for. Stamped at enqueue, checked at dequeue. */
+	uint32_t gen;
 	struct k_sem *done; /* non-NULL => a blocking caller is waiting; never evict */
 	int *result;
 };
@@ -59,6 +67,19 @@ static inline bool ob_eligible(const struct ob_item *it, uint32_t now)
  * local (`cur`) before the LoRa send, so the radio never reads this array. */
 static MESHTASTIC_EXT_RAM_BSS_ATTR struct ob_item ob_items[OB_MAX];
 static uint8_t ob_count;
+/* True from the moment the worker dequeues a frame until its transmit returns.
+ *
+ * ob_count alone cannot answer "is anything still going out", because the
+ * worker removes an item from the queue BEFORE handing it to the radio — so
+ * there is a window in which the queue is empty and a frame is nonetheless
+ * about to be keyed. A preset hop that read only ob_count could retune in that
+ * window and the frame would go out on the new preset's frequency carrying the
+ * old preset's channel hash, which is precisely the outcome the drain interlock
+ * exists to prevent (docs/MULTI-PRESET-OPERATION.md §4.4).
+ *
+ * Set under ob_lock in the same critical section as the removal, so the pair is
+ * never observed as "queue empty and nothing in flight" while a frame exists. */
+static bool ob_inflight;
 
 static K_MUTEX_DEFINE(ob_lock);
 static K_SEM_DEFINE(ob_avail, 0, OB_MAX); /* items ready for the worker */
@@ -175,6 +196,7 @@ static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 		if (idx >= 0) {
 			cur = ob_items[idx];
 			remove_index_locked(idx);
+			ob_inflight = true;
 			k_mutex_unlock(&ob_lock);
 
 			k_sem_give(&ob_space); /* a slot opened up */
@@ -183,11 +205,32 @@ static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 			 * originated leaves over a live BLE peer link to its
 			 * destination instead of spending airtime. Anything
 			 * else — relays, broadcasts, unlinked destinations, a
-			 * failed BLE send — goes on the air as always. */
+			 * failed BLE send — goes on the air as always.
+			 *
+			 * The BLE peer link is offered the frame even when the
+			 * preset moved underneath it: that link is not on the
+			 * radio at all, so a preset switch says nothing about
+			 * whether the destination can still be reached over it.
+			 * Only the LoRa half is preset-bound. */
 			ret = meshtastic_ble_peer_tx_try_divert(cur.wire, cur.len);
-			if (ret != 0) {
+			if (ret != 0 && cur.gen != meshtastic_preset_generation()) {
+				/* Composed for a preset this node has since left.
+				 * Dropped rather than transmitted: the wire
+				 * channel hash it carries was derived from the
+				 * old preset's name, so on the new frequency it
+				 * is addressed to nobody. Counted, so a preset
+				 * switch that keeps stranding traffic is
+				 * visible (`meshtastic preset`) instead of
+				 * looking like plain packet loss. */
+				meshtastic_preset_note_tx_stale();
+				ret = -ESTALE;
+			} else if (ret != 0) {
 				ret = meshtastic_radio_send_wire_now(cur.wire, cur.len);
 			}
+
+			k_mutex_lock(&ob_lock, K_FOREVER);
+			ob_inflight = false;
+			k_mutex_unlock(&ob_lock);
 
 			if (cur.result != NULL) {
 				*cur.result = ret;
@@ -303,6 +346,7 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 	/* A deadline of 0 means "now"; bump a zero-valued uptime by 1 ms so the
 	 * sentinel keeps its meaning at the very start of boot. */
 	ob_items[idx].late = false;
+	ob_items[idx].gen = meshtastic_preset_generation();
 	if (delay_ms == 0U) {
 		ob_items[idx].send_after = 0U;
 	} else {
@@ -352,6 +396,17 @@ int meshtastic_radio_send_wire_after(uint8_t *pkt, uint32_t pkt_len, uint8_t tie
 				     uint32_t delay_ms)
 {
 	return outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, delay_ms);
+}
+
+uint8_t meshtastic_outbound_pending(void)
+{
+	uint8_t n;
+
+	k_mutex_lock(&ob_lock, K_FOREVER);
+	n = (uint8_t)(ob_count + (ob_inflight ? 1U : 0U));
+	k_mutex_unlock(&ob_lock);
+
+	return n;
 }
 
 int meshtastic_outbound_defer_late(uint32_t src, uint32_t id, uint32_t delay_ms)

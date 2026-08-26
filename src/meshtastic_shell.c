@@ -48,6 +48,7 @@
 #include "meshtastic_hlc.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_preset.h"
 #include "meshtastic_region_presets.h"
 #include "meshtastic_powermon.h"
 #include <zephyr/meshtastic/fem.h>
@@ -1391,7 +1392,7 @@ static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
 /* Defined further down, alongside the `lora preset` command that also uses it.
  * Forward-declared rather than moved, so each stays next to its own command
  * group; sharing the parser is the point — the accepted preset spellings must
- * not drift between `lora preset` and `scan presets`. */
+ * not drift between `lora preset`, `scan presets` and `preset hop`. */
 static int shell_parse_modem_preset(const char *name,
 				    meshtastic_Config_LoRaConfig_ModemPreset *out);
 
@@ -2953,9 +2954,12 @@ static void cmd_lora_show(const struct shell *sh)
 	}
 }
 
-#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 /* Match a preset display name (as reported by meshtastic_preset_display_name, so
- * the accepted spellings always equal what `meshtastic lora` shows). */
+ * the accepted spellings always equal what `meshtastic lora` shows).
+ *
+ * Outside the config-write guard, because parsing a preset name has nothing to
+ * do with writing config: `scan presets` and `preset hop` both move the live
+ * radio only, and a build with writes compiled out still wants them. */
 static int shell_parse_modem_preset(const char *s,
 				    meshtastic_Config_LoRaConfig_ModemPreset *out)
 {
@@ -2979,6 +2983,7 @@ static int shell_parse_modem_preset(const char *s,
 	return -EINVAL;
 }
 
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int cmd_lora_preset_set(const struct shell *sh, const char *name)
 {
 	meshtastic_Config cfg;
@@ -3060,6 +3065,96 @@ static int cmd_lora_tx_set(const struct shell *sh, const char *arg)
 	return 0;
 }
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+
+/* `meshtastic preset` — the interlock surface (docs/MULTI-PRESET-OPERATION.md
+ * §4.4). Distinct from `meshtastic lora preset`, which PERSISTS a preset and
+ * needs a reboot: this one is about the live radio and the conditions that
+ * govern moving it on a schedule.
+ *
+ * The counters are the point of the bare command. A slicing node that quietly
+ * never hops, or that hops and strands traffic each time, looks from the
+ * outside like a flaky mesh; here it reads as a number next to a reason.
+ */
+static void cmd_preset_show(const struct shell *sh)
+{
+	enum meshtastic_preset_hold hold = meshtastic_preset_hold_check();
+	uint32_t settle = meshtastic_preset_settle_remaining_ms();
+
+	shell_print(sh, "preset      %s (generation %u)",
+		    meshtastic_preset_display_name(mt.modem_preset, true),
+		    meshtastic_preset_generation());
+	shell_print(sh, "a hop now   %s%s%s", hold == MESHTASTIC_PRESET_HOLD_NONE ? "would go" :
+						      "would be REFUSED (",
+		    hold == MESHTASTIC_PRESET_HOLD_NONE ? "" : meshtastic_preset_hold_name(hold),
+		    hold == MESHTASTIC_PRESET_HOLD_NONE ? "" : ")");
+	shell_print(sh, "settle      %u ms remaining of %u", settle,
+		    (unsigned int)CONFIG_MESHTASTIC_PRESET_SETTLE_MS);
+	shell_print(sh, "");
+	shell_print(sh, "hops        %u completed", meshtastic_preset_hops());
+	shell_print(sh, "held off    %u no-clock, %u scanning, %u reliable-in-flight,",
+		    meshtastic_preset_holds(MESHTASTIC_PRESET_HOLD_NO_CLOCK),
+		    meshtastic_preset_holds(MESHTASTIC_PRESET_HOLD_SCANNING),
+		    meshtastic_preset_holds(MESHTASTIC_PRESET_HOLD_RELIABLE));
+	shell_print(sh, "            %u tx-queued (drain bound %u ms), %u switch-in-progress",
+		    meshtastic_preset_holds(MESHTASTIC_PRESET_HOLD_TX_QUEUED),
+		    (unsigned int)CONFIG_MESHTASTIC_PRESET_DRAIN_MS,
+		    meshtastic_preset_holds(MESHTASTIC_PRESET_HOLD_SWITCHING));
+	/* Two different things, and the distinction is worth reading twice: a
+	 * settle wait cost a frame some milliseconds; a stale drop cost a frame
+	 * entirely, because it outlived the preset it was addressed to. */
+	shell_print(sh, "tx settled  %u frames waited out a settle window",
+		    meshtastic_preset_settle_waits());
+	shell_print(sh, "tx stale    %u frames DROPPED for outliving their preset",
+		    meshtastic_preset_tx_stale());
+}
+
+static int cmd_preset(const struct shell *sh, size_t argc, char **argv)
+{
+	meshtastic_Config_LoRaConfig_ModemPreset target;
+	struct meshtastic_preset_result got;
+	int ret;
+
+	if (argc == 1U) {
+		cmd_preset_show(sh);
+		return 0;
+	}
+
+	if (argc == 2U && strcmp(argv[1], "reset") == 0) {
+		meshtastic_preset_stats_reset();
+		shell_print(sh, "counters cleared");
+		return 0;
+	}
+
+	if (argc != 3U || strcmp(argv[1], "hop") != 0) {
+		shell_error(sh, "usage: meshtastic preset [hop <name> | reset]");
+		return -EINVAL;
+	}
+
+	if (shell_parse_modem_preset(argv[2], &target) < 0) {
+		shell_error(sh, "unknown preset '%s' (e.g. LongFast, ShortTurbo)", argv[2]);
+		return -EINVAL;
+	}
+
+	ret = meshtastic_preset_hop(target, &got);
+	if (ret == -EBUSY) {
+		/* Not an error worth a stack trace: this is the interlock doing its
+		 * job, and the reason is the useful half. */
+		shell_warn(sh, "held off (%s) — still on %s",
+			   meshtastic_preset_hold_name(meshtastic_preset_hold_check()),
+			   meshtastic_preset_display_name(mt.modem_preset, true));
+		return 0;
+	}
+	if (ret < 0) {
+		shell_error(sh, "hop failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "hopped to %s, %u Hz, SF%u BW%u ch_hash 0x%02x",
+		    meshtastic_preset_display_name(got.preset, true), got.frequency_hz,
+		    got.spread_factor, got.bandwidth_hz / 1000U, got.channel_hash);
+	shell_print(sh, "NOTE: live only — `meshtastic lora preset` is what persists a preset");
+	return 0;
+}
 
 static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4195,6 +4290,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 			     "or the TX-enable switch (applies live).",
 			     "[preset <name>] [tx on|off]"),
 		  cmd_lora),
+	SHELL_CMD(preset, NULL,
+		  SHELL_HELP("Live preset switching: what would hold a scheduled hop off, "
+			     "and the counters for the ones that were.",
+			     "[hop <name> | reset]"),
+		  cmd_preset),
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
 	SHELL_CMD(text, &meshtastic_text_cmds, SHELL_HELP("Text message commands.", NULL), NULL),
 #endif

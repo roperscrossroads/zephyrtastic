@@ -35,13 +35,67 @@
 #include <zephyr/logging/log.h>
 
 #include "meshtastic_channels.h"
+#include "meshtastic_clock.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_region_presets.h"
+#include "meshtastic_reliable.h"
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+#include "meshtastic_scanner.h"
+#endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
+
+/* Interlock state. Small enough to be plain scalars under one mutex; the
+ * contenders are the outbound worker (reading, on every transmit) and whichever
+ * thread drives the schedule (writing, once a slot). */
+static struct {
+	/* Bumped once per successful switch; stamped onto every queued frame so a
+	 * frame composed for an older preset can be recognised and dropped rather
+	 * than transmitted with a stale channel hash. Starts at 1 so that 0 is
+	 * never a legitimate stamp. */
+	uint32_t generation;
+	int64_t settle_until; /* k_uptime_get() ms; TX waits this out */
+	uint32_t hops;
+	uint32_t holds[MESHTASTIC_PRESET_HOLD_COUNT];
+	uint32_t tx_stale;
+	uint32_t settle_waits;
+} gate = {
+	.generation = 1U,
+};
+
+/* Serialises hops against each other. NOT a TX gate — the generation stamp is
+ * what protects frames; this only keeps two schedules from driving one radio
+ * into a half-applied switch. */
+static K_MUTEX_DEFINE(hop_lock);
+
+static K_MUTEX_DEFINE(gate_lock_m);
+
+static void gate_lock(void)
+{
+	k_mutex_lock(&gate_lock_m, K_FOREVER);
+}
+
+static void gate_unlock(void)
+{
+	k_mutex_unlock(&gate_lock_m);
+}
+
+/* Arm the settle window. Called on the way out of every successful switch,
+ * including the ones an operator or the scanner's restore drives — the radio
+ * does not know or care why it was retuned. */
+static void settle_arm(void)
+{
+	if (CONFIG_MESHTASTIC_PRESET_SETTLE_MS == 0) {
+		return;
+	}
+
+	gate_lock();
+	gate.settle_until = k_uptime_get() + CONFIG_MESHTASTIC_PRESET_SETTLE_MS;
+	gate_unlock();
+}
 
 /* The region the frequency plan should be resolved against. Read from the stored
  * LoRaConfig on each switch rather than cached: an admin can change the region,
@@ -145,5 +199,233 @@ int meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset preset,
 		out->channel_hash = mt.ch_hash;
 	}
 
+	/* Both of these belong HERE rather than in hop() below, because the radio
+	 * does not know or care why it was retuned: an operator-driven `lora
+	 * preset`, an admin config change and a slot boundary all leave exactly the
+	 * same two problems behind them — an unsettled front end, and a queue that
+	 * may still hold frames addressed to the preset we just left. */
+	gate_lock();
+	gate.generation++;
+	gate_unlock();
+	settle_arm();
+
 	return 0;
+}
+
+
+/* --- Interlocks (docs/MULTI-PRESET-OPERATION.md §4.4) ---------------------- */
+
+const char *meshtastic_preset_hold_name(enum meshtastic_preset_hold reason)
+{
+	switch (reason) {
+	case MESHTASTIC_PRESET_HOLD_NONE:
+		return "none";
+	case MESHTASTIC_PRESET_HOLD_NO_CLOCK:
+		return "no-clock";
+	case MESHTASTIC_PRESET_HOLD_SCANNING:
+		return "scanning";
+	case MESHTASTIC_PRESET_HOLD_RELIABLE:
+		return "reliable-in-flight";
+	case MESHTASTIC_PRESET_HOLD_TX_QUEUED:
+		return "tx-queued";
+	case MESHTASTIC_PRESET_HOLD_SWITCHING:
+		return "switch-in-progress";
+	default:
+		return "?";
+	}
+}
+
+enum meshtastic_preset_hold meshtastic_preset_hold_check(void)
+{
+	/* Order is the API's promise, not an implementation detail: first match
+	 * wins and the list runs from "will not clear by itself" to "clears in a
+	 * frame time", so whatever gets reported is the thing actually worth
+	 * acting on. */
+	if (!meshtastic_clock_valid()) {
+		return MESHTASTIC_PRESET_HOLD_NO_CLOCK;
+	}
+
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+	/* A sweep already has the radio somewhere this node was never configured
+	 * for, and owns the restore. Hopping now would fight it for the tuning. */
+	if (meshtastic_scanner_active()) {
+		return MESHTASTIC_PRESET_HOLD_SCANNING;
+	}
+#endif
+
+	if (meshtastic_reliable_pending() > 0U) {
+		return MESHTASTIC_PRESET_HOLD_RELIABLE;
+	}
+
+	if (meshtastic_outbound_pending() > 0U) {
+		return MESHTASTIC_PRESET_HOLD_TX_QUEUED;
+	}
+
+	return MESHTASTIC_PRESET_HOLD_NONE;
+}
+
+uint32_t meshtastic_preset_generation(void)
+{
+	uint32_t gen;
+
+	gate_lock();
+	gen = gate.generation;
+	gate_unlock();
+
+	return gen;
+}
+
+void meshtastic_preset_note_tx_stale(void)
+{
+	gate_lock();
+	gate.tx_stale++;
+	gate_unlock();
+}
+
+uint32_t meshtastic_preset_settle_remaining_ms(void)
+{
+	int64_t left;
+
+	gate_lock();
+	left = gate.settle_until - k_uptime_get();
+	gate_unlock();
+
+	if (left <= 0) {
+		return 0U;
+	}
+
+	return (uint32_t)left;
+}
+
+void meshtastic_preset_note_settle_wait(void)
+{
+	gate_lock();
+	gate.settle_waits++;
+	gate_unlock();
+}
+
+/* Record a refusal and return the errno hop() reports. Split out so every
+ * refusal path counts, including the one after the drain times out — an
+ * uncounted refusal is exactly the silence these counters exist to remove. */
+static int hop_refuse(enum meshtastic_preset_hold reason)
+{
+	gate_lock();
+	gate.holds[reason]++;
+	gate_unlock();
+
+	LOG_DBG("preset hop: held off (%s)", meshtastic_preset_hold_name(reason));
+
+	return -EBUSY;
+}
+
+int meshtastic_preset_hop(meshtastic_Config_LoRaConfig_ModemPreset preset,
+			  struct meshtastic_preset_result *out)
+{
+	enum meshtastic_preset_hold reason;
+	int64_t deadline;
+	int ret;
+
+	/* Re-entrancy only. Held across the whole hop so two schedules cannot
+	 * interleave a drain with someone else's retune; it gates no transmit. */
+	if (k_mutex_lock(&hop_lock, K_NO_WAIT) != 0) {
+		return hop_refuse(MESHTASTIC_PRESET_HOLD_SWITCHING);
+	}
+
+	/* The three refuse-don't-wait conditions. Checked first because a hop held
+	 * off by any of them costs nothing at all — no drain, no stalled TX. */
+	reason = meshtastic_preset_hold_check();
+	if (reason != MESHTASTIC_PRESET_HOLD_NONE && reason != MESHTASTIC_PRESET_HOLD_TX_QUEUED) {
+		k_mutex_unlock(&hop_lock);
+		return hop_refuse(reason);
+	}
+
+	/* Fourth interlock: drain rather than refuse, because unlike the other
+	 * three this one is guaranteed to clear on its own — the worker is already
+	 * emptying the queue.
+	 *
+	 * Nothing is frozen while this runs, deliberately. Those frames were
+	 * composed for the preset the node is still on, and letting them go out on
+	 * it is the entire reason for waiting instead of hopping immediately.
+	 * Refusing them would turn "drain the queue before leaving" into "discard
+	 * the queue before leaving", which is a different and worse thing. */
+	deadline = k_uptime_get() + CONFIG_MESHTASTIC_PRESET_DRAIN_MS;
+	while (meshtastic_outbound_pending() > 0U) {
+		if (k_uptime_get() >= deadline) {
+			k_mutex_unlock(&hop_lock);
+			return hop_refuse(MESHTASTIC_PRESET_HOLD_TX_QUEUED);
+		}
+		k_sleep(K_MSEC(1));
+	}
+
+	/* Anything composed from here on is racing the retune, and is caught after
+	 * the fact by the generation stamp rather than by a lock. */
+	ret = meshtastic_preset_switch(preset, out);
+
+	if (ret == 0) {
+		gate_lock();
+		gate.hops++;
+		gate_unlock();
+	}
+
+	k_mutex_unlock(&hop_lock);
+
+	return ret;
+}
+
+uint32_t meshtastic_preset_hops(void)
+{
+	uint32_t n;
+
+	gate_lock();
+	n = gate.hops;
+	gate_unlock();
+
+	return n;
+}
+
+uint32_t meshtastic_preset_holds(enum meshtastic_preset_hold reason)
+{
+	uint32_t n;
+
+	if ((unsigned int)reason >= (unsigned int)MESHTASTIC_PRESET_HOLD_COUNT) {
+		return 0U;
+	}
+
+	gate_lock();
+	n = gate.holds[reason];
+	gate_unlock();
+
+	return n;
+}
+
+uint32_t meshtastic_preset_tx_stale(void)
+{
+	uint32_t n;
+
+	gate_lock();
+	n = gate.tx_stale;
+	gate_unlock();
+
+	return n;
+}
+
+uint32_t meshtastic_preset_settle_waits(void)
+{
+	uint32_t n;
+
+	gate_lock();
+	n = gate.settle_waits;
+	gate_unlock();
+
+	return n;
+}
+
+void meshtastic_preset_stats_reset(void)
+{
+	gate_lock();
+	gate.hops = 0U;
+	gate.tx_stale = 0U;
+	gate.settle_waits = 0U;
+	memset(gate.holds, 0, sizeof(gate.holds));
+	gate_unlock();
 }
