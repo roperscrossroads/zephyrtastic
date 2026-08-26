@@ -17,10 +17,44 @@ extern "C" {
 
 struct meshtastic_phoneapi;
 
+/**
+ * @brief What a frame is worth when the queue is full — lowest goes first.
+ *
+ * A ladder rather than the single "droppable" bit this used to be, because the
+ * frames that bit covered are not equally replaceable. A Position or Telemetry
+ * is one sample of a value that will be sent again shortly; a NodeInfo is an
+ * identity, sent rarely, and losing it does not cost the app a stale reading —
+ * it costs the app knowing the node EXISTS, until that peer next announces
+ * itself. On a bench with no netlog that shows up as "the phone can't see
+ * rzr3", which reads like a range problem rather than a full queue.
+ *
+ * Upstream never drops a FromRadio frame at all. This ladder is a deliberate
+ * divergence for a device with an 8-deep queue, but the ordering within it is
+ * chosen so the divergence costs the least recoverable thing last.
+ */
+enum meshtastic_phoneapi_evict_rank {
+	/** Queue status — wholly superseded by the next one to arrive. */
+	MT_PHONE_RANK_STATUS = 0,
+	/** Log records. Diagnostics must never outrank the traffic they
+	 *  describe: a log burst that evicted a text message or an admin reply
+	 *  would be a debugging aid that breaks the thing being debugged. */
+	MT_PHONE_RANK_LOG = 1,
+	/** Position / telemetry — a repeating measurement; the next one is
+	 *  strictly better than the one lost. */
+	MT_PHONE_RANK_SAMPLE = 2,
+	/** NodeInfo — identity, rare, and not re-sent on demand. */
+	MT_PHONE_RANK_IDENTITY = 3,
+	/** Text, routing, admin, everything else. Never evicted while anything
+	 *  cheaper is queued. */
+	MT_PHONE_RANK_KEEP = 4,
+};
+
 struct meshtastic_phoneapi_frame {
 	uint8_t data[MESHTASTIC_API_FRAME_MAX];
 	uint16_t len;
-	bool protected; /* survives selective eviction (see meshtastic sched phone.evict) */
+	/* meshtastic_phoneapi_evict_rank; see meshtastic sched phone.evict. Stored
+	 * as a uint8_t so the frame stays packable. */
+	uint8_t evict_rank;
 };
 
 typedef void (*meshtastic_phoneapi_data_ready_cb_t)(struct meshtastic_phoneapi *api);

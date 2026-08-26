@@ -54,6 +54,28 @@ static meshtastic_FromRadio make_pkt(uint32_t id, meshtastic_PortNum portnum)
 	return from;
 }
 
+/* A FromRadio carrying a log record — the cheapest thing above a queue status. */
+static meshtastic_FromRadio make_log(const char *msg)
+{
+	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+
+	from.which_payload_variant = meshtastic_FromRadio_log_record_tag;
+	strncpy(from.log_record.message, msg, sizeof(from.log_record.message) - 1U);
+	from.log_record.level = meshtastic_LogRecord_Level_INFO;
+	return from;
+}
+
+/* A FromRadio carrying a queue status — the most replaceable frame there is,
+ * since the next one supersedes it outright. */
+static meshtastic_FromRadio make_status(void)
+{
+	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+
+	from.which_payload_variant = meshtastic_FromRadio_queueStatus_tag;
+	from.queueStatus.free = 1U;
+	return from;
+}
+
 /* Decode a popped frame and return its packet portnum (or -1 if not a packet). */
 static int frame_portnum(const struct meshtastic_phoneapi_frame *f)
 {
@@ -208,6 +230,135 @@ ZTEST(phonequeue, test_drop_oldest_legacy)
 
 	zassert_true(pb_decode(&s, meshtastic_FromRadio_fields, &from));
 	zassert_equal(from.packet.id, 2, "oldest (id 1) dropped, id 2 now oldest");
+}
+
+/* --- the eviction ladder (parity T-5) --------------------------------------
+ *
+ * "Droppable" used to be one bit, so a NodeInfo and a Telemetry were
+ * interchangeable victims and whichever happened to arrive first lost. They are
+ * not interchangeable. A lost Telemetry costs one sample of a value that will be
+ * sent again shortly; a lost NodeInfo costs the app knowing a node EXISTS, until
+ * that peer next announces itself — which since the CADENCE fix can be an hour.
+ *
+ * This matters more than the August audit's Tier-2 rating suggests, because the
+ * fleet has no WiFi and therefore no netlog: the phone IS the diagnostic
+ * channel, and "the app can't see that node" reads like a range problem rather
+ * than a full queue.
+ */
+
+/* THE T-5 assertion. A burst of samples must not cost the app a node. */
+ZTEST(phonequeue, test_nodeinfo_survives_a_burst_of_samples)
+{
+	meshtastic_FromRadio ni = make_pkt(1, meshtastic_PortNum_NODEINFO_APP);
+
+	zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &ni));
+
+	/* Fill the rest with samples, then keep pushing samples at a full queue —
+	 * more than the queue is deep, so under the old single-bit rule the
+	 * NodeInfo (the oldest droppable frame) would have been the first victim. */
+	for (uint32_t i = 0; i < Q_SIZE * 3U; i++) {
+		meshtastic_FromRadio t = make_pkt(100U + i, meshtastic_PortNum_TELEMETRY_APP);
+
+		zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &t));
+	}
+
+	zassert_equal(drain_count_portnum(meshtastic_PortNum_NODEINFO_APP), 1,
+		      "a NodeInfo must outrank a Position/Telemetry sample — losing it "
+		      "costs the app a node, not a reading");
+}
+
+/* The bottom of the ladder, and the property the log-record comment in
+ * meshtastic_phoneapi.c has always claimed: diagnostics must never outrank the
+ * traffic they describe. A log burst is exactly what fills this queue now, so
+ * this is the case that stops the observability layer eating the observations. */
+ZTEST(phonequeue, test_a_log_burst_never_evicts_a_sample)
+{
+	meshtastic_FromRadio t = make_pkt(1, meshtastic_PortNum_TELEMETRY_APP);
+	struct meshtastic_sched_stats st;
+
+	zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &t));
+	for (uint32_t i = 0; i < Q_SIZE - 1U; i++) {
+		meshtastic_FromRadio l = make_log("filling");
+
+		zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &l));
+	}
+
+	/* Full. Every further log must be refused at the door rather than evict
+	 * the sample, even though the sample is older. */
+	for (uint32_t i = 0; i < Q_SIZE * 2U; i++) {
+		meshtastic_FromRadio l = make_log("more");
+
+		zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &l));
+	}
+
+	zassert_equal(drain_count_portnum(meshtastic_PortNum_TELEMETRY_APP), 1,
+		      "a log record must never displace the traffic it describes");
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.phone_drop_protected, 0, "nothing protected should have been dropped");
+}
+
+/* A queue status is the most replaceable frame there is — the next one
+ * supersedes it outright — so it goes before a log record does. */
+ZTEST(phonequeue, test_a_queue_status_is_sacrificed_before_a_log_record)
+{
+	meshtastic_FromRadio st_frame = make_status();
+	meshtastic_FromRadio keep = make_log("keep me");
+	uint8_t logs = 0;
+	struct meshtastic_phoneapi_frame f;
+
+	zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &st_frame));
+	zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &keep));
+	for (uint32_t i = 0; i < Q_SIZE - 2U; i++) {
+		meshtastic_FromRadio l = make_log("filling");
+
+		zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &l));
+	}
+
+	/* Full, with exactly one status in it. One more log evicts the status. */
+	meshtastic_FromRadio extra = make_log("extra");
+
+	zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &extra));
+
+	while (meshtastic_phoneapi_pop_frame(&api, &f)) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t s = pb_istream_from_buffer(f.data, f.len);
+
+		zassert_true(pb_decode(&s, meshtastic_FromRadio_fields, &from));
+		zassert_not_equal(from.which_payload_variant,
+				  meshtastic_FromRadio_queueStatus_tag,
+				  "the queue status should have been the first thing sacrificed");
+		if (from.which_payload_variant == meshtastic_FromRadio_log_record_tag) {
+			logs++;
+		}
+	}
+	zassert_equal(logs, Q_SIZE, "every log record should have survived");
+}
+
+/* At EQUAL rank the oldest goes, not the newcomer. For a repeating measurement
+ * the newer sample is strictly the better one to keep, and this is the case that
+ * would silently invert if the comparison were tightened to a strict less-than.
+ */
+ZTEST(phonequeue, test_at_equal_rank_the_newer_sample_wins)
+{
+	struct meshtastic_phoneapi_frame f;
+	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+	pb_istream_t s;
+
+	for (uint32_t i = 0; i < Q_SIZE; i++) {
+		meshtastic_FromRadio t = make_pkt(i + 1U, meshtastic_PortNum_TELEMETRY_APP);
+
+		zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &t));
+	}
+
+	meshtastic_FromRadio newer = make_pkt(99, meshtastic_PortNum_TELEMETRY_APP);
+
+	zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &newer));
+
+	zassert_true(meshtastic_phoneapi_pop_frame(&api, &f));
+	s = pb_istream_from_buffer(f.data, f.len);
+	zassert_true(pb_decode(&s, meshtastic_FromRadio_fields, &from));
+	zassert_equal(from.packet.id, 2U,
+		      "the oldest sample should have gone, not the incoming one");
 }
 
 ZTEST_SUITE(phonequeue, NULL, NULL, phonequeue_before, NULL, NULL);

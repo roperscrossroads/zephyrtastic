@@ -237,29 +237,39 @@ void meshtastic_phoneapi_current_frame_reset(struct meshtastic_phoneapi *api)
  * ephemeral queueStatus. Everything else (text, routing, admin, encrypted DMs,
  * my_info, rebooted) is protected from a burst evicting it before the phone
  * reads it. */
-static bool fromradio_droppable(const meshtastic_FromRadio *from)
+/* What this frame is worth against the others already queued. See
+ * enum meshtastic_phoneapi_evict_rank for why the ordering is what it is. */
+static uint8_t fromradio_evict_rank(const meshtastic_FromRadio *from)
 {
 	if (from->which_payload_variant == meshtastic_FromRadio_queueStatus_tag) {
-		return true;
+		return MT_PHONE_RANK_STATUS;
 	}
 	if (from->which_payload_variant == meshtastic_FromRadio_log_record_tag) {
-		/* Diagnostics must never outrank the traffic they describe. A log
-		 * burst that evicted a text message or an admin reply would be a
-		 * debugging aid that breaks the thing being debugged. */
-		return true;
+		return MT_PHONE_RANK_LOG;
 	}
 	if (from->which_payload_variant == meshtastic_FromRadio_packet_tag &&
 	    from->packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
 		switch (from->packet.decoded.portnum) {
 		case meshtastic_PortNum_POSITION_APP:
 		case meshtastic_PortNum_TELEMETRY_APP:
+			return MT_PHONE_RANK_SAMPLE;
 		case meshtastic_PortNum_NODEINFO_APP:
-			return true;
+			/* Was lumped in with the samples above, which is the whole of
+			 * parity item T-5. A lost sample costs a reading; a lost
+			 * NodeInfo costs the app a node. */
+			return MT_PHONE_RANK_IDENTITY;
 		default:
-			return false;
+			return MT_PHONE_RANK_KEEP;
 		}
 	}
-	return false;
+	return MT_PHONE_RANK_KEEP;
+}
+
+/* "Protected" survives for the drop statistic's purposes: a drop at KEEP is the
+ * one worth alarming about, and it is the one upstream would never do. */
+static bool rank_is_protected(uint8_t rank)
+{
+	return rank >= MT_PHONE_RANK_KEEP;
 }
 
 /* Remove the frame at tail-offset @p k (0 = oldest), preserving order. Caller
@@ -279,7 +289,7 @@ static void queue_evict_at(struct meshtastic_phoneapi *api, uint8_t k)
 /* Drop the oldest frame (tail). Caller holds api->lock. */
 static void queue_drop_oldest(struct meshtastic_phoneapi *api)
 {
-	meshtastic_sched_stat_phone_drop(api->queue[api->tail].protected);
+	meshtastic_sched_stat_phone_drop(rank_is_protected(api->queue[api->tail].evict_rank));
 	api->tail = (uint8_t)((api->tail + 1U) % api->queue_size);
 	api->count--;
 }
@@ -288,7 +298,7 @@ int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 					  const meshtastic_FromRadio *from)
 {
 	struct meshtastic_phoneapi_frame frame;
-	bool incoming_protected = !fromradio_droppable(from);
+	uint8_t rank = fromradio_evict_rank(from);
 	/* Capture the single eviction policy field once so it stays stable for the
 	 * whole decision below (a shell writer could otherwise flip it mid-way). */
 	enum meshtastic_sched_phone_evict evict = meshtastic_sched_get()->phone_evict;
@@ -298,33 +308,45 @@ int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 	if (ret < 0) {
 		return ret;
 	}
-	frame.protected = incoming_protected;
+	frame.evict_rank = rank;
 
 	k_mutex_lock(&api->lock, K_FOREVER);
 	if (api->count == api->queue_size) {
 		if (evict == MT_SCHED_PHONE_PROTECT) {
 			int victim = -1;
+			uint8_t victim_rank = MT_PHONE_RANK_KEEP;
 
+			/* The cheapest frame queued, oldest first among equals. Scanning
+			 * for a MINIMUM rather than for the first droppable frame is what
+			 * makes the ladder mean anything: with one bit, a NodeInfo and a
+			 * Telemetry were interchangeable victims and whichever arrived
+			 * first lost. */
 			for (uint8_t i = 0; i < api->count; i++) {
 				uint8_t idx = (uint8_t)((api->tail + i) % api->queue_size);
 
-				if (!api->queue[idx].protected) {
+				if (victim < 0 || api->queue[idx].evict_rank < victim_rank) {
 					victim = i;
-					break;
+					victim_rank = api->queue[idx].evict_rank;
 				}
 			}
 
-			if (victim >= 0) {
+			if (victim >= 0 && victim_rank < MT_PHONE_RANK_KEEP && victim_rank <= rank) {
+				/* Something cheaper than (or as cheap as) the newcomer is
+				 * queued. At equal rank the OLDEST goes: for a repeating
+				 * measurement the newer sample is the better one to keep. */
 				queue_evict_at(api, (uint8_t)victim);
 				meshtastic_sched_stat_phone_drop(false);
-				LOG_DBG("%s queue full, evicted a droppable frame", api->name);
-			} else if (!incoming_protected) {
-				/* All queued frames are protected and the newcomer is
-				 * droppable — drop the newcomer, not a protected frame. */
+				LOG_DBG("%s queue full, evicted rank-%u frame for a rank-%u",
+					api->name, (unsigned int)victim_rank, (unsigned int)rank);
+			} else if (rank < MT_PHONE_RANK_KEEP) {
+				/* Everything queued is worth more than the newcomer — either
+				 * all protected, or all of a higher rank. Drop the newcomer
+				 * rather than something more valuable. */
 				k_mutex_unlock(&api->lock);
 				meshtastic_sched_stat_phone_drop(false);
-				LOG_DBG("%s queue full (all protected), dropping incoming "
-					"background frame", api->name);
+				LOG_DBG("%s queue full of rank-%u-or-better frames, dropping "
+					"incoming rank-%u frame",
+					api->name, (unsigned int)victim_rank, (unsigned int)rank);
 				return 0;
 			} else {
 				/* Saturated with protected frames — last resort. */
@@ -558,9 +580,10 @@ int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, u
 		}
 		return 0;
 	}
-	/* Droppable: a later burst of anything may evict this. Diagnostics do not
-	 * outrank the traffic they describe. */
-	frame.protected = false;
+	/* Diagnostics do not outrank the traffic they describe, so a later burst of
+	 * almost anything may evict this — but it does outrank a queueStatus, which
+	 * the next one supersedes outright. */
+	frame.evict_rank = MT_PHONE_RANK_LOG;
 
 	for (uint8_t i = 0; i < count; i++) {
 		struct meshtastic_phoneapi *api = transports[i];
