@@ -21,6 +21,8 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/hwinfo.h>
+
+#include "meshtastic_bootlog.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/net/net_event.h>
 #include <zephyr/net/net_if.h>
@@ -150,6 +152,14 @@ static void log_boot_reset_cause(void)
 	struct meshtastic_hw_watchdog_crash_info hw_wdt_crash;
 	struct meshtastic_fatal_crash_info fatal_crash;
 
+#if defined(CONFIG_MESHTASTIC_BOOTLOG)
+	/* First, and on every target: warm-vs-cold plus the boot counter. The
+	 * breadcrumbs below say what the software was doing when it died; this says
+	 * whether the RAM rail held, which is the half that distinguishes a hang
+	 * from a power event — and the half nRF targets had no way to answer. */
+	meshtastic_bootlog_report();
+#endif
+
 #if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
 	LOG_INF("Reset-cause history (RTC-persistent across warm resets, oldest first):");
 	for (uint32_t i = 0; i < RESET_HISTORY_LEN; i++) {
@@ -259,12 +269,26 @@ int main(void)
 #if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
 	uint32_t cause = 0;
 
-	/* Read+clear now (the hwinfo register doesn't survive past the next reset);
-	 * append to the RTC-persistent ring immediately too, so it's captured even if
-	 * this boot never reaches NETLOG. The matching LOG_INF of the full history
-	 * fires later, once IPv4 is up — see log_boot_reset_cause(). */
+	/* The cause comes from bootlog, NOT from hwinfo directly. bootlog reads and
+	 * clears the register at PRE_KERNEL_1, long before this runs, so a second
+	 * hwinfo_get_reset_cause() here would read a register that has already been
+	 * consumed and quietly record 0 for every boot — turning this history into a
+	 * column of zeroes with no error to notice.
+	 *
+	 * Still appended to the RTC ring immediately, so it is captured even if this
+	 * boot never reaches a log backend. The matching LOG_INF of the full history
+	 * fires later — see log_boot_reset_cause(). */
+#if defined(CONFIG_MESHTASTIC_BOOTLOG)
+	{
+		struct meshtastic_boot_record rec;
+
+		meshtastic_bootlog_this_boot(&rec);
+		cause = rec.cause;
+	}
+#else
 	(void)hwinfo_get_reset_cause(&cause);
 	(void)hwinfo_clear_reset_cause();
+#endif
 
 	if (rtc_magic != RESET_HISTORY_MAGIC) {
 		/* Uninitialized RTC memory: first boot ever, or the RTC power domain

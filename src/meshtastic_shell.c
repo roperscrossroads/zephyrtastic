@@ -48,6 +48,7 @@
 #include "meshtastic_hlc.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_bootlog.h"
 #include "meshtastic_preset.h"
 #include "meshtastic_region_presets.h"
 #include "meshtastic_powermon.h"
@@ -3156,6 +3157,66 @@ static int cmd_preset(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+#if defined(CONFIG_MESHTASTIC_BOOTLOG)
+/* `meshtastic resets` — the retrieval half of the boot history.
+ *
+ * The boot-time report goes to whatever log backend happens to be live at the
+ * time, which on this fleet is often nobody: there is no netlog, and a console
+ * only exists while something is attached. A reboot at 03:50 is therefore
+ * unobserved by construction. This is how you ask afterwards.
+ */
+static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_boot_record hist[CONFIG_MESHTASTIC_BOOTLOG_ENTRIES];
+	struct meshtastic_boot_record now;
+	char cbuf[64];
+	size_t n;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_bootlog_this_boot(&now);
+
+	shell_print(sh, "this boot   #%u, %s", now.boot_num,
+		    (now.flags & MESHTASTIC_BOOT_F_WARM)
+			    ? "WARM reset (retained RAM survived)"
+			    : "retained RAM LOST (power cycle, brownout, or a RAM-clearing reset)");
+	if (now.flags & MESHTASTIC_BOOT_F_WARM) {
+		shell_print(sh, "previous    ran %u s before it ended", now.prev_uptime_s);
+	}
+	if (now.flags & MESHTASTIC_BOOT_F_CAUSE_OK) {
+		shell_print(sh, "cause       0x%08x  %s", now.cause,
+			    meshtastic_bootlog_cause_str(now.cause, cbuf, sizeof(cbuf)));
+	} else {
+		/* Deliberately not "cause: none". Claiming a reading we did not get is
+		 * how a diagnostic starts lying: on this board the bootloader consumes
+		 * the reset-reason register before the app ever runs. */
+		shell_print(sh, "cause       unavailable — register empty, or consumed by the "
+				"bootloader before the app ran");
+	}
+	shell_print(sh, "uptime      %lld s", k_uptime_seconds());
+
+	n = meshtastic_bootlog_history(hist, ARRAY_SIZE(hist));
+	if (n == 0U) {
+		shell_print(sh, "");
+		shell_print(sh, "no retained history (this is boot 1 of a fresh one)");
+		return 0;
+	}
+
+	shell_print(sh, "");
+	shell_print(sh, "%-6s %-5s %-8s %s", "boot", "kind", "ran(s)", "cause");
+	for (size_t i = 0; i < n; i++) {
+		shell_print(sh, "#%-5u %-5s %-8u 0x%08x", hist[i].boot_num,
+			    (hist[i].flags & MESHTASTIC_BOOT_F_WARM) ? "warm" : "COLD",
+			    hist[i].prev_uptime_s, hist[i].cause);
+	}
+	shell_print(sh, "");
+	shell_print(sh, "A COLD row means retained RAM did not survive into that boot, so "
+			"everything before it is gone.");
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_BOOTLOG */
+
 static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc == 1U) {
@@ -4290,6 +4351,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 			     "or the TX-enable switch (applies live).",
 			     "[preset <name>] [tx on|off]"),
 		  cmd_lora),
+#if defined(CONFIG_MESHTASTIC_BOOTLOG)
+	SHELL_CMD(resets, NULL,
+		  SHELL_HELP("Why this node last rebooted, and the retained boot history.",
+			     NULL),
+		  cmd_resets),
+#endif
 	SHELL_CMD(preset, NULL,
 		  SHELL_HELP("Live preset switching: what would hold a scheduled hop off, "
 			     "and the counters for the ones that were.",

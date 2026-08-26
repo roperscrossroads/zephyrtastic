@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_BOOTLOG
+	bool "Boot history in retained RAM (why did it reboot?)"
+	default y
+	help
+	  Records one small entry per boot in memory that survives a warm reset:
+	  a boot counter, the hardware reset cause where the SoC will give one,
+	  and how long the previous run lasted.
+
+	  The load-bearing part is not the reset-cause register — on some boards
+	  the bootloader consumes it before the application runs — but whether
+	  the retained memory validated at all. If it did, the CPU restarted and
+	  the RAM rail held: a watchdog, a fault, a software reboot. If it did
+	  not, power was lost. That distinction is otherwise unavailable, and
+	  without it a soak cannot tell a firmware hang from a power event.
+
+	  Costs about 100 bytes of retained RAM and a handful of stores per boot.
+
+if MESHTASTIC_BOOTLOG
+
+config MESHTASTIC_BOOTLOG_ENTRIES
+	int "Boots retained"
+	default 8
+	range 2 64
+	help
+	  History depth. Twelve bytes each. Eight covers a boot loop long enough
+	  to see its shape without keeping a log nobody reads.
+
+endif # MESHTASTIC_BOOTLOG

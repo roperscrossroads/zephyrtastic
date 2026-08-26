@@ -29,6 +29,7 @@
 
 #include <zephyr/meshtastic/diagnostics.h>
 
+#include "meshtastic_bootlog.h"
 #include "meshtastic_core.h" /* meshtastic_radio_cad_/agc_ counter getters */
 #include "meshtastic_watchdog.h"
 
@@ -327,6 +328,14 @@ static void heartbeat_work_fn(struct k_work *work)
 		STATS_INC(mt_wdt, sysworkq_feeds);
 		(void)task_wdt_feed(sysworkq_channel_id);
 	}
+
+	/* Ride an existing aliveness tick rather than adding a wakeup of our own:
+	 * reaching this work item IS the definition of a healthy boot, which is
+	 * exactly what the next boot wants to know the duration of. One halfword
+	 * store into retained RAM. */
+#if defined(CONFIG_MESHTASTIC_BOOTLOG)
+	meshtastic_bootlog_heartbeat((uint32_t)k_uptime_seconds());
+#endif
 
 	(void)k_work_reschedule(&heartbeat_work, K_MSEC(CONFIG_MESHTASTIC_WATCHDOG_FEED_INTERVAL_MS));
 }

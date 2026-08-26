@@ -29,6 +29,7 @@
 #include <cmsis_core.h>
 #endif
 
+#include "meshtastic_bootlog.h"
 #include "meshtastic_dfu_trigger.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -129,6 +130,9 @@ static void boot_guard_feed(struct k_work *work)
 
 	/* Reaching the system workqueue IS the definition of a healthy boot. */
 	boot_guard_attempts = 0U;
+#if defined(CONFIG_MESHTASTIC_BOOTLOG)
+	meshtastic_bootlog_heartbeat((uint32_t)k_uptime_seconds());
+#endif
 	NRF_WDT->RR[0] = WDT_RR_RR_Reload;
 	(void)k_work_reschedule(&boot_guard_work,
 				K_SECONDS(CONFIG_MESHTASTIC_DFU_BOOT_GUARD_TIMEOUT_S / 3U));
