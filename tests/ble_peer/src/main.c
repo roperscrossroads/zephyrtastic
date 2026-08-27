@@ -20,20 +20,29 @@ ZTEST_SUITE(ble_peer_codec, NULL, NULL, NULL, NULL, NULL);
 ZTEST(ble_peer_codec, test_beat_roundtrip)
 {
 	struct meshtastic_ble_peer_beat in = {
-		.flags = MESHTASTIC_BLE_PEER_FLAG_HELLO,
+		.flags = MESHTASTIC_BLE_PEER_FLAG_HELLO | MESHTASTIC_BLE_PEER_FLAG_COURIER,
+		.class_id = 2U,
 		.node_num = 0x699C0E88U,
 		.seq = 0x01020304U,
 		.uptime_s = 86400U,
+		.fw_major = 0U,
+		.fw_minor = 2U,
+		.fw_revision = 0x0105U,
 	};
 	struct meshtastic_ble_peer_beat out;
 	uint8_t buf[MESHTASTIC_BLE_PEER_BEAT_LEN];
 
 	meshtastic_ble_peer_beat_encode(&in, buf);
 	zassert_ok(meshtastic_ble_peer_beat_decode(buf, sizeof(buf), &out));
+	zassert_equal(out.version, MESHTASTIC_BLE_PEER_BEAT_VERSION);
 	zassert_equal(out.flags, in.flags);
+	zassert_equal(out.class_id, in.class_id);
 	zassert_equal(out.node_num, in.node_num);
 	zassert_equal(out.seq, in.seq);
 	zassert_equal(out.uptime_s, in.uptime_s);
+	zassert_equal(out.fw_major, in.fw_major);
+	zassert_equal(out.fw_minor, in.fw_minor);
+	zassert_equal(out.fw_revision, in.fw_revision);
 }
 
 /* Pin the exact bytes, not just the roundtrip: the other end of this link may
@@ -41,16 +50,21 @@ ZTEST(ble_peer_codec, test_beat_roundtrip)
 ZTEST(ble_peer_codec, test_beat_wire_bytes)
 {
 	struct meshtastic_ble_peer_beat in = {
-		.flags = 0U,
+		.flags = MESHTASTIC_BLE_PEER_FLAG_TESTBOOT,
+		.class_id = 1U,
 		.node_num = 0x04E14BB4U,
 		.seq = 7U,
 		.uptime_s = 0x00010203U,
+		.fw_major = 0U,
+		.fw_minor = 2U,
+		.fw_revision = 5U,
 	};
 	static const uint8_t expect[MESHTASTIC_BLE_PEER_BEAT_LEN] = {
-		0x4D, 0x01, 0x00, 0x00,             /* magic, version, flags, reserved */
+		0x4D, 0x02, 0x04, 0x01,             /* magic, version 2, flags TESTBOOT, class 1 */
 		0xB4, 0x4B, 0xE1, 0x04,             /* node_num LE */
 		0x07, 0x00, 0x00, 0x00,             /* seq LE */
 		0x03, 0x02, 0x01, 0x00,             /* uptime_s LE */
+		0x00, 0x02, 0x05, 0x00,             /* fw 0.2.5: major, minor, revision LE */
 	};
 	uint8_t buf[MESHTASTIC_BLE_PEER_BEAT_LEN];
 
@@ -66,7 +80,8 @@ ZTEST(ble_peer_codec, test_beat_decode_rejects_bad_frames)
 
 	meshtastic_ble_peer_beat_encode(&in, buf);
 
-	zassert_equal(meshtastic_ble_peer_beat_decode(buf, sizeof(buf) - 1U, &out), -EINVAL);
+	zassert_equal(meshtastic_ble_peer_beat_decode(buf, MESHTASTIC_BLE_PEER_BEAT_V1_LEN - 1U,
+						      &out), -EINVAL);
 	zassert_equal(meshtastic_ble_peer_beat_decode(buf, 0U, &out), -EINVAL);
 
 	buf[0] = 0x00U;
@@ -79,9 +94,38 @@ ZTEST(ble_peer_codec, test_beat_decode_rejects_bad_frames)
 	zassert_equal(meshtastic_ble_peer_beat_decode(buf, sizeof(buf), &out), -ENOTSUP);
 	buf[1] = MESHTASTIC_BLE_PEER_BEAT_VERSION;
 
-	/* The reserved byte is ignored, not validated (forward compat). */
-	buf[3] = 0xAAU;
-	zassert_ok(meshtastic_ble_peer_beat_decode(buf, sizeof(buf), &out));
+	/* A version-2 frame truncated to version 1's length still decodes the
+	 * version-1 fields; the version-2 fields read as unknown, not as garbage. */
+	zassert_ok(meshtastic_ble_peer_beat_decode(buf, MESHTASTIC_BLE_PEER_BEAT_V1_LEN, &out));
+	zassert_equal(out.version, MESHTASTIC_BLE_PEER_BEAT_VERSION);
+	zassert_equal(out.class_id, 0U);
+	zassert_equal(out.fw_major, 0U);
+	zassert_equal(out.fw_revision, 0U);
+}
+
+/* What an old node on the bench sends: 16 bytes, version 1, byte 3 reserved.
+ * It must decode — the link must form — with class and firmware "unknown",
+ * and byte 3 must NOT be read as a class. */
+ZTEST(ble_peer_codec, test_beat_decode_accepts_a_version1_sender)
+{
+	static const uint8_t v1[MESHTASTIC_BLE_PEER_BEAT_V1_LEN] = {
+		0x4D, 0x01, 0x01, 0xAA,             /* magic, version 1, HELLO, reserved junk */
+		0x14, 0x21, 0x4C, 0x08,             /* node_num LE */
+		0x09, 0x00, 0x00, 0x00,             /* seq LE */
+		0x05, 0x00, 0x00, 0x00,             /* uptime_s LE */
+	};
+	struct meshtastic_ble_peer_beat out;
+
+	zassert_ok(meshtastic_ble_peer_beat_decode(v1, sizeof(v1), &out));
+	zassert_equal(out.version, 1U);
+	zassert_equal(out.flags, MESHTASTIC_BLE_PEER_FLAG_HELLO);
+	zassert_equal(out.node_num, 0x084C2114U);
+	zassert_equal(out.seq, 9U);
+	zassert_equal(out.uptime_s, 5U);
+	zassert_equal(out.class_id, 0U, "a version-1 reserved byte is not a class");
+	zassert_equal(out.fw_major, 0U);
+	zassert_equal(out.fw_minor, 0U);
+	zassert_equal(out.fw_revision, 0U);
 }
 
 /* The rule that makes the first layout change the last flag day: a newer
@@ -94,36 +138,42 @@ ZTEST(ble_peer_codec, test_beat_decode_is_forward_compatible)
 {
 	struct meshtastic_ble_peer_beat in = {
 		.flags = MESHTASTIC_BLE_PEER_FLAG_HELLO,
+		.class_id = 1U,
 		.node_num = 0x084C2114U,
 		.seq = 9U,
 		.uptime_s = 5U,
+		.fw_major = 0U,
+		.fw_minor = 3U,
+		.fw_revision = 0U,
 	};
 	struct meshtastic_ble_peer_beat out;
 	uint8_t buf[MESHTASTIC_BLE_PEER_BEAT_LEN + 4U];
 
 	meshtastic_ble_peer_beat_encode(&in, buf);
 	buf[1] = MESHTASTIC_BLE_PEER_BEAT_VERSION + 1U;
-	buf[3] = 0x01U;
 	memset(&buf[MESHTASTIC_BLE_PEER_BEAT_LEN], 0xAA, 4U);
 
 	zassert_ok(meshtastic_ble_peer_beat_decode(buf, sizeof(buf), &out));
+	zassert_equal(out.version, MESHTASTIC_BLE_PEER_BEAT_VERSION + 1U);
 	zassert_equal(out.flags, in.flags);
+	zassert_equal(out.class_id, in.class_id);
 	zassert_equal(out.node_num, in.node_num);
 	zassert_equal(out.seq, in.seq);
 	zassert_equal(out.uptime_s, in.uptime_s);
+	zassert_equal(out.fw_minor, in.fw_minor);
 
 	/* "Any newer", including one this code will never define. */
 	buf[1] = 0xFFU;
 	zassert_ok(meshtastic_ble_peer_beat_decode(buf, sizeof(buf), &out));
 	zassert_equal(out.node_num, in.node_num);
 
-	/* Newer AND exactly the old length is fine too (a version bump that
-	 * only redefines the reserved byte). */
+	/* Newer AND exactly this build's length is fine too. */
 	zassert_ok(meshtastic_ble_peer_beat_decode(buf, MESHTASTIC_BLE_PEER_BEAT_LEN, &out));
+	zassert_equal(out.class_id, in.class_id);
 
 	/* But newer does not excuse a frame shorter than version 1's. */
-	zassert_equal(meshtastic_ble_peer_beat_decode(buf, MESHTASTIC_BLE_PEER_BEAT_LEN - 1U, &out),
-		      -EINVAL);
+	zassert_equal(meshtastic_ble_peer_beat_decode(buf, MESHTASTIC_BLE_PEER_BEAT_V1_LEN - 1U,
+						      &out), -EINVAL);
 }
 
 ZTEST(ble_peer_codec, test_adv_roundtrip_and_wire_bytes)

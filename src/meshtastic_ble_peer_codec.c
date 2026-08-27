@@ -21,16 +21,30 @@ static uint32_t get_le32(const uint8_t *p)
 	       ((uint32_t)p[3] << 24);
 }
 
+static void put_le16(uint8_t *p, uint16_t v)
+{
+	p[0] = (uint8_t)(v & 0xFFU);
+	p[1] = (uint8_t)((v >> 8) & 0xFFU);
+}
+
+static uint16_t get_le16(const uint8_t *p)
+{
+	return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
 void meshtastic_ble_peer_beat_encode(const struct meshtastic_ble_peer_beat *beat,
 				     uint8_t buf[MESHTASTIC_BLE_PEER_BEAT_LEN])
 {
 	buf[0] = MESHTASTIC_BLE_PEER_BEAT_MAGIC;
 	buf[1] = MESHTASTIC_BLE_PEER_BEAT_VERSION;
 	buf[2] = beat->flags;
-	buf[3] = 0U;
+	buf[3] = beat->class_id;
 	put_le32(&buf[4], beat->node_num);
 	put_le32(&buf[8], beat->seq);
 	put_le32(&buf[12], beat->uptime_s);
+	buf[16] = beat->fw_major;
+	buf[17] = beat->fw_minor;
+	put_le16(&buf[18], beat->fw_revision);
 }
 
 int meshtastic_ble_peer_beat_decode(const uint8_t *buf, size_t len,
@@ -38,20 +52,35 @@ int meshtastic_ble_peer_beat_decode(const uint8_t *buf, size_t len,
 {
 	/* Shorter than version 1 is malformed; longer is a newer sender whose
 	 * appended fields this decoder does not know — read what it does. */
-	if (len < MESHTASTIC_BLE_PEER_BEAT_LEN) {
+	if (len < MESHTASTIC_BLE_PEER_BEAT_V1_LEN) {
 		return -EINVAL;
 	}
 	if (buf[0] != MESHTASTIC_BLE_PEER_BEAT_MAGIC) {
 		return -EBADMSG;
 	}
-	if (buf[1] < MESHTASTIC_BLE_PEER_BEAT_VERSION) {
+	if (buf[1] < 1U) {
 		return -ENOTSUP;
 	}
 
+	beat->version = buf[1];
 	beat->flags = buf[2];
 	beat->node_num = get_le32(&buf[4]);
 	beat->seq = get_le32(&buf[8]);
 	beat->uptime_s = get_le32(&buf[12]);
+
+	/* Version-2 fields: only when the sender claims them AND sent them. A
+	 * version-1 sender's byte 3 was reserved, so it is not a class. */
+	if (buf[1] >= 2U && len >= MESHTASTIC_BLE_PEER_BEAT_LEN) {
+		beat->class_id = buf[3];
+		beat->fw_major = buf[16];
+		beat->fw_minor = buf[17];
+		beat->fw_revision = get_le16(&buf[18]);
+	} else {
+		beat->class_id = 0U;
+		beat->fw_major = 0U;
+		beat->fw_minor = 0U;
+		beat->fw_revision = 0U;
+	}
 	return 0;
 }
 

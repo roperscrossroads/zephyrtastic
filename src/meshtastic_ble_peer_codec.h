@@ -20,17 +20,31 @@
  */
 
 /*
- * The beat: 16 bytes, all little-endian, deliberately inside the default
- * 23-byte ATT MTU so the link never depends on MTU exchange succeeding (the
- * flakiest part of the existing phone path — meshtastic_ble.c mtu_exchange).
+ * The beat: 20 bytes (version 2), all little-endian, exactly the guaranteed
+ * payload of the default 23-byte ATT MTU so the link never depends on MTU
+ * exchange succeeding (the flakiest part of the existing phone path —
+ * meshtastic_ble.c mtu_exchange).
  *
  *   [0]      magic     0x4D
- *   [1]      version   1
- *   [2]      flags     bit0 = HELLO (link start: receiver resyncs its seq)
- *   [3]      reserved  0 on encode, ignored on decode
+ *   [1]      version   2
+ *   [2]      flags     bit0 = HELLO    (link start: receiver resyncs its seq)
+ *                      bit1 = HOLD     (do not push firmware to me right now)
+ *                      bit2 = TESTBOOT (running an image MCUboot has not
+ *                                       confirmed — it may still revert)
+ *                      bit3 = COURIER  (I carry an SMP client: I can push)
+ *   [3]      class     fleet image class (CONFIG_MESHTASTIC_FLEET_CLASS;
+ *                      0 = unset). Was "reserved" in version 1.
  *   [4..7]   node_num  LE
  *   [8..11]  seq       LE — per-link, from 0, so gaps PROVE loss
  *   [12..15] uptime_s  LE — sender uptime in seconds
+ *   --- version 2 appends (a version-1 receiver ignores them) ---
+ *   [16]     fw major  the running image's MCUboot header version, the
+ *   [17]     fw minor  bytes in the header's own order so a courier can
+ *   [18..19] fw rev LE compare them with no arithmetic. All 0 = unknown
+ *                      (not an MCUboot-managed image).
+ *
+ * Version 1 was the first 16 bytes with byte 3 reserved and flags bit0 only.
+ * A version-1 sender's beat decodes here with class and fw all zero.
  *
  * FORWARD COMPATIBILITY (the rule since the version-1 decoder, so that the
  * first layout change is also the last flag day): a later version may ONLY
@@ -40,16 +54,26 @@
  * rest. Version 0 is not a version and is refused, as is anything shorter
  * than the version-1 frame.
  */
-#define MESHTASTIC_BLE_PEER_BEAT_LEN     16U
+#define MESHTASTIC_BLE_PEER_BEAT_V1_LEN  16U /* the shortest frame any decoder accepts */
+#define MESHTASTIC_BLE_PEER_BEAT_LEN     20U /* what this build encodes (version 2) */
 #define MESHTASTIC_BLE_PEER_BEAT_MAGIC   0x4DU
-#define MESHTASTIC_BLE_PEER_BEAT_VERSION 1U
-#define MESHTASTIC_BLE_PEER_FLAG_HELLO   0x01U
+#define MESHTASTIC_BLE_PEER_BEAT_VERSION 2U
+#define MESHTASTIC_BLE_PEER_FLAG_HELLO    0x01U
+#define MESHTASTIC_BLE_PEER_FLAG_HOLD     0x02U
+#define MESHTASTIC_BLE_PEER_FLAG_TESTBOOT 0x04U
+#define MESHTASTIC_BLE_PEER_FLAG_COURIER  0x08U
 
 struct meshtastic_ble_peer_beat {
+	uint8_t version;  /* the frame version this beat carried (set by decode; encode
+			   * ignores it and writes MESHTASTIC_BLE_PEER_BEAT_VERSION) */
 	uint8_t flags;
+	uint8_t class_id;
 	uint32_t node_num;
 	uint32_t seq;
 	uint32_t uptime_s;
+	uint8_t fw_major;
+	uint8_t fw_minor;
+	uint16_t fw_revision;
 };
 
 void meshtastic_ble_peer_beat_encode(const struct meshtastic_ble_peer_beat *beat,
@@ -57,9 +81,10 @@ void meshtastic_ble_peer_beat_encode(const struct meshtastic_ble_peer_beat *beat
 
 /*
  * Returns 0, -EINVAL on a frame shorter than version 1's, -EBADMSG on wrong
- * magic, -ENOTSUP on version 0. A longer frame or a newer version decodes the
- * version-1 fields and ignores the rest (see the layout comment). `beat` is
- * untouched on error.
+ * magic, -ENOTSUP on version 0. The version-2 fields are read when the sender
+ * says version >= 2 AND the frame is long enough to hold them; otherwise they
+ * are zero. A longer frame or a newer version decodes what this build knows
+ * and ignores the rest (see the layout comment). `beat` is untouched on error.
  */
 int meshtastic_ble_peer_beat_decode(const uint8_t *buf, size_t len,
 				    struct meshtastic_ble_peer_beat *beat);
