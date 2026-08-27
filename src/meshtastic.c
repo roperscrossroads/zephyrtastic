@@ -104,6 +104,13 @@ int meshtastic_display_init(void);
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_MESH_NODE_T114
 #elif defined(CONFIG_BOARD_RAK4631)
 #define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_RAK4631
+/* Seeed XIAO nRF52840 (+ Wio-SX1262 shield) — upstream's enum for exactly this
+ * pairing. Covers the plain and the Sense variant (one BOARD symbol). Before
+ * this case existed the kits fell through to PRIVATE_HW, so a peer's NodeDB
+ * could not tell a XIAO from unknown hardware — which matters once an image
+ * class is checked against hw_model before a firmware push. */
+#elif defined(CONFIG_BOARD_XIAO_BLE)
+#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_XIAO_NRF52_KIT
 #else
 /* An unmapped board advertises PRIVATE_HW to every peer and to the phone app.
  * That is the honest answer for hardware upstream has no enum for, but it is the
