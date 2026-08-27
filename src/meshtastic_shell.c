@@ -3387,6 +3387,14 @@ static int cmd_blepeer_status(const struct shell *sh, size_t argc, char **argv)
 		}
 		(void)meshtastic_ble_slot_info(i, addr, sizeof(addr), &age_ms);
 		if (meshtastic_ble_peer_rx_get(i, &rx, &last_ms)) {
+			/* The version-2 columns: what the neighbour runs and whether
+			 * it may be pushed to. A version-1 sender shows v1 and dashes. */
+			char flags[5] = {
+				(rx.last.flags & MESHTASTIC_BLE_PEER_FLAG_HOLD) ? 'H' : '-',
+				(rx.last.flags & MESHTASTIC_BLE_PEER_FLAG_TESTBOOT) ? 'T' : '-',
+				(rx.last.flags & MESHTASTIC_BLE_PEER_FLAG_COURIER) ? 'C' : '-',
+				'\0', '\0'};
+
 			shell_print(sh,
 				    "slot %u: %-12s %s age=%llds rx beats=%u lost=%u resyncs=%u "
 				    "from=0x%08x last=%llds ago",
@@ -3394,6 +3402,14 @@ static int cmd_blepeer_status(const struct shell *sh, size_t argc, char **argv)
 				    (long long)(age_ms / 1000), rx.beats, rx.lost, rx.resyncs,
 				    rx.last.node_num,
 				    (long long)((k_uptime_get() - last_ms) / 1000));
+			if (rx.last.version >= 2U) {
+				shell_print(sh, "        beat v%u fw=%u.%u.%u class=%u flags=%s",
+					    rx.last.version, rx.last.fw_major, rx.last.fw_minor,
+					    rx.last.fw_revision, rx.last.class_id, flags);
+			} else {
+				shell_print(sh, "        beat v%u fw=? class=? flags=? (pre-fleet sender)",
+					    rx.last.version);
+			}
 		} else {
 			shell_print(sh, "slot %u: %-12s %s age=%llds%s", i, blepeer_kind_str(kind),
 				    addr, (long long)(age_ms / 1000),
@@ -3500,6 +3516,24 @@ static int cmd_blepeer_disconnect(const struct shell *sh, size_t argc, char **ar
 	return 0;
 }
 
+static int cmd_blepeer_hold(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc >= 2) {
+		if (strcmp(argv[1], "on") == 0) {
+			meshtastic_ble_peer_hold_set(true);
+		} else if (strcmp(argv[1], "off") == 0) {
+			meshtastic_ble_peer_hold_set(false);
+		} else {
+			shell_error(sh, "usage: blepeer hold [on|off]");
+			return -EINVAL;
+		}
+	}
+	shell_print(sh, "hold: %s (HOLD %s in this node's beats)",
+		    meshtastic_ble_peer_hold_get() ? "on" : "off",
+		    meshtastic_ble_peer_hold_get() ? "set" : "clear");
+	return 0;
+}
+
 static int cmd_blepeer_beat(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -3524,6 +3558,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  cmd_blepeer_disconnect),
 	SHELL_CMD(beat, NULL, SHELL_HELP("Send one heartbeat now on every active link.", NULL),
 		  cmd_blepeer_beat),
+	SHELL_CMD(hold, NULL,
+		  SHELL_HELP("Show or set HOLD (\"do not push firmware to me\") in this node's beats.",
+			     "[on|off]"),
+		  cmd_blepeer_hold),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_BLE_PEER */
 

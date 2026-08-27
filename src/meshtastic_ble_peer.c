@@ -40,8 +40,12 @@
 
 #include "meshtastic_ble_peer.h"
 #include "meshtastic_ble_registry.h"
+#include "meshtastic_build.h"
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
+#if defined(CONFIG_MCUBOOT_IMG_MANAGER)
+#include <zephyr/dfu/mcuboot.h>
+#endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -102,6 +106,10 @@ static struct {
 	bool notify_enabled;
 	bool hello_pending;
 	uint32_t tx_seq;
+	/* HOLD in every outgoing beat: "do not push firmware to me right now".
+	 * Set by the operator (blepeer hold on) and, later, by the node's own
+	 * update machinery while it is mid-transfer. */
+	bool hold;
 	/* RX (write) side, per connection registry slot. */
 	struct meshtastic_ble_peer_rx rx[MESHTASTIC_BLE_REG_SLOTS];
 	int64_t rx_last_ms[MESHTASTIC_BLE_REG_SLOTS]; /* k_uptime at last beat */
@@ -273,6 +281,68 @@ BT_GATT_SERVICE_DEFINE(meshtastic_peer_svc,
 					      BT_GATT_PERM_WRITE, NULL, write_frame, NULL),
 		       BT_GATT_CCC(frame_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE));
 
+/*
+ * What this node says about itself in every beat (version 2 of the frame):
+ * its image class, the running image's MCUboot version, and the three fleet
+ * flags. Called with peer_lock held (it reads peer.hold). The version is read
+ * from the slot0 header once — it cannot change while this image runs; the
+ * confirmed/test state is re-read each beat because it does change (the
+ * image confirms itself, or the operator does), and a courier watches for
+ * exactly that edge.
+ */
+static void beat_fill_identity(struct meshtastic_ble_peer_beat *beat, bool hello)
+{
+	static bool fw_read;
+	static struct meshtastic_image_version fw;
+
+	if (!fw_read) {
+		if (meshtastic_image_version(&fw) != 0) {
+			memset(&fw, 0, sizeof(fw));
+		}
+		fw_read = true;
+	}
+
+	beat->version = MESHTASTIC_BLE_PEER_BEAT_VERSION;
+	beat->flags = hello ? MESHTASTIC_BLE_PEER_FLAG_HELLO : 0U;
+	if (peer.hold) {
+		beat->flags |= MESHTASTIC_BLE_PEER_FLAG_HOLD;
+	}
+#if defined(CONFIG_MCUBOOT_IMG_MANAGER)
+	if (!boot_is_img_confirmed()) {
+		beat->flags |= MESHTASTIC_BLE_PEER_FLAG_TESTBOOT;
+	}
+#endif
+	if (IS_ENABLED(CONFIG_MESHTASTIC_SMP_CENTRAL)) {
+		beat->flags |= MESHTASTIC_BLE_PEER_FLAG_COURIER;
+	}
+	beat->class_id = (uint8_t)CONFIG_MESHTASTIC_FLEET_CLASS;
+	beat->node_num = mt.node_id;
+	beat->uptime_s = (uint32_t)(k_uptime_get() / MSEC_PER_SEC);
+	beat->fw_major = fw.major;
+	beat->fw_minor = fw.minor;
+	beat->fw_revision = fw.revision;
+}
+
+void meshtastic_ble_peer_hold_set(bool on)
+{
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	peer.hold = on;
+	k_mutex_unlock(&peer_lock);
+	/* Say so at once rather than on the next scheduled beat: a courier
+	 * that is about to start a job should see the bit within a second. */
+	meshtastic_ble_peer_beat_now();
+}
+
+bool meshtastic_ble_peer_hold_get(void)
+{
+	bool on;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	on = peer.hold;
+	k_mutex_unlock(&peer_lock);
+	return on;
+}
+
 int meshtastic_ble_peer_send_beat(void)
 {
 	uint8_t buf[MESHTASTIC_BLE_PEER_BEAT_LEN];
@@ -284,10 +354,8 @@ int meshtastic_ble_peer_send_beat(void)
 		k_mutex_unlock(&peer_lock);
 		return -ENOTCONN;
 	}
-	beat.flags = peer.hello_pending ? MESHTASTIC_BLE_PEER_FLAG_HELLO : 0U;
-	beat.node_num = mt.node_id;
+	beat_fill_identity(&beat, peer.hello_pending);
 	beat.seq = peer.tx_seq;
-	beat.uptime_s = (uint32_t)(k_uptime_get() / MSEC_PER_SEC);
 	k_mutex_unlock(&peer_lock);
 
 	meshtastic_ble_peer_beat_encode(&beat, buf);
@@ -784,10 +852,8 @@ static int central_send_beat(void)
 	}
 	conn = bt_conn_ref(central.conn);
 	handle = central.value_handle;
-	beat.flags = central.hello_pending ? MESHTASTIC_BLE_PEER_FLAG_HELLO : 0U;
-	beat.node_num = mt.node_id;
+	beat_fill_identity(&beat, central.hello_pending);
 	beat.seq = central.tx_seq;
-	beat.uptime_s = (uint32_t)(k_uptime_get() / MSEC_PER_SEC);
 	k_mutex_unlock(&peer_lock);
 
 	meshtastic_ble_peer_beat_encode(&beat, buf);

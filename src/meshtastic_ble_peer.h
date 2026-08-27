@@ -40,6 +40,12 @@ bool meshtastic_ble_peer_rx_get(unsigned int index, struct meshtastic_ble_peer_r
 /* Poke the beat engine: one immediate beat on every active link. */
 void meshtastic_ble_peer_beat_now(void);
 
+/* The HOLD flag in this node's beats: "do not push firmware to me now". A
+ * courier treats a holding neighbour as not a candidate. Setting it beats
+ * immediately so the change is on the air within a second. */
+void meshtastic_ble_peer_hold_set(bool on);
+bool meshtastic_ble_peer_hold_get(void);
+
 /* ---- frame channel (agents-xhli.1, PEER-TRANSPORT-DESIGN.md §2) ---- */
 
 /* Notify one wire frame to the subscribed peer central, chunked at the
