@@ -44,3 +44,47 @@ config MESHTASTIC_OTA_CONFIRM_DELAY_SEC
 	depends on MESHTASTIC_OTA_AUTOCONFIRM
 
 endif # MESHTASTIC_OTA
+
+config MESHTASTIC_SMP_CENTRAL
+	bool "SMP (mcumgr) client over BLE: this node manages a peer node"
+	depends on BT && BOOTLOADER_MCUBOOT
+	select MCUMGR
+	select NET_BUF
+	select ZCBOR
+	select CRC
+	select SMP_CLIENT
+	select MCUMGR_GRP_IMG_CLIENT
+	select MCUMGR_GRP_OS_CLIENT
+	select BT_CENTRAL
+	select BT_GATT_CLIENT
+	select FLASH_MAP
+	help
+	  The other side of overlay-ota-ble.conf. Zephyr has an SMP server over
+	  BLE and an SMP client core, but no client TRANSPORT that talks to that
+	  server from another Zephyr node. This adds one: the node connects as a
+	  BLE central to a peer's SMP GATT service (the same service smpmgr --ble
+	  uses) and runs the same img_mgmt / os_mgmt commands a laptop would —
+	  upload, mark test, reset, confirm — so a node can update its neighbour
+	  with no host in the middle. The peer needs no new firmware.
+
+	  The image it pushes is whatever is staged in THIS node's slot1 (a
+	  signed image uploaded there and never marked for test, which MCUboot
+	  leaves alone) — the node is a courier. Shell: `smpc`.
+
+if MESHTASTIC_SMP_CENTRAL
+
+config MESHTASTIC_SMP_CENTRAL_JOB_STACK_SIZE
+	int "Stack for the push/update job thread"
+	default 4096
+	help
+	  The upload loop reads flash and drives img_mgmt_client (zcbor encode
+	  into a net_buf, then a blocking wait per chunk). Internal RAM.
+
+config MESHTASTIC_SMP_CENTRAL_JOB_PRIORITY
+	int "Priority of the push/update job thread"
+	default 10
+	help
+	  Preemptible and low: a firmware push is background work next to the
+	  radio and the phone link.
+
+endif # MESHTASTIC_SMP_CENTRAL

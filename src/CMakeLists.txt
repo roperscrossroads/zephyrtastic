@@ -123,6 +123,10 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_POWERMON meshtastic_powermon.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_WATCHDOG meshtastic_watchdog.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_DFU_TRIGGER meshtastic_dfu_trigger.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SMP_CENTRAL meshtastic_smp_central.c)
+  # img_mgmt_client.h drags in bootutil/image.h, whose include path is an INTERFACE of
+  # the MCUBOOT_BOOTUTIL target (not global) — link it the way Zephyr's own client lib does.
+  zephyr_library_link_libraries_ifdef(CONFIG_MESHTASTIC_SMP_CENTRAL MCUBOOT_BOOTUTIL)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_HEAP_TRACE meshtastic_heap_trace.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_NETLOG_FILTER meshtastic_netlog_filter.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SHELL_UART0 meshtastic_shell_uart0.c)
