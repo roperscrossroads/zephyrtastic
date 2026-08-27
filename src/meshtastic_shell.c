@@ -324,6 +324,9 @@ static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 	} else {
 		shell_print(sh, "image:  header read failed (%d)", rc);
 	}
+	shell_print(sh, "class:  %u%s", CONFIG_MESHTASTIC_FLEET_CLASS,
+		    CONFIG_MESHTASTIC_FLEET_CLASS == 0 ? " (unset: no courier will offer this node an image)"
+						       : "");
 	return 0;
 }
 

@@ -103,3 +103,16 @@ config MESHTASTIC_DEPOT
 	  to a neighbour by the SMP client (`smpc push /depot/<name>`),
 	  so a courier keeps its cargo across its own OTA — slot1 no longer doubles as the
 	  hold. Needs the fstab node enabled: samples/meshtastic/depot.overlay.
+
+config MESHTASTIC_FLEET_CLASS
+	int "Fleet image class of this build (0 = unset)"
+	range 0 255
+	default 0
+	help
+	  A small operator-assigned number naming what this image is FOR: the
+	  (board, build variant) pair — e.g. the XIAO BLE node, the Heltec R8
+	  courier, the Heltec V4 transmit-disabled node. hw_model alone cannot say
+	  it: one board runs several variants that must never replace each other.
+	  A courier only offers a node an image of the node's own class, and a
+	  node with class 0 is offered nothing. Shown by `meshtastic version`;
+	  carried in the peer-link beat from version 2 of that frame.
