@@ -31,6 +31,14 @@
  *   [4..7]   node_num  LE
  *   [8..11]  seq       LE — per-link, from 0, so gaps PROVE loss
  *   [12..15] uptime_s  LE — sender uptime in seconds
+ *
+ * FORWARD COMPATIBILITY (the rule since the version-1 decoder, so that the
+ * first layout change is also the last flag day): a later version may ONLY
+ * append fields after byte 15 and bump [1]; it may not move or reinterpret
+ * the bytes above. A decoder therefore accepts any version >= 1 and any
+ * length >= 16, reads the fields its own version defines, and ignores the
+ * rest. Version 0 is not a version and is refused, as is anything shorter
+ * than the version-1 frame.
  */
 #define MESHTASTIC_BLE_PEER_BEAT_LEN     16U
 #define MESHTASTIC_BLE_PEER_BEAT_MAGIC   0x4DU
@@ -48,8 +56,10 @@ void meshtastic_ble_peer_beat_encode(const struct meshtastic_ble_peer_beat *beat
 				     uint8_t buf[MESHTASTIC_BLE_PEER_BEAT_LEN]);
 
 /*
- * Returns 0, -EINVAL on wrong length, -EBADMSG on wrong magic, -ENOTSUP on a
- * version this build does not speak. `beat` is untouched on error.
+ * Returns 0, -EINVAL on a frame shorter than version 1's, -EBADMSG on wrong
+ * magic, -ENOTSUP on version 0. A longer frame or a newer version decodes the
+ * version-1 fields and ignores the rest (see the layout comment). `beat` is
+ * untouched on error.
  */
 int meshtastic_ble_peer_beat_decode(const uint8_t *buf, size_t len,
 				    struct meshtastic_ble_peer_beat *beat);

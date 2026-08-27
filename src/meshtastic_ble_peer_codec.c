@@ -36,13 +36,15 @@ void meshtastic_ble_peer_beat_encode(const struct meshtastic_ble_peer_beat *beat
 int meshtastic_ble_peer_beat_decode(const uint8_t *buf, size_t len,
 				    struct meshtastic_ble_peer_beat *beat)
 {
-	if (len != MESHTASTIC_BLE_PEER_BEAT_LEN) {
+	/* Shorter than version 1 is malformed; longer is a newer sender whose
+	 * appended fields this decoder does not know — read what it does. */
+	if (len < MESHTASTIC_BLE_PEER_BEAT_LEN) {
 		return -EINVAL;
 	}
 	if (buf[0] != MESHTASTIC_BLE_PEER_BEAT_MAGIC) {
 		return -EBADMSG;
 	}
-	if (buf[1] != MESHTASTIC_BLE_PEER_BEAT_VERSION) {
+	if (buf[1] < MESHTASTIC_BLE_PEER_BEAT_VERSION) {
 		return -ENOTSUP;
 	}
 

@@ -67,20 +67,63 @@ ZTEST(ble_peer_codec, test_beat_decode_rejects_bad_frames)
 	meshtastic_ble_peer_beat_encode(&in, buf);
 
 	zassert_equal(meshtastic_ble_peer_beat_decode(buf, sizeof(buf) - 1U, &out), -EINVAL);
-	zassert_equal(meshtastic_ble_peer_beat_decode(buf, sizeof(buf) + 1U, &out), -EINVAL);
 	zassert_equal(meshtastic_ble_peer_beat_decode(buf, 0U, &out), -EINVAL);
 
 	buf[0] = 0x00U;
 	zassert_equal(meshtastic_ble_peer_beat_decode(buf, sizeof(buf), &out), -EBADMSG);
 	buf[0] = MESHTASTIC_BLE_PEER_BEAT_MAGIC;
 
-	buf[1] = MESHTASTIC_BLE_PEER_BEAT_VERSION + 1U;
+	/* Version 0 is not a version. (A NEWER version is accepted — see the
+	 * forward-compatibility test.) */
+	buf[1] = 0U;
 	zassert_equal(meshtastic_ble_peer_beat_decode(buf, sizeof(buf), &out), -ENOTSUP);
 	buf[1] = MESHTASTIC_BLE_PEER_BEAT_VERSION;
 
 	/* The reserved byte is ignored, not validated (forward compat). */
 	buf[3] = 0xAAU;
 	zassert_ok(meshtastic_ble_peer_beat_decode(buf, sizeof(buf), &out));
+}
+
+/* The rule that makes the first layout change the last flag day: a newer
+ * sender may append fields and bump the version, and this decoder must still
+ * read the version-1 fields from the front of the frame. Exercised with the
+ * shape version 2 is expected to take (4 bytes appended, reserved byte used)
+ * and with a deliberately absurd version, so the rule is "any newer", not
+ * "the next one". */
+ZTEST(ble_peer_codec, test_beat_decode_is_forward_compatible)
+{
+	struct meshtastic_ble_peer_beat in = {
+		.flags = MESHTASTIC_BLE_PEER_FLAG_HELLO,
+		.node_num = 0x084C2114U,
+		.seq = 9U,
+		.uptime_s = 5U,
+	};
+	struct meshtastic_ble_peer_beat out;
+	uint8_t buf[MESHTASTIC_BLE_PEER_BEAT_LEN + 4U];
+
+	meshtastic_ble_peer_beat_encode(&in, buf);
+	buf[1] = MESHTASTIC_BLE_PEER_BEAT_VERSION + 1U;
+	buf[3] = 0x01U;
+	memset(&buf[MESHTASTIC_BLE_PEER_BEAT_LEN], 0xAA, 4U);
+
+	zassert_ok(meshtastic_ble_peer_beat_decode(buf, sizeof(buf), &out));
+	zassert_equal(out.flags, in.flags);
+	zassert_equal(out.node_num, in.node_num);
+	zassert_equal(out.seq, in.seq);
+	zassert_equal(out.uptime_s, in.uptime_s);
+
+	/* "Any newer", including one this code will never define. */
+	buf[1] = 0xFFU;
+	zassert_ok(meshtastic_ble_peer_beat_decode(buf, sizeof(buf), &out));
+	zassert_equal(out.node_num, in.node_num);
+
+	/* Newer AND exactly the old length is fine too (a version bump that
+	 * only redefines the reserved byte). */
+	zassert_ok(meshtastic_ble_peer_beat_decode(buf, MESHTASTIC_BLE_PEER_BEAT_LEN, &out));
+
+	/* But newer does not excuse a frame shorter than version 1's. */
+	zassert_equal(meshtastic_ble_peer_beat_decode(buf, MESHTASTIC_BLE_PEER_BEAT_LEN - 1U, &out),
+		      -EINVAL);
 }
 
 ZTEST(ble_peer_codec, test_adv_roundtrip_and_wire_bytes)
