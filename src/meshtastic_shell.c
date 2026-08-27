@@ -309,6 +309,21 @@ static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 		    meshtastic_build_time());
 	shell_print(sh, "board:  %s", CONFIG_BOARD);
 	shell_print(sh, "zephyr: %s", KERNEL_VERSION_STRING);
+
+	/* The orderable one: the MCUboot image header of the running slot. This
+	 * is what a peer's SMP client compares against, and what the fleet
+	 * orders by. Absent on an image MCUboot does not manage. */
+	struct meshtastic_image_version v;
+	int rc = meshtastic_image_version(&v);
+
+	if (rc == 0) {
+		shell_print(sh, "image:  %u.%u.%u+%u (MCUboot header, slot0)", v.major, v.minor,
+			    v.revision, v.build);
+	} else if (rc == -ENOTSUP) {
+		shell_print(sh, "image:  n/a (not an MCUboot-managed image)");
+	} else {
+		shell_print(sh, "image:  header read failed (%d)", rc);
+	}
 	return 0;
 }
 
