@@ -28,3 +28,14 @@ config MESHTASTIC_BOOTLOG_ENTRIES
 	  to see its shape without keeping a log nobody reads.
 
 endif # MESHTASTIC_BOOTLOG
+
+config MESHTASTIC_FAULTMARK
+	bool "Read the fixed-address fault record a reverted test image left (shell: faultmark)"
+	default y if SOC_NRF52840
+	depends on SOC_NRF52840 && SHELL
+	help
+	  A test image (an MCUboot test boot that never confirms) that faults
+	  before it has any console can still say where it died: its fatal-error
+	  handler writes a record to a fixed RAM address that survives the warm
+	  reset, MCUboot reverts, and this command prints it. Contract and address:
+	  include/zephyr/meshtastic/faultmark.h.
