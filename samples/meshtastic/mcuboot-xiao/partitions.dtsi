@@ -1,0 +1,89 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0
+ *
+ * Seeed XIAO nRF52840 — flash layout for MCUboot chainloaded from the resident
+ * Seeed/Adafruit UF2 bootloader, with the second image slot on the module's
+ * 2 MB QSPI flash.
+ *
+ * Included by both mcuboot.overlay (the bootloader image) and app.overlay (the
+ * application image); sysbuild.cmake attaches them whenever the board is
+ * built with --sysbuild. A plain (non-sysbuild) build never sees this file and
+ * keeps the stock UF2 layout (nrf52840_partition_uf2_sdv7.dtsi), where the app
+ * itself sits at 0x27000.
+ *
+ * Why this shape:
+ *
+ *   0x00000  MBR + SoftDevice S140 v7   156 KB  untouched — the MBR is the reset
+ *                                               vector; the SoftDevice is dormant
+ *   0x27000  boot_partition   (MCUboot)  64 KB  where the UF2 bootloader jumps to —
+ *                                               so MCUboot takes the app's old place
+ *   0x37000  slot0_partition (image-0)  724 KB  181 × 4 KB sectors
+ *   0xEC000  storage_partition            32 KB  UNCHANGED — NVS settings, i.e. the
+ *                                               node's provisioning and channels
+ *   0xF4000  UF2 bootloader               48 KB  untouched — the recovery path
+ *                                               (double-tap / 1200-baud touch)
+ *   QSPI 0   slot1_partition (image-1)  720 KB  180 × 4 KB sectors, the first
+ *                                               0xB4000 of the p25q16h; the rest
+ *                                               of the 2 MB is free
+ *
+ * Two internal slots do not fit: the app region is 788 KB and the image is
+ * ~520 KB. The QSPI part is what makes A/B possible at all.
+ *
+ * slot1 is deliberately ONE SECTOR SMALLER than slot0: swap-using-move needs a
+ * spare sector in the primary slot to shift the image up by one, and MCUboot's
+ * boot_slots_compatible() calls "primary = secondary + 1" the optimal layout
+ * (it also accepts equal counts). Both slots must present the same 4 KB sector
+ * size, which is why both images set
+ * CONFIG_NORDIC_QSPI_NOR_FLASH_LAYOUT_PAGE_SIZE=4096 — the driver's default
+ * reports 64 KB pages and the swap would be refused as "not same sector layout".
+ *
+ * Nothing here touches 0x0–0x27000 or 0xF4000–0x100000. Neither image is ever
+ * flashed there: the Adafruit serial DFU writes from 0x27000 up, so the merged
+ * MCUboot+app hex goes through exactly the same USB path as before, and a bad
+ * MCUboot is recovered the same way a bad app always was.
+ */
+
+/* The stock layout's application partition (0x27000, 788 KB) and its label for
+ * the UF2 bootloader region ("boot_partition"), which MCUboot's own convention
+ * needs for itself. Both are re-created below.
+ */
+/delete-node/ &code_partition;
+/delete-node/ &boot_partition;
+
+&flash0 {
+	partitions {
+		boot_partition: partition@27000 {
+			compatible = "zephyr,mapped-partition";
+			label = "mcuboot";
+			reg = <0x00027000 0x00010000>;
+		};
+
+		slot0_partition: partition@37000 {
+			compatible = "zephyr,mapped-partition";
+			label = "image-0";
+			reg = <0x00037000 0x000b5000>;
+		};
+
+		/* storage_partition @ 0xec000 (32 KB) is inherited unchanged. */
+
+		uf2_boot_partition: partition@f4000 {
+			compatible = "zephyr,mapped-partition";
+			label = "UF2";
+			read-only;
+			reg = <0x000f4000 0x0000c000>;
+		};
+	};
+};
+
+&p25q16h {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		slot1_partition: partition@0 {
+			label = "image-1";
+			reg = <0x00000000 0x000b4000>;
+		};
+	};
+};

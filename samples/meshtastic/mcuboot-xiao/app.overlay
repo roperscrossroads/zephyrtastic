@@ -1,0 +1,17 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0
+ *
+ * Application-image overlay for the XIAO nRF52840 MCUboot build. Attached by
+ * sysbuild.cmake (never auto-picked: it does not live under boards/). See
+ * partitions.dtsi for the layout and the reasoning.
+ */
+#include "partitions.dtsi"
+
+/ {
+	chosen {
+		/* The app links into slot0 (0x37000 + the 0x200 MCUboot header),
+		 * not the stock 0x27000 application partition MCUboot now occupies.
+		 */
+		zephyr,code-partition = &slot0_partition;
+	};
+};

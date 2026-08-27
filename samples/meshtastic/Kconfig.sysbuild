@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0
+#
+# Sysbuild Kconfig for the meshtastic sample. Replaces the sysbuild Kconfig
+# root, so the stock tree is sourced below — AFTER the choice defaults here,
+# because Kconfig takes the FIRST satisfied default and the stock tree's
+# BOOT_SIGNATURE_TYPE choice carries an unconditional `default RSA`. (Board
+# Kconfig.sysbuild files win for the same reason: they are sourced early.)
+
+# XIAO nRF52840: sign images with ECDSA P-256 instead of sysbuild's RSA-2048
+# default. Nordic's recommendation for the nRF52 (tinycrypt, small and fast,
+# against mbedTLS bignum for RSA) and the verifier the 64 KB boot_partition
+# was sized for. The key is MCUboot's bundled development key
+# (root-ec-p256.pem) until SB_CONFIG_BOOT_SIGNATURE_KEY_FILE names a real one
+# — it authenticates nothing, but it exercises the exact path a real key will
+# use, and swapping the key later changes no layout.
+#
+# The Heltec boards set BOOT_SIGNATURE_TYPE_NONE in their own Kconfig.sysbuild
+# and are not touched by this.
+choice BOOT_SIGNATURE_TYPE
+	default BOOT_SIGNATURE_TYPE_ECDSA_P256 if BOARD_XIAO_BLE
+endchoice
+
+# One hex with both images (merged_xiao_ble_nrf52840.hex): MCUboot at 0x27000
+# and the signed app at 0x37000, which is exactly the blob the Adafruit serial
+# DFU writes from 0x27000 up — so `adafruit-nrfutil dfu genpkg --application`
+# takes it unchanged. Off by default upstream; XIAO only, the Heltec dist
+# recipe packages its two images itself.
+config MERGED_HEX_FILES
+	default y if BOARD_XIAO_BLE
+
+source "share/sysbuild/Kconfig"
