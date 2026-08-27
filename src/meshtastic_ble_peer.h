@@ -7,6 +7,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <zephyr/bluetooth/addr.h>
+
 #include "meshtastic_ble_peer_codec.h"
 
 /*
@@ -161,6 +163,11 @@ const uint8_t *meshtastic_ble_service_uuid128(void);
 
 /* Peer address string + connection age for slot `index` (false if free). */
 bool meshtastic_ble_slot_info(unsigned int index, char *addr, size_t addr_len, int64_t *age_ms);
+
+/* The peer address of registry slot `index` as a bt_addr_le_t — what a
+ * programmatic caller (an SMP client adopting the link) needs, where the
+ * string form above is for the shell. Returns false if the slot is empty. */
+bool meshtastic_ble_slot_addr(unsigned int index, bt_addr_le_t *out);
 
 /* Advertiser state, tracked in meshtastic_ble.c (a4it.2). */
 bool meshtastic_ble_adv_active(void);
