@@ -64,6 +64,8 @@
 #include <zephyr/mgmt/mcumgr/grp/os_mgmt/os_mgmt_client.h>
 #include <mgmt/mcumgr/transport/smp_internal.h>
 
+#include "meshtastic_smp_central.h"
+
 LOG_MODULE_REGISTER(mt_smpc, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 /* ------------------------------------------------------------------------ */
@@ -705,7 +707,7 @@ static int smpc_src_open(struct smpc_src *src, const char *path)
 	}
 #endif
 	{
-		int rc = flash_area_open(FIXED_PARTITION_ID(slot1_partition), &src->fa);
+		int rc = flash_area_open(PARTITION_ID(slot1_partition), &src->fa);
 
 		if (rc != 0) {
 			return rc;
@@ -745,13 +747,6 @@ static void smpc_src_close(struct smpc_src *src)
 }
 
 
-struct smpc_local_image {
-	uint32_t size;		/* header + body + (protected) TLVs: the bytes to send */
-	uint8_t major, minor;
-	uint16_t revision;
-	uint32_t build;
-};
-
 /* MCUboot's image layout, spelled out locally so this file has no bootutil
  * dependency (the courier need not be MCUboot-managed itself). */
 struct smpc_mcuboot_hdr {
@@ -776,7 +771,7 @@ struct smpc_mcuboot_tlv_info {
 #define SMPC_MCUBOOT_TLV_INFO_MAGIC 0x6907U
 #define SMPC_MCUBOOT_TLV_PROT_INFO_MAGIC 0x6908U
 
-static int smpc_local_image_inspect(struct smpc_src *src, struct smpc_local_image *out)
+static int smpc_local_image_inspect(struct smpc_src *src, struct meshtastic_smpc_image *out)
 {
 	struct smpc_mcuboot_hdr hdr;
 	struct smpc_mcuboot_tlv_info tlv;
@@ -820,7 +815,7 @@ static int smpc_local_image_inspect(struct smpc_src *src, struct smpc_local_imag
 	return 0;
 }
 
-int meshtastic_smpc_local_image(const char *path, struct smpc_local_image *out)
+int meshtastic_smpc_local_image(const char *path, struct meshtastic_smpc_image *out)
 {
 	struct smpc_src src;
 	int rc;
@@ -870,7 +865,7 @@ static const char *mgmt_err_str(int rc)
 
 /* Upload this node's slot1 image to the target's slot1. Progress lands in the
  * job fields so `smpc status` can watch. Returns an MGMT_ERR_* (0 = ok). */
-static int smpc_do_push(const char *path, struct smpc_local_image *img)
+static int smpc_do_push(const char *path, struct meshtastic_smpc_image *img)
 {
 	struct smpc_src src;
 	struct mcumgr_image_upload up;
@@ -950,7 +945,7 @@ static const struct mcumgr_image_data *smpc_find_slot(const struct mcumgr_image_
 
 static void smpc_job_fn(struct k_work *work)
 {
-	struct smpc_local_image img = {0};
+	struct meshtastic_smpc_image img = {0};
 	struct mcumgr_image_state st;
 	enum smpc_job_kind kind;
 	int rc;
@@ -1201,7 +1196,7 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_image(const struct shell *sh, size_t argc, char **argv)
 {
-	struct smpc_local_image img;
+	struct meshtastic_smpc_image img;
 	int rc;
 
 	rc = meshtastic_smpc_local_image(argc > 1 ? argv[1] : NULL, &img);
