@@ -88,3 +88,18 @@ config MESHTASTIC_SMP_CENTRAL_JOB_PRIORITY
 	  radio and the phone link.
 
 endif # MESHTASTIC_SMP_CENTRAL
+
+config MESHTASTIC_DEPOT
+	bool "Firmware depot: a LittleFS of images for other nodes on the board's spare flash"
+	depends on SOC_FAMILY_ESPRESSIF_ESP32
+	# FILE_SYSTEM + FILE_SYSTEM_LITTLEFS come from the overlay: LittleFS's own
+	# deps (FILE_SYSTEM_LIB_LINK, the module) do not resolve through a select.
+	depends on FILE_SYSTEM_LITTLEFS
+	select FLASH_MAP
+	help
+	  Mounts the board's `depot` partition (boards/heltec/.../heltec_partitions_16M.dtsi)
+	  as LittleFS at /depot at boot, formatting it on first use. Images are put there
+	  over SMP file management (`smpmgr file upload <bin> /depot/<name>`) and served
+	  to a neighbour by the SMP client (`smpc push /depot/<name>`),
+	  so a courier keeps its cargo across its own OTA — slot1 no longer doubles as the
+	  hold. Needs the fstab node enabled: samples/meshtastic/depot.overlay.

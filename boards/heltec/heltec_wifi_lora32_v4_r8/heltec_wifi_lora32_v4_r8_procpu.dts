@@ -22,7 +22,7 @@
 #include <espressif/esp32s3/esp32s3_wroom_n16r8.dtsi>
 #include "../heltec_wifi_lora32_v4/heltec_wifi_lora32_v4-pinctrl.dtsi"
 #include <zephyr/dt-bindings/pwm/pwm.h>
-#include <espressif/partitions_0x0_amp_16M.dtsi>
+#include "../heltec_wifi_lora32_v4/heltec_partitions_16M.dtsi"
 #include "../heltec_wifi_lora32_v4/heltec_wifi_lora32_v4-common.dtsi"
 
 / {

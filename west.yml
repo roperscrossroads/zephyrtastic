@@ -26,6 +26,8 @@ manifest:
           - mcuboot # needed for sysbuild/OTA (MCUboot A/B) builds; the upstream trimmed
                     # manifest didn't need it since it targets simple-boot only
           - zcbor   # needed by MESHTASTIC_OTA's MCUmgr/SMP transport, same reason as mcuboot
+          - littlefs # the firmware depot (CONFIG_MESHTASTIC_DEPOT): a LittleFS of images for
+                     # other nodes on the Heltec 16 MB map's spare flash (2026-08-26)
           - loramac-node # drop me eventually, not used but there's a kconfig issue preventing
                          # build when HAS_SEMTECH_SX126X=y but module is not present, even when
                          # using native lora backend

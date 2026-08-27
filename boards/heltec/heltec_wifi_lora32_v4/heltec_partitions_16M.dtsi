@@ -1,0 +1,112 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0
+ *
+ * 16 MB flash map for the Heltec WiFi LoRa 32 V4 family (V4 and V4-R8), replacing
+ * Espressif's <espressif/partitions_0x0_amp_16M.dtsi>.
+ *
+ * Why not the stock map: it gives slot0/slot1 5952 KB EACH for a ~720 KB image and
+ * reserves 4 MB for AMP (appcpu) and LP-core images this procpu-only firmware never
+ * builds — roughly 12 MB of the 16 MB was dead. This map keeps the two things the
+ * Espressif MCUboot port needs where it expects them (mcuboot @0, sys @0x10000, the
+ * app slots MMU-mapped), sizes the slots for real images with headroom, gives NVS
+ * room to grow, and turns the rest into a `depot`: a plain flash area carrying a
+ * LittleFS of firmware images for OTHER nodes (the courier's cargo hold,
+ * CONFIG_MESHTASTIC_DEPOT), or anything else that wants bulk flash.
+ *
+ * MCUboot reads slot0/slot1 from this same devicetree when the bootloader is
+ * built, so a node that has the OLD bootloader cannot boot an image linked for
+ * THIS map: switching a board over is one USB flash of bootloader + app (flash.sh
+ * from a `dist` built with this file), after which OTA works as before.
+ *
+ *   0x000000  mcuboot     64 KB
+ *   0x010000  sys         64 KB   (Espressif port bookkeeping)
+ *   0x020000  slot0     2048 KB   image-0, MMU-mapped, XIP
+ *   0x220000  slot1     2048 KB   image-1, MMU-mapped (swap-using-move needs
+ *                                 the same sector layout as slot0)
+ *   0x420000  storage    512 KB   NVS settings (was 192 KB)
+ *   0x4a0000  scratch    128 KB   kept for swap-using-scratch builds
+ *   0x4c0000  coredump    64 KB   (was 4 KB; a full dump needs more)
+ *   0x4d0000  depot   11456 KB   LittleFS, mounted at /depot (see fstab)
+ *   0x1000000 end
+ */
+
+&flash0 {
+	partitions {
+		ranges;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "mcuboot";
+			reg = <0x0 DT_SIZE_K(64)>;
+		};
+
+		sys_partition: partition@10000 {
+			compatible = "zephyr,mapped-partition";
+			label = "sys";
+			reg = <0x10000 DT_SIZE_K(64)>;
+		};
+
+		slot0_partition: partition@20000 {
+			compatible = "zephyr,mapped-partition";
+			label = "image-0";
+			reg = <0x20000 DT_SIZE_K(2048)>;
+		};
+
+		slot1_partition: partition@220000 {
+			compatible = "zephyr,mapped-partition";
+			label = "image-1";
+			reg = <0x220000 DT_SIZE_K(2048)>;
+		};
+
+		storage_partition: partition@420000 {
+			compatible = "zephyr,mapped-partition";
+			label = "storage";
+			reg = <0x420000 DT_SIZE_K(512)>;
+		};
+
+		scratch_partition: partition@4a0000 {
+			compatible = "zephyr,mapped-partition";
+			label = "image-scratch";
+			reg = <0x4a0000 DT_SIZE_K(128)>;
+		};
+
+		coredump_partition: partition@4c0000 {
+			compatible = "zephyr,mapped-partition";
+			label = "coredump";
+			reg = <0x4c0000 DT_SIZE_K(64)>;
+		};
+
+		depot_partition: partition@4d0000 {
+			/* Every child of the Espressif flash node carries this compatible:
+			 * it is what the flash-map generator numbers, not just XIP slots. */
+			compatible = "zephyr,mapped-partition";
+			label = "depot";
+			reg = <0x4d0000 DT_SIZE_K(11456)>;
+		};
+	};
+};
+
+/ {
+	fstab {
+		compatible = "zephyr,fstab";
+
+		depot_fs: depot_fs {
+			compatible = "zephyr,fstab,littlefs";
+			mount-point = "/depot";
+			partition = <&depot_partition>;
+			/* 4 KB flash sectors; small read/prog granules keep RAM low. */
+			read-size = <32>;
+			prog-size = <32>;
+			cache-size = <256>;
+			lookahead-size = <64>;
+			block-cycles = <512>;
+			/* Mounted at boot only when CONFIG_MESHTASTIC_DEPOT is on
+			 * (the fstab node is otherwise disabled below). A fresh
+			 * partition is formatted on first mount. */
+			automount;
+			status = "disabled";
+		};
+	};
+};

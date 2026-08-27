@@ -1,0 +1,3 @@
+/* Enable the depot LittleFS automount declared in the board's partition map.
+ * Pair with overlay-depot.conf (CONFIG_MESHTASTIC_DEPOT). */
+&depot_fs { status = "okay"; };
