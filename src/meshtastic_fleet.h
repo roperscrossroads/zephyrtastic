@@ -107,6 +107,36 @@ meshtastic_fleet_evaluate(uint32_t running, bool running_known, uint8_t beat_fla
 
 const char *meshtastic_fleet_verdict_str(enum meshtastic_fleet_verdict v);
 
+/* ---- which neighbour first (§8.4), pure ------------------------------------
+ *
+ * F6: a courier with more than one target (BT_MAX_CONN 3 on the R8: two peer
+ * links plus the host) is still ONE job at a time (R6) — the star is served by
+ * ordering, not concurrency. The order is decided here from values alone so it
+ * is provable on native_sim, and `fleet status` marks the row this returns so
+ * the bench sees the same choice the loop will make.
+ */
+struct meshtastic_fleet_candidate {
+	uint32_t node;
+	bool present;      /* a fresh v2 beat within the last few seconds */
+	bool latched;      /* REVERTED: off limits until `fleet clear` */
+	bool in_flight;    /* updating, or delivered and awaiting its self-confirm */
+	bool has_cargo;    /* the depot holds a classed image of the wanted version */
+	enum meshtastic_fleet_verdict verdict; /* meshtastic_fleet_evaluate() for it */
+	uint32_t attempts;
+	int64_t last_beat_ms;
+	int64_t next_try_ms; /* backoff: not before this uptime */
+};
+
+/*
+ * The index of the candidate to push to next, or -1 when none is eligible.
+ * Eligible: present, not latched, not in flight, past its backoff, verdict
+ * PUSH, cargo on hand. Among those: fewest attempts, then freshest beat, then
+ * lowest node id — deterministic, so two ticks with the same view agree, and
+ * a node in flight is never picked twice however often the loop is re-armed.
+ */
+int meshtastic_fleet_pick(const struct meshtastic_fleet_candidate *c, unsigned int n,
+			  int64_t now);
+
 #if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
 /* Arm/disarm the courier loop (manual in F3; off at boot). */
 void meshtastic_fleet_courier_arm(bool on);
@@ -124,6 +154,7 @@ struct meshtastic_fleet_courier_row {
 	uint8_t flags;         /* last beat flags */
 	const char *state;     /* "idle"/"updating"/"wait-confirm"/"done"/"reverted"/… */
 	uint32_t attempts;
+	bool next;             /* the row meshtastic_fleet_pick() would serve next */
 };
 uint16_t meshtastic_fleet_courier_rows(struct meshtastic_fleet_courier_row *out, uint16_t max);
 #endif /* CONFIG_MESHTASTIC_FLEET_COURIER */

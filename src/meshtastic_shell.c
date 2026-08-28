@@ -4515,10 +4515,15 @@ static int cmd_fleet_status(const struct shell *sh, size_t argc, char **argv)
 		struct meshtastic_fleet_courier_row rows[MESHTASTIC_BLE_REG_SLOTS];
 		uint16_t nr = meshtastic_fleet_courier_rows(rows, ARRAY_SIZE(rows));
 
-		shell_print(sh, "courier : %s", meshtastic_fleet_courier_armed() ? "ARMED" : "disarmed");
+		/* F6: the star. Every row is a neighbour the loop can serve; `->`
+		 * marks the one meshtastic_fleet_pick() would push next (none while
+		 * a job is in flight). Slots: BT_MAX_CONN, minus one for the host. */
+		shell_print(sh, "courier : %s — %u row(s) of %u slot(s)",
+			    meshtastic_fleet_courier_armed() ? "ARMED" : "disarmed", nr,
+			    (unsigned int)MESHTASTIC_BLE_REG_SLOTS);
 		for (uint16_t i = 0U; i < nr; i++) {
-			shell_print(sh, "  0x%08x class %u run %u.%u.%u want %u.%u.%u [%c%c%c] %s x%u",
-				    rows[i].node_id, rows[i].class_id,
+			shell_print(sh, "%s0x%08x class %u run %u.%u.%u want %u.%u.%u [%c%c%c] %s x%u",
+				    rows[i].next ? "-> " : "   ", rows[i].node_id, rows[i].class_id,
 				    (unsigned int)(rows[i].running >> 24),
 				    (unsigned int)((rows[i].running >> 16) & 0xFFU),
 				    (unsigned int)(rows[i].running & 0xFFFFU),

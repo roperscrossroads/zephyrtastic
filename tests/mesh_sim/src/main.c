@@ -3129,6 +3129,70 @@ ZTEST(mesh_sim, test_fleet_evaluate_decides_who_to_push_to)
 			  "wrong-board");
 }
 
+/* F6: which neighbour first. The star is served by ORDER, not concurrency —
+ * one job at a time over however many links the courier holds — so the order
+ * is the thing to prove: §8.4's (fewest attempts, freshest beat, lowest id),
+ * and every reason a row is not eligible at all. The last case is the F6
+ * done-criterion "a second `arm` does not double-push": a node already in
+ * flight is never picked again whatever the rest of its row says. */
+ZTEST(mesh_sim, test_fleet_pick_orders_the_star)
+{
+	struct meshtastic_fleet_candidate c[3];
+	const int64_t now = 100000;
+
+	/* Two eligible kits, alike except for id → lowest id. */
+	memset(c, 0, sizeof(c));
+	for (int i = 0; i < 2; i++) {
+		c[i].present = true;
+		c[i].has_cargo = true;
+		c[i].verdict = MESHTASTIC_FLEET_PUSH;
+		c[i].last_beat_ms = now - 500;
+	}
+	c[0].node = 0x299de6c4U; /* kit1 */
+	c[1].node = 0x084c2114U; /* kit2 */
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "tie -> lowest node id");
+
+	/* A fresher beat outranks id. */
+	c[0].last_beat_ms = now - 100;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 0, "freshest beat first");
+
+	/* Fewer attempts outranks freshness: the never-tried one goes first. */
+	c[0].attempts = 1U;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "fewest attempts first");
+
+	/* Every way a row drops out of the running. */
+	c[0].attempts = 0U;
+	c[0].last_beat_ms = now - 100; /* c[0] would win on freshness... */
+	c[0].present = false;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "stale beat -> not here");
+	c[0].present = true;
+	c[0].latched = true;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "REVERTED latch -> off limits");
+	c[0].latched = false;
+	c[0].next_try_ms = now + 1;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "inside its backoff");
+	c[0].next_try_ms = now;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 0, "backoff expired exactly now -> eligible");
+	c[0].has_cargo = false;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "no classed image of that version");
+	c[0].has_cargo = true;
+	c[0].verdict = MESHTASTIC_FLEET_SKIP_HOLD;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "any non-PUSH verdict");
+	c[0].verdict = MESHTASTIC_FLEET_PUSH;
+
+	/* A second `arm` must not double-push: the node in flight is skipped
+	 * even though its row still reads "behind, willing, cargo on hand". */
+	c[0].in_flight = true;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "in flight -> never picked again");
+	c[1].in_flight = true;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), -1, "both in flight -> nobody");
+
+	/* Nothing eligible at all, and an empty table. */
+	zassert_equal(meshtastic_fleet_pick(c, 0, now), -1, "empty table");
+	memset(c, 0, sizeof(c));
+	zassert_equal(meshtastic_fleet_pick(c, 3, now), -1, "three empty slots");
+}
+
 #endif /* CONFIG_MESHTASTIC_FLEET */
 
 /*

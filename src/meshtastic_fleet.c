@@ -243,6 +243,33 @@ meshtastic_fleet_evaluate(uint32_t running, bool running_known, uint8_t beat_fla
 	return MESHTASTIC_FLEET_PUSH;
 }
 
+int meshtastic_fleet_pick(const struct meshtastic_fleet_candidate *c, unsigned int n,
+			  int64_t now)
+{
+	int best = -1;
+
+	for (unsigned int i = 0U; i < n; i++) {
+		const struct meshtastic_fleet_candidate *x = &c[i];
+
+		if (!x->present || x->latched || x->in_flight || now < x->next_try_ms ||
+		    x->verdict != MESHTASTIC_FLEET_PUSH || !x->has_cargo) {
+			continue;
+		}
+		if (best < 0) {
+			best = (int)i;
+			continue;
+		}
+		/* Fewest attempts, then freshest beat, then lowest id. */
+		if (x->attempts < c[best].attempts ||
+		    (x->attempts == c[best].attempts &&
+		     (x->last_beat_ms > c[best].last_beat_ms ||
+		      (x->last_beat_ms == c[best].last_beat_ms && x->node < c[best].node)))) {
+			best = (int)i;
+		}
+	}
+	return best;
+}
+
 /* ==========================================================================
  * The courier loop (CONFIG_MESHTASTIC_FLEET_COURIER).
  * ========================================================================== */
@@ -500,59 +527,73 @@ static bool courier_self_ready(void)
 	return !meshtastic_ble_peer_hold_get();
 }
 
-/* Choose and start one job. Assumes no job is active and the node is ready. */
-static void courier_maybe_start(void)
+/*
+ * The courier's view of every slot as a candidate table, under courier_lock.
+ * This is the one place a neighbour's beat, the document's intent, the board
+ * cross-check and the depot meet; both the loop (to choose) and `fleet status`
+ * (to show what it would choose) read the same table. want_version[i] is the
+ * version a PUSH verdict is for, so the winner's cargo can be re-resolved.
+ */
+static void courier_candidates(struct meshtastic_fleet_candidate *c, uint32_t *want_version)
 {
-	int64_t now = k_uptime_get();
-	int best = -1;
-	char path[64];
-	uint32_t want_version = 0U;
-
 	for (unsigned int i = 0U; i < MESHTASTIC_BLE_REG_SLOTS; i++) {
 		struct courier_nbr *n = &courier.nbr[i];
 		struct meshtastic_fleet_intent want;
 		bool have;
-		enum meshtastic_fleet_verdict v;
+		char path[64];
 
-		if (!n->present || n->state == CS_REVERTED || now < n->next_try_ms) {
+		memset(&c[i], 0, sizeof(c[i]));
+		want_version[i] = 0U;
+		c[i].node = n->node;
+		c[i].present = n->present;
+		c[i].latched = (n->state == CS_REVERTED);
+		c[i].in_flight = (n->state == CS_UPDATING || n->state == CS_WAIT_CONFIRM);
+		c[i].attempts = n->attempts;
+		c[i].last_beat_ms = n->last_beat_ms;
+		c[i].next_try_ms = n->next_try_ms;
+		if (!n->present) {
+			c[i].verdict = MESHTASTIC_FLEET_SKIP_NO_INTENT;
 			continue;
 		}
 		have = meshtastic_fleet_desired_for(n->node, n->class_id, &want);
-		v = meshtastic_fleet_evaluate(n->running, n->running_known, n->flags, n->hw_model,
-					      have ? &want : NULL);
-		if (v == MESHTASTIC_FLEET_SKIP_HW_MISMATCH && !n->hw_logged) {
+		c[i].verdict = meshtastic_fleet_evaluate(n->running, n->running_known, n->flags,
+							 n->hw_model, have ? &want : NULL);
+		if (c[i].verdict == MESHTASTIC_FLEET_SKIP_HW_MISMATCH && !n->hw_logged) {
 			n->hw_logged = true;
 			LOG_WRN("courier: 0x%08x is hw_model %u but the class-%u row is for %u — refusing",
 				n->node, n->hw_model, n->class_id, want.hw_model);
 		}
-		if (v != MESHTASTIC_FLEET_PUSH) {
+		if (c[i].verdict != MESHTASTIC_FLEET_PUSH) {
 			continue;
 		}
+		want_version[i] = want.version;
 		/* Have the bytes for that version, FOR THAT CLASS? The image's
 		 * signed class TLV decides (F4); an unclassed image matches nothing. */
-		if (meshtastic_smpc_depot_find(n->class_id, want.version, path, sizeof(path)) != 0) {
+		c[i].has_cargo = (meshtastic_smpc_depot_find(n->class_id, want.version, path,
+							      sizeof(path)) == 0);
+		if (!c[i].has_cargo && n->nocargo_version != want.version) {
 			/* Say so once per wanted version, not once per tick: an
 			 * idle row with a want is otherwise silent about why. */
-			if (n->nocargo_version != want.version) {
-				n->nocargo_version = want.version;
-				LOG_INF("courier: 0x%08x wants %u.%u.%u but /depot has no class-%u image of it",
-					n->node, (unsigned int)(want.version >> 24),
-					(unsigned int)((want.version >> 16) & 0xFFU),
-					(unsigned int)(want.version & 0xFFFFU), n->class_id);
-			}
-			continue;
-		}
-		/* Sort: fewest attempts, then freshest beat, then lowest id. */
-		if (best < 0 || n->attempts < courier.nbr[best].attempts ||
-		    (n->attempts == courier.nbr[best].attempts &&
-		     n->last_beat_ms > courier.nbr[best].last_beat_ms) ||
-		    (n->attempts == courier.nbr[best].attempts &&
-		     n->last_beat_ms == courier.nbr[best].last_beat_ms &&
-		     n->node < courier.nbr[best].node)) {
-			best = (int)i;
-			want_version = want.version;
+			n->nocargo_version = want.version;
+			LOG_INF("courier: 0x%08x wants %u.%u.%u but /depot has no class-%u image of it",
+				n->node, (unsigned int)(want.version >> 24),
+				(unsigned int)((want.version >> 16) & 0xFFU),
+				(unsigned int)(want.version & 0xFFFFU), n->class_id);
 		}
 	}
+}
+
+/* Choose and start one job. Assumes no job is active and the node is ready. */
+static void courier_maybe_start(void)
+{
+	struct meshtastic_fleet_candidate cand[MESHTASTIC_BLE_REG_SLOTS];
+	uint32_t want_version[MESHTASTIC_BLE_REG_SLOTS];
+	int64_t now = k_uptime_get();
+	char path[64];
+	int best;
+
+	courier_candidates(cand, want_version);
+	best = meshtastic_fleet_pick(cand, MESHTASTIC_BLE_REG_SLOTS, now);
 	if (best < 0) {
 		return;
 	}
@@ -562,8 +603,9 @@ static void courier_maybe_start(void)
 		bt_addr_le_t addr;
 		int rc;
 
-		/* Re-resolve the path for the winner (the loop reused `path`). */
-		if (meshtastic_smpc_depot_find(n->class_id, want_version, path, sizeof(path)) != 0 ||
+		/* Re-resolve the winner's cargo (the table only kept yes/no). */
+		if (meshtastic_smpc_depot_find(n->class_id, want_version[best], path,
+					       sizeof(path)) != 0 ||
 		    !meshtastic_ble_slot_addr((unsigned int)best, &addr)) {
 			return;
 		}
@@ -581,12 +623,13 @@ static void courier_maybe_start(void)
 			return;
 		}
 		n->state = CS_UPDATING;
-		n->target_version = want_version;
+		n->target_version = want_version[best];
 		n->attempts++;
 		courier.active_slot = best;
 		LOG_INF("courier: pushing %u.%u.%u to 0x%08x (%s)",
-			(unsigned int)(want_version >> 24), (unsigned int)((want_version >> 16) & 0xFFU),
-			(unsigned int)(want_version & 0xFFFFU), n->node, path);
+			(unsigned int)(want_version[best] >> 24),
+			(unsigned int)((want_version[best] >> 16) & 0xFFU),
+			(unsigned int)(want_version[best] & 0xFFFFU), n->node, path);
 	}
 }
 
@@ -635,9 +678,18 @@ void meshtastic_fleet_courier_clear(uint32_t node_id)
 
 uint16_t meshtastic_fleet_courier_rows(struct meshtastic_fleet_courier_row *out, uint16_t max)
 {
+	struct meshtastic_fleet_candidate cand[MESHTASTIC_BLE_REG_SLOTS];
+	uint32_t want_version[MESHTASTIC_BLE_REG_SLOTS];
 	uint16_t n = 0U;
+	int next;
 
 	k_mutex_lock(&courier_lock, K_FOREVER);
+	/* The same table the loop chooses from, so the marked row IS the next
+	 * push (a job in flight means no next until it ends). */
+	courier_candidates(cand, want_version);
+	next = (courier.active_slot < 0)
+		       ? meshtastic_fleet_pick(cand, MESHTASTIC_BLE_REG_SLOTS, k_uptime_get())
+		       : -1;
 	for (unsigned int i = 0U; i < MESHTASTIC_BLE_REG_SLOTS && n < max; i++) {
 		struct courier_nbr *c = &courier.nbr[i];
 		struct meshtastic_fleet_intent want;
@@ -645,6 +697,7 @@ uint16_t meshtastic_fleet_courier_rows(struct meshtastic_fleet_courier_row *out,
 		if (!c->present && c->state == CS_IDLE) {
 			continue;
 		}
+		out[n].next = ((int)i == next);
 		out[n].node_id = c->node;
 		out[n].class_id = c->class_id;
 		out[n].running = c->running_known ? c->running : 0U;
