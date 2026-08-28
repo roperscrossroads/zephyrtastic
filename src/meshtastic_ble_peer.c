@@ -101,8 +101,13 @@ static K_WORK_DELAYABLE_DEFINE(beat_work, beat_work_fn);
 static struct {
 	/* TX (notify) side: seq restarts from 0 on every subscribe edge and the
 	 * first beat then carries HELLO, so the receiver's accounting resyncs.
-	 * Single-subscriber by design for now (CONFIG_BT_MAX_CONN=2 leaves one
-	 * non-phone slot); revisit per-conn TX state before raising that. */
+	 * ONE stream for every subscribed central (F6: the courier holds two):
+	 * bt_gatt_notify(NULL) fans a beat to all of them, Zephyr raises the
+	 * CCC callback only on the AGGREGATE edge (first subscriber in, last
+	 * out), and a receiver syncs on whatever beat it sees first — so a
+	 * second central joining mid-stream neither restarts the first's seq
+	 * nor needs its own HELLO, and one leaving does not silence the other.
+	 * Per-conn state would only buy per-conn loss figures. */
 	bool notify_enabled;
 	bool hello_pending;
 	uint32_t tx_seq;
@@ -382,7 +387,7 @@ bool meshtastic_ble_peer_frame_notify_ready(void)
 	return peer.frame_notify_enabled;
 }
 
-int meshtastic_ble_peer_frame_notify(const uint8_t *frame, size_t len)
+int meshtastic_ble_peer_frame_notify(struct bt_conn *conn, const uint8_t *frame, size_t len)
 {
 	/* Chunk at the guaranteed minimum ATT payload rather than the live
 	 * MTU: correct on every link by construction (the codec's whole
@@ -403,7 +408,7 @@ int meshtastic_ble_peer_frame_notify(const uint8_t *frame, size_t len)
 	}
 
 	while ((n = meshtastic_ble_peer_chunker_next(&ck, buf, sizeof(buf))) > 0) {
-		ret = bt_gatt_notify(NULL,
+		ret = bt_gatt_notify(conn,
 				     &meshtastic_peer_svc.attrs[MESHTASTIC_PEER_ATTR_FRAME_VALUE],
 				     buf, (uint16_t)n);
 		if (ret != 0) {
@@ -1176,18 +1181,19 @@ static int central_send_frame(const uint8_t *frame, size_t len)
 int meshtastic_ble_peer_frame_send_to(uint32_t node_num, const uint8_t *frame, size_t len)
 {
 	bool via_central = false;
-	bool via_notify = false;
+	int via_slot = -1;
 
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	if (central.frame_ready && central.conn != NULL && central.conn_node == node_num) {
 		via_central = true;
 	} else if (peer.frame_notify_enabled) {
-		/* Inbound link: the peer is OUR central. The notify targets
-		 * every frame-subscribed central (single-subscriber by design,
-		 * like the beat channel); requiring live beats from the target
-		 * keeps a stale subscription from swallowing frames. The
-		 * outbound conn's slot is excluded: its rx accounting holds the
-		 * node at the far end of OUR central link, which a notify on
+		/* Inbound link: the peer is OUR central. Find the slot whose
+		 * beats say it is that node and notify THAT connection only —
+		 * with two kits on the courier (F6) a broadcast notify would
+		 * hand kit1's frame to kit2 as well. Requiring live beats from
+		 * the target keeps a stale subscription from swallowing frames.
+		 * The outbound conn's slot is excluded: its rx accounting holds
+		 * the node at the far end of OUR central link, which a notify on
 		 * our peripheral characteristic can never reach. */
 		unsigned int out_idx = (central.conn != NULL)
 					       ? bt_conn_index(central.conn)
@@ -1196,7 +1202,7 @@ int meshtastic_ble_peer_frame_send_to(uint32_t node_num, const uint8_t *frame, s
 		for (unsigned int i = 0U; i < MESHTASTIC_BLE_REG_SLOTS; i++) {
 			if (i != out_idx && peer.rx[i].beats > 0U &&
 			    peer.rx[i].last.node_num == node_num) {
-				via_notify = true;
+				via_slot = (int)i;
 				break;
 			}
 		}
@@ -1206,8 +1212,16 @@ int meshtastic_ble_peer_frame_send_to(uint32_t node_num, const uint8_t *frame, s
 	if (via_central) {
 		return central_send_frame(frame, len);
 	}
-	if (via_notify) {
-		return meshtastic_ble_peer_frame_notify(frame, len);
+	if (via_slot >= 0) {
+		struct bt_conn *conn = meshtastic_ble_slot_conn((unsigned int)via_slot);
+		int ret;
+
+		if (conn == NULL) {
+			return -EHOSTUNREACH; /* gone between the lookup and now */
+		}
+		ret = meshtastic_ble_peer_frame_notify(conn, frame, len);
+		bt_conn_unref(conn);
+		return ret;
 	}
 	return -EHOSTUNREACH;
 }

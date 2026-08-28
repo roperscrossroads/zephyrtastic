@@ -50,12 +50,15 @@ bool meshtastic_ble_peer_hold_get(void);
 
 /* ---- frame channel (agents-xhli.1, PEER-TRANSPORT-DESIGN.md §2) ---- */
 
-/* Notify one wire frame to the subscribed peer central, chunked at the
- * guaranteed 20-byte ATT payload. Returns 0 once every chunk is queued,
- * -ENOTCONN when nobody has enabled frame notifications, -EINVAL/-EMSGSIZE
- * from the chunker, else the first bt_gatt_notify error (frame abandoned —
- * the receiver's partial dies on the next FIRST chunk). */
-int meshtastic_ble_peer_frame_notify(const uint8_t *frame, size_t len);
+/* Notify one wire frame to a subscribed peer central, chunked at the
+ * guaranteed 20-byte ATT payload. @p conn names the central (F6: a courier
+ * holds two; a frame for one must not land on the other) — NULL notifies every
+ * subscribed central. Returns 0 once every chunk is queued, -ENOTCONN when
+ * nobody has enabled frame notifications, -EINVAL/-EMSGSIZE from the chunker,
+ * else the first bt_gatt_notify error (frame abandoned — the receiver's
+ * partial dies on the next FIRST chunk; -EINVAL also if @p conn is not
+ * subscribed). */
+int meshtastic_ble_peer_frame_notify(struct bt_conn *conn, const uint8_t *frame, size_t len);
 
 /* True while a connected central has notifications enabled on the frame
  * channel. */
@@ -168,6 +171,12 @@ bool meshtastic_ble_slot_info(unsigned int index, char *addr, size_t addr_len, i
  * programmatic caller (an SMP client adopting the link) needs, where the
  * string form above is for the shell. Returns false if the slot is empty. */
 bool meshtastic_ble_slot_addr(unsigned int index, bt_addr_le_t *out);
+
+/* A reference to the connection in registry slot `index`, or NULL if the slot
+ * is empty. The caller owns the reference (bt_conn_unref when done). For a
+ * notify that must reach ONE central when several are subscribed (F6: two
+ * kits on the courier's peripheral side). */
+struct bt_conn *meshtastic_ble_slot_conn(unsigned int index);
 
 /* Advertiser state, tracked in meshtastic_ble.c (a4it.2). */
 bool meshtastic_ble_adv_active(void);

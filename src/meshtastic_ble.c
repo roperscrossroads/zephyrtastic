@@ -540,6 +540,18 @@ bool meshtastic_ble_slot_addr(unsigned int index, bt_addr_le_t *out)
 	k_mutex_unlock(&ble.lock);
 	return ok;
 }
+
+struct bt_conn *meshtastic_ble_slot_conn(unsigned int index)
+{
+	struct bt_conn *conn = NULL;
+
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	if (index < MESHTASTIC_BLE_REG_SLOTS && ble.conns[index] != NULL) {
+		conn = bt_conn_ref(ble.conns[index]);
+	}
+	k_mutex_unlock(&ble.lock);
+	return conn;
+}
 #endif /* CONFIG_MESHTASTIC_BLE_PEER */
 
 static void connected(struct bt_conn *conn, uint8_t err)
