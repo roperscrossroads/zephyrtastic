@@ -748,6 +748,50 @@ ZTEST(meshtastic_shell, test_cluster_promote_is_idempotent_via_origin_marker)
 			 "the refusal should name the reason");
 }
 
+#if defined(CONFIG_MESHTASTIC_FLEET)
+/*
+ * The fleet verbs (DECLARATIVE-FLEET.md §7): `desire` publishes a base/FW row
+ * for a class, `status` reads it back per class, `pin`/`unpin` write and
+ * withdraw a node's own row. Driven through the real handlers; what a master's
+ * shell session looks like.
+ */
+ZTEST(meshtastic_shell, test_fleet_desire_status_pin_and_unpin)
+{
+	const char *out = NULL;
+
+	provision_cluster_channel();
+
+	zassert_ok(run_cmd("meshtastic fleet status", &out), "status failed");
+	zassert_not_null(strstr(out, "0 base rows"), "an empty document has no intent");
+
+	zassert_not_equal(run_cmd("meshtastic fleet desire 0 0.3.0", &out), 0,
+			  "class 0 is not a class");
+	zassert_not_equal(run_cmd("meshtastic fleet desire 1 three", &out), 0,
+			  "a version must be maj.min.rev");
+	zassert_ok(run_cmd("meshtastic fleet desire 1 0.3.0", &out), "desire failed");
+	zassert_not_null(strstr(out, "published: class 1 -> 0.3.0"), "desire should confirm");
+	zassert_ok(run_cmd("meshtastic fleet desire 2 0.2.7 deadbeef pause", &out),
+		   "desire with hash + flag failed");
+
+	/* The reconciler (and the fleet hook) run on the system workqueue. */
+	k_sleep(K_MSEC(50));
+
+	zassert_ok(run_cmd("meshtastic fleet status", &out), "status failed");
+	zassert_not_null(strstr(out, "class 1 -> 0.3.0"), "class 1's row must read back");
+	zassert_not_null(strstr(out, "class 2 -> 0.2.7"), "class 2's row must read back");
+	zassert_not_null(strstr(out, "PAUSED"), "the flag must read back");
+	zassert_not_null(strstr(out, "2 base rows"), "two classes, two rows");
+
+	zassert_ok(run_cmd("meshtastic fleet pin 0b0b0b0b 0.2.4", &out), "pin failed");
+	zassert_ok(run_cmd("meshtastic fleet status", &out), "status failed");
+	zassert_not_null(strstr(out, "pin     0x0b0b0b0b"), "the pin must be listed");
+	zassert_ok(run_cmd("meshtastic fleet unpin 0b0b0b0b", &out), "unpin failed");
+	zassert_ok(run_cmd("meshtastic fleet status", &out), "status failed");
+	zassert_not_null(strstr(out, "withdrawn (tombstone)"),
+			 "a withdrawn pin is a tombstone, and says so");
+}
+#endif /* CONFIG_MESHTASTIC_FLEET */
+
 ZTEST(meshtastic_shell, test_cluster_pull_needs_a_channel_and_a_peer)
 {
 	const char *out = NULL;

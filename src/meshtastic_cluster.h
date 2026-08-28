@@ -275,6 +275,22 @@ uint32_t meshtastic_cluster_doc_hash_now(void);
 struct meshtastic_cluster_entry;
 bool meshtastic_cluster_entry_get(uint16_t idx, struct meshtastic_cluster_entry *out);
 
+/*
+ * Private sections (meshtastic_cluster_doc.h: MESHTASTIC_CLUSTER_SECTION_*).
+ *
+ * publish: write @p payload under (layer, node_id, section) from this node —
+ * the private-section counterpart of promote/pin. An empty payload at the NODE
+ * layer is a tombstone. -EPERM for a config section, an unlisted section, or a
+ * managed node; -EINVAL if the payload would not pass ingest.
+ *
+ * effective_copy: a locked copy of effective(node_id, section) — the NODE entry
+ * for that node if present and live, else BASE. False if neither exists.
+ */
+int meshtastic_cluster_publish(uint16_t section, uint8_t layer, uint32_t node_id,
+			       const uint8_t *payload, size_t payload_len);
+bool meshtastic_cluster_effective_copy(uint32_t node_id, uint16_t section,
+				       struct meshtastic_cluster_entry *out);
+
 #endif /* CONFIG_MESHTASTIC_CLUSTER */
 
 #endif /* MESHTASTIC_CLUSTER_H_ */

@@ -117,6 +117,9 @@
 #include "meshtastic_clock.h"
 #include "meshtastic_cluster.h"
 #include "meshtastic_cluster_doc.h"
+#if defined(CONFIG_MESHTASTIC_FLEET)
+#include "meshtastic_fleet.h"
+#endif
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_ext_ram.h"
@@ -299,6 +302,7 @@ static const uint16_t shareable_sections[] = {
 	meshtastic_Config_power_tag,	 meshtastic_Config_display_tag,
 	meshtastic_Config_lora_tag, /* replicable; promote refuses it separately */
 	meshtastic_Config_bluetooth_tag,
+	MESHTASTIC_CLUSTER_SECTION_FW, /* firmware intent — private payload, own actuator */
 };
 
 /* A CORE-scope node holds base + its own sections, so its claim is exactly
@@ -339,6 +343,49 @@ static bool section_shareable(uint16_t section)
  * build is still sitting — so validating on load is what makes the upgrade
  * clean out what the previous rules let in.
  */
+/*
+ * The private sections' half of the check below. Firmware intent is the one
+ * defined so far: a FleetIntent with at least one row, every row naming a
+ * class (1..255) and a non-zero version, a hash prefix that is either absent or
+ * whole, and no flag bit this build has not defined. The same "permanent
+ * fleet-wide junk" argument applies with full force — MORE force, because this
+ * payload names firmware — so a row that would be meaningless to a courier is
+ * refused before it can replicate.
+ */
+#define FLEET_INTENT_FLAGS_KNOWN 0x3U /* PAUSE | ALLOW_DOWNGRADE */
+
+static bool private_payload_is_valid(uint16_t section, const uint8_t *payload, size_t len)
+{
+	static zephyrtastic_FleetIntent intent; /* same static discipline as the probe */
+	pb_istream_t is;
+
+	if (section != MESHTASTIC_CLUSTER_SECTION_FW) {
+		return false; /* no other private section exists yet */
+	}
+	is = pb_istream_from_buffer(payload, len);
+	intent = (zephyrtastic_FleetIntent)zephyrtastic_FleetIntent_init_zero;
+	if (!pb_decode(&is, zephyrtastic_FleetIntent_fields, &intent)) {
+		return false;
+	}
+	if (intent.rows_count == 0U) {
+		return false;
+	}
+	for (pb_size_t i = 0U; i < intent.rows_count; i++) {
+		const zephyrtastic_ClassIntent *r = &intent.rows[i];
+
+		if (r->class_id > 255U || r->version == 0U) {
+			return false;
+		}
+		if (r->hash_prefix.size != 0U && r->hash_prefix.size != 4U) {
+			return false;
+		}
+		if ((r->flags & ~FLEET_INTENT_FLAGS_KNOWN) != 0U) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool payload_is_its_section(uint16_t section, const uint8_t *payload, size_t len,
 				   bool tombstone)
 {
@@ -351,6 +398,11 @@ static bool payload_is_its_section(uint16_t section, const uint8_t *payload, siz
 
 	if (tombstone) {
 		return len == 0U; /* nothing to check; accept() enforces the rest */
+	}
+	/* Private sections carry their own payload type; a Config decode would
+	 * refuse every one of them. Dispatch on the range, before the probe. */
+	if (meshtastic_cluster_section_is_private(section)) {
+		return private_payload_is_valid(section, payload, len);
 	}
 	is = pb_istream_from_buffer(payload, len);
 	probe = (meshtastic_Config)meshtastic_Config_init_zero;
@@ -968,10 +1020,26 @@ static void reconcile_section(uint16_t section)
  * one of them short-circuits on the stamp comparison once applied. */
 static void reconcile_work_fn(struct k_work *work)
 {
+	bool private_changed = false;
+
 	ARG_UNUSED(work);
 
 	for (size_t i = 0; i < ARRAY_SIZE(shareable_sections); i++) {
+		if (meshtastic_cluster_section_is_private(shareable_sections[i])) {
+			/* Not config. THE DOCUMENT IS ONE, THE ACTUATORS ARE TWO:
+			 * the config store applies sections, the fleet module
+			 * acts on intent. Never hand a private payload to
+			 * merge_config — it is not a Config and would not decode
+			 * as one. */
+			private_changed = true;
+			continue;
+		}
 		reconcile_section(shareable_sections[i]);
+	}
+	if (private_changed) {
+#if defined(CONFIG_MESHTASTIC_FLEET)
+		meshtastic_fleet_intent_changed();
+#endif
 	}
 }
 
@@ -2679,6 +2747,57 @@ int meshtastic_cluster_promote(uint16_t section)
 			stamp.node_id);
 	}
 	return ret;
+}
+
+/*
+ * The private sections' writer. promote/pin read the config store and lift a
+ * Config section into the document; a private section has no store to read
+ * from — its payload is handed in by its own module — and no origin marker to
+ * check, so this is the plain write: validate as ingest would (the local door
+ * is held to the same rule as the air), mint, accept, persist, push. A NODE
+ * write names the node it pins; a master may pin any node (ingest at every
+ * peer applies the D4 rule to our stamp), a non-master's pin of another node
+ * simply never leaves this table.
+ */
+int meshtastic_cluster_publish(uint16_t section, uint8_t layer, uint32_t node_id,
+			       const uint8_t *payload, size_t payload_len)
+{
+	struct meshtastic_cluster_key key = {
+		.layer = layer,
+		.node_id = (layer == MESHTASTIC_CLUSTER_LAYER_BASE) ? 0U : node_id,
+		.section = section,
+	};
+	struct meshtastic_hlc_stamp stamp;
+	struct meshtastic_hlc_stamp none = {0};
+	bool tombstone = (payload_len == 0U);
+
+	if (!meshtastic_cluster_section_is_private(section) || !section_shareable(section) ||
+	    !local_writes_allowed()) {
+		return -EPERM;
+	}
+	if (payload_len > MESHTASTIC_CLUSTER_PAYLOAD_MAX) {
+		return -EMSGSIZE;
+	}
+	if (!payload_is_its_section(section, payload, payload_len, tombstone)) {
+		return -EINVAL;
+	}
+	return doc_write_local(&key, &none, tombstone, payload, payload_len, &stamp);
+}
+
+bool meshtastic_cluster_effective_copy(uint32_t node_id, uint16_t section,
+				       struct meshtastic_cluster_entry *out)
+{
+	const struct meshtastic_cluster_entry *e;
+	bool found = false;
+
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	e = meshtastic_cluster_doc_effective(&cluster.doc, node_id, section);
+	if (e != NULL) {
+		*out = *e;
+		found = true;
+	}
+	k_mutex_unlock(&cluster_lock);
+	return found;
 }
 
 int meshtastic_cluster_pin(uint16_t section)

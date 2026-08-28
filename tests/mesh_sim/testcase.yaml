@@ -44,4 +44,7 @@ tests:
   # disturb anything else.
   meshtastic.mesh_sim.cluster_small_table.native_sim:
     extra_configs:
-      - CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES=14
+      # 16, not 14, since the FW (firmware intent) section joined the
+      # allowlist: a CORE claim is twice the allowlist (14), and a cap equal to
+      # the claim would leave narrowing nothing to free.
+      - CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES=16

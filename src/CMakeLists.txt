@@ -98,6 +98,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_cluster.c
     meshtastic_cluster_doc.c
   )
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_FLEET meshtastic_fleet.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE
     meshtastic_ble.c
     meshtastic_ble_name.c

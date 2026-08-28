@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,6 +43,9 @@
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
 #include "meshtastic_cluster.h"
 #include "meshtastic_cluster_doc.h"
+#if defined(CONFIG_MESHTASTIC_FLEET)
+#include "meshtastic_fleet.h"
+#endif
 #endif
 #include "meshtastic_build.h"
 #include "meshtastic_channels.h"
@@ -1357,6 +1361,7 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+
 
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
@@ -4337,6 +4342,289 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_CLUSTER */
 
+#if defined(CONFIG_MESHTASTIC_FLEET)
+/* ---- `meshtastic fleet` — firmware intent on the cluster document ---------- */
+
+/* "maj.min.rev", each a decimal in the MCUboot header's range. strtoul rather
+ * than sscanf: the shell file has no stdio, and scanf is not worth its flash. */
+static int fleet_version_parse(const char *s, uint32_t *out)
+{
+	unsigned long part[3];
+	char *end;
+
+	for (int i = 0; i < 3; i++) {
+		if (*s < '0' || *s > '9') {
+			return -EINVAL;
+		}
+		part[i] = strtoul(s, &end, 10);
+		if (i < 2) {
+			if (*end != '.') {
+				return -EINVAL;
+			}
+			s = end + 1;
+		} else if (*end != '\0') {
+			return -EINVAL;
+		}
+	}
+	if (part[0] > 255UL || part[1] > 255UL || part[2] > 65535UL) {
+		return -EINVAL;
+	}
+	*out = meshtastic_fleet_version_pack((uint8_t)part[0], (uint8_t)part[1],
+					     (uint16_t)part[2]);
+	return 0;
+}
+
+static int fleet_hash_parse(const char *hex, uint8_t out[4])
+{
+	if (strlen(hex) != 8U) {
+		return -EINVAL;
+	}
+	for (int i = 0; i < 4; i++) {
+		char pair[3] = {hex[2 * i], hex[2 * i + 1], '\0'};
+		char *end;
+		unsigned long b = strtoul(pair, &end, 16);
+
+		if (*end != '\0' || pair[0] == '\0' || pair[1] == '\0') {
+			return -EINVAL;
+		}
+		out[i] = (uint8_t)b;
+	}
+	return 0;
+}
+
+static void fleet_print_row(const struct shell *sh, const char *what, uint32_t node_id,
+			    const struct meshtastic_fleet_intent *w)
+{
+	char hw[16] = "";
+
+	if (w->hw_model != 0U) {
+		(void)snprintf(hw, sizeof(hw), " hw=%u", (unsigned int)w->hw_model);
+	}
+	shell_print(sh, "%s%s%08x: class %u -> %u.%u.%u%s%s%s%s  (stamp %lld.%u by 0x%08x)", what,
+		    node_id ? " 0x" : "", node_id, w->class_id, (unsigned int)(w->version >> 24),
+		    (unsigned int)((w->version >> 16) & 0xFFU), (unsigned int)(w->version & 0xFFFFU),
+		    hw, w->has_hash ? " hash=" : "", w->has_hash ? "yes" : "",
+		    (w->flags & MESHTASTIC_FLEET_FLAG_PAUSE) ? " PAUSED" :
+		    (w->flags & MESHTASTIC_FLEET_FLAG_ALLOW_DOWNGRADE) ? " allow-downgrade" : "",
+		    (long long)w->stamp.physical_ms, w->stamp.counter, w->stamp.node_id);
+}
+
+/* fleet status: the base rows per class, then every pin in the document. */
+static int cmd_fleet_status(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_cluster_entry e;
+	struct meshtastic_fleet_intent w;
+	unsigned int base_rows = 0U, pins = 0U;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	for (unsigned int c = 1U; c <= 255U; c++) {
+		/* Ask for a node that cannot have a pin, so the answer is base. */
+		if (meshtastic_fleet_desired_for(0U, (uint8_t)c, &w) && !w.pinned) {
+			fleet_print_row(sh, "base   ", 0U, &w);
+			base_rows++;
+		}
+	}
+	for (uint16_t i = 0U; meshtastic_cluster_entry_get(i, &e); i++) {
+		if (e.key.section != MESHTASTIC_CLUSTER_SECTION_FW ||
+		    e.key.layer != MESHTASTIC_CLUSTER_LAYER_NODE) {
+			continue;
+		}
+		if (e.tombstone) {
+			shell_print(sh, "pin     0x%08x: withdrawn (tombstone)", e.key.node_id);
+		} else if (meshtastic_fleet_desired_for(e.key.node_id, 0U, &w)) {
+			fleet_print_row(sh, "pin    ", e.key.node_id, &w);
+		}
+		pins++;
+	}
+	shell_print(sh, "%u base row%s, %u pin%s; this build is class %u", base_rows,
+		    base_rows == 1U ? "" : "s", pins, pins == 1U ? "" : "s",
+		    CONFIG_MESHTASTIC_FLEET_CLASS);
+	if (meshtastic_fleet_desired_for(meshtastic_get_node_id(), CONFIG_MESHTASTIC_FLEET_CLASS,
+					 &w)) {
+		fleet_print_row(sh, "me     ", 0U, &w);
+	} else {
+		shell_print(sh, "me      : no intent for my class — nobody will push to me");
+	}
+#if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
+	{
+		struct meshtastic_fleet_courier_row rows[MESHTASTIC_BLE_REG_SLOTS];
+		uint16_t nr = meshtastic_fleet_courier_rows(rows, ARRAY_SIZE(rows));
+
+		shell_print(sh, "courier : %s", meshtastic_fleet_courier_armed() ? "ARMED" : "disarmed");
+		for (uint16_t i = 0U; i < nr; i++) {
+			shell_print(sh, "  0x%08x class %u run %u.%u.%u want %u.%u.%u [%c%c%c] %s x%u",
+				    rows[i].node_id, rows[i].class_id,
+				    (unsigned int)(rows[i].running >> 24),
+				    (unsigned int)((rows[i].running >> 16) & 0xFFU),
+				    (unsigned int)(rows[i].running & 0xFFFFU),
+				    (unsigned int)(rows[i].desired >> 24),
+				    (unsigned int)((rows[i].desired >> 16) & 0xFFU),
+				    (unsigned int)(rows[i].desired & 0xFFFFU),
+				    (rows[i].flags & MESHTASTIC_BLE_PEER_FLAG_HOLD) ? 'H' : '-',
+				    (rows[i].flags & MESHTASTIC_BLE_PEER_FLAG_TESTBOOT) ? 'T' : '-',
+				    (rows[i].flags & MESHTASTIC_BLE_PEER_FLAG_COURIER) ? 'C' : '-',
+				    rows[i].state, rows[i].attempts);
+		}
+	}
+#endif
+	return 0;
+}
+
+#if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
+static int cmd_fleet_arm(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc >= 2) {
+		if (strcmp(argv[1], "on") == 0) {
+			meshtastic_fleet_courier_arm(true);
+		} else if (strcmp(argv[1], "off") == 0) {
+			meshtastic_fleet_courier_arm(false);
+		} else {
+			shell_error(sh, "usage: fleet arm [on|off]");
+			return -EINVAL;
+		}
+	}
+	shell_print(sh, "courier: %s", meshtastic_fleet_courier_armed() ? "ARMED" : "disarmed");
+	return 0;
+}
+
+static int cmd_fleet_clear(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t node;
+
+	if (argc < 2) {
+		shell_error(sh, "usage: fleet clear <node-hex>");
+		return -EINVAL;
+	}
+	node = (uint32_t)strtoul(argv[1], NULL, 16);
+	meshtastic_fleet_courier_clear(node);
+	shell_print(sh, "cleared any reverted/backoff latch on 0x%08x", node);
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_FLEET_COURIER */
+
+static int cmd_fleet_desire(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t version;
+	uint16_t hw_model = 0U;
+	uint8_t hash[4];
+	const uint8_t *hash_p = NULL;
+	uint32_t flags = 0U;
+	unsigned long cls;
+	int ret;
+
+	if (argc < 3U) {
+		shell_error(sh, "usage: fleet desire <class> <maj.min.rev> [hash8hex] [pause|downgrade] [hw=<model>]");
+		return -EINVAL;
+	}
+	cls = strtoul(argv[1], NULL, 0);
+	if (cls == 0UL || cls > 255UL || fleet_version_parse(argv[2], &version) != 0) {
+		shell_error(sh, "class 1..255 and a version maj.min.rev are required");
+		return -EINVAL;
+	}
+	for (size_t i = 3U; i < argc; i++) {
+		if (strcmp(argv[i], "pause") == 0) {
+			flags |= MESHTASTIC_FLEET_FLAG_PAUSE;
+		} else if (strcmp(argv[i], "downgrade") == 0) {
+			flags |= MESHTASTIC_FLEET_FLAG_ALLOW_DOWNGRADE;
+		} else if (strncmp(argv[i], "hw=", 3) == 0) {
+			unsigned long m = strtoul(argv[i] + 3, NULL, 0);
+
+			if (m == 0UL || m > 65535UL) {
+				shell_error(sh, "hw=<meshtastic HardwareModel number>, e.g. hw=88");
+				return -EINVAL;
+			}
+			hw_model = (uint16_t)m;
+		} else if (fleet_hash_parse(argv[i], hash) == 0) {
+			hash_p = hash;
+		} else {
+			shell_error(sh, "unknown argument '%s'", argv[i]);
+			return -EINVAL;
+		}
+	}
+	ret = meshtastic_fleet_desire((uint8_t)cls, version, hash_p, flags, hw_model);
+	if (ret == -EPERM) {
+		shell_error(sh, "refused: this node may not write the document (managed?)");
+	} else if (ret == -ENOSPC) {
+		shell_error(sh, "refused: four classes already have rows");
+	} else if (ret < 0) {
+		shell_error(sh, "desire failed (%d)", ret);
+	} else {
+		shell_print(sh, "published: class %lu -> %s%s", cls, argv[2],
+			    flags ? " (flagged)" : "");
+	}
+	return ret;
+}
+
+static int cmd_fleet_pin(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t node, version = 0U;
+	uint8_t hash[4];
+	const uint8_t *hash_p = NULL;
+	uint32_t flags = 0U;
+	bool withdraw = (strcmp(argv[0], "unpin") == 0);
+	int ret;
+
+	if (argc < (withdraw ? 2U : 3U)) {
+		shell_error(sh, "usage: fleet pin <node-hex> <maj.min.rev> [hash8hex] [downgrade] | "
+				"fleet unpin <node-hex>");
+		return -EINVAL;
+	}
+	node = (uint32_t)strtoul(argv[1], NULL, 16);
+	if (node == 0U) {
+		shell_error(sh, "node id required (hex)");
+		return -EINVAL;
+	}
+	if (!withdraw) {
+		if (fleet_version_parse(argv[2], &version) != 0) {
+			shell_error(sh, "version maj.min.rev required");
+			return -EINVAL;
+		}
+		for (size_t i = 3U; i < argc; i++) {
+			if (strcmp(argv[i], "downgrade") == 0) {
+				flags |= MESHTASTIC_FLEET_FLAG_ALLOW_DOWNGRADE;
+			} else if (fleet_hash_parse(argv[i], hash) == 0) {
+				hash_p = hash;
+			} else {
+				shell_error(sh, "unknown argument '%s'", argv[i]);
+				return -EINVAL;
+			}
+		}
+	}
+	ret = meshtastic_fleet_pin(node, version, hash_p, flags);
+	if (ret < 0) {
+		shell_error(sh, "%s failed (%d)", withdraw ? "unpin" : "pin", ret);
+	} else {
+		shell_print(sh, "%s 0x%08x%s%s", withdraw ? "withdrew the pin on" : "pinned", node,
+			    withdraw ? "" : " -> ", withdraw ? "" : argv[2]);
+	}
+	return ret;
+}
+
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	meshtastic_fleet_cmds,
+	SHELL_CMD(status, NULL, SHELL_HELP("Base rows per class, pins, and what I should run.", NULL),
+		  cmd_fleet_status),
+	SHELL_CMD(desire, NULL,
+		  SHELL_HELP("Publish the fleet's intent for an image class (master only).",
+			     "<class> <maj.min.rev> [hash8hex] [pause|downgrade] [hw=<model>]"),
+		  cmd_fleet_desire),
+	SHELL_CMD(pin, NULL, SHELL_HELP("Pin one node to a version.",
+					"<node-hex> <maj.min.rev> [hash8hex] [downgrade]"),
+		  cmd_fleet_pin),
+	SHELL_CMD(unpin, NULL, SHELL_HELP("Withdraw a node's pin (it falls back to base).",
+					  "<node-hex>"),
+		  cmd_fleet_pin),
+#if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
+	SHELL_CMD(arm, NULL, SHELL_HELP("Arm/disarm the courier loop.", "[on|off]"), cmd_fleet_arm),
+	SHELL_CMD(clear, NULL, SHELL_HELP("Clear a node's reverted/backoff latch.", "<node-hex>"),
+		  cmd_fleet_clear),
+#endif
+	SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_FLEET */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_admin_cmds,
 			       SHELL_CMD(trust, NULL,
 					 SHELL_HELP("List/manage trusted remote-admin keys.",
@@ -4401,6 +4689,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
 	SHELL_CMD(cluster, &meshtastic_cluster_cmds,
 		  SHELL_HELP("Fleet config convergence.", NULL), cmd_cluster_status),
+#endif
+#if defined(CONFIG_MESHTASTIC_FLEET)
+	SHELL_CMD(fleet, &meshtastic_fleet_cmds,
+		  SHELL_HELP("Fleet firmware intent (what each class should run).", NULL),
+		  cmd_fleet_status),
 #endif
 	SHELL_CMD(lora, NULL,
 		  SHELL_HELP("Show or set the LoRa modem preset (reboot to apply) "

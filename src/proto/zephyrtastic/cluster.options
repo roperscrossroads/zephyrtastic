@@ -12,3 +12,8 @@
 # is what keeps these counts honest against the generated sizes.
 *ClusterVector.entries   max_count:4
 *ClusterEntryReq.keys    max_count:6
+
+# Firmware intent: 4 classes covers this fleet twice; a row is ~18 B, so a
+# full FleetIntent is ~72 B inside the 128-byte payload cap.
+*ClassIntent.hash_prefix max_size:4
+*FleetIntent.rows        max_count:4

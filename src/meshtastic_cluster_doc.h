@@ -39,10 +39,30 @@ enum meshtastic_cluster_layer {
 	MESHTASTIC_CLUSTER_LAYER_NODE = 1,
 };
 
+/*
+ * Sections 1..10 are meshtastic_Config payload-variant tags — a config
+ * section, applied by the reconciler. Sections at or above
+ * MESHTASTIC_CLUSTER_SECTION_PRIVATE are zephyrtastic-private, each with its
+ * own payload type and its own actuator; the document treats them exactly
+ * like any other key (LWW, layers, scope, persistence), and the module's
+ * validator dispatches on the range. The one defined so far:
+ *
+ *   FW (0x100) — firmware intent, a zephyrtastic.FleetIntent (cluster.proto).
+ *                BASE = the fleet's intent per image class; NODE = a pin.
+ *                Actuated by meshtastic_fleet.c, never by the config store.
+ */
+#define MESHTASTIC_CLUSTER_SECTION_PRIVATE 0x100U
+#define MESHTASTIC_CLUSTER_SECTION_FW      0x100U
+
+static inline bool meshtastic_cluster_section_is_private(uint16_t section)
+{
+	return section >= MESHTASTIC_CLUSTER_SECTION_PRIVATE;
+}
+
 struct meshtastic_cluster_key {
 	uint8_t layer;    /* enum meshtastic_cluster_layer */
 	uint32_t node_id; /* 0 for BASE */
-	uint16_t section; /* meshtastic_Config payload-variant tag */
+	uint16_t section; /* a meshtastic_Config tag, or a private section (above) */
 };
 
 struct meshtastic_cluster_entry {

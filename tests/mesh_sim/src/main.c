@@ -2845,6 +2845,292 @@ ZTEST(mesh_sim, test_cluster_entry_payload_must_match_its_claimed_section)
 	cluster_channel(false);
 }
 
+#if defined(CONFIG_MESHTASTIC_FLEET)
+/* ==========================================================================
+ * Fleet firmware intent (DECLARATIVE-FLEET.md §7): the private FW section.
+ * The document treats it like any other key; what these prove is the seams
+ * around it — the validator at ingest, the authorship gate, the reconciler
+ * NOT applying it, and the pin-else-base answer a courier will act on.
+ * ========================================================================== */
+
+#include "meshtastic_ble_peer_codec.h"
+#include "meshtastic_fleet.h"
+
+/* A FleetIntent encoded as the document carries it. */
+static size_t encode_intent(uint8_t class_id, uint32_t version, uint32_t flags, uint8_t *buf,
+			    size_t buf_len)
+{
+	zephyrtastic_FleetIntent in = zephyrtastic_FleetIntent_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, buf_len);
+
+	in.rows_count = 1U;
+	in.rows[0].class_id = class_id;
+	in.rows[0].version = version;
+	in.rows[0].flags = flags;
+	zassert_true(pb_encode(&os, zephyrtastic_FleetIntent_fields, &in), "intent encode failed");
+	return os.bytes_written;
+}
+
+/* A master's fleet intent is accepted, visible through the fleet API, and NOT
+ * handed to the config store: the document is one, the actuators are two. */
+ZTEST(mesh_sim, test_cluster_fleet_intent_from_master_is_visible_and_never_applied_as_config)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	struct meshtastic_fleet_intent want;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t len;
+	uint32_t v = meshtastic_fleet_version_pack(0, 3, 0);
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	meshtastic_cluster_stats_get(&before_st);
+
+	len = encode_intent(1U, v, 0U, buf, sizeof(buf));
+	/* Newer than anything the document holds — ztest orders by name and the
+	 * `desire` case below runs first, leaving a base/FW row with a fresh
+	 * local stamp; an older injected stamp would lose LWW as stale. */
+	inject_entry(MESHTASTIC_CLUSTER_SECTION_FW, zephyrtastic_ClusterLayer_BASE, 0U,
+		     doc_max_stamp().physical_ms + 1000, false, buf, len, 0x7401U);
+	k_sleep(K_MSEC(400));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.entry_rx_applied, before_st.entry_rx_applied + 1U,
+		      "a master's fleet intent must enter the document");
+	zassert_true(doc_get(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, MESHTASTIC_CLUSTER_SECTION_FW,
+			     NULL), "as base/FW");
+	zassert_equal(after_st.sections_applied, before_st.sections_applied,
+		      "and must NOT be applied as a config section");
+	zassert_equal(after_st.sections_kept_local, before_st.sections_kept_local);
+
+	zassert_true(meshtastic_fleet_desired_for(0x12345678U, 1U, &want),
+		      "any node of class 1 is told what to run");
+	zassert_equal(want.version, v);
+	zassert_false(want.pinned);
+	zassert_equal(want.class_id, 1U);
+	zassert_equal(want.stamp.node_id, PEER_NODE_ID, "stamped by the master that said so");
+	zassert_false(meshtastic_fleet_desired_for(0x12345678U, 2U, &want),
+		      "a class with no row is told nothing — silence is not an order");
+
+	cluster_channel(false);
+}
+
+/* The D4 gate is unchanged by the new section: base/FW is master-only. */
+ZTEST(mesh_sim, test_cluster_fleet_intent_from_non_master_refused)
+{
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(false);
+	wait_cluster_idle();
+	quiesce();
+	meshtastic_cluster_stats_get(&before_st);
+
+	len = encode_intent(1U, meshtastic_fleet_version_pack(9, 9, 9), 0U, buf, sizeof(buf));
+	inject_entry(MESHTASTIC_CLUSTER_SECTION_FW, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 2200), false, buf, len, 0x7402U);
+	k_sleep(K_MSEC(300));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.entry_rx_refused, before_st.entry_rx_refused + 1U,
+		      "fleet intent from a non-master must be refused");
+	zassert_equal(after_st.entry_rx_applied, before_st.entry_rx_applied);
+
+	cluster_channel(false);
+}
+
+/* Malformed intent is refused at INGEST, not at apply: a base entry can never
+ * be withdrawn, so a row a courier could not act on must never replicate. */
+ZTEST(mesh_sim, test_cluster_fleet_intent_malformed_refused_at_ingest)
+{
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint16_t before_count;
+	size_t len;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	before_count = meshtastic_cluster_entry_count();
+
+	/* A Config section wearing the FW key. */
+	len = encode_display(30U, buf, sizeof(buf));
+	inject_entry(MESHTASTIC_CLUSTER_SECTION_FW, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 2300), false, buf, len, 0x7403U);
+	k_sleep(K_MSEC(300));
+	zassert_equal(meshtastic_cluster_entry_count(), before_count,
+		      "a Config payload under the FW key must be refused");
+
+	/* A FleetIntent with no rows — well-formed, meaningless. */
+	{
+		zephyrtastic_FleetIntent empty = zephyrtastic_FleetIntent_init_zero;
+		pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+
+		zassert_true(pb_encode(&os, zephyrtastic_FleetIntent_fields, &empty));
+		inject_entry(MESHTASTIC_CLUSTER_SECTION_FW, zephyrtastic_ClusterLayer_BASE, 0U,
+			     (TEST_EPOCH_MS + 2400), false, buf, os.bytes_written, 0x7404U);
+	}
+	k_sleep(K_MSEC(300));
+	zassert_equal(meshtastic_cluster_entry_count(), before_count,
+		      "an intent with no rows must be refused");
+
+	/* A row with version 0, and one with a flag this build does not know. */
+	len = encode_intent(1U, 0U, 0U, buf, sizeof(buf));
+	inject_entry(MESHTASTIC_CLUSTER_SECTION_FW, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 2500), false, buf, len, 0x7405U);
+	k_sleep(K_MSEC(300));
+	zassert_equal(meshtastic_cluster_entry_count(), before_count, "version 0 is not a version");
+	len = encode_intent(1U, meshtastic_fleet_version_pack(0, 3, 0), 0x80U, buf, sizeof(buf));
+	inject_entry(MESHTASTIC_CLUSTER_SECTION_FW, zephyrtastic_ClusterLayer_BASE, 0U,
+		     (TEST_EPOCH_MS + 2600), false, buf, len, 0x7406U);
+	k_sleep(K_MSEC(300));
+	zassert_equal(meshtastic_cluster_entry_count(), before_count,
+		      "an unknown flag bit must be refused — a courier could not honour it");
+
+	cluster_channel(false);
+}
+
+/* pin, else base: a node's own row answers for it whatever its class; every
+ * other node of the class still gets the fleet's row. */
+ZTEST(mesh_sim, test_cluster_fleet_pin_overrides_base_for_that_node_only)
+{
+	struct meshtastic_fleet_intent want;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t len;
+	uint32_t fleet_v = meshtastic_fleet_version_pack(0, 3, 0);
+	uint32_t pin_v = meshtastic_fleet_version_pack(0, 2, 4);
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	len = encode_intent(1U, fleet_v, 0U, buf, sizeof(buf));
+	inject_entry(MESHTASTIC_CLUSTER_SECTION_FW, zephyrtastic_ClusterLayer_BASE, 0U,
+		     doc_max_stamp().physical_ms + 1000, false, buf, len, 0x7407U);
+	k_sleep(K_MSEC(300));
+	/* The master pins PEER itself (a node may always write its own rows). */
+	len = encode_intent(0U /* wildcard */, pin_v, 0U, buf, sizeof(buf));
+	inject_entry(MESHTASTIC_CLUSTER_SECTION_FW, zephyrtastic_ClusterLayer_NODE, PEER_NODE_ID,
+		     doc_max_stamp().physical_ms + 1000, false, buf, len, 0x7408U);
+	k_sleep(K_MSEC(300));
+
+	zassert_true(meshtastic_fleet_desired_for(PEER_NODE_ID, 1U, &want));
+	zassert_equal(want.version, pin_v, "the pinned node gets its pin");
+	zassert_true(want.pinned);
+	zassert_true(meshtastic_fleet_desired_for(0x12345678U, 1U, &want));
+	zassert_equal(want.version, fleet_v, "everyone else of the class gets the fleet's row");
+	zassert_false(want.pinned);
+
+	cluster_channel(false);
+}
+
+/* The writer: `desire` upserts a row in base/FW without disturbing the others,
+ * and the entry it mints is this node's — the shape a master's shell produces. */
+ZTEST(mesh_sim, test_cluster_fleet_desire_upserts_base_rows)
+{
+	struct meshtastic_fleet_intent want;
+	struct meshtastic_cluster_entry e;
+	uint32_t v1 = meshtastic_fleet_version_pack(0, 3, 1);
+	uint32_t v2 = meshtastic_fleet_version_pack(0, 2, 6);
+	uint8_t hash[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+
+	cluster_channel(true);
+	wait_cluster_idle();
+	quiesce();
+
+	zassert_ok(meshtastic_fleet_desire(1U, v1, NULL, 0U, 0U));
+	zassert_ok(meshtastic_fleet_desire(2U, v2, hash, MESHTASTIC_FLEET_FLAG_PAUSE, 132U));
+	zassert_true(doc_get(MESHTASTIC_CLUSTER_LAYER_BASE, 0U, MESHTASTIC_CLUSTER_SECTION_FW, &e));
+	zassert_equal(e.stamp.node_id, TEST_NODE_ID, "minted by this node");
+
+	zassert_true(meshtastic_fleet_desired_for(0x22222222U, 1U, &want));
+	zassert_equal(want.version, v1, "class 1's row survives a desire for class 2");
+	zassert_true(meshtastic_fleet_desired_for(0x22222222U, 2U, &want));
+	zassert_equal(want.version, v2);
+	zassert_true(want.has_hash);
+	zassert_mem_equal(want.hash_prefix, hash, 4U);
+	zassert_equal(want.hw_model, 132U, "the row's board survives the round trip");
+	zassert_equal(want.flags, MESHTASTIC_FLEET_FLAG_PAUSE);
+
+	/* Re-desiring a class replaces its row, not adds one. */
+	zassert_ok(meshtastic_fleet_desire(1U, v2, NULL, 0U, 0U));
+	zassert_true(meshtastic_fleet_desired_for(0x22222222U, 1U, &want));
+	zassert_equal(want.version, v2);
+
+	zassert_equal(meshtastic_fleet_desire(0U, v1, NULL, 0U, 0U), -EINVAL, "class 0 is not a class");
+	zassert_equal(meshtastic_fleet_desire(1U, 0U, NULL, 0U, 0U), -EINVAL, "version 0 is not a version");
+
+	cluster_channel(false);
+}
+
+/* The courier's decision, pure — every branch of meshtastic_fleet_evaluate,
+ * with no BLE or SMP. This is the heart of §8's loop; the transport around it
+ * is bench-tested, but the "should I push" rules are provable here. */
+ZTEST(mesh_sim, test_fleet_evaluate_decides_who_to_push_to)
+{
+	struct meshtastic_fleet_intent want = {0};
+	uint32_t v030 = meshtastic_fleet_version_pack(0, 3, 0);
+	uint32_t v024 = meshtastic_fleet_version_pack(0, 2, 4);
+
+	/* No intent at all → nothing to do. */
+	zassert_equal(meshtastic_fleet_evaluate(v024, true, 0U, 0U, NULL),
+		      MESHTASTIC_FLEET_SKIP_NO_INTENT);
+
+	want.version = v030;
+	want.flags = 0U;
+
+	/* The happy path: behind, willing, known version. */
+	zassert_equal(meshtastic_fleet_evaluate(v024, true, 0U, 0U, &want), MESHTASTIC_FLEET_PUSH);
+	/* Already there. */
+	zassert_equal(meshtastic_fleet_evaluate(v030, true, 0U, 0U, &want),
+		      MESHTASTIC_FLEET_SKIP_UP_TO_DATE);
+	/* Beat reports no version. */
+	zassert_equal(meshtastic_fleet_evaluate(0U, false, 0U, 0U, &want),
+		      MESHTASTIC_FLEET_SKIP_UNKNOWN_VER);
+
+	/* Consent bits win over "behind". */
+	zassert_equal(meshtastic_fleet_evaluate(v024, true, MESHTASTIC_BLE_PEER_FLAG_HOLD, 0U, &want),
+		      MESHTASTIC_FLEET_SKIP_HOLD);
+	zassert_equal(meshtastic_fleet_evaluate(v024, true, MESHTASTIC_BLE_PEER_FLAG_TESTBOOT, 0U, &want),
+		      MESHTASTIC_FLEET_SKIP_TESTBOOT);
+
+	/* A paused row is not acted on. */
+	want.flags = MESHTASTIC_FLEET_FLAG_PAUSE;
+	zassert_equal(meshtastic_fleet_evaluate(v024, true, 0U, 0U, &want),
+		      MESHTASTIC_FLEET_SKIP_PAUSED);
+
+	/* Never downgrade — unless the row says so. */
+	want.version = v024;
+	want.flags = 0U;
+	zassert_equal(meshtastic_fleet_evaluate(v030, true, 0U, 0U, &want),
+		      MESHTASTIC_FLEET_SKIP_DOWNGRADE);
+	want.flags = MESHTASTIC_FLEET_FLAG_ALLOW_DOWNGRADE;
+	zassert_equal(meshtastic_fleet_evaluate(v030, true, 0U, 0U, &want), MESHTASTIC_FLEET_PUSH);
+
+	/* The board cross-check: a row that names a board is refused to a node
+	 * known to be another; either side unstated means no check. */
+	want.version = v030;
+	want.flags = 0U;
+	want.hw_model = 88U;
+	zassert_equal(meshtastic_fleet_evaluate(v024, true, 0U, 88U, &want), MESHTASTIC_FLEET_PUSH,
+		      "same board -> push");
+	zassert_equal(meshtastic_fleet_evaluate(v024, true, 0U, 110U, &want),
+		      MESHTASTIC_FLEET_SKIP_HW_MISMATCH, "another board -> refused");
+	zassert_equal(meshtastic_fleet_evaluate(v024, true, 0U, 0U, &want), MESHTASTIC_FLEET_PUSH,
+		      "no NodeInfo for it -> no check");
+	want.hw_model = 0U;
+	zassert_equal(meshtastic_fleet_evaluate(v024, true, 0U, 110U, &want), MESHTASTIC_FLEET_PUSH,
+		      "row does not name a board -> no check");
+	zassert_str_equal(meshtastic_fleet_verdict_str(MESHTASTIC_FLEET_SKIP_HW_MISMATCH),
+			  "wrong-board");
+}
+
+#endif /* CONFIG_MESHTASTIC_FLEET */
+
 /*
  * The one-packet fleet kill. `promote` refuses to CREATE a base/lora entry
  * because a missed preset change orphans a node permanently (§7.9, no straggler
@@ -4333,6 +4619,12 @@ static const uint16_t probe_sections[] = {
 	meshtastic_Config_device_tag,	 meshtastic_Config_position_tag,
 	meshtastic_Config_power_tag,	 meshtastic_Config_display_tag,
 	meshtastic_Config_bluetooth_tag,
+	/* lora replicates (it is merely never APPLIED), so it fills a slot like
+	 * any other section. It joined the probes when the FW (fleet intent)
+	 * section joined the allowlist: the fleet tests leave two FW rows in
+	 * the shared document, which took the slack the fill relied on to hand
+	 * back one free key at the cap. */
+	meshtastic_Config_lora_tag,
 };
 
 static void probe_candidates(struct probe_key *out, size_t *n)

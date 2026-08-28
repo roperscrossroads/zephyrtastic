@@ -116,3 +116,17 @@ config MESHTASTIC_FLEET_CLASS
 	  A courier only offers a node an image of the node's own class, and a
 	  node with class 0 is offered nothing. Shown by `meshtastic version`;
 	  carried in the peer-link beat from version 2 of that frame.
+
+config MESHTASTIC_FLEET
+	bool "Fleet firmware intent on the cluster document (the courier's orders)"
+	depends on MESHTASTIC_CLUSTER
+	default y
+	help
+	  The reader and writer of the document's private FW section
+	  (meshtastic_fleet.h): what each image class should run, fleet-wide at
+	  BASE and per node as a pin. Shell: `meshtastic fleet`. Intent only —
+	  the courier loop that acts on it comes with the SMP client.
+
+if MESHTASTIC_FLEET
+
+endif # MESHTASTIC_FLEET

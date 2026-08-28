@@ -122,6 +122,29 @@ message ClusterEntry {
 }
 
 // The top-level PRIVATE_APP payload: one port, one envelope, five verbs.
+// Firmware intent (DECLARATIVE-FLEET.md §7). Carried in the document under
+// the zephyrtastic-PRIVATE section 0x100 (MESHTASTIC_CLUSTER_SECTION_FW),
+// outside meshtastic.Config's tag range — at BASE as the fleet's intent for
+// every image class, at NODE as one node's pin. It is intent, not config:
+// the reconciler never hands it to the config store; the fleet module (the
+// courier loop) is its actuator.
+message ClassIntent {
+  uint32 class_id    = 1; // CONFIG_MESHTASTIC_FLEET_CLASS of the images it names;
+                          // 0 in a NODE pin means "whatever that node is"
+  uint32 version     = 2; // (major << 24) | (minor << 16) | revision — the MCUboot
+                          // header version, orderable
+  bytes  hash_prefix = 3; // first 4 bytes of the image's SHA-256, or empty
+  uint32 flags       = 4; // bit0 PAUSE (hold the rollout), bit1 ALLOW_DOWNGRADE
+  uint32 hw_model    = 5; // meshtastic.HardwareModel the class's images are FOR, or 0
+                          // (unstated). A courier refuses to serve this row to a node
+                          // whose NodeDB hw_model disagrees — the class byte says what
+                          // an image is for, this says what board that means.
+}
+
+message FleetIntent {
+  repeated ClassIntent rows = 1; // one per class; max_count in cluster.options
+}
+
 message ClusterMessage {
   oneof variant {
     ClusterDigest digest = 1;
