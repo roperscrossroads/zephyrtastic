@@ -43,6 +43,28 @@ config MESHTASTIC_OTA_CONFIRM_DELAY_SEC
 	default 120
 	depends on MESHTASTIC_OTA_AUTOCONFIRM
 
+config MESHTASTIC_OTA_HOLD_DURING_DFU
+	bool "Raise the peer-link HOLD flag while an image is being uploaded into this node"
+	default y
+	depends on MESHTASTIC_OTA_AUTOCONFIRM && MESHTASTIC_BLE_PEER
+	select MCUMGR_MGMT_NOTIFICATION_HOOKS
+	select MCUMGR_GRP_IMG_STATUS_HOOKS
+	help
+	  Consent, said out loud (DECLARATIVE-FLEET.md §8, F5): from the first
+	  upload chunk until the upload stops, this node's beats carry HOLD, so
+	  a second courier sees "busy" instead of starting a competing job. The
+	  flag is RAM-only and clears with the reboot into the new image.
+
+config MESHTASTIC_OTA_FAULT_TEST_SEC
+	int "TEST ONLY: fault (k_oops) this many seconds after boot, 0 = off"
+	default 0
+	depends on MESHTASTIC_OTA_AUTOCONFIRM
+	help
+	  Builds a deliberately bad image: it boots, beats, then faults before
+	  the auto-confirm window closes, so MCUboot reverts it on the reset and
+	  a courier can be watched calling the round REVERTED. Never set this in
+	  an image meant to run. samples/meshtastic/overlay-fault-test.conf.
+
 endif # MESHTASTIC_OTA
 
 config MESHTASTIC_SMP_CENTRAL
