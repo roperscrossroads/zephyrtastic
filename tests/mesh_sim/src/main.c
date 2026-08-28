@@ -3152,17 +3152,18 @@ ZTEST(mesh_sim, test_fleet_pick_orders_the_star)
 	c[1].node = 0x084c2114U; /* kit2 */
 	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "tie -> lowest node id");
 
-	/* A fresher beat outranks id. */
+	/* A fresher beat does NOT outrank id: between two live nodes freshness
+	 * flips every second, and the pick must agree with itself a tick later
+	 * (bench 2026-08-28: `->` on one kit, the push went to the other). */
 	c[0].last_beat_ms = now - 100;
-	zassert_equal(meshtastic_fleet_pick(c, 2, now), 0, "freshest beat first");
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "freshness is a gate, not a rank");
 
-	/* Fewer attempts outranks freshness: the never-tried one goes first. */
-	c[0].attempts = 1U;
-	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "fewest attempts first");
+	/* Fewer attempts outranks id: the never-tried one goes first. */
+	c[1].attempts = 1U;
+	zassert_equal(meshtastic_fleet_pick(c, 2, now), 0, "fewest attempts first");
 
-	/* Every way a row drops out of the running. */
-	c[0].attempts = 0U;
-	c[0].last_beat_ms = now - 100; /* c[0] would win on freshness... */
+	/* Every way a row drops out of the running (c[1] is the fallback). */
+	c[1].attempts = 0U;
 	c[0].present = false;
 	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "stale beat -> not here");
 	c[0].present = true;
@@ -3172,7 +3173,9 @@ ZTEST(mesh_sim, test_fleet_pick_orders_the_star)
 	c[0].next_try_ms = now + 1;
 	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "inside its backoff");
 	c[0].next_try_ms = now;
+	c[1].attempts = 1U;
 	zassert_equal(meshtastic_fleet_pick(c, 2, now), 0, "backoff expired exactly now -> eligible");
+	c[1].attempts = 0U;
 	c[0].has_cargo = false;
 	zassert_equal(meshtastic_fleet_pick(c, 2, now), 1, "no classed image of that version");
 	c[0].has_cargo = true;

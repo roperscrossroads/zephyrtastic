@@ -130,9 +130,10 @@ struct meshtastic_fleet_candidate {
 /*
  * The index of the candidate to push to next, or -1 when none is eligible.
  * Eligible: present, not latched, not in flight, past its backoff, verdict
- * PUSH, cargo on hand. Among those: fewest attempts, then freshest beat, then
- * lowest node id — deterministic, so two ticks with the same view agree, and
- * a node in flight is never picked twice however often the loop is re-armed.
+ * PUSH, cargo on hand. Among those: fewest attempts, then lowest node id —
+ * deterministic across ticks (beat freshness gates, it does not rank: between
+ * two live nodes it flips every second), and a node in flight is never picked
+ * twice however often the loop is re-armed.
  */
 int meshtastic_fleet_pick(const struct meshtastic_fleet_candidate *c, unsigned int n,
 			  int64_t now);

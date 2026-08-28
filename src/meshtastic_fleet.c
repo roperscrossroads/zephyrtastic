@@ -259,11 +259,14 @@ int meshtastic_fleet_pick(const struct meshtastic_fleet_candidate *c, unsigned i
 			best = (int)i;
 			continue;
 		}
-		/* Fewest attempts, then freshest beat, then lowest id. */
+		/* Fewest attempts, then lowest id. Beat freshness is the GATE
+		 * (present or not), never a rank: every present node beats
+		 * about once a second, so "freshest" between two live nodes
+		 * flips from tick to tick — on the bench (2026-08-28) `->` sat
+		 * on one kit and the next tick pushed the other. A rank must
+		 * agree with itself a second later. */
 		if (x->attempts < c[best].attempts ||
-		    (x->attempts == c[best].attempts &&
-		     (x->last_beat_ms > c[best].last_beat_ms ||
-		      (x->last_beat_ms == c[best].last_beat_ms && x->node < c[best].node)))) {
+		    (x->attempts == c[best].attempts && x->node < c[best].node)) {
 			best = (int)i;
 		}
 	}
@@ -321,6 +324,7 @@ struct courier_nbr {
 	uint32_t nocargo_version; /* last wanted version logged as "no classed cargo" */
 	uint16_t hw_model;       /* from our NodeDB, 0 if we hold no NodeInfo for it */
 	bool hw_logged;          /* the wrong-board refusal was logged once */
+	bool lost_logged;        /* "delivered but no beat since" was logged once */
 };
 
 static struct {
@@ -504,6 +508,19 @@ static void courier_track(void)
 				n->state = CS_REVERTED;
 				LOG_WRN("courier: 0x%08x never confirmed — treating as reverted", n->node);
 			}
+		} else if (n->state == CS_WAIT_CONFIRM && !n->present && !n->lost_logged &&
+			   now > n->confirm_deadline_ms) {
+			/* Delivered — smpc saw it come back running the image — and
+			 * then its beats stopped reaching us. Not a revert (that
+			 * needs a beat saying so) and not a job failure: it is
+			 * linked elsewhere or off. Bench 2026-08-28: kit2 re-linked
+			 * to kit1 after its swap and this row sat silent for 4 min.
+			 * Say so once; the row resolves when its beats return. */
+			n->lost_logged = true;
+			LOG_WRN("courier: 0x%08x delivered %u.%u.%u but no beat since — linked elsewhere? (`blepeer connect` it here)",
+				n->node, (unsigned int)(n->target_version >> 24),
+				(unsigned int)((n->target_version >> 16) & 0xFFU),
+				(unsigned int)(n->target_version & 0xFFFFU));
 		} else if (n->state == CS_DONE && n->present && n->running_known &&
 			   n->running < n->target_version) {
 			/* The delivered version was live and now an older one
@@ -623,6 +640,7 @@ static void courier_maybe_start(void)
 			return;
 		}
 		n->state = CS_UPDATING;
+		n->lost_logged = false;
 		n->target_version = want_version[best];
 		n->attempts++;
 		courier.active_slot = best;
