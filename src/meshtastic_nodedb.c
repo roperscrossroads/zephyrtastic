@@ -1713,6 +1713,34 @@ int meshtastic_nodedb_remove(uint32_t node_num)
 	return -ENOENT;
 }
 
+/* An operator forget is NOT an eviction: eviction parks a peer's key and role
+ * in the warm tier so a re-admitted peer keeps them (B-5, and the test
+ * test_warm_tier_carries_role_on_readmit); a forget must ALSO purge that tier,
+ * or a re-keyed peer (a re-flashed kit) is re-admitted from the warm slot with
+ * the old, pinned key within a second and every PKC frame to it keeps failing
+ * (bench, 2026-08-27). The save then prunes its NVS record. */
+int meshtastic_nodedb_forget(uint32_t node_num)
+{
+	int ret = meshtastic_nodedb_remove(node_num);
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	{
+		struct warm_key *w = warm_find_locked(node_num);
+
+		if (w != NULL) {
+			*w = (struct warm_key){0};
+			nodekeys_schedule_save();
+			if (ret == -ENOENT) {
+				ret = 0; /* it was only warm; that is gone too */
+			}
+		}
+	}
+	k_mutex_unlock(&nodedb_lock);
+#endif
+	return ret;
+}
+
 void meshtastic_nodedb_reset(bool keep_favorites)
 {
 	uint32_t self = meshtastic_get_node_id();

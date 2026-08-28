@@ -1359,12 +1359,41 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 		if (node.has_is_unmessagable) {
 			shell_print(sh, "unmessagable: %s", node.is_unmessagable ? "yes" : "no");
 		}
-		shell_print(sh, "public key bytes: %u", (unsigned int)node.public_key_len);
+		if (node.public_key_len >= 8U) {
+			shell_print(sh, "public key: %02x%02x%02x%02x%02x%02x%02x%02x… (%u bytes, pinned)",
+				    node.public_key[0], node.public_key[1], node.public_key[2],
+				    node.public_key[3], node.public_key[4], node.public_key[5],
+				    node.public_key[6], node.public_key[7],
+				    (unsigned int)node.public_key_len);
+		} else {
+			shell_print(sh, "public key bytes: %u", (unsigned int)node.public_key_len);
+		}
 	}
 
 	return 0;
 }
 
+/* `node forget <id>`: drop a peer from the NodeDB — the only way past key
+ * pinning for a peer that legitimately re-keyed (a re-flashed kit): its next
+ * NodeInfo is then accepted with the new key, and PKC to it works again. */
+static int cmd_node_forget(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t node_num;
+	int ret;
+
+	if (argc < 2) {
+		shell_error(sh, "usage: node forget <node-hex>");
+		return -EINVAL;
+	}
+	node_num = strtoul(argv[1], NULL, 16);
+	ret = meshtastic_nodedb_forget(node_num);
+	if (ret != 0) {
+		shell_error(sh, "0x%08x: not in the NodeDB (%d)", node_num, ret);
+		return ret;
+	}
+	shell_print(sh, "0x%08x forgotten — its next NodeInfo re-learns it (and its key)", node_num);
+	return 0;
+}
 
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
@@ -2009,6 +2038,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodedb_cmds,
 					 SHELL_HELP("List warm key-tier entries (num + LRU recency).",
 						    NULL),
 					 cmd_nodedb_warm),
+			       SHELL_CMD_ARG(forget, NULL,
+					     SHELL_HELP("Drop a peer from the NodeDB (past key pinning for a re-keyed peer).",
+							"<node-hex>"),
+					     cmd_node_forget, 2, 0),
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 			       SHELL_CMD(favorite, NULL,
 					 SHELL_HELP("Mark a node favorite / not.",

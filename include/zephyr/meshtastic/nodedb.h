@@ -219,6 +219,14 @@ bool meshtastic_nodedb_is_ignored(uint32_t node_num);
  */
 int meshtastic_nodedb_remove(uint32_t node_num);
 
+/*
+ * Operator forget: remove() plus purge of the warm key tier, so a re-keyed peer
+ * can be re-learned with its new key (remove() alone is an eviction — the warm
+ * tier deliberately keeps the key and role for a re-admitted peer). 0 if the
+ * node was known in either tier, -ENOENT if in neither.
+ */
+int meshtastic_nodedb_forget(uint32_t node_num);
+
 /**
  * @brief Clear the in-RAM NodeDB (and persisted peer keys), keeping the local node.
  *
