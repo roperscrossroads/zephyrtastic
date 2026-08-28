@@ -73,6 +73,9 @@ LOG_MODULE_REGISTER(mt_smpc, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 /* Connect + MTU exchange + 3-stage discovery + subscribe, end to end. */
 #define SMPC_CONNECT_TIMEOUT_MS 15000
+/* How long connect() waits for a returned link's CCC=0 write to be answered
+ * before reusing the subscribe params (one connection interval, normally). */
+#define SMPC_UNSUB_SETTLE_MS 1000
 /* One ATT chunk's TX-complete; a connection interval at worst, so generous. */
 #define SMPC_TX_CHUNK_TIMEOUT_MS 3000
 /* bt_gatt_write_without_response_cb() -> -ENOMEM means the host's TX buffers
@@ -139,6 +142,13 @@ static struct {
 	bool adopted;		/* the link was already up (peer link, phone...) — not ours to drop */
 	bool connect_failed;	/* set by a callback so a waiter wakes with a verdict */
 	uint8_t last_disconnect;
+	/* An adopted link being returned: the CCC=0 write bt_gatt_unsubscribe()
+	 * sent is still unanswered. Cleared by the completion (notify with
+	 * data == NULL, on the BT RX thread) or by the link dropping first (the
+	 * error path completes the request without calling notify). While it
+	 * is set, sub is the GATT layer's; a new subscribe must wait. */
+	atomic_t unsub_pending;
+	struct bt_conn *release_conn;	/* identity of that link only — NO ref held */
 	struct k_sem ready_sem;
 	struct k_sem tx_sem;
 	struct bt_gatt_discover_params disc;
@@ -279,7 +289,14 @@ static uint8_t smpc_notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_par
 	ARG_UNUSED(params);
 
 	if (data == NULL) {
-		/* Unsubscribed (link torn down). */
+		/* The unsubscribe completed (our CCC=0 write was answered) or the
+		 * stack dropped the subscription with the link. Either way the
+		 * params are ours again. A half-reassembled frame can't finish. */
+		atomic_clear(&smpc.unsub_pending);
+		smpc.release_conn = NULL;
+		if (smpc.rx != NULL) {
+			smpc_rx_drop();
+		}
 		return BT_GATT_ITER_STOP;
 	}
 
@@ -347,19 +364,43 @@ static uint8_t smpc_notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_par
 /* ------------------------------------------------------------------------ */
 /* Link bring-up: connect -> MTU -> discover service/chr/CCC -> subscribe     */
 
+/* Forget the link. Deliberately does NOT memset smpc.sub — bug #2 (2026-08-27,
+ * PC 0 on the BT RX thread, right after the courier returned an adopted link):
+ * bt_gatt_unsubscribe() is asynchronous. It sends the CCC=0 write and returns;
+ * when the write RESPONSE arrives, gatt_write_ccc_rsp() calls
+ * params->notify(conn, params, NULL, 0) through whatever pointer the struct
+ * holds at that moment, and a memset here had just made that NULL. (The job's
+ * own release after `os reset` never hit it: the target was rebooting and the
+ * link died before any response — the error path doesn't call notify.) So the
+ * GATT layer owns .node (list linkage) and .flags for as long as anything is
+ * in flight, the two callbacks are wired once at init and never cleared, and
+ * only what discovery re-derives is dropped here. */
 static void smpc_link_reset_locked(void)
 {
 	smpc.ready = false;
 	smpc.adopted = false;
 	smpc.chr_handle = 0U;
 	smpc.ccc_handle = 0U;
-	memset(&smpc.sub, 0, sizeof(smpc.sub));
+	smpc.sub.value_handle = 0U;
+	smpc.sub.ccc_handle = 0U;
 }
 
 static void smpc_subscribed_cb(struct bt_conn *conn, uint8_t err,
 			       struct bt_gatt_subscribe_params *params)
 {
-	ARG_UNUSED(params);
+	if (params->value == 0U) {
+		/* The completion of OUR unsubscribe — bt_gatt_unsubscribe() zeroes
+		 * value before the CCC=0 write, and its response comes back
+		 * through this same callback. The link is being returned, not
+		 * brought up: on success notify(NULL) follows and finishes the
+		 * bookkeeping; on an ATT error nothing else will, so do it here. */
+		if (err != 0U) {
+			LOG_DBG("SMPC unsubscribe answered with error 0x%02x", err);
+			atomic_clear(&smpc.unsub_pending);
+			smpc.release_conn = NULL;
+		}
+		return;
+	}
 
 	if (err != 0U) {
 		LOG_WRN("SMPC subscribe failed (0x%02x)", err);
@@ -497,6 +538,14 @@ static void smpc_connected(struct bt_conn *conn, uint8_t err)
 
 static void smpc_disconnected(struct bt_conn *conn, uint8_t reason)
 {
+	if (conn == smpc.release_conn) {
+		/* The link we were returning went down before (or instead of)
+		 * answering the CCC=0 write: the stack completed that request on
+		 * its error path, which never calls notify — so this is where the
+		 * release finishes. Identity comparison only; no ref was held. */
+		smpc.release_conn = NULL;
+		atomic_clear(&smpc.unsub_pending);
+	}
 	if (conn != smpc.conn) {
 		return;
 	}
@@ -554,6 +603,11 @@ static int smpc_client_init(void)
 	img_mgmt_client_init(&smpc_img, &smpc_client, ARRAY_SIZE(smpc_images), smpc_images);
 	os_mgmt_client_init(&smpc_os, &smpc_client);
 
+	/* Wired for the life of the program: the GATT layer may call either
+	 * long after a link is forgotten (see smpc_link_reset_locked). */
+	smpc.sub.notify = smpc_notify_cb;
+	smpc.sub.subscribe = smpc_subscribed_cb;
+
 	k_work_queue_start(&smpc_job_q, smpc_job_stack, K_THREAD_STACK_SIZEOF(smpc_job_stack),
 			   CONFIG_MESHTASTIC_SMP_CENTRAL_JOB_PRIORITY, NULL);
 	k_thread_name_set(&smpc_job_q.thread, "smpc_job");
@@ -576,13 +630,36 @@ int meshtastic_smpc_connect(const bt_addr_le_t *addr, k_timeout_t timeout)
 
 	k_mutex_lock(&smpc.lock, K_FOREVER);
 	if (smpc.conn != NULL) {
+		/* A link is already held. If it is the SAME target and ready,
+		 * reuse it — the update job's reboot-wait loop lands here when
+		 * the target re-links to us before we re-dial it. A different
+		 * target while one is held is a real conflict: single link,
+		 * single job. */
+		bool same = bt_addr_le_cmp(&smpc.addr, addr) == 0;
+		bool ready = smpc.ready;
+
 		k_mutex_unlock(&smpc.lock);
-		return -EALREADY;
+		return (same && ready) ? 0 : -EALREADY;
 	}
 	smpc_link_reset_locked();
 	smpc.connect_failed = false;
 	bt_addr_le_copy(&smpc.addr, addr);
 	k_sem_reset(&smpc.ready_sem);
+	k_mutex_unlock(&smpc.lock);
+
+	/* A returned link's CCC=0 write may still be unanswered; its response
+	 * would complete against the very params the new subscribe is about to
+	 * reuse and report "subscribed" one round trip early. One connection
+	 * interval settles it; bounded so a lost response can't wedge us. */
+	for (int i = 0; i < SMPC_UNSUB_SETTLE_MS / 10 && atomic_get(&smpc.unsub_pending); i++) {
+		k_sleep(K_MSEC(10));
+	}
+	if (atomic_get(&smpc.unsub_pending)) {
+		LOG_WRN("SMPC: previous unsubscribe never completed; proceeding");
+		atomic_clear(&smpc.unsub_pending);
+	}
+
+	k_mutex_lock(&smpc.lock, K_FOREVER);
 
 	/* Zephyr keeps ONE connection per peer address, whichever side opened
 	 * it. In a BLE pocket the target may already be linked to us — its peer
@@ -635,14 +712,31 @@ int meshtastic_smpc_disconnect(void)
 			smpc.conn = NULL;
 			smpc.ready = false;
 			k_mutex_unlock(&smpc.lock);
-			/* Unsubscribe needs the very params that were subscribed, so
-			 * it goes before the reset that wipes them. */
+			/* Asynchronous: on success a CCC=0 write is now in flight and
+			 * its response will call sub.notify(NULL) on the BT RX thread —
+			 * sub must stay intact until then (smpc_link_reset_locked
+			 * leaves it alone). -ENOTCONN means the link is already going
+			 * down; the stack then drops the subscription itself in
+			 * bt_gatt_disconnected(), through the same callback. */
 			if (was_ready) {
-				(void)bt_gatt_unsubscribe(conn, &smpc.sub);
+				int urc;
+
+				/* Armed BEFORE the call: the completion can land on the
+				 * BT RX thread before bt_gatt_unsubscribe() returns. */
+				smpc.release_conn = conn;
+				atomic_set(&smpc.unsub_pending, 1);
+				urc = bt_gatt_unsubscribe(conn, &smpc.sub);
+				if (urc != 0) {
+					atomic_clear(&smpc.unsub_pending);
+					smpc.release_conn = NULL;
+					LOG_DBG("SMPC unsubscribe on release: %d", urc);
+				}
 			}
 			k_mutex_lock(&smpc.lock, K_FOREVER);
 			smpc_link_reset_locked();
 			k_mutex_unlock(&smpc.lock);
+			/* Balances bt_conn_lookup_addr_le() in connect(); the peer-link
+			 * module's own ref keeps the link up. */
 			bt_conn_unref(conn);
 			LOG_INF("SMPC released the adopted link");
 			return 0;
