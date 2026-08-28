@@ -45,6 +45,9 @@
 #include "meshtastic_cluster_doc.h"
 #if defined(CONFIG_MESHTASTIC_FLEET)
 #include "meshtastic_fleet.h"
+#if defined(CONFIG_MESHTASTIC_DEPOT)
+#include "meshtastic_smp_central.h"
+#endif
 #endif
 #endif
 #include "meshtastic_build.h"
@@ -4447,6 +4450,33 @@ static int cmd_fleet_status(const struct shell *sh, size_t argc, char **argv)
 	} else {
 		shell_print(sh, "me      : no intent for my class — nobody will push to me");
 	}
+#if defined(CONFIG_MESHTASTIC_DEPOT)
+	{
+		struct meshtastic_smpc_depot_row d[MESHTASTIC_SMPC_DEPOT_ROWS];
+		uint16_t skipped = 0U;
+		uint16_t nd = meshtastic_smpc_depot_rows(d, ARRAY_SIZE(d), &skipped);
+
+		if (skipped != 0U) {
+			shell_print(sh, "depot   : %u image(s) — %u file(s) NOT indexed (over the %u-row cap, or not a signed image): prune /depot",
+				    nd, skipped, (unsigned int)MESHTASTIC_SMPC_DEPOT_ROWS);
+		} else {
+			shell_print(sh, "depot   : %u image(s)", nd);
+		}
+		for (uint16_t i = 0U; i < nd; i++) {
+			if (d[i].class_id == 0U) {
+				shell_print(sh, "  %-24s class -  %u.%u.%u  %u B  (unclassed, offered to nobody)",
+					    d[i].name, (unsigned int)(d[i].version >> 24),
+					    (unsigned int)((d[i].version >> 16) & 0xFFU),
+					    (unsigned int)(d[i].version & 0xFFFFU), d[i].size);
+			} else {
+				shell_print(sh, "  %-24s class %u  %u.%u.%u  %u B", d[i].name,
+					    d[i].class_id, (unsigned int)(d[i].version >> 24),
+					    (unsigned int)((d[i].version >> 16) & 0xFFU),
+					    (unsigned int)(d[i].version & 0xFFFFU), d[i].size);
+			}
+		}
+	}
+#endif
 #if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
 	{
 		struct meshtastic_fleet_courier_row rows[MESHTASTIC_BLE_REG_SLOTS];
@@ -4602,6 +4632,21 @@ static int cmd_fleet_pin(const struct shell *sh, size_t argc, char **argv)
 	return ret;
 }
 
+#if defined(CONFIG_MESHTASTIC_DEPOT)
+static int cmd_fleet_rescan(const struct shell *sh, size_t argc, char **argv)
+{
+	int rc = meshtastic_smpc_depot_rescan();
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	if (rc < 0) {
+		shell_error(sh, "depot rescan failed (%d)", rc);
+		return rc;
+	}
+	shell_print(sh, "depot: %d image(s)", rc);
+	return 0;
+}
+#endif
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_fleet_cmds,
@@ -4617,6 +4662,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(unpin, NULL, SHELL_HELP("Withdraw a node's pin (it falls back to base).",
 					  "<node-hex>"),
 		  cmd_fleet_pin),
+#if defined(CONFIG_MESHTASTIC_DEPOT)
+	SHELL_CMD(rescan, NULL, SHELL_HELP("Re-read /depot (after loading cargo).", NULL),
+		  cmd_fleet_rescan),
+#endif
 #if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
 	SHELL_CMD(arm, NULL, SHELL_HELP("Arm/disarm the courier loop.", "[on|off]"), cmd_fleet_arm),
 	SHELL_CMD(clear, NULL, SHELL_HELP("Clear a node's reverted/backoff latch.", "<node-hex>"),

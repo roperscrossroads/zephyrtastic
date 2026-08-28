@@ -128,7 +128,13 @@ enum smpc_job_kind {
 	SMPC_JOB_NONE = 0,
 	SMPC_JOB_PUSH,
 	SMPC_JOB_UPDATE,
+	SMPC_JOB_UPDATE_NOCONFIRM, /* the whole ladder EXCEPT the confirm — the
+				   * target self-confirms after its health window
+				   * (R8: a courier proves the version, never
+				   * confirms on a peer's behalf). */
 };
+BUILD_ASSERT((int)SMPC_JOB_UPDATE_NOCONFIRM == (int)MESHTASTIC_SMPC_JOB_UPDATE_NOCONFIRM,
+	     "public and internal job-kind enums must agree");
 
 static struct {
 	struct k_mutex lock;
@@ -165,6 +171,7 @@ static struct {
 	bool job_running;
 	int job_rc;
 	const char *job_stage;
+	const char *job_fail_stage;
 	uint32_t job_off;
 	uint32_t job_total;
 	int64_t job_t0;
@@ -861,9 +868,19 @@ struct smpc_mcuboot_tlv_info {
 	uint16_t tot;
 } __packed;
 
+struct smpc_mcuboot_tlv_entry {
+	uint16_t type;
+	uint16_t len;	/* of the value that follows; not including this header */
+} __packed;
+
 #define SMPC_MCUBOOT_MAGIC 0x96f3b83dU
 #define SMPC_MCUBOOT_TLV_INFO_MAGIC 0x6907U
 #define SMPC_MCUBOOT_TLV_PROT_INFO_MAGIC 0x6908U
+/* Custom protected TLV: the fleet class (DECLARATIVE-FLEET.md §5.2). Signed in by
+ * CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x<class>" in the
+ * variant's overlay; the app CMakeLists refuses a build where that byte and
+ * CONFIG_MESHTASTIC_FLEET_CLASS disagree. */
+#define SMPC_MCUBOOT_TLV_FLEET_CLASS 0x00A0U
 
 static int smpc_local_image_inspect(struct smpc_src *src, struct meshtastic_smpc_image *out)
 {
@@ -885,8 +902,34 @@ static int smpc_local_image_inspect(struct smpc_src *src, struct meshtastic_smpc
 	if (rc != 0) {
 		return rc;
 	}
+	out->class_id = 0U;
 	if (tlv.magic == SMPC_MCUBOOT_TLV_PROT_INFO_MAGIC) {
-		/* Protected TLVs first, then the plain TLV block behind them. */
+		/* Protected TLVs first, then the plain TLV block behind them. The
+		 * fleet class rides here (imgtool --custom-tlv 0x00A0, one byte),
+		 * under the signature, so a depot answers "what is this file for"
+		 * from the header alone. */
+		uint32_t p = off + sizeof(tlv);
+		uint32_t end = off + tlv.tot;
+
+		while (p + sizeof(struct smpc_mcuboot_tlv_entry) <= end) {
+			struct smpc_mcuboot_tlv_entry e;
+
+			rc = smpc_src_read(src, p, &e, sizeof(e));
+			if (rc != 0) {
+				return rc;
+			}
+			p += sizeof(e);
+			if (e.type == SMPC_MCUBOOT_TLV_FLEET_CLASS && e.len >= 1U) {
+				uint8_t c;
+
+				rc = smpc_src_read(src, p, &c, 1U);
+				if (rc != 0) {
+					return rc;
+				}
+				out->class_id = c;
+			}
+			p += e.len;
+		}
 		off += tlv.tot;
 		rc = smpc_src_read(src, off, &tlv, sizeof(tlv));
 		if (rc != 0) {
@@ -1064,7 +1107,7 @@ static void smpc_job_fn(struct k_work *work)
 	LOG_INF("SMPC push: %u bytes in %lld ms (%lld B/s)", img.size, (long long)smpc.job_t_upload,
 		(long long)(smpc.job_t_upload > 0 ? (img.size * 1000LL) / smpc.job_t_upload : 0LL));
 
-	if (kind != SMPC_JOB_UPDATE) {
+	if (kind == SMPC_JOB_PUSH) {
 		goto out;
 	}
 
@@ -1160,6 +1203,18 @@ static void smpc_job_fn(struct k_work *work)
 		}
 	}
 
+	if (kind == SMPC_JOB_UPDATE_NOCONFIRM) {
+		/* Verified the right image is active, and stop. It is still
+		 * UNCONFIRMED: the target confirms itself after its health
+		 * window (MESHTASTIC_OTA_AUTOCONFIRM), and until it does its
+		 * beat carries TESTBOOT and MCUboot will revert on a bad reset.
+		 * That is the safety property the courier must not short. */
+		LOG_INF("SMPC update: target runs %u.%u.%u+%u (UNCONFIRMED — its own health "
+			"window decides), %lld ms end to end", img.major, img.minor, img.revision,
+			img.build, (long long)(k_uptime_get() - smpc.job_t0));
+		goto out;
+	}
+
 	k_mutex_lock(&smpc.lock, K_FOREVER);
 	smpc.job_stage = "confirm";
 	k_mutex_unlock(&smpc.lock);
@@ -1175,11 +1230,191 @@ out:
 	k_mutex_lock(&smpc.lock, K_FOREVER);
 	smpc.job_rc = rc;
 	smpc.job_running = false;
+	smpc.job_fail_stage = rc == 0 ? "" : smpc.job_stage; /* where it died — the courier reads it */
 	smpc.job_stage = rc == 0 ? "done" : "failed";
 	k_mutex_unlock(&smpc.lock);
-	LOG_INF("SMPC job %s: %s", kind == SMPC_JOB_UPDATE ? "update" : "push",
+	LOG_INF("SMPC job %s: %s", kind == SMPC_JOB_PUSH ? "push" : "update",
 		rc == 0 ? "OK" : mgmt_err_str(rc));
 }
+
+/* ---- programmatic API (meshtastic_smp_central.h): the fleet courier ------- */
+
+static int smpc_job_start(enum smpc_job_kind kind, const char *path);
+
+int meshtastic_smpc_job_start(enum meshtastic_smpc_job_kind kind, const char *path)
+{
+	return smpc_job_start((enum smpc_job_kind)kind, path);
+}
+
+void meshtastic_smpc_job_get(struct meshtastic_smpc_job *out)
+{
+	k_mutex_lock(&smpc.lock, K_FOREVER);
+	out->kind = (enum meshtastic_smpc_job_kind)smpc.job_kind;
+	out->running = smpc.job_running;
+	out->rc = smpc.job_rc;
+	out->stage = smpc.job_stage != NULL ? smpc.job_stage : "";
+	out->fail_stage = smpc.job_fail_stage != NULL ? smpc.job_fail_stage : "";
+	out->off = smpc.job_off;
+	out->total = smpc.job_total;
+	k_mutex_unlock(&smpc.lock);
+}
+
+/* --- the depot index (F4) ------------------------------------------------ */
+
+#if defined(CONFIG_MESHTASTIC_DEPOT)
+
+/* A lookup miss triggers a rescan (cargo loaded since the last one), but not
+ * more often than this — a node that wants a version nobody carries would
+ * otherwise re-read every header on every courier tick. */
+#define DEPOT_MISS_RESCAN_MS 30000
+
+static struct {
+	struct meshtastic_smpc_depot_row rows[MESHTASTIC_SMPC_DEPOT_ROWS];
+	uint16_t n;
+	bool built;
+	int64_t last_scan_ms;
+	uint16_t skipped;	/* files in /depot that are not signed images */
+} depot;
+static K_MUTEX_DEFINE(depot_lock);
+
+static int depot_rescan_locked(void)
+{
+	struct fs_dir_t dir;
+	struct fs_dirent ent;
+	int rc;
+
+	fs_dir_t_init(&dir);
+	rc = fs_opendir(&dir, "/depot");
+	if (rc != 0) {
+		return rc;
+	}
+	depot.n = 0U;
+	depot.skipped = 0U;
+	while (fs_readdir(&dir, &ent) == 0 && ent.name[0] != '\0') {
+		struct meshtastic_smpc_image img;
+		struct meshtastic_smpc_depot_row *r;
+		char path[64];
+
+		if (ent.type != FS_DIR_ENTRY_FILE) {
+			continue;
+		}
+		(void)snprintf(path, sizeof(path), "/depot/%s", ent.name);
+		if (meshtastic_smpc_local_image(path, &img) != 0) {
+			depot.skipped++;
+			continue; /* not a signed image, or unreadable */
+		}
+		if (depot.n >= ARRAY_SIZE(depot.rows)) {
+			LOG_WRN("depot: more than %u images, ignoring %s",
+				(unsigned int)ARRAY_SIZE(depot.rows), ent.name);
+			depot.skipped++;
+			continue;
+		}
+		r = &depot.rows[depot.n++];
+		(void)strncpy(r->name, ent.name, sizeof(r->name) - 1U);
+		r->name[sizeof(r->name) - 1U] = '\0';
+		r->version = ((uint32_t)img.major << 24) | ((uint32_t)img.minor << 16) | img.revision;
+		r->size = img.size;
+		r->class_id = img.class_id;
+	}
+	(void)fs_closedir(&dir);
+	depot.built = true;
+	depot.last_scan_ms = k_uptime_get();
+	LOG_INF("depot: %u image(s) indexed, %u other file(s)", depot.n, depot.skipped);
+	return depot.n;
+}
+
+static int depot_find_locked(uint8_t class_id, uint32_t packed_version, char *path_out,
+			     size_t path_len)
+{
+	for (uint16_t i = 0U; i < depot.n; i++) {
+		const struct meshtastic_smpc_depot_row *r = &depot.rows[i];
+
+		if (r->class_id == class_id && r->version == packed_version) {
+			(void)snprintf(path_out, path_len, "/depot/%s", r->name);
+			return 0;
+		}
+	}
+	return -ENOENT;
+}
+
+int meshtastic_smpc_depot_rescan(void)
+{
+	int rc;
+
+	k_mutex_lock(&depot_lock, K_FOREVER);
+	rc = depot_rescan_locked();
+	k_mutex_unlock(&depot_lock);
+	return rc;
+}
+
+uint16_t meshtastic_smpc_depot_rows(struct meshtastic_smpc_depot_row *out, uint16_t max,
+				    uint16_t *not_indexed)
+{
+	uint16_t n;
+
+	k_mutex_lock(&depot_lock, K_FOREVER);
+	if (!depot.built) {
+		(void)depot_rescan_locked();
+	}
+	n = MIN(depot.n, max);
+	memcpy(out, depot.rows, n * sizeof(*out));
+	if (not_indexed != NULL) {
+		*not_indexed = depot.skipped;
+	}
+	k_mutex_unlock(&depot_lock);
+	return n;
+}
+
+int meshtastic_smpc_depot_find(uint8_t class_id, uint32_t packed_version, char *path_out,
+			       size_t path_len)
+{
+	int rc;
+
+	if (class_id == 0U) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&depot_lock, K_FOREVER);
+	if (!depot.built) {
+		(void)depot_rescan_locked();
+	}
+	rc = depot_find_locked(class_id, packed_version, path_out, path_len);
+	if (rc == -ENOENT && k_uptime_get() - depot.last_scan_ms >= DEPOT_MISS_RESCAN_MS) {
+		(void)depot_rescan_locked();
+		rc = depot_find_locked(class_id, packed_version, path_out, path_len);
+	}
+	k_mutex_unlock(&depot_lock);
+	return rc;
+}
+
+#else /* !CONFIG_MESHTASTIC_DEPOT */
+
+int meshtastic_smpc_depot_rescan(void)
+{
+	return -ENOTSUP;
+}
+
+uint16_t meshtastic_smpc_depot_rows(struct meshtastic_smpc_depot_row *out, uint16_t max,
+				    uint16_t *not_indexed)
+{
+	ARG_UNUSED(out);
+	ARG_UNUSED(max);
+	if (not_indexed != NULL) {
+		*not_indexed = 0U;
+	}
+	return 0U;
+}
+
+int meshtastic_smpc_depot_find(uint8_t class_id, uint32_t packed_version, char *path_out,
+			       size_t path_len)
+{
+	ARG_UNUSED(class_id);
+	ARG_UNUSED(packed_version);
+	ARG_UNUSED(path_out);
+	ARG_UNUSED(path_len);
+	return -ENOTSUP;
+}
+
+#endif /* CONFIG_MESHTASTIC_DEPOT */
 
 static int smpc_job_start(enum smpc_job_kind kind, const char *path)
 {
@@ -1298,8 +1533,9 @@ static int cmd_image(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "%s: nothing pushable (%d)", argc > 1 ? argv[1] : "slot1", rc);
 		return rc;
 	}
-	shell_print(sh, "%s (courier image): %u.%u.%u+%u, %u bytes", argc > 1 ? argv[1] : "slot1",
-		    img.major, img.minor, img.revision, img.build, img.size);
+	shell_print(sh, "%s (courier image): %u.%u.%u+%u, %u bytes, class %u%s",
+		    argc > 1 ? argv[1] : "slot1", img.major, img.minor, img.revision, img.build,
+		    img.size, img.class_id, img.class_id == 0U ? " (unclassed: offered to nobody)" : "");
 	return 0;
 }
 
