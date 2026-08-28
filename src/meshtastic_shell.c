@@ -3611,14 +3611,21 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
  * NodeDB lookup: "trust that node as my remote admin". The headless-bench
  * equivalent of the app's key-entry screen — the key comes from the target's
  * own NodeInfo broadcast, so trust-on-first-use applies: verify the node id
- * belongs to hardware you hold before trusting it. */
+ * belongs to hardware you hold before trusting it.
+ *
+ * `admin trust key:<hex-prefix> off` removes an entry by its leading bytes
+ * (>= 4, unique) instead: the form for a key whose node no longer exists in
+ * the NodeDB — a re-keyed peer's old key (bench 2026-08-27: kit2 kept the
+ * courier's stale `510dd592…` beside its real one, and nothing could name it). */
 static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
 {
 	meshtastic_Config cfg;
 	meshtastic_Config_SecurityConfig *sec;
 	uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
-	uint32_t node_num;
+	uint32_t node_num = 0U;
 	bool remove;
+	bool by_prefix;
+	size_t prefix_len = 0U;
 	pb_size_t match;
 	int ret;
 
@@ -3644,6 +3651,8 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
 #if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 	shell_error(sh, "config writes are compiled out of this build");
 	ARG_UNUSED(remove);
+	ARG_UNUSED(by_prefix);
+	ARG_UNUSED(prefix_len);
 	ARG_UNUSED(match);
 	ARG_UNUSED(node_num);
 	ARG_UNUSED(key);
@@ -3653,30 +3662,60 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
 		return -EACCES;
 	}
 
-	ret = parse_u32(sh, argv[1], &node_num);
-	if (ret < 0) {
-		return ret;
-	}
 	remove = (argc >= 3U && strcmp(argv[2], "off") == 0);
+	by_prefix = (strncmp(argv[1], "key:", 4U) == 0);
 
-	if (meshtastic_nodedb_copy_pubkey(node_num, key) != 0) {
-		shell_error(sh, "no public key for 0x%08x in the NodeDB (heard its NodeInfo?)",
-			    node_num);
-		return -ENOENT;
+	if (by_prefix) {
+		const char *hex = argv[1] + 4;
+		size_t n = strlen(hex);
+
+		if (!remove) {
+			shell_error(sh, "key:<prefix> only removes (`off`); trust a node by its id");
+			return -EINVAL;
+		}
+		if (n < 8U || (n & 1U) != 0U || n / 2U > sizeof(key) ||
+		    hex2bin(hex, n, key, sizeof(key)) != n / 2U) {
+			shell_error(sh, "key:<prefix> needs 4..%u bytes of hex",
+				    (unsigned int)sizeof(key));
+			return -EINVAL;
+		}
+		prefix_len = n / 2U;
+	} else {
+		ret = parse_u32(sh, argv[1], &node_num);
+		if (ret < 0) {
+			return ret;
+		}
+		if (meshtastic_nodedb_copy_pubkey(node_num, key) != 0) {
+			shell_error(sh, "no public key for 0x%08x in the NodeDB (heard its NodeInfo?)",
+				    node_num);
+			return -ENOENT;
+		}
+		prefix_len = sizeof(key);
 	}
 
 	match = sec->admin_key_count;
 	for (pb_size_t i = 0; i < sec->admin_key_count; i++) {
 		if (sec->admin_key[i].size == sizeof(key) &&
-		    memcmp(sec->admin_key[i].bytes, key, sizeof(key)) == 0) {
+		    memcmp(sec->admin_key[i].bytes, key, prefix_len) == 0) {
+			if (match != sec->admin_key_count) {
+				shell_error(sh, "key:%s matches more than one entry — give more bytes",
+					    argv[1] + 4);
+				return -EINVAL;
+			}
 			match = i;
-			break;
+			if (!by_prefix) {
+				break;
+			}
 		}
 	}
 
 	if (remove) {
 		if (match == sec->admin_key_count) {
-			shell_print(sh, "0x%08x was not trusted", node_num);
+			if (by_prefix) {
+				shell_print(sh, "no admin key starts with %s", argv[1] + 4);
+			} else {
+				shell_print(sh, "0x%08x was not trusted", node_num);
+			}
 			return 0;
 		}
 		for (pb_size_t i = match; i + 1U < sec->admin_key_count; i++) {
@@ -3703,9 +3742,15 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "config write failed (%d)", ret);
 		return ret;
 	}
-	shell_print(sh, "0x%08x %s as remote admin (%u key%s)", node_num,
-		    remove ? "untrusted" : "trusted", (unsigned int)sec->admin_key_count,
-		    sec->admin_key_count == 1U ? "" : "s");
+	if (by_prefix) {
+		shell_print(sh, "key %s… removed (%u key%s)", argv[1] + 4,
+			    (unsigned int)sec->admin_key_count,
+			    sec->admin_key_count == 1U ? "" : "s");
+	} else {
+		shell_print(sh, "0x%08x %s as remote admin (%u key%s)", node_num,
+			    remove ? "untrusted" : "trusted", (unsigned int)sec->admin_key_count,
+			    sec->admin_key_count == 1U ? "" : "s");
+	}
 	return 0;
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 }
@@ -4715,7 +4760,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_admin_cmds,
 			       SHELL_CMD(trust, NULL,
 					 SHELL_HELP("List/manage trusted remote-admin keys.",
-						    "[<node> [off]]"),
+						    "[<node> [off] | key:<hex-prefix> off]"),
 					 cmd_admin_trust),
 #if defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
 			       SHELL_CMD(remote, NULL,

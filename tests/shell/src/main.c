@@ -560,6 +560,49 @@ ZTEST(meshtastic_shell, test_owner_set_does_not_clear_the_licence)
 	zassert_ok(meshtastic_config_store_set_owner(&licensed_user), "owner restore failed");
 }
 
+/* `admin trust key:<prefix> off` names an entry by its bytes, for a key whose
+ * node is gone from the NodeDB (a re-keyed peer's old key: nothing else can
+ * name it). Too short, ambiguous and unknown prefixes are refused or reported,
+ * and only the unique match is removed. */
+ZTEST(meshtastic_shell, test_admin_trust_removes_a_key_by_prefix)
+{
+	meshtastic_Config sec = meshtastic_Config_init_zero;
+	meshtastic_Config chk;
+	const char *out = NULL;
+
+	sec.which_payload_variant = meshtastic_Config_security_tag;
+	sec.payload_variant.security.admin_key_count = 2U;
+	for (int i = 0; i < 2; i++) {
+		sec.payload_variant.security.admin_key[i].size = 32U;
+		memset(sec.payload_variant.security.admin_key[i].bytes, 0x51, 32U);
+		sec.payload_variant.security.admin_key[i].bytes[0] = 0x51;
+		sec.payload_variant.security.admin_key[i].bytes[1] = 0x0d;
+		sec.payload_variant.security.admin_key[i].bytes[2] = 0xd5;
+		sec.payload_variant.security.admin_key[i].bytes[3] = 0x92;
+		sec.payload_variant.security.admin_key[i].bytes[4] = (uint8_t)(0xa0 + i);
+	}
+	zassert_ok(meshtastic_config_store_set_config(&sec), "security config write failed");
+
+	zassert_ok(run_cmd("meshtastic admin trust", &out), "list failed");
+	zassert_not_null(strstr(out, "admin keys: 2/"), "two keys seeded");
+
+	zassert_not_equal(run_cmd("meshtastic admin trust key:510d off", &out), 0,
+			  "fewer than 4 bytes is refused");
+	zassert_not_equal(run_cmd("meshtastic admin trust key:510dd592 off", &out), 0,
+			  "a prefix both keys share is ambiguous");
+	zassert_not_equal(run_cmd("meshtastic admin trust key:510dd592a0", &out), 0,
+			  "key: only removes");
+	zassert_ok(run_cmd("meshtastic admin trust key:ffffffff off", &out), "unknown prefix");
+	zassert_not_null(strstr(out, "no admin key starts with ffffffff"), "…is reported, not an error");
+
+	zassert_ok(run_cmd("meshtastic admin trust key:510dd592a1 off", &out), "removal failed");
+	zassert_not_null(strstr(out, "key 510dd592a1"), "the removal names the key: %s", out);
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &chk));
+	zassert_equal(chk.payload_variant.security.admin_key_count, 1U, "one key left");
+	zassert_equal(chk.payload_variant.security.admin_key[0].bytes[4], 0xa0,
+		      "the OTHER key survived");
+}
+
 #else /* !CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 /* The other half of the build coverage: with writes compiled out the command
