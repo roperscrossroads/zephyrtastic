@@ -107,5 +107,25 @@ meshtastic_fleet_evaluate(uint32_t running, bool running_known, uint8_t beat_fla
 
 const char *meshtastic_fleet_verdict_str(enum meshtastic_fleet_verdict v);
 
+#if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
+/* Arm/disarm the courier loop (manual in F3; off at boot). */
+void meshtastic_fleet_courier_arm(bool on);
+bool meshtastic_fleet_courier_armed(void);
+
+/* Forget a neighbour's REVERTED latch so it may be tried again. */
+void meshtastic_fleet_courier_clear(uint32_t node_id);
+
+/* One row of the courier's per-neighbour view, for `fleet status`. */
+struct meshtastic_fleet_courier_row {
+	uint32_t node_id;
+	uint8_t class_id;
+	uint32_t running;      /* packed; 0 = unknown */
+	uint32_t desired;      /* packed; 0 = no intent */
+	uint8_t flags;         /* last beat flags */
+	const char *state;     /* "idle"/"updating"/"wait-confirm"/"done"/"reverted"/… */
+	uint32_t attempts;
+};
+uint16_t meshtastic_fleet_courier_rows(struct meshtastic_fleet_courier_row *out, uint16_t max);
+#endif /* CONFIG_MESHTASTIC_FLEET_COURIER */
 
 #endif /* MESHTASTIC_FLEET_H_ */

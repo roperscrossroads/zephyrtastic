@@ -151,4 +151,22 @@ config MESHTASTIC_FLEET
 
 if MESHTASTIC_FLEET
 
+config MESHTASTIC_FLEET_COURIER
+	bool "Courier loop: push depot images to neighbours the document wants updated"
+	depends on MESHTASTIC_SMP_CENTRAL && MESHTASTIC_BLE_PEER
+	default y
+	help
+	  The actuator for fleet intent (DECLARATIVE-FLEET.md §8). A node that
+	  carries the SMP client and the peer link watches its neighbours' beats
+	  (running version, class, HOLD/TESTBOOT) against the document and pushes
+	  an image from its depot to any neighbour that is behind and willing —
+	  one target at a time. Manual-armed (`meshtastic fleet arm on`); the
+	  target confirms itself (MESHTASTIC_OTA_AUTOCONFIRM), the courier never
+	  confirms on its behalf.
+
+config MESHTASTIC_FLEET_COURIER_TICK_SEC
+	int "Courier poll interval (seconds)"
+	default 5
+	depends on MESHTASTIC_FLEET_COURIER
+
 endif # MESHTASTIC_FLEET
