@@ -83,6 +83,17 @@ tests:
       - CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND=n
       - CONFIG_MESHTASTIC_CLUSTER=n
 
+  # --- default-OFF options, built the other way up ---------------------------
+  # Everything above subtracts from an all-on baseline, because the untested arm
+  # of a default-y bool is =n. For a default-N bool the untested arm is =y, and
+  # it is untested twice over: the application build carries no -Werror while
+  # twister sets CONFIG_COMPILER_WARNINGS_AS_ERRORS=y, so a diagnostic that
+  # compiles on the bench can still fail here. That asymmetry is exactly what let
+  # an unused static live in meshtastic_gnss.c.
+  meshtastic.variants.gnss_time_debug.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_GNSS_TIME_DEBUG=y
+
   # The floor: the radio and the router, and as little else as the Kconfig
   # allows. Catches a module that has quietly become load-bearing for the core.
   meshtastic.variants.minimal.native_sim:

@@ -52,4 +52,59 @@ config MESHTASTIC_GNSS_SEND_WORK_PRIORITY
 
 endif # MESHTASTIC_GNSS_AUTO_SEND
 
+config MESHTASTIC_GNSS_TIME_DEBUG
+	bool "Log GNSS time-delivery diagnostics (bench only)"
+	default n
+	help
+	  Log one line per GNSS data callback, stamped with k_cycle_get_32() and
+	  k_uptime_get() taken at the very top of the callback — BEFORE the no-fix
+	  gate, so a module that is tracking satellites but has not yet fixed is
+	  still visible.
+
+	  This measures the term that actually bounds GNSS time accuracy, which is
+	  not sub-second resolution but one-sided LATENCY: the delay from the true
+	  UTC second to the moment we are handed the sentence. That delay is the
+	  receiver's own fix latency plus the whole sentence's UART time (~73 ms for
+	  a 70-character RMC at 9600 baud, because modem_chat only delivers on a
+	  complete match). It is a late bias of order 100-500 ms, not a symmetric
+	  quantisation, so it cannot be averaged away.
+
+	  The cycle stamp shares a counter with the board-level `gps pps` edge
+	  capture, so an interleaved console capture yields the latency directly by
+	  subtraction. Without a PPS reference the same log still yields the
+	  inter-callback jitter and the reported sub-second digits.
+
+	  Bench diagnostic. Off in shipping images: it logs at up to the GNSS
+	  publish rate.
+
+config MESHTASTIC_GNSS_PPS_AUTOSTART
+	bool "Arm the board's 1PPS edge counter at boot"
+	depends on SHELL
+	default y if MESHTASTIC_GNSS_TIME_DEBUG
+	help
+	  Arm the board-level 1PPS edge capture during init instead of waiting for
+	  `gps pps start` on the console. Only the Heltec V4/R8 implement it; it is a
+	  no-op elsewhere.
+
+	  Depends on SHELL because the counter lives in the board's `gps` CLI and
+	  because reading the result back — `gps pps`, or `logring` for the captured
+	  stream — needs a shell either way. Stated as a dependency rather than left
+	  as a silent no-op.
+
+	  This exists because the measurement it feeds happens where the console is
+	  not: a receiver needs sky, and a node at a window is a node on battery with
+	  nobody typing at it. Armed by hand, a trip to the window collects nothing —
+	  which is exactly how the first one went.
+
+	  With MESHTASTIC_GNSS_TIME_DEBUG also on, the per-edge log line and the
+	  per-callback line share a cycle counter AND both land in the retained log
+	  ring (MESHTASTIC_LOGRING), so an unattended session leaves behind the
+	  interleaved PPS/NMEA stream that the latency measurement is a subtraction
+	  over. Read it back with `logring` — or `logring prev` if the node rebooted
+	  on the way home. The ring is small, so it holds the last tens of seconds,
+	  not the whole trip; a handful of paired lines is all the measurement needs.
+
+	  Retained RAM survives a warm reset but NOT a power cycle. A node whose
+	  battery died on the windowsill comes back with nothing.
+
 endif # MESHTASTIC_GNSS

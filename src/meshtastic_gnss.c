@@ -135,6 +135,37 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 	bool due;
 	bool can_retry;
 
+#if defined(CONFIG_MESHTASTIC_GNSS_TIME_DEBUG)
+	/* Stamp FIRST, and before the no-fix gate. Everything below this point —
+	 * including the gate itself — is delay we would otherwise attribute to the
+	 * receiver. And a module that is tracking satellites but has not yet fixed
+	 * is exactly the state we most need to see on an indoor bench, which the
+	 * gate would otherwise make invisible. */
+	{
+		uint32_t cyc = k_cycle_get_32();
+		int64_t up = k_uptime_get();
+
+		if (data != NULL) {
+			uint32_t ms = data->utc.millisecond;
+
+			/* gnss_time carries no seconds field: seconds AND milliseconds
+			 * both live in .millisecond, range [0, 60999]. */
+			LOG_INF("gnsst cyc=%u up=%lld utc=%02u:%02u:%02u.%03u "
+				"date=%02u/%02u/%02u fix=%u sats=%u",
+				cyc, up, (unsigned int)data->utc.hour,
+				(unsigned int)data->utc.minute,
+				(unsigned int)(ms / MSEC_PER_SEC),
+				(unsigned int)(ms % MSEC_PER_SEC),
+				(unsigned int)data->utc.month_day, (unsigned int)data->utc.month,
+				(unsigned int)data->utc.century_year,
+				(unsigned int)data->info.fix_status,
+				(unsigned int)data->info.satellites_cnt);
+		} else {
+			LOG_INF("gnsst cyc=%u up=%lld (null data)", cyc, up);
+		}
+	}
+#endif
+
 	if (dev != gnss_dev || data == NULL || data->info.fix_status == GNSS_FIX_STATUS_NO_FIX) {
 		return;
 	}
