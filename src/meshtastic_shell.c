@@ -1522,8 +1522,21 @@ static int cmd_scan_status(const struct shell *sh, size_t argc, char **argv)
 		/* Not cosmetic: a non-zero count means some path kept trying to
 		 * transmit while parked on a foreign frequency. The gate held, but
 		 * something upstream should not have been asking. */
+		uint32_t bdest;
+		uint8_t bchan;
+		uint16_t blen;
+
 		shell_warn(sh, "tx refused while scanning: %u (expected 0 — investigate)",
 			   blocked);
+		/* Say WHAT, not just how many. The portnum lives in the encrypted
+		 * payload and is invisible at the TX choke point, but dest and the
+		 * channel hash name the subsystem well enough to go looking. */
+		if (meshtastic_scanner_tx_blocked_first(&bdest, &bchan, &blen)) {
+			shell_warn(sh, "  first: to 0x%08x ch 0x%02x len %u%s", bdest, bchan,
+				   (unsigned int)blen,
+				   bdest == 0xffffffffU ? " (a broadcast — a beacon or a digest)"
+							: " (a unicast — a reply or a walk)");
+		}
 	}
 	shell_print(sh, "");
 	shell_print(sh, "%-12s %11s %8s %8s %10s", "preset", "freq", "heard", "visits", "listen_s");
@@ -1547,8 +1560,26 @@ static int cmd_scan_dump(const struct shell *sh, size_t argc, char **argv)
 		want = (uint32_t)strtoul(argv[1], NULL, 0);
 	}
 
-	shell_print(sh, "%-10s %-12s %-10s %-10s %5s %4s %4s %5s %5s %5s %4s", "epoch", "preset",
-		    "from", "to", "rssi", "snr", "hops", "strt", "relay", "chan", "len");
+	/*
+	 * `uptime` and `id` are what turn a survey into an instrument, so they lead.
+	 * uptime_ms is what the record actually stores and is always meaningful;
+	 * epoch_ms is DERIVED here and is 0 when the clock has never been seeded.
+	 *
+	 * Both columns, deliberately. Printing only the derived epoch is how the old
+	 * absolute-stamp arrangement made a clockless node's capture look like a
+	 * capture of 1970 instead of an untimed one; printing only uptime would lose
+	 * the correlation to anything off-node. With both, "no clock" and "clock says
+	 * X" are distinguishable at a glance.
+	 *
+	 * The anchor is snapshotted ONCE before the loop. Resolving per row would let
+	 * a seed landing mid-dump split the output across two different anchors, so
+	 * rows would disagree with each other about when the same second was.
+	 */
+	int64_t anchor_ms = meshtastic_clock_uptime_ms_to_epoch_ms(0);
+
+	shell_print(sh, "%-12s %-14s %-10s %-12s %-10s %-10s %5s %4s %4s %5s %5s %5s %4s",
+		    "uptime_ms", "epoch_ms", "id", "preset", "from", "to", "rssi", "snr", "hops",
+		    "strt", "relay", "chan", "len");
 
 	while (done < want) {
 		int n = meshtastic_scanner_records(rec, ARRAY_SIZE(rec), from);
@@ -1557,8 +1588,11 @@ static int cmd_scan_dump(const struct shell *sh, size_t argc, char **argv)
 			break;
 		}
 		for (int i = 0; i < n && done < want; i++, done++) {
-			shell_print(sh, "%-10u %-12s 0x%08x 0x%08x %5d %4d %4u %5u  0x%02x  0x%02x %4u",
-				    rec[i].epoch_sec,
+			shell_print(sh,
+				    "%-12u %-14lld 0x%08x %-12s 0x%08x 0x%08x %5d %4d %4u %5u  0x%02x  0x%02x %4u",
+				    rec[i].uptime_ms,
+				    anchor_ms ? (long long)(anchor_ms + rec[i].uptime_ms) : 0LL,
+				    rec[i].id,
 				    meshtastic_preset_display_name(
 					    (meshtastic_Config_LoRaConfig_ModemPreset)rec[i].preset,
 					    true),
@@ -1572,6 +1606,10 @@ static int cmd_scan_dump(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	shell_print(sh, "(%u shown of %u captured)", done, meshtastic_scanner_total());
+	if (anchor_ms == 0) {
+		shell_print(sh, "clock UNSEEDED — epoch_ms is 0, not 1970. Deltas are still exact; "
+				"`meshtastic time set` now re-dates the whole ring retroactively.");
+	}
 	return 0;
 }
 

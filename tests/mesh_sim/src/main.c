@@ -1447,6 +1447,62 @@ ZTEST(mesh_sim, test_scan_captures_foreign_headers)
 	zassert_ok(meshtastic_scanner_stop(), "scan stop failed");
 }
 
+/*
+ * The tap's timestamps are MONOTONIC and must work with no wall clock at all.
+ *
+ * This is the regression the previous arrangement could not pass. The record used
+ * to store an absolute epoch, so on a node whose clock had never been seeded —
+ * the state of every node after every reboot, because the anchor is RAM-only —
+ * every stamp was 0 and every derived interval was 0. Measured on rzr2
+ * (2026-08-29): 512 captured records, hop latency computing as min 0 / median 0 /
+ * max 0 across 259 matched relay pairs. A full-looking capture worth nothing.
+ *
+ * So the assertion here is deliberately made with the clock left UNSET: the
+ * deltas must be exact anyway, because a delta never needed civil time.
+ */
+ZTEST(mesh_sim, test_scan_stamps_are_monotonic_without_a_wall_clock)
+{
+	struct meshtastic_scan_record rec[4];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint32_t freq = 0U;
+	uint8_t sf = 0U, bw = 0U;
+	const int32_t gap_ms = 250;
+	int32_t delta;
+	int n;
+
+	/* The precondition, stated rather than assumed. */
+	meshtastic_clock_test_reset();
+	zassert_false(meshtastic_clock_valid(), "this test is only meaningful with no clock");
+
+	meshtastic_scanner_reset();
+	zassert_ok(meshtastic_scanner_start(), "scan start failed");
+	k_sleep(K_MSEC(200));
+	zassert_ok(lora_sim_get_tuning(lora_dev, &freq, &sf, &bw), "sweep did not tune");
+
+	build_peer_text(0x6007U, "first", wire, &wire_len);
+	zassert_ok(lora_sim_inject_on(lora_dev, freq, sf, bw, wire, (uint8_t)wire_len, -70, 5),
+		   "first inject failed");
+
+	k_sleep(K_MSEC(gap_ms));
+
+	build_peer_text(0x6008U, "second", wire, &wire_len);
+	zassert_ok(lora_sim_inject_on(lora_dev, freq, sf, bw, wire, (uint8_t)wire_len, -70, 5),
+		   "second inject failed");
+
+	n = meshtastic_scanner_records(rec, ARRAY_SIZE(rec), 0U);
+	zassert_true(n >= 2, "both frames must be recorded (got %d)", n);
+
+	/* Non-zero at all — the old code's failure was zeros, not wrong values. */
+	zassert_true(rec[0].uptime_ms > 0U, "an unseeded node must still stamp the frame");
+
+	delta = (int32_t)(rec[1].uptime_ms - rec[0].uptime_ms);
+	zassert_true(delta >= gap_ms - 50 && delta <= gap_ms + 250,
+		     "delta %d ms does not reflect the %d ms between injections", delta, gap_ms);
+
+	zassert_ok(meshtastic_scanner_stop(), "scan stop failed");
+}
+
 /* A scanning node is an observer, not a participant: a surveyed frame must NOT
  * continue into the normal stack.
  *

@@ -44,7 +44,7 @@ config MESHTASTIC_SCANNER_RING_RECORDS
 	default 2048
 	range 64 262144
 	help
-	  Ring capacity in records (28 bytes each). The default is deliberately
+	  Ring capacity in records (25 bytes each). The default is deliberately
 	  modest so the feature fits on a board with no PSRAM at all.
 
 	  Measured ceilings on the R8 (8 MB octal PSRAM), both verified to build:
@@ -82,6 +82,28 @@ config MESHTASTIC_SCANNER_AUTOSTART
 	default n
 	help
 	  Otherwise the sweep is started explicitly (shell, or scanner_start()).
+
+config MESHTASTIC_SCANNER_AUTOSTART_PRESET
+	int "Preset to park on at autostart (-1 = sweep them all)"
+	default -1
+	range -1 15
+	depends on MESHTASTIC_SCANNER_AUTOSTART
+	help
+	  A meshtastic_Config_LoRaConfig_ModemPreset value (e.g. 8 = ShortTurbo).
+
+	  The runtime preset list (`meshtastic scan presets ...`) is RAM-only, so
+	  without this an autostarting node comes back SWEEPING ALL PRESETS after
+	  every reset — which is the right behaviour for a survey and the wrong one
+	  for a tap. A dedicated listener is measuring one preset continuously, and
+	  after a power cut it must resume measuring THAT one rather than quietly
+	  start cycling; a gap in the record is recoverable, silently measuring the
+	  wrong thing is not.
+
+	  Narrowing to a single preset also engages tap mode: the sweep thread stops
+	  re-tuning the radio at the end of each dwell, so there is no periodic blind
+	  spot punched through the capture.
+
+	  -1 keeps the old behaviour (the full sweep).
 
 config MESHTASTIC_SCANNER_STACK_SIZE
 	int "Sweep thread stack"

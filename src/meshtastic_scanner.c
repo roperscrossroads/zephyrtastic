@@ -12,7 +12,6 @@
 #include <zephyr/sys/util.h>
 
 #include <zephyr/drivers/lora.h>
-#include "meshtastic_clock.h"
 #include "meshtastic_core.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_outbound.h"
@@ -73,6 +72,16 @@ static struct {
 	uint32_t head;  /* next write slot; also the running count of writes */
 	uint32_t total;      /* ever captured; keeps counting past the ring */
 	uint32_t tx_blocked; /* transmissions refused while off our preset */
+	/* Identity of the FIRST refusal, so a non-zero counter explains itself
+	 * instead of only alarming. The portnum is inside the encrypted payload
+	 * and is not visible at the TX choke point, but dest + channel hash are,
+	 * and between them they name the subsystem: 0xffffffff on the primary
+	 * channel is a beacon (NodeInfo / telemetry / position), 0xffffffff on the
+	 * cluster channel is a digest, a unicast is a reply or a walk. */
+	bool tx_blocked_seen;
+	uint32_t tx_blocked_dest;
+	uint8_t tx_blocked_chan;
+	uint16_t tx_blocked_len;
 	uint32_t rx_dropped; /* frames surveyed but withheld from the stack */
 	uint32_t parks;      /* times the sweep thread has parked; stop()'s handshake */
 	struct meshtastic_scan_stats stats[MESHTASTIC_SCANNER_MAX_PRESETS];
@@ -116,8 +125,11 @@ void meshtastic_scanner_on_frame(const uint8_t *buf, uint16_t len, int16_t rssi,
 
 	rec = &scan_ring[scan.head % RING_CAP];
 
-	rec->epoch_sec = meshtastic_clock_now_epoch();
-	rec->epoch_ms = (uint16_t)(meshtastic_clock_now_epoch_ms() % 1000);
+	/* ONE read, and a monotonic one. The pair this replaced took two separate
+	 * clock calls, so a second boundary landing between them stamped second N
+	 * with a millisecond remainder from N+1 — a silent ~1 s error in exactly the
+	 * quantity the tap exists to measure. */
+	rec->uptime_ms = (uint32_t)k_uptime_get();
 	rec->from = hdr->src;
 	rec->to = hdr->dest;
 	rec->id = hdr->id;
@@ -137,6 +149,16 @@ void meshtastic_scanner_on_frame(const uint8_t *buf, uint16_t len, int16_t rssi,
 	scan.stats[scan.cur].heard++;
 	scan_unlock();
 }
+
+/* Which preset the radio is actually tuned to right now, or -1 for "unknown /
+ * not ours". TAP MODE (2026-08-29): a single-preset list parks on one preset
+ * forever, and re-tuning the radio at the end of every dwell would blind it for
+ * the duration of each retune — a periodic hole punched through a capture whose
+ * entire purpose is timing. Re-tune only when the target actually changes, which
+ * is every dwell for a real sweep and never for a tap. Reset by start/stop so a
+ * restore that put the radio back on the operating preset cannot be mistaken for
+ * "already tuned". */
+static int scan_tuned = -1;
 
 static void scan_thread_fn(void *p1, void *p2, void *p3)
 {
@@ -171,17 +193,25 @@ static void scan_thread_fn(void *p1, void *p2, void *p3)
 		if (meshtastic_region_freq_plan(
 			    meshtastic_preset_region(), scan_list[i],
 			    meshtastic_preset_display_name(scan_list[i], true), true,
-			    &plan) < 0 ||
-		    meshtastic_radio_tune_explicit(plan.frequency_hz, modem.spread_factor,
-						   modem.bandwidth_hz, modem.coding_rate) < 0) {
-			/* No plan for this preset in this region, or the driver cannot
-			 * represent it: skip rather than listen on a guess and attribute
-			 * the silence to the preset. */
+			    &plan) < 0) {
+			/* No plan for this preset in this region: skip rather than
+			 * listen on a guess and attribute the silence to the preset. */
 			scan_lock();
 			scan.cur = (uint8_t)((i + 1U) % scan_list_n);
 			scan_unlock();
 			continue;
 		}
+		if (scan_tuned != (int)scan_list[i] &&
+		    meshtastic_radio_tune_explicit(plan.frequency_hz, modem.spread_factor,
+						   modem.bandwidth_hz, modem.coding_rate) < 0) {
+			/* The driver cannot represent this preset. Same treatment. */
+			scan_tuned = -1;
+			scan_lock();
+			scan.cur = (uint8_t)((i + 1U) % scan_list_n);
+			scan_unlock();
+			continue;
+		}
+		scan_tuned = (int)scan_list[i];
 
 		/* Dwell = this preset's worst-case time-on-air + the constant. Computed
 		 * AFTER tuning, because lora_airtime() reads the driver's current config
@@ -245,6 +275,11 @@ int meshtastic_scanner_start(void)
 	 * cannot post another token until we give it below. */
 	(void)k_sem_take(&scan_idle, K_NO_WAIT);
 
+	/* Before the thread is un-parked, not after: it reads scan_tuned on its
+	 * first pass, and a stale value would let it skip the very first tune and
+	 * survey the operating preset while believing it was on another. */
+	scan_tuned = -1;
+
 	k_sem_give(&scan_wake); /* un-park the thread */
 
 	LOG_INF("scanner: sweeping %u presets, dwell = ToA + %ums — TX refused until stop",
@@ -277,6 +312,7 @@ int meshtastic_scanner_stop(void)
 	 * re-derives the channel hashes and keeps mt.modem_preset agreeing with the
 	 * radio, which an explicit tune deliberately does not. */
 	ret = meshtastic_preset_switch(mt.modem_preset, NULL);
+	scan_tuned = -1; /* the restore just moved the radio; our cache is void */
 
 	/* Reopen the TX gate ONLY once the radio is genuinely back on the operating
 	 * preset. On failure it stays shut: a node that cannot retune must not
@@ -314,6 +350,34 @@ bool meshtastic_scanner_sweeping(void)
 	s = scan.sweeping;
 	scan_unlock();
 	return s;
+}
+
+void meshtastic_scanner_note_tx_blocked_frame(uint32_t dest, uint8_t chan_hash, uint16_t len)
+{
+	scan_lock();
+	if (!scan.tx_blocked_seen) {
+		scan.tx_blocked_seen = true;
+		scan.tx_blocked_dest = dest;
+		scan.tx_blocked_chan = chan_hash;
+		scan.tx_blocked_len = len;
+	}
+	scan_unlock();
+	meshtastic_scanner_note_tx_blocked();
+}
+
+bool meshtastic_scanner_tx_blocked_first(uint32_t *dest, uint8_t *chan_hash, uint16_t *len)
+{
+	bool seen;
+
+	scan_lock();
+	seen = scan.tx_blocked_seen;
+	if (seen) {
+		*dest = scan.tx_blocked_dest;
+		*chan_hash = scan.tx_blocked_chan;
+		*len = scan.tx_blocked_len;
+	}
+	scan_unlock();
+	return seen;
 }
 
 void meshtastic_scanner_note_tx_blocked(void)
@@ -376,6 +440,7 @@ void meshtastic_scanner_reset(void)
 	scan.head = 0U;
 	scan.total = 0U;
 	scan.tx_blocked = 0U;
+	scan.tx_blocked_seen = false;
 	scan.rx_dropped = 0U;
 	memset(scan.stats, 0, sizeof(scan.stats));
 	scan_unlock();
@@ -484,9 +549,41 @@ static int scanner_init(void)
 			K_NO_WAIT);
 	k_thread_name_set(&scan_thread, "mt_scan");
 
-#if defined(CONFIG_MESHTASTIC_SCANNER_AUTOSTART)
-	(void)meshtastic_scanner_start();
-#endif
+	/* NOTE: autostart deliberately does NOT happen here. scanner_init() is a
+	 * SYS_INIT, so it runs before main() — and therefore before
+	 * meshtastic_init() has configured the radio at all. Starting the sweep
+	 * from here tuned the SX1262 out from under a stack that was still
+	 * bringing it up, and the two then fought for it: ~30 s of
+	 * `sx126x: Busy` / `lora_recv_async arm failed (-16)` at every boot
+	 * (agents-0lzm.11, found on the first listener image). Captures survived
+	 * it, which is worse rather than better — it normalises an error log.
+	 *
+	 * meshtastic_scanner_autostart() is called from the tail of
+	 * meshtastic_init() instead, where the radio is provably up. A timer
+	 * would only have made the race less likely, not absent. */
 	return 0;
+}
+
+void meshtastic_scanner_autostart(void)
+{
+#if defined(CONFIG_MESHTASTIC_SCANNER_AUTOSTART)
+#if CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESET >= 0
+	/* Park on the configured preset before starting, so a listener that has
+	 * just power-cycled resumes measuring the preset it was built for instead
+	 * of sweeping. The list is RAM-only, which is exactly why this has to be a
+	 * build-time answer. */
+	const meshtastic_Config_LoRaConfig_ModemPreset one =
+		(meshtastic_Config_LoRaConfig_ModemPreset)
+			CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESET;
+
+	if (meshtastic_scanner_set_presets(&one, 1U) != 0) {
+		LOG_WRN("scanner: autostart preset %d rejected — sweeping all",
+			CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESET);
+	}
+#endif
+	if (meshtastic_scanner_start() == 0) {
+		LOG_INF("scanner: autostarted — this node is an instrument, not a participant");
+	}
+#endif
 }
 SYS_INIT(scanner_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);

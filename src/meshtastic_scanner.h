@@ -22,10 +22,33 @@
 
 #include "meshtastic/config.pb.h"
 
-/** One heard frame. 28 bytes packed — at 4 MB of PSRAM that is ~150k records. */
+/** One heard frame. 25 bytes packed — at 4 MB of PSRAM that is ~167k records. */
 struct meshtastic_scan_record {
-	uint32_t epoch_sec; /**< absolute; needs the wall clock (4f63e11) */
-	uint16_t epoch_ms;
+	/**
+	 * k_uptime_get() at the driver RX callback. RELATIVE BY DESIGN.
+	 *
+	 * This used to be an absolute epoch_sec/epoch_ms pair, and that was the
+	 * wrong currency for an instrument. Everything computed from this ring is
+	 * a DELTA — hop latency, retransmit interval, inter-frame cadence — and a
+	 * delta needs monotonic time, not civil time. Storing absolute time made
+	 * the tap depend on a wall clock it does not need, with three consequences:
+	 *
+	 *  - the wall-clock anchor is RAM-only, so every capture after a reboot was
+	 *    silently stamped 0 (measured on rzr2, 2026-08-29: 512 records, every
+	 *    timestamp zero, hop latency computing as 0/0/0 across 259 pairs);
+	 *  - clock_should_set() re-applies unconditionally for GPS, so every fix
+	 *    re-anchored with a fresh unmeasured NMEA latency and the stamps moved
+	 *    UNDER the capture — exactly what tools/scantap.py's contract forbids;
+	 *  - and it cost two non-atomic clock reads per frame (below).
+	 *
+	 * Absolute time is recovered at DUMP time instead, which is strictly better:
+	 * seeding the clock late now re-dates the whole ring retroactively, where
+	 * before the zeros were already burned in.
+	 *
+	 * Wraps at 49.7 days. A wrap shows up as one negative delta, never as
+	 * silent corruption, and the host tool checks for it.
+	 */
+	uint32_t uptime_ms;
 	uint32_t from;
 	uint32_t to;
 	uint32_t id;
@@ -38,6 +61,13 @@ struct meshtastic_scan_record {
 	int8_t   snr;
 	uint8_t  payload_len; /**< length only — contents are never stored */
 } __packed;
+
+/* The ring sizing advice in Kconfig.scanner is derived from this number, and the
+ * header comment above states it. There was no assert here when the struct was
+ * 27 bytes while both places claimed 28 — so the sizing table had been wrong,
+ * unnoticed, for as long as it had existed. */
+BUILD_ASSERT(sizeof(struct meshtastic_scan_record) == 25U,
+	     "scan ring sizing (Kconfig.scanner) assumes 25-byte records");
 
 /** What the survey has observed for one preset. */
 struct meshtastic_scan_stats {
@@ -76,6 +106,15 @@ int meshtastic_scanner_get_presets(meshtastic_Config_LoRaConfig_ModemPreset *out
 
 /** @brief Begin cycling. Idempotent. @return 0, or -EALREADY if already running. */
 int meshtastic_scanner_start(void);
+
+/**
+ * @brief Start the sweep if this image was built to autostart; else do nothing.
+ *
+ * Called from the tail of meshtastic_init(), NOT from the module's own SYS_INIT:
+ * that runs before main(), so it would tune the radio out from under a stack
+ * still bringing it up (agents-0lzm.11). Safe to call unconditionally.
+ */
+void meshtastic_scanner_autostart(void);
 
 /**
  * @brief Stop cycling and return the radio to the configured preset.
@@ -143,6 +182,13 @@ uint32_t meshtastic_scanner_total(void);
  * worth seeing rather than a silence worth trusting.
  */
 void meshtastic_scanner_note_tx_blocked(void);
+
+/** As above, but also remembers the first refused frame so `scan status` can
+ *  say WHAT tried to transmit rather than only how often. */
+void meshtastic_scanner_note_tx_blocked_frame(uint32_t dest, uint8_t chan_hash, uint16_t len);
+
+/** Identity of the first refused frame. False if nothing has been refused. */
+bool meshtastic_scanner_tx_blocked_first(uint32_t *dest, uint8_t *chan_hash, uint16_t *len);
 
 /** @brief Transmissions refused since the last reset. Should be ZERO; see above. */
 uint32_t meshtastic_scanner_tx_blocked(void);
