@@ -402,7 +402,19 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	 * this error to whoever enqueued it, so a refusal costs one dropped frame
 	 * and never a retry storm. */
 	if (meshtastic_scanner_active()) {
-		meshtastic_scanner_note_tx_blocked();
+		const struct meshtastic_wire_header *h =
+			(pkt_len >= MESHTASTIC_HDR_LEN)
+				? (const struct meshtastic_wire_header *)pkt
+				: NULL;
+
+		if (h != NULL) {
+			meshtastic_scanner_note_tx_blocked_frame(sys_le32_to_cpu(h->dest),
+								 h->channel, (uint16_t)pkt_len);
+			LOG_DBG("TX refused (scanning): to 0x%08x ch 0x%02x len %u",
+				sys_le32_to_cpu(h->dest), h->channel, (unsigned int)pkt_len);
+		} else {
+			meshtastic_scanner_note_tx_blocked();
+		}
 		return -EPERM;
 	}
 #endif
@@ -438,7 +450,17 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	 * The early check is kept as well: it is the common path while sweeping, and
 	 * it refuses without touching the radio at all. */
 	if (meshtastic_scanner_active()) {
-		meshtastic_scanner_note_tx_blocked();
+		const struct meshtastic_wire_header *h =
+			(pkt_len >= MESHTASTIC_HDR_LEN)
+				? (const struct meshtastic_wire_header *)pkt
+				: NULL;
+
+		if (h != NULL) {
+			meshtastic_scanner_note_tx_blocked_frame(sys_le32_to_cpu(h->dest),
+								 h->channel, (uint16_t)pkt_len);
+		} else {
+			meshtastic_scanner_note_tx_blocked();
+		}
 		(void)k_sem_give(&mt_radio_sem);
 		return -EPERM;
 	}
