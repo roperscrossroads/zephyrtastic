@@ -3301,13 +3301,37 @@ static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	shell_print(sh, "");
-	shell_print(sh, "%-6s %-5s %-8s %s", "boot", "kind", "ran(s)", "cause");
+	/*
+	 * Both data columns describe the TRANSITION INTO the row's boot, not the
+	 * row's boot itself: bootlog_init() stamps each record with how long the
+	 * PREVIOUS run lasted and with the reset cause it read on the way in. The
+	 * header used to say "ran(s)", which reads as "boot #N ran this long" and is
+	 * off by one boot. It showed on screen as a contradiction — rzr2 reporting
+	 * "this boot #50 ... uptime 7870" directly above a row "#50 ... 8731" — and
+	 * cost a session the time to go read the source. Name the columns for what
+	 * they hold.
+	 */
+	shell_print(sh, "%-6s %-5s %-12s %s", "boot", "kind", "prev-ran(s)", "started-by");
 	for (size_t i = 0; i < n; i++) {
-		shell_print(sh, "#%-5u %-5s %-8u 0x%08x", hist[i].boot_num,
-			    (hist[i].flags & MESHTASTIC_BOOT_F_WARM) ? "warm" : "COLD",
-			    hist[i].prev_uptime_s, hist[i].cause);
+		/* prev_uptime_s is a uint16 fed by the heartbeat, so it saturates at
+		 * 65535 s (18.2 h). Say so rather than report a cap as a measurement —
+		 * a soak longer than that is exactly when someone reads this column. */
+		if (hist[i].prev_uptime_s == UINT16_MAX) {
+			shell_print(sh, "#%-5u %-5s %-12s 0x%08x", hist[i].boot_num,
+				    (hist[i].flags & MESHTASTIC_BOOT_F_WARM) ? "warm" : "COLD",
+				    ">=65535", hist[i].cause);
+		} else {
+			shell_print(sh, "#%-5u %-5s %-12u 0x%08x", hist[i].boot_num,
+				    (hist[i].flags & MESHTASTIC_BOOT_F_WARM) ? "warm" : "COLD",
+				    hist[i].prev_uptime_s, hist[i].cause);
+		}
 	}
 	shell_print(sh, "");
+	shell_print(sh, "Each row is a boot STARTING: how long the run before it lasted, and "
+			"the reset");
+	shell_print(sh, "cause read on the way in — so both numbers belong to boot #N-1's "
+			"ending, not");
+	shell_print(sh, "to #N. prev-ran(s) saturates at 65535 (18.2 h).");
 	shell_print(sh, "A COLD row means retained RAM did not survive into that boot, so "
 			"everything before it is gone.");
 	return 0;
