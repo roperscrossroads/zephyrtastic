@@ -39,6 +39,8 @@
  * rather than printing garbage.
  */
 
+#include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -316,6 +318,73 @@ static int logring_latch(void)
 SYS_INIT(logring_latch, PRE_KERNEL_1, 0);
 
 #if defined(CONFIG_SHELL)
+/*
+ * Bounded readback helpers.
+ *
+ * WHY A LINE LIMIT EXISTS AT ALL. The whole ring is several KB, which is fine on
+ * a console and impossible over SMP: `logring` on a node reachable only by BLE
+ * comes back as MGMT_ERR.EMSGSIZE, because the response has to fit one SMP
+ * buffer. That is not a corner case — it is the normal state of any node taken
+ * off the bench, which is exactly when its log is most interesting and its USB
+ * port least available. `logring <n>` is what makes the ring readable from a
+ * node you cannot touch.
+ *
+ * The ring stores formatted log output, so lines are just '\n'-separated bytes;
+ * counting backwards from the end is all "the last n lines" needs.
+ */
+
+/* Byte at logical index i of a view that may wrap. prev_buf is linear with
+ * start == 0, and prev_len <= RING_SIZE, so the same accessor serves both. */
+static char logring_at(const char *buf, uint32_t start, uint32_t i)
+{
+	return buf[(start + i) % RING_SIZE];
+}
+
+/* Logical offset where the last `lines` lines begin; 0 for "all of it". */
+static uint32_t logring_tail_offset(const char *buf, uint32_t start, uint32_t len,
+				    uint32_t lines)
+{
+	uint32_t seen = 0U;
+
+	if (lines == 0U || len == 0U) {
+		return 0U;
+	}
+
+	for (uint32_t k = 1U; k <= len; k++) {
+		uint32_t i = len - k;
+
+		if (logring_at(buf, start, i) != '\n') {
+			continue;
+		}
+		/* A trailing newline TERMINATES the last line rather than starting
+		 * one. Counting it would return n-1 lines and look like an
+		 * off-by-one in the caller's request. */
+		if (k == 1U) {
+			continue;
+		}
+		seen++;
+		if (seen == lines) {
+			return i + 1U;
+		}
+	}
+
+	/* Fewer lines held than asked for: give everything, which is the whole
+	 * answer to the question, not a truncation of it. */
+	return 0U;
+}
+
+static void logring_emit(const struct shell *sh, const char *buf, uint32_t start,
+			 uint32_t len, uint32_t from)
+{
+	for (uint32_t i = from; i < len; i++) {
+		char c = logring_at(buf, start, i);
+
+		if (c != '\r') {
+			shell_fprintf(sh, SHELL_NORMAL, "%c", c);
+		}
+	}
+}
+
 /* On-demand readback. The boot dump is one-shot and goes out over whatever
  * backend is live at the time; this is for the case where you are already on the
  * node's shell and want the tail without waiting for -- or causing -- a reset.
@@ -323,26 +392,39 @@ SYS_INIT(logring_latch, PRE_KERNEL_1, 0);
  * since this boot started. */
 static int cmd_logring(const struct shell *sh, size_t argc, char **argv)
 {
-	uint32_t len, start;
+	uint32_t len, start, from, lines = 0U;
+	bool want_prev = false;
+	size_t argi = 1U;
+
+	if (argi < argc && strcmp(argv[argi], "prev") == 0) {
+		want_prev = true;
+		argi++;
+	}
+	if (argi < argc) {
+		char *endp;
+		unsigned long v = strtoul(argv[argi], &endp, 10);
+
+		if (*endp != '\0' || v == 0UL || v > UINT32_MAX) {
+			shell_error(sh, "usage: logring [prev] [<lines>]");
+			return -EINVAL;
+		}
+		lines = (uint32_t)v;
+	}
 
 	/* `logring prev` -- the tail recovered from BEFORE the last reset. Kept
 	 * readable for the whole boot precisely because, with netlog no longer
 	 * autostarting, the automatic boot dump may reach no backend at all. This
 	 * is how a monitor retrieves a reboot's evidence after the fact. */
-	if (argc >= 2 && strcmp(argv[1], "prev") == 0) {
+	if (want_prev) {
 		if (!prev_valid || prev_len == 0U) {
 			shell_print(sh, "log ring: no pre-reset tail (cold start)");
 			return 0;
 		}
-		shell_print(sh, "--- log ring: %u bytes recovered from before the last reset ---",
-			    (unsigned int)prev_len);
-		for (uint32_t i = 0; i < prev_len; i++) {
-			char c = prev_buf[i];
-
-			if (c != '\r') {
-				shell_fprintf(sh, SHELL_NORMAL, "%c", c);
-			}
-		}
+		from = logring_tail_offset(prev_buf, 0U, prev_len, lines);
+		shell_print(sh,
+			    "--- log ring: %u of %u bytes recovered from before the last reset ---",
+			    (unsigned int)(prev_len - from), (unsigned int)prev_len);
+		logring_emit(sh, prev_buf, 0U, prev_len, from);
 		shell_print(sh, "\n--- end ---");
 		return 0;
 	}
@@ -354,22 +436,20 @@ static int cmd_logring(const struct shell *sh, size_t argc, char **argv)
 
 	len = ring_wrapped ? RING_SIZE : ring_head;
 	start = ring_wrapped ? ring_head : 0U;
+	from = logring_tail_offset(ring_buf, start, len, lines);
 
-	shell_print(sh, "--- log ring: %u bytes from the current boot ---", (unsigned int)len);
-	for (uint32_t i = 0; i < len; i++) {
-		char c = ring_buf[(start + i) % RING_SIZE];
-
-		if (c != '\r') {
-			shell_fprintf(sh, SHELL_NORMAL, "%c", c);
-		}
-	}
+	shell_print(sh, "--- log ring: %u of %u bytes from the current boot ---",
+		    (unsigned int)(len - from), (unsigned int)len);
+	logring_emit(sh, ring_buf, start, len, from);
 	shell_print(sh, "\n--- end ---");
 
 	return 0;
 }
 
 SHELL_CMD_REGISTER(logring, NULL,
-		   "Dump the RTC log ring. `logring` = this boot, `logring prev` = "
-		   "the tail recovered from before the last reset.",
+		   "Dump the RTC log ring. `logring` = this boot, `logring prev` = the "
+		   "tail recovered from before the last reset. Add a line count to bound "
+		   "the output -- `logring 40`, `logring prev 40` -- which is required "
+		   "over SMP/BLE, where the whole ring exceeds one response buffer.",
 		   cmd_logring);
 #endif /* CONFIG_SHELL */

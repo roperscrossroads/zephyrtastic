@@ -15,11 +15,13 @@
  * anything below it would not exercise the thing under test.
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/lora.h>
 #include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_dummy.h>
 #include <zephyr/ztest.h>
@@ -939,3 +941,111 @@ ZTEST(meshtastic_shell, test_cluster_reset_needs_confirmation_and_says_what_it_d
 }
 
 #endif /* CONFIG_MESHTASTIC_CLUSTER */
+
+#if defined(CONFIG_MESHTASTIC_LOGRING)
+/* ---- logring line bounding ------------------------------------------------
+ *
+ * `logring <n>` exists because the unbounded form is unusable on the transport
+ * that matters most. Over SMP/BLE the whole ring cannot fit one response buffer
+ * and the node answers MGMT_ERR.EMSGSIZE — and a node reachable only by BLE is
+ * precisely a node that has left the bench, which is when its log is most worth
+ * reading and its USB port least available.
+ *
+ * The counting is a backwards walk over a ring that may have wrapped, with a
+ * trailing newline that terminates the last line rather than starting one. Every
+ * part of that is an off-by-one waiting to happen, and an off-by-one here is
+ * invisible: you get almost the right answer, from a node you cannot check.
+ */
+LOG_MODULE_REGISTER(shell_test_logring, LOG_LEVEL_INF);
+
+static void logring_fill(int n)
+{
+	for (int i = 0; i < n; i++) {
+		LOG_INF("LRMARK%03d", i);
+	}
+}
+
+ZTEST(meshtastic_shell, test_logring_bounds_output_to_the_last_n_lines)
+{
+	const char *out;
+
+	logring_fill(12);
+
+	/* Ask for 3. The last marker must be there and an early one must not —
+	 * asserting both directions, because "shows the newest" and "drops the
+	 * oldest" are separate claims and a wrong offset can satisfy one alone. */
+	zassert_ok(run_cmd("logring 3", &out), "logring 3 failed");
+	zassert_not_null(strstr(out, "LRMARK011"), "the newest line must survive bounding");
+	zassert_is_null(strstr(out, "LRMARK000"),
+			"a 3-line request must not carry 12 lines of history");
+
+	/* The header reports both numbers, so "bounded" is visible rather than
+	 * inferred from the absence of output. */
+	zassert_not_null(strstr(out, " of "), "header should read '<shown> of <total> bytes'");
+}
+
+ZTEST(meshtastic_shell, test_logring_line_count_is_exact)
+{
+	const char *out;
+	int found = 0;
+
+	logring_fill(12);
+
+	/* Exactly 5 markers for a 5-line request. The trailing-newline rule is
+	 * what this pins: counting the terminator of the final line would quietly
+	 * return four. */
+	zassert_ok(run_cmd("logring 5", &out), "logring 5 failed");
+	for (int i = 0; i < 12; i++) {
+		char needle[16];
+
+		snprintk(needle, sizeof(needle), "LRMARK%03d", i);
+		if (strstr(out, needle) != NULL) {
+			found++;
+		}
+	}
+	zassert_equal(found, 5, "expected exactly 5 markers in `logring 5`, got %d", found);
+}
+
+ZTEST(meshtastic_shell, test_logring_more_lines_than_held_returns_everything)
+{
+	const char *out, *h;
+	unsigned long shown, total;
+
+	logring_fill(4);
+
+	/* Asking for more than exists is not an error and must not truncate: the
+	 * whole ring IS the complete answer to "the last 9999 lines".
+	 *
+	 * Asserted from the HEADER, not by looking for a marker in the body. The
+	 * unbounded dump is larger than the dummy backend's capture buffer, so the
+	 * body gets clipped and the newest line — the one a body check would look
+	 * for — is the first casualty. Which is the whole reason `logring <n>`
+	 * exists: it is the same size limit as SMP's, met in the test harness. */
+	zassert_ok(run_cmd("logring 9999", &out), "logring with a large count failed");
+
+	h = strstr(out, "log ring: ");
+	zassert_not_null(h, "expected the '<shown> of <total> bytes' header");
+	h += strlen("log ring: ");
+	shown = strtoul(h, (char **)&h, 10);
+	h = strstr(h, "of ");
+	zassert_not_null(h, "malformed header");
+	total = strtoul(h + 3, NULL, 10);
+
+	zassert_true(total > 0UL, "the ring should hold something after 4 log lines");
+	zassert_equal(shown, total,
+		      "a count above the lines held must return the whole ring (%lu of %lu)",
+		      shown, total);
+}
+
+ZTEST(meshtastic_shell, test_logring_rejects_a_bad_count)
+{
+	const char *out;
+
+	/* Non-numeric and zero are usage errors, not "show me everything" — a
+	 * silently-ignored argument on a size-capped transport reads as the node
+	 * failing rather than the request being malformed. */
+	zassert_not_equal(run_cmd("logring banana", &out), 0, "non-numeric count must fail");
+	zassert_not_null(strstr(out, "usage:"), "and should say how to call it");
+	zassert_not_equal(run_cmd("logring 0", &out), 0, "zero lines is not a request");
+}
+#endif /* CONFIG_MESHTASTIC_LOGRING */
