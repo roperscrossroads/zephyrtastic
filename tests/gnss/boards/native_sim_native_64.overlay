@@ -1,0 +1,26 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+/*
+ * Two fakes, both upstream Zephyr's: the project's simulated LoRa radio (so the
+ * real stack can transmit and the test can count what it sent) and Zephyr's own
+ * emulated GNSS device. The emul is what makes this suite possible at all --
+ * meshtastic_gnss.c wraps its entire callback path in
+ * `#if DT_NODE_HAS_STATUS(DT_ALIAS(gnss), okay)`, so WITHOUT a gnss alias the
+ * only thing that compiles is meshtastic_gnss_init(), and there is nothing to
+ * test. That is precisely why the module had no coverage (agents-isfr).
+ */
+/ {
+	aliases {
+		lora0 = &lora_sim0;
+		gnss = &gnss_emul0;
+	};
+
+	lora_sim0: lora-sim {
+		compatible = "meshtastic,lora-sim";
+		status = "okay";
+	};
+
+	gnss_emul0: gnss-emul {
+		compatible = "zephyr,gnss-emul";
+		status = "okay";
+	};
+};

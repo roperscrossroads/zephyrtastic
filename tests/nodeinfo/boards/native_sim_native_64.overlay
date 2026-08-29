@@ -1,0 +1,11 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+/ {
+	aliases {
+		lora0 = &lora_sim0;
+	};
+
+	lora_sim0: lora-sim {
+		compatible = "meshtastic,lora-sim";
+		status = "okay";
+	};
+};

@@ -1,0 +1,34 @@
+common:
+  tags:
+    - meshtastic
+    - nodeinfo
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # The suppression windows. START_DELAY is pinned to the Kconfig maximum so the
+  # unprompted announce cannot fire inside any of these tests' frame captures.
+  meshtastic.nodeinfo.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC=3600
+
+  # Same tests against the smallest cache the Kconfig allows, which is the only
+  # way the eviction boundary is reachable without injecting 17 peers.
+  meshtastic.nodeinfo.small_cache.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC=3600
+      - CONFIG_MESHTASTIC_NODEINFO_PEER_CACHE_SIZE=4
+
+  # The announce cadence, which needs a short delay and therefore its own image.
+  # INTERVAL is the Kconfig minimum (1 h); native_sim runs it in virtual time.
+  meshtastic.nodeinfo.announce.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC=2
+      - CONFIG_MESHTASTIC_NODEINFO_INTERVAL_SEC=3600
+
+  # Fleet class 5's configuration: reactive paths intact, nothing unprompted.
+  meshtastic.nodeinfo.no_auto_send.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEINFO_AUTO_SEND=n

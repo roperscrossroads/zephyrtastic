@@ -1,0 +1,97 @@
+# The matrix IS the test (see src/main.c). Each scenario subtracts one thing
+# from the all-on baseline in prj.conf; the last few subtract a role's worth at
+# once, because a combination can break in ways none of its parts do.
+#
+# Rule for adding to this file: a module-level bool with no scenario here is a
+# configuration nobody has ever built. That is how CONFIG_MESHTASTIC_GNSS_AUTO_SEND=n
+# reached 2026-08-29 without compiling.
+common:
+  tags:
+    - meshtastic
+    - variants
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # The all-on baseline. If this fails, every subtraction below is uninformative.
+  meshtastic.variants.full.native_sim: {}
+
+  # --- the beacons -------------------------------------------------------
+  # AUTO_SEND=n for each: "the module is present and listening, but this node
+  # announces nothing". Both are what fleet class 5 (the listener) needs, and
+  # the GNSS one is the config that did not compile.
+  meshtastic.variants.no_gnss_auto_send.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_GNSS_AUTO_SEND=n
+  meshtastic.variants.no_nodeinfo_auto_send.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEINFO_AUTO_SEND=n
+
+  # --- whole modules absent ----------------------------------------------
+  # MESHTASTIC_GNSS selects MESHTASTIC_POSITION, so a position-less node is only
+  # reachable with both off — which is why they share a scenario rather than
+  # getting one each.
+  meshtastic.variants.no_gnss.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_GNSS=n
+  meshtastic.variants.no_position.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_GNSS=n
+      - CONFIG_MESHTASTIC_POSITION=n
+  meshtastic.variants.no_nodeinfo.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEINFO=n
+  meshtastic.variants.no_nodedb.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEDB=n
+  meshtastic.variants.no_scanner.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SCANNER=n
+  # MESHTASTIC_FLEET depends on MESHTASTIC_CLUSTER, so =n silently takes the
+  # courier and the fleet-intent reader with it. The listener build omits the
+  # cluster overlay entirely, so this is a shipped configuration, not a corner.
+  meshtastic.variants.no_cluster.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_CLUSTER=n
+  meshtastic.variants.no_device_metrics.native_sim:
+    extra_configs:
+      # AIRTIME depends on DEVICE_METRICS (the regulatory gate reads the TX
+      # window), so this subtracts both.
+      - CONFIG_MESHTASTIC_DEVICE_METRICS=n
+      - CONFIG_MESHTASTIC_AIRTIME=n
+
+  # --- combinations ------------------------------------------------------
+  # The shape of fleet class 5: survey autostarted on a fixed preset, no cluster
+  # membership, and every beacon off. Built as one config because that is how it
+  # ships, and because the refusals interact — each one hid the next when they
+  # were peeled off by hand on the bench.
+  #
+  # There are FOUR beacons, not three. DEVICE_METRICS_AUTO_SEND fires once an
+  # hour, so it outlived every bench session that went looking, and was only
+  # caught on 2026-08-29 by an rzr2 that had been up for 7951 s with a refusal
+  # counter reading exactly 2. Keep this list in step with
+  # overlay-v4-listener.conf: a beacon that is off in the overlay and absent here
+  # is one this sweep cannot tell you about.
+  meshtastic.variants.listener_shape.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SCANNER_AUTOSTART=y
+      - CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESET=8
+      - CONFIG_MESHTASTIC_GNSS_AUTO_SEND=n
+      - CONFIG_MESHTASTIC_NODEINFO_AUTO_SEND=n
+      - CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND=n
+      - CONFIG_MESHTASTIC_CLUSTER=n
+
+  # The floor: the radio and the router, and as little else as the Kconfig
+  # allows. Catches a module that has quietly become load-bearing for the core.
+  meshtastic.variants.minimal.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_GNSS=n
+      - CONFIG_MESHTASTIC_POSITION=n
+      - CONFIG_MESHTASTIC_NODEINFO=n
+      - CONFIG_MESHTASTIC_NODEDB=n
+      - CONFIG_MESHTASTIC_SCANNER=n
+      - CONFIG_MESHTASTIC_CLUSTER=n
+      - CONFIG_MESHTASTIC_DEVICE_METRICS=n
+      - CONFIG_MESHTASTIC_AIRTIME=n

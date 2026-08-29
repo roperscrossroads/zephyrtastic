@@ -1,0 +1,23 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+/*
+ * Every optional peripheral the sweep might switch on has to EXIST here, or a
+ * scenario silently tests nothing: MESHTASTIC_GNSS compiles its whole callback
+ * path away without a `gnss` alias, so a GNSS scenario on a board with no GNSS
+ * node would build clean while proving nothing.
+ */
+/ {
+	aliases {
+		lora0 = &lora_sim0;
+		gnss = &gnss_emul0;
+	};
+
+	lora_sim0: lora-sim {
+		compatible = "meshtastic,lora-sim";
+		status = "okay";
+	};
+
+	gnss_emul0: gnss-emul {
+		compatible = "zephyr,gnss-emul";
+		status = "okay";
+	};
+};

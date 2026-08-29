@@ -1,0 +1,35 @@
+common:
+  tags:
+    - meshtastic
+    - gnss
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+  extra_configs:
+    # Short windows so the gate tests run in seconds of virtual time. 5 s is the
+    # Kconfig minimum for both, so these are real settable values, not test-only
+    # escapes.
+    - CONFIG_MESHTASTIC_GNSS_SEND_INTERVAL_SEC=5
+tests:
+  # Send-dominated: the retry window is the same size, so the send interval is
+  # what the gate expresses. This is the shape of the shipped defaults (300 s
+  # send / 60 s retry) with the numbers shrunk.
+  meshtastic.gnss.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_GNSS_RETRY_INTERVAL_SEC=5
+
+  # Retry-dominated: retry > send, which makes the AND of the two windows
+  # visible. Nothing on the bench is configured this way — that is exactly why
+  # it needs a test rather than a reader noticing.
+  meshtastic.gnss.retry_gate.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_GNSS_RETRY_INTERVAL_SEC=20
+
+  # The configuration that had never been built by anyone before 2026-08-29 and
+  # therefore did not compile. Fleet class 5 (the listener) is its first user.
+  meshtastic.gnss.no_auto_send.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_GNSS_RETRY_INTERVAL_SEC=5
+      - CONFIG_MESHTASTIC_GNSS_AUTO_SEND=n
