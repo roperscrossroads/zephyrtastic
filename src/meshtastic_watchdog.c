@@ -289,6 +289,32 @@ static void heartbeat_work_fn(struct k_work *work)
 
 	ARG_UNUSED(work);
 
+	/*
+	 * This runs in a work handler, which is thread context, so k_is_in_isr()
+	 * MUST be false here. If it is not, the kernel's per-CPU interrupt nesting
+	 * count has been left non-zero by an interrupt path that raised it without
+	 * unwinding — and from that moment the node is doomed: the next blocking
+	 * call from any thread hits Zephyr's "no waiting in an ISR" assertion and
+	 * panics.
+	 *
+	 * That is agents-quo6. It presents as an unexplained WATCHDOG reset every
+	 * few hours, because the panic ends in a reset and the cause register
+	 * cannot tell a panic from a starved feed. The panic itself lands wherever
+	 * the next blocking call happens to be — on this bench the shell's
+	 * TX-done wait, which says nothing about the culprit.
+	 *
+	 * Hence this probe. It cannot fix the leak, but it timestamps it to within
+	 * one heartbeat instead of within the hours between resets, and the console
+	 * capture running alongside says what the node was doing in that window.
+	 * Cost: one register read per heartbeat, in a handler that already runs.
+	 */
+	if (k_is_in_isr()) {
+		LOG_ERR("ISR NESTING LEAK (agents-quo6): the kernel believes it is in an "
+			"ISR while running thread context at uptime %lld ms. The next "
+			"blocking call will panic this node.",
+			k_uptime_get());
+	}
+
 	if (sys_heap_runtime_stats_get(&_system_heap.heap, &stats) == 0) {
 		LOG_INF("Watchdog: system heap free=%zu allocated=%zu max_allocated=%zu",
 			stats.free_bytes, stats.allocated_bytes, stats.max_allocated_bytes);
