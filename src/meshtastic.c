@@ -32,6 +32,9 @@
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_tx_power.h"
 #include "meshtastic_core.h"
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+#include "meshtastic_scanner.h"
+#endif
 #include "meshtastic_modules.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
@@ -686,6 +689,16 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 
 	LOG_INF("Meshtastic init: node=0x%08x ch_hash=0x%02x freq=%uHz", mt.node_id, mt.ch_hash,
 		mt.frequency);
+
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+	/* LAST, and deliberately after the radio is up: a scanner image parks the
+	 * SX1262 on a survey frequency and closes the TX gate, so it must not run
+	 * until the stack it is displacing has finished claiming the radio. Doing
+	 * this from the scanner's own SYS_INIT (before main()) had the two fighting
+	 * for the chip for ~30 s of every boot — agents-0lzm.11. No-op unless the
+	 * image was built with MESHTASTIC_SCANNER_AUTOSTART. */
+	meshtastic_scanner_autostart();
+#endif
 
 	return 0;
 }
