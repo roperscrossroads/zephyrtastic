@@ -223,6 +223,33 @@ static struct meshtastic_ble_peer_beat mk_beat(uint32_t seq, uint8_t flags)
 	return b;
 }
 
+/* agents-xhli.7: which advert a scanning central admits. A targeted intent
+ * admits only its target; a bare intent prefers the last-linked peer for the
+ * sticky window, then anyone — so a kit that swapped and rebooted re-forms
+ * toward its courier, and a chain still forms once the courier is gone. */
+ZTEST(ble_peer_codec, test_scan_admits_prefers_the_last_linked_peer)
+{
+	const uint32_t courier = 0x04e14bb4U, other = 0x299de6c4U;
+
+	/* Targeted: only the target, whatever the history or the clock. */
+	zassert_true(meshtastic_ble_peer_scan_admits(courier, other, courier, 0, 20000));
+	zassert_false(meshtastic_ble_peer_scan_admits(courier, other, other, 99999, 20000));
+
+	/* Bare intent, no history: anyone, at once. */
+	zassert_true(meshtastic_ble_peer_scan_admits(0U, 0U, other, 0, 20000));
+
+	/* Bare intent, a last-linked courier: the other kit is passed over
+	 * inside the window, the courier is admitted at once... */
+	zassert_false(meshtastic_ble_peer_scan_admits(0U, courier, other, 0, 20000));
+	zassert_false(meshtastic_ble_peer_scan_admits(0U, courier, other, 19999, 20000));
+	zassert_true(meshtastic_ble_peer_scan_admits(0U, courier, courier, 0, 20000));
+	/* ...and once the window has passed, anyone. */
+	zassert_true(meshtastic_ble_peer_scan_admits(0U, courier, other, 20000, 20000));
+
+	/* Window 0 = the preference is off. */
+	zassert_true(meshtastic_ble_peer_scan_admits(0U, courier, other, 0, 0));
+}
+
 ZTEST(ble_peer_codec, test_rx_clean_sequence_counts_no_loss)
 {
 	struct meshtastic_ble_peer_rx st;

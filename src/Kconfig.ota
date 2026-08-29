@@ -95,6 +95,17 @@ config MESHTASTIC_SMP_CENTRAL
 
 if MESHTASTIC_SMP_CENTRAL
 
+config MESHTASTIC_SMP_CENTRAL_PAIR
+	bool "Pair (encrypt) the link before talking SMP to the target"
+	default y if MCUMGR_TRANSPORT_BT_PERM_RW_ENCRYPT
+	help
+	  Request BT_SECURITY_L2 on the adopted link before discovery, so a
+	  target whose SMP service demands an encrypted link (RW_ENCRYPT —
+	  overlay-ota-ble-secure.conf, F7) accepts the courier's writes. Just
+	  Works pairing, bonded on both sides; needs BT_SMP + BT_BONDABLE and
+	  a BT_MAX_PAIRED with room for every neighbour the courier serves.
+	  Off, the courier talks to an open service (the bench posture).
+
 config MESHTASTIC_SMP_CENTRAL_JOB_STACK_SIZE
 	int "Stack for the push/update job thread"
 	default 4096

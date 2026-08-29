@@ -490,6 +490,14 @@ static struct {
 	bool scan_on;   /* user intent (shell) */
 	bool scanning;  /* bt_le_scan actually running */
 	uint32_t target_node; /* 0 = any peer */
+	/* The peer to prefer on a bare rescan, persisted with the intent
+	 * (agents-xhli.7): the last outbound peer whose beats said COURIER —
+	 * or, with no courier ever seen, simply the last one. A fallback link
+	 * to a non-courier (the courier was rebooting) must not overwrite a
+	 * remembered courier, or the fallback becomes permanent (bench
+	 * 2026-08-28: kit2 learned kit1 during rzr3's 30 s swap). */
+	uint32_t last_node;
+	int64_t looking_since_ms; /* uptime the current hunt began; 0 = not hunting */
 	struct bt_conn *conn; /* the one outbound link */
 	uint32_t conn_node;
 	bool link_ready; /* beat discovery + subscribe complete */
@@ -503,6 +511,9 @@ static struct {
 	bool hello_pending;
 	struct meshtastic_ble_peer_seen seen[CONFIG_MESHTASTIC_BLE_PEER_SEEN_MAX];
 } central;
+
+/* Persisted central intent (defined with the settings handler below). */
+static void peer_intent_save(void);
 
 static struct bt_gatt_discover_params central_disc;
 static struct bt_gatt_subscribe_params central_sub;
@@ -599,7 +610,9 @@ static void peer_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	peer.stats.adverts_matched++;
 	if (central.conn == NULL && central.scanning &&
-	    (central.target_node == 0U || central.target_node == m.node_num)) {
+	    meshtastic_ble_peer_scan_admits(central.target_node, central.last_node, m.node_num,
+					    k_uptime_get() - central.looking_since_ms,
+					    CONFIG_MESHTASTIC_BLE_PEER_STICKY_MS)) {
 		connect_now = true;
 		/* Already-linked guard: a node whose beats we are receiving on an
 		 * INBOUND link keeps advertising (the re-arm is deliberate — it must
@@ -614,6 +627,11 @@ static void peer_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 				break;
 			}
 		}
+	} else if (central.conn == NULL && central.scanning && central.target_node == 0U &&
+		   central.last_node != 0U && m.node_num != central.last_node) {
+		/* Passed over inside the sticky window; counted so a bench can
+		 * see the preference doing its work. */
+		peer.stats.sticky_deferred++;
 	}
 	k_mutex_unlock(&peer_lock);
 
@@ -657,6 +675,12 @@ static void scan_work_fn(struct k_work *work)
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	if (central.scan_on && !central.scanning && central.conn == NULL) {
 		start = true;
+		if (central.looking_since_ms == 0) {
+			/* A hunt starts once and runs through scan restarts (a
+			 * failed connect to the preferred peer must not re-open
+			 * its window); it ends when a link is ready. */
+			central.looking_since_ms = k_uptime_get();
+		}
 	}
 	k_mutex_unlock(&peer_lock);
 
@@ -712,8 +736,25 @@ static uint8_t central_notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_
 	index = bt_conn_index(conn);
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	if (index < MESHTASTIC_BLE_REG_SLOTS) {
+		bool promote = false;
+
 		meshtastic_ble_peer_rx_account(&peer.rx[index], &beat);
 		peer.rx_last_ms[index] = k_uptime_get();
+		/* This is OUR outbound peer beating. If it says COURIER, it is
+		 * the one a bare rescan should hold out for (agents-xhli.7); a
+		 * non-courier never displaces a remembered courier. */
+		if (conn == central.conn && (beat.flags & MESHTASTIC_BLE_PEER_FLAG_COURIER) != 0U &&
+		    central.last_node != beat.node_num) {
+			central.last_node = beat.node_num;
+			promote = true;
+		}
+		k_mutex_unlock(&peer_lock);
+		if (promote) {
+			LOG_INF("BLE peer 0x%08x is a courier — preferred on a bare rescan",
+				beat.node_num);
+			peer_intent_save();
+		}
+		return BT_GATT_ITER_CONTINUE;
 	}
 	k_mutex_unlock(&peer_lock);
 	return BT_GATT_ITER_CONTINUE;
@@ -796,14 +837,26 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 			peer.stats.discovery_failures++;
 			k_mutex_unlock(&peer_lock);
 		} else {
+			bool remember;
+
 			k_mutex_lock(&peer_lock, K_FOREVER);
 			central.value_handle = central_sub.value_handle;
 			central.link_ready = true;
 			central.tx_seq = 0U;
 			central.hello_pending = true;
+			central.looking_since_ms = 0;
+			/* First link ever: remember it. Otherwise wait for its beats —
+			 * a COURIER flag promotes it (central_notify_cb). */
+			remember = (central.last_node == 0U);
+			if (remember) {
+				central.last_node = central.conn_node;
+			}
 			k_mutex_unlock(&peer_lock);
 			LOG_INF("BLE peer link to 0x%08x ready (beats every %u ms)",
 				central.conn_node, CONFIG_MESHTASTIC_BLE_PEER_BEAT_PERIOD_MS);
+			if (remember) {
+				peer_intent_save(); /* the next bare rescan prefers it */
+			}
 			(void)k_work_schedule(&beat_work, K_NO_WAIT);
 
 			/* Beat chain done — continue into the frame channel,
@@ -975,7 +1028,9 @@ BT_CONN_CB_DEFINE(peer_conn_callbacks) = {
 struct peer_intent_rec {
 	uint8_t scan_on;
 	uint32_t target;
+	uint32_t last; /* v2 (agents-xhli.7): the last-linked peer; absent in a v1 record */
 } __packed;
+#define PEER_INTENT_REC_V1_LEN 5U
 
 static void peer_intent_save(void)
 {
@@ -984,6 +1039,7 @@ static void peer_intent_save(void)
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	rec.scan_on = central.scan_on ? 1U : 0U;
 	rec.target = central.target_node;
+	rec.last = central.last_node;
 	k_mutex_unlock(&peer_lock);
 
 	if (settings_save_one("blepeer/central", &rec, sizeof(rec)) != 0) {
@@ -999,13 +1055,18 @@ static int peer_intent_settings_set(const char *key, size_t len, settings_read_c
 	if (strcmp(key, "central") != 0) {
 		return -ENOENT;
 	}
-	if (len != sizeof(rec) || read_cb(cb_arg, &rec, sizeof(rec)) != (ssize_t)sizeof(rec)) {
+	/* A v1 record (no `last`) is still an intent: an image upgrade must
+	 * not silently disarm a chain. */
+	rec.last = 0U;
+	if ((len != sizeof(rec) && len != PEER_INTENT_REC_V1_LEN) ||
+	    read_cb(cb_arg, &rec, len) != (ssize_t)len) {
 		return -EINVAL;
 	}
 
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	central.scan_on = (rec.scan_on != 0U);
 	central.target_node = rec.target;
+	central.last_node = rec.last;
 	k_mutex_unlock(&peer_lock);
 	return 0;
 }
@@ -1022,6 +1083,9 @@ static int peer_intent_settings_commit(void)
 		if (central.target_node != 0U) {
 			LOG_INF("BLE peer: restored scan intent, target 0x%08x",
 				central.target_node);
+		} else if (central.last_node != 0U) {
+			LOG_INF("BLE peer: restored scan intent (any peer, preferring 0x%08x)",
+				central.last_node);
 		} else {
 			LOG_INF("BLE peer: restored scan intent (any peer)");
 		}
@@ -1047,6 +1111,7 @@ int meshtastic_ble_peer_scan_set(bool on)
 	if (!on) {
 		central.target_node = 0U;
 	}
+	central.looking_since_ms = 0; /* arm = a fresh hunt, with its full window */
 	k_mutex_unlock(&peer_lock);
 	peer_intent_save();
 
@@ -1067,6 +1132,16 @@ int meshtastic_ble_peer_scan_set(bool on)
 bool meshtastic_ble_peer_scan_armed(void)
 {
 	return central.scan_on;
+}
+
+uint32_t meshtastic_ble_peer_last_node(void)
+{
+	uint32_t n;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	n = central.last_node;
+	k_mutex_unlock(&peer_lock);
+	return n;
 }
 
 uint32_t meshtastic_ble_peer_scan_target(void)

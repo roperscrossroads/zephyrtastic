@@ -146,6 +146,7 @@ static struct {
 	uint16_t ccc_handle;
 	bool ready;		/* subscribed: SMP frames can flow */
 	bool adopted;		/* the link was already up (peer link, phone...) — not ours to drop */
+	bool bringup;		/* MTU+discovery has been started for THIS link, once */
 	bool connect_failed;	/* set by a callback so a waiter wakes with a verdict */
 	uint8_t last_disconnect;
 	/* An adopted link being returned: the CCC=0 write bt_gatt_unsubscribe()
@@ -212,7 +213,11 @@ static int smpc_output(struct net_buf *nb)
 	int rc = 0;
 
 	k_mutex_lock(&smpc.lock, K_FOREVER);
-	if (smpc.ready && smpc.conn != NULL) {
+	/* The handle is part of "ready": bt_gatt_write_without_response_cb()
+	 * ASSERTS on handle 0 (bench 2026-08-28: a pending command fired on
+	 * the mcumgr thread while a re-adopted link was between reset and
+	 * discovery — kernel panic on the courier). Refuse, never assert. */
+	if (smpc.ready && smpc.conn != NULL && smpc.chr_handle != 0U) {
 		conn = bt_conn_ref(smpc.conn);
 	}
 	handle = smpc.chr_handle;
@@ -386,6 +391,7 @@ static void smpc_link_reset_locked(void)
 {
 	smpc.ready = false;
 	smpc.adopted = false;
+	smpc.bringup = false;
 	smpc.chr_handle = 0U;
 	smpc.ccc_handle = 0U;
 	smpc.sub.value_handle = 0U;
@@ -419,6 +425,13 @@ static void smpc_subscribed_cb(struct bt_conn *conn, uint8_t err,
 	}
 
 	k_mutex_lock(&smpc.lock, K_FOREVER);
+	if (conn != smpc.conn || smpc.chr_handle == 0U) {
+		/* A completion for a link we have since dropped or re-adopted:
+		 * it must not mark the CURRENT link ready with no handle. */
+		k_mutex_unlock(&smpc.lock);
+		LOG_DBG("SMPC stale subscribe completion ignored");
+		return;
+	}
 	smpc.ready = true;
 	k_mutex_unlock(&smpc.lock);
 	LOG_INF("SMPC link ready: chr 0x%04x ccc 0x%04x ATT MTU %u", smpc.chr_handle,
@@ -426,9 +439,9 @@ static void smpc_subscribed_cb(struct bt_conn *conn, uint8_t err,
 	k_sem_give(&smpc.ready_sem);
 }
 
-static void smpc_discover_fail(struct bt_conn *conn, const char *what)
+static void smpc_discover_fail(struct bt_conn *conn, const char *what, int rc)
 {
-	LOG_WRN("SMPC discovery: %s", what);
+	LOG_WRN("SMPC discovery: %s (%d)", what, rc);
 	k_mutex_lock(&smpc.lock, K_FOREVER);
 	smpc.connect_failed = true;
 	k_mutex_unlock(&smpc.lock);
@@ -444,7 +457,7 @@ static uint8_t smpc_discover_cb(struct bt_conn *conn, const struct bt_gatt_attr 
 	if (attr == NULL) {
 		smpc_discover_fail(conn, params->type == BT_GATT_DISCOVER_PRIMARY
 						 ? "no SMP service on target"
-						 : "SMP service incomplete");
+						 : "SMP service incomplete", 0);
 		return BT_GATT_ITER_STOP;
 	}
 
@@ -458,7 +471,7 @@ static uint8_t smpc_discover_cb(struct bt_conn *conn, const struct bt_gatt_attr 
 		params->type = BT_GATT_DISCOVER_CHARACTERISTIC;
 		rc = bt_gatt_discover(conn, params);
 		if (rc != 0) {
-			smpc_discover_fail(conn, "chr discovery failed to start");
+			smpc_discover_fail(conn, "chr discovery failed to start", rc);
 		}
 		return BT_GATT_ITER_STOP;
 	}
@@ -469,7 +482,7 @@ static uint8_t smpc_discover_cb(struct bt_conn *conn, const struct bt_gatt_attr 
 		params->type = BT_GATT_DISCOVER_DESCRIPTOR;
 		rc = bt_gatt_discover(conn, params);
 		if (rc != 0) {
-			smpc_discover_fail(conn, "CCC discovery failed to start");
+			smpc_discover_fail(conn, "CCC discovery failed to start", rc);
 		}
 		return BT_GATT_ITER_STOP;
 	case BT_GATT_DISCOVER_DESCRIPTOR:
@@ -479,9 +492,23 @@ static uint8_t smpc_discover_cb(struct bt_conn *conn, const struct bt_gatt_attr 
 		smpc.sub.value = BT_GATT_CCC_NOTIFY;
 		smpc.sub.value_handle = smpc.chr_handle;
 		smpc.sub.ccc_handle = smpc.ccc_handle;
+		/* VOLATILE or nothing: the host keeps a subscription across a
+		 * disconnect for a BONDED peer (remove_subscriptions() in
+		 * gatt.c drops it only if the bond is absent or this bit is
+		 * set), and bt_gatt_subscribe() answers -EALREADY when handed
+		 * params that are still on that list. Since F7 P1 every target
+		 * IS bonded, so without this the SECOND bring-up of a link to
+		 * the same target always failed here — which is what made the
+		 * update job's reboot-wait spend its whole 150 s budget and the
+		 * courier latch a delivered target as REVERTED (2026-08-28).
+		 * Persistence would be wrong anyway: the handles above are
+		 * re-discovered on every bring-up, and a retained entry gets
+		 * re-subscribed by the host with whatever it last held — a
+		 * zeroed handle, hence the ATT 0x01 that followed. */
+		atomic_set_bit(smpc.sub.flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE);
 		rc = bt_gatt_subscribe(conn, &smpc.sub);
 		if (rc != 0) {
-			smpc_discover_fail(conn, "subscribe failed to start");
+			smpc_discover_fail(conn, "subscribe failed to start", rc);
 		}
 		return BT_GATT_ITER_STOP;
 	default:
@@ -502,7 +529,7 @@ static void smpc_discover_start(struct bt_conn *conn)
 
 	rc = bt_gatt_discover(conn, &smpc.disc);
 	if (rc != 0) {
-		smpc_discover_fail(conn, "service discovery failed to start");
+		smpc_discover_fail(conn, "service discovery failed to start", rc);
 	}
 }
 
@@ -515,10 +542,49 @@ static void smpc_mtu_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_exchan
 	smpc_discover_start(conn);
 }
 
-static void smpc_connected(struct bt_conn *conn, uint8_t err)
+/* MTU exchange, then discovery — ONCE per link, whoever gets here first.
+ *
+ * Two callers race on an adopted link: smpc_connected() when it cannot start
+ * a security procedure, and smpc_security_changed() when the peer's own
+ * procedure completes. Both used to run, and `smpc.disc`/`smpc.sub` are one
+ * struct each: the second discovery memset the first one's params mid-flight,
+ * the CCC handle it ended up with was not a CCC, and the subscribe came back
+ * `ATT 0x03 (write not permitted)` — after which the job held a link that
+ * would never be ready and every reconnect answered -EALREADY until the
+ * budget ran out (bench 2026-08-28, kit1's delivery). One entry point, one
+ * bring-up. */
+static void smpc_bringup(struct bt_conn *conn)
 {
+	bool first;
 	int rc;
 
+	k_mutex_lock(&smpc.lock, K_FOREVER);
+	first = !smpc.bringup;
+	smpc.bringup = true;
+	k_mutex_unlock(&smpc.lock);
+	if (!first) {
+		LOG_DBG("SMPC bring-up already running for this link");
+		return;
+	}
+
+	smpc.mtu_params.func = smpc_mtu_cb;
+	rc = bt_gatt_exchange_mtu(conn, &smpc.mtu_params);
+	if (rc != 0) {
+		/* -EALREADY: an MTU exchange has been done, or is in flight,
+		 * on this link — normal when the peer-link module brought it up.
+		 * Either way there is nothing to wait for here; go on with the
+		 * MTU the link ends up with. */
+		if (rc == -EALREADY) {
+			LOG_INF("SMPC MTU exchange not ours to make (already done or in flight)");
+		} else {
+			LOG_WRN("SMPC MTU exchange failed to start (%d)", rc);
+		}
+		smpc_discover_start(conn);
+	}
+}
+
+static void smpc_connected(struct bt_conn *conn, uint8_t err)
+{
 	if (conn != smpc.conn) {
 		return;
 	}
@@ -535,13 +601,56 @@ static void smpc_connected(struct bt_conn *conn, uint8_t err)
 	}
 
 	LOG_INF("SMPC connected");
-	smpc.mtu_params.func = smpc_mtu_cb;
-	rc = bt_gatt_exchange_mtu(conn, &smpc.mtu_params);
-	if (rc != 0) {
-		LOG_WRN("SMPC MTU exchange failed to start (%d)", rc);
-		smpc_discover_start(conn);
+#if defined(CONFIG_MESHTASTIC_SMP_CENTRAL_PAIR)
+	int rc;
+
+	/* F7: a target whose SMP service is RW_ENCRYPT refuses every write
+	 * on a plain link. Ask for level 2 (encrypted, Just Works) first; the
+	 * bring-up continues from security_changed. An adopted peer link that
+	 * is already at L2 (a bond from an earlier job) answers at once. */
+	if (bt_conn_get_security(conn) >= BT_SECURITY_L2) {
+		/* Already encrypted — an adopted peer link the target re-formed
+		 * with its bond. bt_conn_set_security() would return 0 with NO
+		 * security_changed callback and the bring-up would stall (bench
+		 * 2026-08-28: every post-swap reconnect to a bonded kit timed out
+		 * this way). Go straight on. */
+		LOG_INF("SMPC link already encrypted (level %d)", bt_conn_get_security(conn));
+	} else {
+		rc = bt_conn_set_security(conn, BT_SECURITY_L2);
+		if (rc == 0 || rc == -EBUSY) {
+			/* -EBUSY: a security procedure is ALREADY running on this
+			 * link — the target, as central, started encrypting the
+			 * moment it re-connected. It ends in security_changed for
+			 * every listener, so wait for it exactly as we would for
+			 * our own request. Falling through here (as this did until
+			 * 2026-08-28) starts a second bring-up alongside the one
+			 * security_changed goes on to start. */
+			return;
+		}
+		LOG_WRN("SMPC set_security failed to start (%d) — trying unpaired", rc);
 	}
+#endif
+	smpc_bringup(conn);
 }
+
+#if defined(CONFIG_MESHTASTIC_SMP_CENTRAL_PAIR)
+static void smpc_security_changed(struct bt_conn *conn, bt_security_t level,
+				  enum bt_security_err err)
+{
+	if (conn != smpc.conn) {
+		return;
+	}
+	if (err != BT_SECURITY_ERR_SUCCESS || level < BT_SECURITY_L2) {
+		LOG_WRN("SMPC pairing failed (level %d, err %d) — the target will refuse writes",
+			level, err);
+		/* Carry on: an OPEN target still works, and a refused write
+		 * names the reason in the job's fail_stage. */
+	} else {
+		LOG_INF("SMPC link encrypted (level %d)", level);
+	}
+	smpc_bringup(conn);
+}
+#endif
 
 static void smpc_disconnected(struct bt_conn *conn, uint8_t reason)
 {
@@ -573,6 +682,9 @@ static void smpc_disconnected(struct bt_conn *conn, uint8_t reason)
 BT_CONN_CB_DEFINE(smpc_conn_cb) = {
 	.connected = smpc_connected,
 	.disconnected = smpc_disconnected,
+#if defined(CONFIG_MESHTASTIC_SMP_CENTRAL_PAIR)
+	.security_changed = smpc_security_changed,
+#endif
 };
 
 /* ------------------------------------------------------------------------ */
@@ -1174,6 +1286,18 @@ static void smpc_job_fn(struct k_work *work)
 			if (rc == 0) {
 				break;
 			}
+			if (rc == -EALREADY) {
+				/* A link to the target is held but never became
+				 * ready — a bring-up that died at discovery or
+				 * subscribe. connect() will answer -EALREADY for
+				 * as long as we hold it, so nothing improves by
+				 * waiting: let it go and dial again. Without this
+				 * one bad bring-up spent the entire budget and the
+				 * courier latched a delivered node REVERTED (bench
+				 * 2026-08-28). */
+				LOG_WRN("SMPC update: held link never came ready — releasing and retrying");
+				(void)meshtastic_smpc_disconnect();
+			}
 		}
 		if (rc != 0) {
 			LOG_ERR("SMPC update: target did not come back (%d)", rc);
@@ -1277,12 +1401,36 @@ static struct {
 } depot;
 static K_MUTEX_DEFINE(depot_lock);
 
+/* A row from the previous index for this directory entry, if the file is
+ * unchanged by the only cheap evidence LittleFS gives (name and size). */
+static const struct meshtastic_smpc_depot_row *
+depot_prev_row(const struct meshtastic_smpc_depot_row *prev, uint16_t prev_n,
+	       const struct fs_dirent *ent)
+{
+	for (uint16_t i = 0U; i < prev_n; i++) {
+		if (prev[i].size == (uint32_t)ent->size && strcmp(prev[i].name, ent->name) == 0) {
+			return &prev[i];
+		}
+	}
+	return NULL;
+}
+
 static int depot_rescan_locked(void)
 {
+	/* Incremental: a file already indexed under the same name and size is
+	 * carried over without re-reading its header (each read is an fs_open
+	 * plus the MCUboot header and TLV walk); only new or changed files
+	 * are parsed, and rows for vanished files drop out. The previous
+	 * rows are kept aside here rather than on the stack: 16 rows is
+	 * ~0.7 KB, and this runs on the courier's tick thread. */
+	static struct meshtastic_smpc_depot_row prev[MESHTASTIC_SMPC_DEPOT_ROWS];
+	uint16_t prev_n = depot.n;
 	struct fs_dir_t dir;
 	struct fs_dirent ent;
+	unsigned int reused = 0U, parsed = 0U;
 	int rc;
 
+	memcpy(prev, depot.rows, sizeof(prev));
 	fs_dir_t_init(&dir);
 	rc = fs_opendir(&dir, "/depot");
 	if (rc != 0) {
@@ -1293,15 +1441,22 @@ static int depot_rescan_locked(void)
 	while (fs_readdir(&dir, &ent) == 0 && ent.name[0] != '\0') {
 		struct meshtastic_smpc_image img;
 		struct meshtastic_smpc_depot_row *r;
+		const struct meshtastic_smpc_depot_row *old;
 		char path[64];
 
 		if (ent.type != FS_DIR_ENTRY_FILE) {
 			continue;
 		}
-		(void)snprintf(path, sizeof(path), "/depot/%s", ent.name);
-		if (meshtastic_smpc_local_image(path, &img) != 0) {
-			depot.skipped++;
-			continue; /* not a signed image, or unreadable */
+		old = depot_prev_row(prev, prev_n, &ent);
+		if (old == NULL) {
+			(void)snprintf(path, sizeof(path), "/depot/%s", ent.name);
+			if (meshtastic_smpc_local_image(path, &img) != 0) {
+				depot.skipped++;
+				continue; /* not a signed image, or unreadable */
+			}
+			parsed++;
+		} else {
+			reused++;
 		}
 		if (depot.n >= ARRAY_SIZE(depot.rows)) {
 			LOG_WRN("depot: more than %u images, ignoring %s",
@@ -1310,6 +1465,10 @@ static int depot_rescan_locked(void)
 			continue;
 		}
 		r = &depot.rows[depot.n++];
+		if (old != NULL) {
+			*r = *old;
+			continue;
+		}
 		(void)strncpy(r->name, ent.name, sizeof(r->name) - 1U);
 		r->name[sizeof(r->name) - 1U] = '\0';
 		r->version = ((uint32_t)img.major << 24) | ((uint32_t)img.minor << 16) | img.revision;
@@ -1319,7 +1478,8 @@ static int depot_rescan_locked(void)
 	(void)fs_closedir(&dir);
 	depot.built = true;
 	depot.last_scan_ms = k_uptime_get();
-	LOG_INF("depot: %u image(s) indexed, %u other file(s)", depot.n, depot.skipped);
+	LOG_INF("depot: %u image(s) indexed (%u header(s) read, %u carried over), %u other file(s)",
+		depot.n, parsed, reused, depot.skipped);
 	return depot.n;
 }
 

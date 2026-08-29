@@ -108,6 +108,18 @@ int meshtastic_ble_peer_adv_decode(const uint8_t *buf, size_t len, uint32_t *nod
 	return 0;
 }
 
+bool meshtastic_ble_peer_scan_admits(uint32_t target, uint32_t last, uint32_t node,
+				     int64_t since_ms, int64_t sticky_ms)
+{
+	if (target != 0U) {
+		return node == target;
+	}
+	if (last != 0U && node != last && since_ms < sticky_ms) {
+		return false;
+	}
+	return true;
+}
+
 void meshtastic_ble_peer_rx_reset(struct meshtastic_ble_peer_rx *st)
 {
 	memset(st, 0, sizeof(*st));

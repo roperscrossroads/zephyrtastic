@@ -106,6 +106,9 @@ bool meshtastic_ble_peer_scan_armed(void);
 
 /* The persisted/armed connect target (0 = any peer). */
 uint32_t meshtastic_ble_peer_scan_target(void);
+/* The peer the last outbound link was to (0 = none); a bare rescan prefers it
+ * for CONFIG_MESHTASTIC_BLE_PEER_STICKY_MS (agents-xhli.7). */
+uint32_t meshtastic_ble_peer_last_node(void);
 
 /* Target one node number (0 = connect to any peer found) and arm the scan. */
 int meshtastic_ble_peer_connect(uint32_t node_num);
@@ -139,6 +142,7 @@ void meshtastic_ble_peer_link_get(struct meshtastic_ble_peer_link *out);
 struct meshtastic_ble_peer_stats {
 	uint32_t adverts_matched;    /* peer adverts seen (uuid + blob) */
 	uint32_t reflections;        /* own node_num in an advert, rejected */
+	uint32_t sticky_deferred; /* adverts passed over for the last-linked peer (xhli.7) */
 	uint32_t connects_attempted;
 	uint32_t connects_failed;
 	uint32_t discovery_failures;

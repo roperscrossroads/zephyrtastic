@@ -113,6 +113,20 @@ void meshtastic_ble_peer_adv_encode(uint8_t buf[MESHTASTIC_BLE_PEER_ADV_LEN],
 int meshtastic_ble_peer_adv_decode(const uint8_t *buf, size_t len, uint32_t *node_num);
 
 /*
+ * Should a scanning central connect to the peer whose advert just matched?
+ * Pure (agents-xhli.7). @p target is the operator's targeted intent (0 = any
+ * peer); @p last is the node this central was last linked to (0 = none);
+ * @p since_ms is how long the central has been looking, @p sticky_ms the
+ * grace window. A targeted intent admits only its target. A bare intent
+ * prefers the last-linked peer for the window — a kit that just swapped and
+ * rebooted re-forms toward its courier instead of whichever peer advertises
+ * first — and admits anyone once the window has passed (the courier is gone;
+ * a chain must still form).
+ */
+bool meshtastic_ble_peer_scan_admits(uint32_t target, uint32_t last, uint32_t node,
+				     int64_t since_ms, int64_t sticky_ms);
+
+/*
  * Receive-side accounting for one link. seq gaps are LOSS (proven, not
  * guessed); a HELLO — or the first beat ever — resyncs; a seq at or below the
  * last one seen without HELLO is treated as a peer restart (resync, counted).

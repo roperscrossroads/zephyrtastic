@@ -125,6 +125,20 @@ config MESHTASTIC_BLE_PEER_BEAT_PERIOD_MS
 	  How often the beat engine sends on each active peer link (notify
 	  toward a subscribed central, write toward a connected peripheral).
 
+config MESHTASTIC_BLE_PEER_STICKY_MS
+	int "Prefer the last-linked courier for this long on a bare rescan (ms)"
+	default 60000
+	depends on MESHTASTIC_BLE_PEER
+	help
+	  A central with no targeted intent (`blepeer scan on`) remembers the
+	  peer its last outbound link was to and, when it looks again, passes
+	  over other peers' adverts for this long before admitting anyone. A
+	  kit that swapped and rebooted re-forms toward its courier instead of
+	  whichever peer advertises first (a two-kit star made that grab likely,
+	  2026-08-28). Longer than a courier's own reboot: at 20 s a kit whose
+	  courier was mid-swap (~30 s) fell back to the other kit and then
+	  REMEMBERED it. 0 disables the preference.
+
 config MESHTASTIC_BLE_PEER_SEEN_MAX
 	int "Peer advert table size"
 	default 8

@@ -3439,6 +3439,12 @@ static int cmd_blepeer_status(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "scan          : armed (target 0x%08x), adverts matched=%u "
 			    "reflections=%u", meshtastic_ble_peer_scan_target(),
 			    ps.adverts_matched, ps.reflections);
+	} else if (meshtastic_ble_peer_last_node() != 0U) {
+		shell_print(sh, "scan          : %s (any peer, prefers last 0x%08x for %u s; deferred %u), adverts matched=%u reflections=%u",
+			    meshtastic_ble_peer_scan_armed() ? "armed" : "off",
+			    meshtastic_ble_peer_last_node(),
+			    CONFIG_MESHTASTIC_BLE_PEER_STICKY_MS / 1000U, ps.sticky_deferred,
+			    ps.adverts_matched, ps.reflections);
 	} else {
 		shell_print(sh, "scan          : %s, adverts matched=%u reflections=%u",
 			    meshtastic_ble_peer_scan_armed() ? "armed" : "off",
