@@ -34,6 +34,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/meshtastic/fem.h>
 #include <zephyr/shell/shell.h>
+#include <zephyr/meshtastic/gnss_pps.h>
 #include <zephyr/sys/sys_io.h>
 #include <zephyr/sys/util.h>
 
@@ -650,159 +651,37 @@ static int cmd_gps_pinmux(const struct shell *sh, size_t argc, char **argv)
 
 /*
  * ---------------------------------------------------------------------------
- * `gps pps` — read-only edge counter on the GNSS 1PPS pin (GPIO41).
+ * `gps pps` — the bench view of the 1PPS capture.
  *
- * WHY THIS EXISTS. `docs/MULTI-PRESET-OPERATION.md` asserted for months that no
- * PPS pin was wired on the V4 — an assertion produced by reading OUR devicetree,
- * which describes our port and says nothing about the board. The vendor
- * schematics (~/heltec/, incl. HTIT-WBR8H_V4.3.2.pdf) route net PPS to 41 on the
- * 8-pin GNSS connector on V4.2, V4.3 and R8 alike, and upstream agrees
- * (firmware/variants/esp32s3/heltec_v4/variant.h:94 — PIN_GPS_PPS (41)). GPIO41
- * is unclaimed in every one of our board files: uart1 takes GPIO38/39 and the
- * L76K control lines take 34/40/42. So the pin is there; the only open question
- * is whether the FITTED module actually drives it, and that is what this counts.
+ * The capture itself is NOT here any more. It moved to meshtastic_gnss_pps.c
+ * once the pin gained a devicetree description, because at that point nothing
+ * about it is board-specific: any board with a meshtastic,gnss-pps node gets the
+ * same capture, and one without compiles it out. What stays here is the bench
+ * CLI, next to the rest of the L76K controls it is used alongside.
  *
- * GPIO41 is MTDI in the ESP32-S3 JTAG block — as are GPIO39/40/42, which this
- * board already uses for the GNSS UART and control lines, so the GNSS connector
- * simply occupies that block. It is NOT a strapping pin (those are 0/3/45/46),
- * and this command only ever configures it as an INPUT: it cannot drive, damage
- * or reconfigure anything.
+ * The pulse is also a TIME SOURCE now, not only a diagnostic — the wall clock
+ * anchors on its edge instead of on the NMEA sentence's arrival — so the capture
+ * arms itself at init. `start` and `stop` remain for bench work; `stop` really
+ * does stop disciplining the clock.
  *
- * Stamps are `k_cycle_get_32()`, not `k_uptime_get()`, deliberately. The tick
- * clock is millisecond-resolution at best, and the entire value of PPS is that
- * it is good to microseconds — measuring it with a millisecond ruler would
- * discard the property being measured. The 32-bit cycle counter wraps in ~17.9 s
- * at 240 MHz, which is far longer than the ~1 s intervals being differenced, and
- * unsigned subtraction handles a wrap inside a single interval correctly.
- *
- * Each edge also LOGs, cycle-stamped. That is what makes the *latency* question
- * (how long after the true UTC second does the NMEA callback land?) answerable:
- * MESHTASTIC_GNSS_TIME_DEBUG stamps the GNSS callback from the same counter, so
- * an interleaved console capture yields the delay by subtraction, with no
- * coupling between the two modules beyond a shared clock.
- *
- *   gps pps start [quiet]   arm the capture (resets stats; `quiet` = no per-edge log)
- *   gps pps                 count, rate, min/max/mean interval, jitter, pad level
+ *   gps pps                 count, rate, min/max interval, jitter, lock state
+ *   gps pps start [quiet]   re-arm and reset the statistics
  *   gps pps stop            disarm
  * ---------------------------------------------------------------------------
  */
-/*
- * The pin comes from the devicetree now (see the gnss_pps node in the common
- * dtsi), not from a constant here. It was a constant while the question was
- * still "does the module even drive this?"; now that the answer is yes, the pin
- * is board description and belongs where the rest of the board is described —
- * which is also what stops a future board from silently inheriting GPIO41.
- */
-#define GPS_PPS_NODE DT_NODELABEL(gnss_pps)
-#if !DT_NODE_HAS_STATUS(GPS_PPS_NODE, okay)
-#error "gnss_pps node missing: this board file needs a 1PPS pin description"
-#endif
-static const struct gpio_dt_spec gps_pps = GPIO_DT_SPEC_GET(GPS_PPS_NODE, pps_gpios);
-
-/* Kept only for the human-readable output: the SoC pin number is not derivable
- * from a gpio_dt_spec (it holds a port device plus a pin within that port). */
-#define GPS_PPS_GPIO 41
-
-static struct gpio_callback gps_pps_cb_data;
-static bool gps_pps_armed;
-static bool gps_pps_log;
-
-/* Written from the GPIO ISR, read under irq_lock() by the shell. */
-static struct {
-	uint32_t count;
-	uint32_t last_cyc;
-	uint32_t min_d;
-	uint32_t max_d;
-	uint64_t sum_d;
-	uint32_t n_d;
-} gps_pps_stats;
-
-static void gps_pps_isr(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins)
-{
-	uint32_t now = k_cycle_get_32();
-	uint32_t d = 0U;
-	bool have_d;
-
-	ARG_UNUSED(port);
-	ARG_UNUSED(cb);
-	ARG_UNUSED(pins);
-
-	have_d = (gps_pps_stats.count > 0U);
-	if (have_d) {
-		d = now - gps_pps_stats.last_cyc; /* unsigned: correct across one wrap */
-		if (gps_pps_stats.n_d == 0U || d < gps_pps_stats.min_d) {
-			gps_pps_stats.min_d = d;
-		}
-		if (gps_pps_stats.n_d == 0U || d > gps_pps_stats.max_d) {
-			gps_pps_stats.max_d = d;
-		}
-		gps_pps_stats.sum_d += d;
-		gps_pps_stats.n_d++;
-	}
-	gps_pps_stats.last_cyc = now;
-	gps_pps_stats.count++;
-
-	if (gps_pps_log) {
-		if (have_d) {
-			LOG_INF("PPS #%u cyc=%u d=%u cyc (%u us)", gps_pps_stats.count, now, d,
-				(unsigned int)k_cyc_to_us_near32(d));
-		} else {
-			LOG_INF("PPS #%u cyc=%u (first edge)", gps_pps_stats.count, now);
-		}
-	}
-}
-
-/*
- * Arm the capture. Shared by `gps pps start` and the boot-time autostart, so
- * the unattended path cannot drift from the one the bench exercises.
- */
-static int gps_pps_arm(bool log_edges)
-{
-	int ret;
-
-	if (!gpio_is_ready_dt(&gps_pps)) {
-		return -ENODEV;
-	}
-
-	gps_pps_log = log_edges;
-
-	ret = gpio_pin_configure_dt(&gps_pps, GPIO_INPUT);
-	if (ret < 0) {
-		return ret;
-	}
-
-	if (!gps_pps_armed) {
-		gpio_init_callback(&gps_pps_cb_data, gps_pps_isr, BIT(gps_pps.pin));
-		ret = gpio_add_callback(gps_pps.port, &gps_pps_cb_data);
-		if (ret < 0) {
-			return ret;
-		}
-	}
-
-	memset(&gps_pps_stats, 0, sizeof(gps_pps_stats));
-
-	ret = gpio_pin_interrupt_configure_dt(&gps_pps, GPIO_INT_EDGE_TO_ACTIVE);
-	if (ret < 0) {
-		gpio_remove_callback(gps_pps.port, &gps_pps_cb_data);
-		return ret;
-	}
-
-	gps_pps_armed = true;
-	return 0;
-}
+#define GPS_PPS_GPIO 41 /* for the human-readable output only; the pin is in DT */
 
 static int cmd_gps_pps_start(const struct shell *sh, size_t argc, char **argv)
 {
 	bool log_edges = !(argc == 2 && strcmp(argv[1], "quiet") == 0);
-	int ret = gps_pps_arm(log_edges);
+	int ret = meshtastic_gnss_pps_start(log_edges);
 
 	if (ret < 0) {
-		shell_error(sh, "arming PPS capture on GPIO%u failed: %d", GPS_PPS_GPIO, ret);
+		shell_error(sh, "arming the 1PPS capture failed: %d", ret);
 		return ret;
 	}
-
 	shell_print(sh, "PPS capture armed on GPIO%u (rising edge)%s", GPS_PPS_GPIO,
-		    gps_pps_log ? "" : ", per-edge log off");
+		    log_edges ? "" : ", per-edge log off");
 	shell_print(sh, "cycle clock = %u Hz; expect ~1 edge/s if the module drives PPS",
 		    (unsigned int)sys_clock_hw_cycles_per_sec());
 	return 0;
@@ -810,100 +689,88 @@ static int cmd_gps_pps_start(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_gps_pps_stop(const struct shell *sh, size_t argc, char **argv)
 {
-	const struct device *gpio1 = gps_gpio1();
+	struct meshtastic_gnss_pps_stats st;
+	int ret;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	if (gpio1 == NULL) {
-		shell_error(sh, "gpio1 not ready");
-		return -ENODEV;
-	}
-	if (!gps_pps_armed) {
+	meshtastic_gnss_pps_get_stats(&st);
+	ret = meshtastic_gnss_pps_stop();
+	if (ret == -EALREADY) {
 		shell_print(sh, "PPS capture not armed");
 		return 0;
 	}
-
-	gpio_pin_interrupt_configure_dt(&gps_pps, GPIO_INT_DISABLE);
-	gpio_remove_callback(gps_pps.port, &gps_pps_cb_data);
-	gps_pps_armed = false;
-	shell_print(sh, "PPS capture disarmed (%u edges counted)", gps_pps_stats.count);
+	if (ret < 0) {
+		shell_error(sh, "disarm failed: %d", ret);
+		return ret;
+	}
+	shell_warn(sh, "PPS capture disarmed (%u edges) — the clock will fall back to "
+		       "NMEA arrival", st.count);
 	return 0;
 }
 
 static int cmd_gps_pps(const struct shell *sh, size_t argc, char **argv)
 {
+	struct meshtastic_gnss_pps_stats st;
 	uint32_t hz = sys_clock_hw_cycles_per_sec();
-	unsigned int key;
-	uint32_t count, last, min_d, max_d, n_d;
-	uint64_t sum_d;
-	int level = -1;
+	int64_t edge_ms, age_ms;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	key = irq_lock();
-	count = gps_pps_stats.count;
-	last = gps_pps_stats.last_cyc;
-	min_d = gps_pps_stats.min_d;
-	max_d = gps_pps_stats.max_d;
-	sum_d = gps_pps_stats.sum_d;
-	n_d = gps_pps_stats.n_d;
-	irq_unlock(key);
+	meshtastic_gnss_pps_get_stats(&st);
 
-	if (gpio_is_ready_dt(&gps_pps)) {
-		gpio_pin_configure_dt(&gps_pps, GPIO_INPUT);
-		level = gpio_pin_get_dt(&gps_pps);
-	}
+	shell_print(sh, "GPIO%u (PPS): armed=%s  locked=%s  cycle clock=%u Hz", GPS_PPS_GPIO,
+		    st.armed ? "yes" : "no", st.locked ? "yes" : "no", (unsigned int)hz);
+	shell_print(sh, "edges: %u", st.count);
 
-	shell_print(sh, "GPIO%u (PPS): armed=%s  pad=%d  cycle clock=%u Hz", GPS_PPS_GPIO,
-		    gps_pps_armed ? "yes" : "no", level, (unsigned int)hz);
-	shell_print(sh, "edges: %u", count);
-
-	if (!gps_pps_armed) {
+	if (!st.armed) {
 		shell_print(sh, "arm it with `gps pps start` first");
 		return 0;
 	}
-	if (n_d == 0U) {
-		/* A zero count is NOT proof the pin is dead: many receivers gate PPS
+	if (st.intervals == 0U) {
+		/* A zero count is NOT proof the pin is dead: most receivers gate PPS
 		 * on a position fix. Say so, rather than let silence read as a verdict. */
 		shell_warn(sh, "no interval yet — need >=2 edges");
-		shell_print(sh, "0 edges is inconclusive indoors: most receivers only");
-		shell_print(sh, "drive PPS once they have a fix. Check for a fix first —");
-		shell_print(sh, "the `gnsst` log line carries fix= and sats=, and layering");
-		shell_print(sh, "overlay-gnssdump.conf on top adds per-satellite SNR.");
+		shell_print(sh, "0 edges is inconclusive without a fix: most receivers only");
+		shell_print(sh, "drive PPS once they have one. The `gnsst` log line carries");
+		shell_print(sh, "fix= and sats=; overlay-gnssdump.conf adds per-satellite SNR.");
 		return 0;
 	}
 
 	{
-		uint32_t mean_d = (uint32_t)(sum_d / n_d);
+		uint32_t mean = (uint32_t)(st.sum_cyc / st.intervals);
 
 		shell_print(sh, "interval: mean %u us   min %u us   max %u us   (n=%u)",
-			    (unsigned int)k_cyc_to_us_near32(mean_d),
-			    (unsigned int)k_cyc_to_us_near32(min_d),
-			    (unsigned int)k_cyc_to_us_near32(max_d), n_d);
-		shell_print(sh, "jitter (max-min): %u us", (unsigned int)k_cyc_to_us_near32(max_d - min_d));
-		/* The window comes from sum_d (uint64), NOT last-first: those are
-		 * 32-bit cycle stamps, and at 240 MHz their difference wraps after
-		 * 17.9 s. The sum of the intervals is the same quantity and does not
-		 * wrap. Caught on the bench reporting a 56-edge run as a 2.3 s window. */
+			    (unsigned int)k_cyc_to_us_near32(mean),
+			    (unsigned int)k_cyc_to_us_near32(st.min_cyc),
+			    (unsigned int)k_cyc_to_us_near32(st.max_cyc), st.intervals);
+		shell_print(sh, "jitter (max-min): %u us",
+			    (unsigned int)k_cyc_to_us_near32(st.max_cyc - st.min_cyc));
+		/* From the SUM, not last-first: those are 32-bit cycle stamps and their
+		 * difference wraps every 17.9 s at 240 MHz. Caught on the bench
+		 * reporting a 56-edge run as a 2.3 s window. */
 		shell_print(sh, "window: %llu us over %u intervals",
-			    (unsigned long long)(sum_d / (hz / 1000000U)), n_d);
-		shell_print(sh, "last edge cyc=%u  (compare against the GNSS callback stamp)", last);
-		if (mean_d > (hz - hz / 100U) && mean_d < (hz + hz / 100U)) {
-			shell_print(sh, "=> ~1 Hz within 1%%: the module DRIVES PPS.");
-		} else {
-			shell_warn(sh, "=> not ~1 Hz: edges are noise or a shared/floating pin, not PPS");
-		}
+			    (unsigned long long)(st.sum_cyc / (hz / 1000000U)), st.intervals);
+	}
+
+	if (meshtastic_gnss_pps_last_edge(&edge_ms, &age_ms)) {
+		shell_print(sh, "last edge %lld ms ago — USABLE as a clock anchor",
+			    (long long)age_ms);
+	} else {
+		shell_warn(sh, "no usable edge right now: the clock falls back to NMEA "
+			       "arrival (%d ms assumed)",
+			   CONFIG_MESHTASTIC_GNSS_FIX_LATENCY_MS);
 	}
 	return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(gps_pps_cmds,
 			       SHELL_CMD(start, NULL,
-					 "Arm the GPIO41 edge capture: gps pps start [quiet].",
+					 "Re-arm the 1PPS capture: gps pps start [quiet].",
 					 cmd_gps_pps_start),
-			       SHELL_CMD(stop, NULL, "Disarm the GPIO41 edge capture.",
+			       SHELL_CMD(stop, NULL, "Disarm the 1PPS capture.",
 					 cmd_gps_pps_stop),
 			       SHELL_SUBCMD_SET_END);
 
@@ -925,38 +792,5 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 
 SHELL_CMD_REGISTER(gps, &gps_cmds, "Heltec V4 L76K GNSS bench control", NULL);
 
-#if defined(CONFIG_MESHTASTIC_GNSS_PPS_AUTOSTART)
-/*
- * Arm the capture at boot, because the measurement happens where the console is
- * not. A GNSS receiver needs sky; a node at a window is a node on battery with
- * nobody typing at it. The first window trip collected nothing for exactly this
- * reason — the counter is armed by hand, and a reboot disarms it.
- *
- * Per-edge logging is left ON here, deliberately. The point of an unattended run
- * is not the count — it is that each PPS line and each GNSS callback line carry
- * stamps from the same cycle counter and both land in the retained log ring, so
- * `logring` on return replays the interleaved stream the latency measurement is
- * a subtraction over. A silent counter would give a number and throw away the
- * measurement.
- *
- * APPLICATION level: gpio1 is up by POST_KERNEL, and arming later than the GNSS
- * module costs nothing — the receiver needs minutes to acquire.
- */
-static int heltec_v4_gps_pps_autostart(void)
-{
-	int ret = gps_pps_arm(true);
-
-	if (ret < 0) {
-		LOG_WRN("GPS: 1PPS autostart failed on GPIO%u: %d", GPS_PPS_GPIO, ret);
-		return 0; /* a diagnostic that cannot arm must not stop the node booting */
-	}
-
-	LOG_INF("GPS: 1PPS capture armed on GPIO%u at boot (read with `gps pps`)",
-		GPS_PPS_GPIO);
-	return 0;
-}
-
-SYS_INIT(heltec_v4_gps_pps_autostart, APPLICATION, 0);
-#endif /* CONFIG_MESHTASTIC_GNSS_PPS_AUTOSTART */
 
 #endif /* CONFIG_SHELL */

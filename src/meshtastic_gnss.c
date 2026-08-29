@@ -19,8 +19,11 @@
 #include <zephyr/sys/timeutil.h>
 #include <zephyr/sys/util.h>
 
+#include <zephyr/meshtastic/gnss_pps.h>
+
 #include "meshtastic_clock.h"
 #include "meshtastic_gnss.h"
+
 #include "meshtastic_position.h"
 
 #include <zephyr/logging/log.h>
@@ -184,10 +187,54 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 			.tm_sec = (int)(data->utc.millisecond / MSEC_PER_SEC),
 		};
 		int64_t epoch = timeutil_timegm64(&gnss_tm);
+		int64_t edge_uptime_ms;
+		int64_t edge_age_ms;
 
 		if (epoch > 0) {
-			meshtastic_clock_set_epoch((uint32_t)epoch,
-						  MESHTASTIC_CLOCK_QUALITY_GPS);
+			/*
+			 * WHEN was this true, not just WHAT is it.
+			 *
+			 * The sentence names second N, but it is handed to us well after
+			 * second N began: the receiver's fix latency plus the whole
+			 * sentence's UART time, because the modem layer only delivers on a
+			 * complete match. Measured here at 853 ms, and one-sided, so
+			 * anchoring at arrival makes the clock late by that whole amount
+			 * however precisely the receiver knew the time.
+			 *
+			 * The 1PPS edge IS the moment second N began. Pairing the two —
+			 * digits from the sentence, instant from the edge — is what turns a
+			 * sub-second-accurate source into a sub-second-accurate clock.
+			 *
+			 * The pairing rule is "the most recent edge", and it is sound only
+			 * while delivery takes less than a second: the edge for N arrives
+			 * first, the sentence naming N follows. If an edge were missed the
+			 * most recent one would belong to N+1 and the clock would be a
+			 * whole second fast — silent, plausible, and the worst possible
+			 * size of error. meshtastic_gnss_pps_last_edge() refuses any edge
+			 * older than a second, and refuses entirely until the pulse train
+			 * has been seen to be 1 Hz, so both of those become a fallback
+			 * rather than a wrong answer.
+			 */
+			if (meshtastic_gnss_pps_last_edge(&edge_uptime_ms, &edge_age_ms)) {
+				meshtastic_clock_set_epoch_ms_at(epoch * MSEC_PER_SEC,
+								 edge_uptime_ms,
+								 MESHTASTIC_CLOCK_QUALITY_GPS);
+				LOG_DBG("gnss: clock anchored on PPS edge %lld ms ago",
+					edge_age_ms);
+			} else {
+				/*
+				 * No usable edge: anchor at arrival and add back the delivery
+				 * latency, if it has been measured for this receiver.
+				 * MESHTASTIC_GNSS_FIX_LATENCY_MS defaults to 0 — the historical
+				 * behaviour — because the figure is a property of the module and
+				 * its baud rate, not of this code, and a guessed constant is
+				 * worse than an honest offset of zero.
+				 */
+				meshtastic_clock_set_epoch_ms(
+					epoch * MSEC_PER_SEC +
+						CONFIG_MESHTASTIC_GNSS_FIX_LATENCY_MS,
+					MESHTASTIC_CLOCK_QUALITY_GPS);
+			}
 		}
 	}
 

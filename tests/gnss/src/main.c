@@ -29,6 +29,8 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/ztest.h>
 
+#include <zephyr/meshtastic/gnss_pps.h>
+
 #include <zephyr/meshtastic/meshtastic.h>
 #include <meshtastic/lora_sim.h>
 
@@ -429,3 +431,104 @@ ZTEST(gnss, test_no_auto_send_still_tracks_position_and_clock)
 #endif /* CONFIG_MESHTASTIC_GNSS_AUTO_SEND */
 
 ZTEST_SUITE(gnss, NULL, gnss_setup, gnss_before, NULL, NULL);
+
+#if defined(CONFIG_MESHTASTIC_GNSS_PPS)
+/* ---- 1PPS: the guards that stop a one-second error ------------------------
+ *
+ * The clock anchors on the most recent PPS edge rather than on the NMEA
+ * sentence's arrival, because the sentence is ~853 ms late and one-sided. That
+ * pairing — "the sentence naming second N belongs to the edge just before it" —
+ * is sound only while delivery takes under a second. Miss an edge and the most
+ * recent one belongs to N+1, making the clock exactly one second fast: silent,
+ * plausible, and the worst possible size of error.
+ *
+ * So the accessor refuses rather than guesses, on two independent conditions,
+ * and both are tested here by driving the emulated pin directly.
+ */
+#include <zephyr/drivers/gpio/gpio_emul.h>
+
+#define PPS_EMUL_NODE DT_NODELABEL(gnss_pps)
+static const struct gpio_dt_spec pps_test_pin = GPIO_DT_SPEC_GET(PPS_EMUL_NODE, pps_gpios);
+
+static void pps_edge(void)
+{
+	/* Low then high: the capture triggers on the rising edge. */
+	(void)gpio_emul_input_set(pps_test_pin.port, pps_test_pin.pin, 0);
+	(void)gpio_emul_input_set(pps_test_pin.port, pps_test_pin.pin, 1);
+}
+
+ZTEST(gnss, test_pps_a_unlocked_train_is_refused)
+{
+	int64_t edge, age;
+
+	zassert_ok(meshtastic_gnss_pps_start(false), "arming the capture failed");
+
+	/* One edge is not a pulse train. Nothing has established a rate yet, so
+	 * there is no basis for calling this a second boundary. */
+	pps_edge();
+	zassert_false(meshtastic_gnss_pps_last_edge(&edge, &age),
+		      "a single edge must not be usable — no interval has been measured");
+
+	/* Two edges a tenth of a second apart are a rate, just not 1 Hz. A floating
+	 * pin picking up noise looks exactly like this, and noise timestamped as a
+	 * second boundary is worse than having no reference at all. */
+	k_msleep(100);
+	pps_edge();
+	zassert_false(meshtastic_gnss_pps_last_edge(&edge, &age),
+		      "a 10 Hz train must not be accepted as 1PPS");
+}
+
+ZTEST(gnss, test_pps_b_locked_train_is_usable_and_dated)
+{
+	int64_t edge, age, before;
+
+	zassert_ok(meshtastic_gnss_pps_start(false), "arming the capture failed");
+
+	pps_edge();
+	k_msleep(1000);
+	before = k_uptime_get();
+	pps_edge();
+
+	zassert_true(meshtastic_gnss_pps_last_edge(&edge, &age),
+		     "two edges one second apart must lock and be usable");
+	zassert_within(edge, before, 50,
+		       "the edge must be stamped when it happened, not when it was read");
+	zassert_true(age >= 0 && age < 1000, "a fresh edge's age must be inside a second, got %lld",
+		     age);
+}
+
+ZTEST(gnss, test_pps_c_a_stale_edge_is_refused)
+{
+	int64_t edge, age;
+
+	zassert_ok(meshtastic_gnss_pps_start(false), "arming the capture failed");
+
+	pps_edge();
+	k_msleep(1000);
+	pps_edge();
+	zassert_true(meshtastic_gnss_pps_last_edge(&edge, &age), "precondition: locked");
+
+	/* Let the edge age past a second WITHOUT another arriving — a receiver that
+	 * lost its fix and stopped pulsing. The last edge is still perfectly valid
+	 * data; it is just no longer the second boundary anyone is asking about. */
+	k_msleep(1100);
+	zassert_false(meshtastic_gnss_pps_last_edge(&edge, &age),
+		      "an edge older than a second must be refused: pairing a sentence "
+		      "with it would put the clock out by exactly one second");
+}
+
+ZTEST(gnss, test_pps_d_disarmed_capture_is_refused)
+{
+	int64_t edge, age;
+
+	zassert_ok(meshtastic_gnss_pps_start(false), "arming the capture failed");
+	pps_edge();
+	k_msleep(1000);
+	pps_edge();
+	zassert_true(meshtastic_gnss_pps_last_edge(&edge, &age), "precondition: locked");
+
+	zassert_ok(meshtastic_gnss_pps_stop(), "stop failed");
+	zassert_false(meshtastic_gnss_pps_last_edge(&edge, &age),
+		      "a disarmed capture has nothing to say, however good its last edge was");
+}
+#endif /* CONFIG_MESHTASTIC_GNSS_PPS */

@@ -77,34 +77,56 @@ config MESHTASTIC_GNSS_TIME_DEBUG
 	  Bench diagnostic. Off in shipping images: it logs at up to the GNSS
 	  publish rate.
 
-config MESHTASTIC_GNSS_PPS_AUTOSTART
-	bool "Arm the board's 1PPS edge counter at boot"
-	depends on SHELL
-	default y if MESHTASTIC_GNSS_TIME_DEBUG
+config MESHTASTIC_GNSS_PPS
+	bool "Capture the GNSS 1PPS edge"
+	default y
+	depends on DT_HAS_MESHTASTIC_GNSS_PPS_ENABLED && GPIO
 	help
-	  Arm the board-level 1PPS edge capture during init instead of waiting for
-	  `gps pps start` on the console. Only the Heltec V4/R8 implement it; it is a
-	  no-op elsewhere.
+	  Timestamp the rising edge of the receiver's pulse-per-second output, from
+	  the pin described by the board's meshtastic,gnss-pps node.
 
-	  Depends on SHELL because the counter lives in the board's `gps` CLI and
-	  because reading the result back — `gps pps`, or `logring` for the captured
-	  stream — needs a shell either way. Stated as a dependency rather than left
-	  as a silent no-op.
+	  The edge is the only microsecond-grade time reference on the board. The
+	  NMEA sentence naming the same second arrives ~853 ms later (measured on
+	  an L76K at 9600 baud): the receiver's fix latency plus the whole
+	  sentence's UART time, since the modem layer only delivers on a complete
+	  match. That delay is one-sided, so it cannot be averaged away — it is a
+	  bias, not noise.
 
-	  This exists because the measurement it feeds happens where the console is
-	  not: a receiver needs sky, and a node at a window is a node on battery with
-	  nobody typing at it. Armed by hand, a trip to the window collects nothing —
-	  which is exactly how the first one went.
+	  Armed at init rather than on demand, because this is a time source and
+	  not a diagnostic: a receiver needs sky, and a node at a window is on
+	  battery with nobody typing at it. Compiled out on boards whose
+	  devicetree describes no such pin.
 
-	  With MESHTASTIC_GNSS_TIME_DEBUG also on, the per-edge log line and the
-	  per-callback line share a cycle counter AND both land in the retained log
-	  ring (MESHTASTIC_LOGRING), so an unattended session leaves behind the
-	  interleaved PPS/NMEA stream that the latency measurement is a subtraction
-	  over. Read it back with `logring` — or `logring prev` if the node rebooted
-	  on the way home. The ring is small, so it holds the last tens of seconds,
-	  not the whole trip; a handful of paired lines is all the measurement needs.
+config MESHTASTIC_GNSS_PPS_LOG_EDGES
+	bool "Log one line per 1PPS edge"
+	depends on MESHTASTIC_GNSS_PPS
+	default n
+	help
+	  Bench diagnostic. Each edge logs its cycle stamp and the interval since
+	  the last one, which — interleaved with MESHTASTIC_GNSS_TIME_DEBUG's
+	  per-callback line, stamped from the same counter — is how the NMEA
+	  delivery latency was measured in the first place.
 
-	  Retained RAM survives a warm reset but NOT a power cycle. A node whose
-	  battery died on the windowsill comes back with nothing.
+	  One line per second, forever. Off in shipping images.
+
+config MESHTASTIC_GNSS_FIX_LATENCY_MS
+	int "Assumed NMEA delivery latency, milliseconds"
+	default 0
+	range 0 999
+	help
+	  How long after the true UTC second the GNSS callback receives the
+	  sentence naming it. Added back when the clock is anchored on the
+	  sentence's ARRIVAL, which happens only when no trustworthy 1PPS edge is
+	  available — with PPS the instant is measured rather than assumed and this
+	  value is unused.
+
+	  Zero by default, which is the historical behaviour. The delay is a
+	  property of the receiver and its baud rate, not of this code, and a
+	  guessed constant is worse than an honest offset of nothing: it moves the
+	  clock by a confident amount in a direction nobody checked. Set it only
+	  from a measurement on the hardware in question.
+
+	  For reference, the figure measured on this project's bench — a Quectel
+	  L76K at 9600 baud — is 853 ms, with about 6 ms of spread.
 
 endif # MESHTASTIC_GNSS

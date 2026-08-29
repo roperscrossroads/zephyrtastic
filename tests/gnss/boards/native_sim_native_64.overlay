@@ -23,4 +23,18 @@
 		compatible = "zephyr,gnss-emul";
 		status = "okay";
 	};
+
+	/*
+	 * The 1PPS pin, on native_sim's emulated GPIO. Backing it with gpio_emul is
+	 * what lets a test drive real edges at chosen intervals and exercise the two
+	 * guards that matter: an edge is only usable once the train has been SEEN to
+	 * be 1 Hz, and only while it is younger than a second. Both exist to stop a
+	 * sentence being paired with the wrong edge, which is an error of exactly
+	 * one second — silent, plausible, and the worst possible size.
+	 */
+	gnss_pps: gnss-pps {
+		compatible = "meshtastic,gnss-pps";
+		pps-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
 };
