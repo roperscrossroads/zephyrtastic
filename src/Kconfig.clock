@@ -40,11 +40,19 @@ config MESHTASTIC_CLOCK_PERSIST
 	  and was not diagnosable from where that node was — battery powered, no
 	  console, reachable only over BLE.
 
-	  The first suspect is the counter itself. That board's devicetree notes
-	  that the RTC timer is "INERT unless the application sets CONFIG_PM",
-	  and this option selects COUNTER regardless, so the driver now initialises
-	  — allocating an IRAM interrupt — in a build that never did so before.
-	  Bring this up on a node with a console attached before turning it on.
+	  The cause is genuinely OPEN. The first suspect was the counter driver
+	  newly initialising because this option selects COUNTER — and that was
+	  checked and is WRONG: COUNTER and COUNTER_RTC_ESP32 are already y in
+	  these images with this option off, so the select changes nothing and the
+	  driver was already running. Recorded because a wrong suspect left
+	  standing is worse than none.
+
+	  What remains: the failure is one observation, and a test-boot can be
+	  ended by a reset from any source, not only by this code. The bench also
+	  has a separate fault that panics a node every few hours (agents-quo6),
+	  which is a low-probability but real alternative explanation for a single
+	  reverted test boot. Bring this up on a node with a console attached, where
+	  the fault output can actually be read, before turning it on.
 
 	  Do NOT raise the default without that bring-up. An image that fails to
 	  boot is recoverable here only because every image is test-swapped first.
