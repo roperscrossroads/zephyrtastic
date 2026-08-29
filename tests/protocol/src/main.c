@@ -3813,6 +3813,57 @@ ZTEST(protocol_stack, test_clock_resolver_tracks_the_anchor_interval)
 		       "the same stored uptime must re-date against the NEW anchor");
 }
 
+/*
+ * Anchoring at a KNOWN PAST INSTANT, which is what the 1PPS pin buys.
+ *
+ * Every other setter anchors at "now", assuming a value became true the moment
+ * it arrived. GNSS breaks that assumption by ~853 ms — the sentence naming a
+ * second is handed over long after the second began — so the pin supplies the
+ * instant and the sentence supplies the digits.
+ */
+ZTEST(protocol_stack, test_clock_anchors_at_a_past_instant)
+{
+	const uint32_t epoch = 1800000000U;
+	int64_t at, now_ms;
+
+	meshtastic_clock_test_reset();
+
+	/* "This epoch was true 500 ms ago" must read 500 ms LATER than the same
+	 * epoch anchored at now — the whole correction PPS exists to apply. */
+	at = k_uptime_get() - 500;
+	meshtastic_clock_set_epoch_ms_at((int64_t)epoch * 1000, at, MESHTASTIC_CLOCK_QUALITY_GPS);
+	now_ms = meshtastic_clock_now_epoch_ms();
+
+	zassert_within(now_ms, (int64_t)epoch * 1000 + 500, 50,
+		       "an anchor 500 ms in the past must put the clock 500 ms ahead of the "
+		       "same epoch anchored now; got %lld", now_ms - (int64_t)epoch * 1000);
+}
+
+ZTEST(protocol_stack, test_clock_refuses_an_anchor_in_the_future)
+{
+	const uint32_t epoch = 1800000000U;
+	int64_t first, second;
+
+	meshtastic_clock_test_reset();
+
+	meshtastic_clock_set_epoch_ms_at((int64_t)epoch * 1000, k_uptime_get(),
+					 MESHTASTIC_CLOCK_QUALITY_GPS);
+	first = meshtastic_clock_now_epoch_ms();
+
+	/* A future anchor would mean "this was true at a time that has not happened",
+	 * and the clock would read BEHIND its own previous value until uptime caught
+	 * up — a clock running backwards, which is the one outcome the tuple
+	 * representation exists to prevent. It is clamped to now instead. */
+	meshtastic_clock_set_epoch_ms_at((int64_t)epoch * 1000, k_uptime_get() + 60000,
+					 MESHTASTIC_CLOCK_QUALITY_GPS);
+	second = meshtastic_clock_now_epoch_ms();
+
+	zassert_true(second >= first,
+		     "a future anchor must not rewind the clock (%lld -> %lld)", first, second);
+	zassert_within(second, (int64_t)epoch * 1000, 200,
+		       "and must be clamped to now, not honoured");
+}
+
 /* --- T-A: source-quality ladder gates clock writes ------------------------ */
 
 /* A lower-trust time source (SNTP / phone set_time = NTP) must not overwrite the

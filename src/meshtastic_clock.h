@@ -73,6 +73,29 @@ void meshtastic_clock_set_epoch(uint32_t epoch_now, enum meshtastic_clock_qualit
  */
 void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quality quality);
 
+/**
+ * @brief Seed the clock with an epoch that was true at a KNOWN PAST INSTANT.
+ *
+ * The general form, and the one the other setters are built on: they anchor at
+ * "now", which silently assumes the value arrived the moment it became true.
+ * For most sources that assumption is close enough. For GNSS it is not — the
+ * NMEA sentence carrying second N is handed over ~853 ms after second N began
+ * (measured), one-sided, so anchoring it at arrival makes the clock late by that
+ * whole amount no matter how precisely the receiver knew the time.
+ *
+ * A 1PPS edge is the instant the second actually began. Passing that edge's
+ * uptime here turns a sub-second-accurate source into a sub-second-accurate
+ * clock, which is the entire point of the pin.
+ *
+ * @param epoch_ms      Unix epoch in milliseconds. Negative values are ignored.
+ * @param at_uptime_ms  k_uptime_get() at the instant @p epoch_ms was true. Must
+ *                      not be in the future; a stale value simply anchors
+ *                      further back and stays self-consistent.
+ * @param quality       Trust level of the source.
+ */
+void meshtastic_clock_set_epoch_ms_at(int64_t epoch_ms, int64_t at_uptime_ms,
+				      enum meshtastic_clock_quality quality);
+
 /** Trust level of the source that last set the clock (NONE if never set). */
 enum meshtastic_clock_quality meshtastic_clock_get_quality(void);
 

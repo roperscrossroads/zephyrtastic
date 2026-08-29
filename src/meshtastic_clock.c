@@ -139,12 +139,15 @@ static bool clock_should_set(enum meshtastic_clock_quality quality, int64_t now_
 	if (quality == MESHTASTIC_CLOCK_QUALITY_GPS) {
 		return true;
 	}
-	/* anchor_uptime_ms doubles as "when the clock was last set", because today
-	 * every accepted write installs an anchor and nothing else does. If a future
-	 * change re-anchors WITHOUT that counting as a fresh sync — slewing a small
-	 * correction rather than stepping it, say — this window has to become its own
-	 * field, or a slew every few minutes would hold the NTP re-apply gate shut
-	 * forever. */
+	/* anchor_uptime_ms doubles as "when the clock was last set". Since PPS
+	 * anchoring it can sit slightly in the past of the write that installed it —
+	 * under one second, because an older edge is refused — which is three orders
+	 * inside this thirty-minute window and so cannot change the decision.
+	 *
+	 * It would still have to become its own field if something ever re-anchored
+	 * WITHOUT that counting as a fresh sync: slewing a small correction rather
+	 * than stepping it, say, where a slew every few minutes would hold this gate
+	 * shut forever. Every write today is a real sync. */
 	if (quality == MESHTASTIC_CLOCK_QUALITY_NTP &&
 	    (now_ms - anchor.anchor_uptime_ms) >= MESHTASTIC_CLOCK_NTP_REAPPLY_MS) {
 		return true;
@@ -153,6 +156,13 @@ static bool clock_should_set(enum meshtastic_clock_quality quality, int64_t now_
 }
 
 void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quality quality)
+{
+	/* "Now" is the ordinary assumption: the value became true when it arrived. */
+	meshtastic_clock_set_epoch_ms_at(epoch_ms, k_uptime_get(), quality);
+}
+
+void meshtastic_clock_set_epoch_ms_at(int64_t epoch_ms, int64_t at_uptime_ms,
+				      enum meshtastic_clock_quality quality)
 {
 	struct clock_anchor next;
 	k_spinlock_key_t key;
@@ -170,10 +180,16 @@ void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quali
 		return;
 	}
 
-	/* One k_uptime_get() for both the drift window and the anchor, so the two
-	 * cannot disagree about when this write happened. Taken before the lock so
-	 * the spinlock's interrupt-masked section stays as short as it can be. */
 	now_ms = k_uptime_get();
+
+	/* The anchor may sit slightly in the PAST of this decision — a PPS edge is
+	 * ~853 ms before the sentence that names it. Clamp rather than trust: an
+	 * anchor in the future would make the clock run backwards until uptime
+	 * caught up, which is the one outcome the tuple representation exists to
+	 * prevent. */
+	if (at_uptime_ms > now_ms || at_uptime_ms < 0) {
+		at_uptime_ms = now_ms;
+	}
 
 	key = k_spin_lock(&anchor_write_lock);
 
@@ -182,7 +198,7 @@ void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quali
 	 * old quality and the loser's value would land last. */
 	if (clock_should_set(quality, now_ms)) {
 		next.epoch_ms = epoch_ms;
-		next.anchor_uptime_ms = now_ms;
+		next.anchor_uptime_ms = at_uptime_ms;
 		next.quality = quality;
 		next.valid = true;
 		anchor_write(&next);
