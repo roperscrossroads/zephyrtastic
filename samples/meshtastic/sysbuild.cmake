@@ -33,10 +33,21 @@ if(BOARD MATCHES "^xiao_ble")
 
   # Seed <main>_<VAR> from the unprefixed VAR (and OVERLAY_CONFIG, the
   # deprecated alias of EXTRA_CONF_FILE), if the prefixed one is not yet set.
+  # Second trap (2026-08-28): the prefixed list is a CACHE variable, so once
+  # seeded it survived every later configure of the same build dir — a changed
+  # -DEXTRA_CONF_FILE on the command line was silently ignored (a secure
+  # overlay added to build-xiao-f7 never reached the image; only a pristine
+  # build did). Remember what the list was seeded FROM and re-seed whenever
+  # the unprefixed value differs from that record.
   foreach(seed "EXTRA_CONF_FILE;EXTRA_CONF_FILE;OVERLAY_CONFIG"
                "EXTRA_DTC_OVERLAY_FILE;EXTRA_DTC_OVERLAY_FILE")
     list(POP_FRONT seed var)
-    if(NOT DEFINED ${DEFAULT_IMAGE}_${var})
+    set(unprefixed)
+    foreach(alias ${seed})
+      list(APPEND unprefixed ${${alias}})
+    endforeach()
+    if(NOT DEFINED ${DEFAULT_IMAGE}_${var}
+       OR NOT "${unprefixed}" STREQUAL "${${DEFAULT_IMAGE}_${var}_SEEDED_FROM}")
       set(seeded)
       foreach(alias ${seed})
         foreach(f ${${alias}})
@@ -46,9 +57,14 @@ if(BOARD MATCHES "^xiao_ble")
           list(APPEND seeded ${f})
         endforeach()
       endforeach()
+      set(${DEFAULT_IMAGE}_${var}_SEEDED_FROM "${unprefixed}" CACHE INTERNAL
+          "meshtastic sysbuild.cmake: the unprefixed ${var} this image's list was seeded from")
       if(seeded)
         set(${DEFAULT_IMAGE}_${var} ${seeded} CACHE INTERNAL
             "meshtastic sysbuild.cmake: seeded from the unprefixed ${var}")
+      else()
+        # Re-seeded from nothing: drop the stale list too, or it would live on.
+        unset(${DEFAULT_IMAGE}_${var} CACHE)
       endif()
     endif()
   endforeach()
