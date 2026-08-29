@@ -90,10 +90,16 @@ static void fill_position(const struct gnss_data *data, meshtastic_Position *pos
 	}
 }
 
+/* The whole automatic-send apparatus — queue, stack, work item and handler —
+ * lives under one guard. Leaving any of it outside is not merely dead code: the
+ * work item is only ever referenced from the submit site below, so with
+ * AUTO_SEND=n it becomes an unused static and -Werror=unused-variable fails the
+ * build. Found by the AUTO_SEND=n test configuration (agents-isfr); the earlier
+ * fix in gnss_data_cb() closed the reference but left this behind, and the
+ * application build does not use -Werror, so only twister sees it. */
 #if defined(CONFIG_MESHTASTIC_GNSS_AUTO_SEND)
 K_THREAD_STACK_DEFINE(gnss_send_wq_stack, CONFIG_MESHTASTIC_GNSS_SEND_WORK_STACK_SIZE);
 static struct k_work_q gnss_send_wq;
-#endif
 
 static void position_work_handler(struct k_work *work)
 {
@@ -118,6 +124,7 @@ static void position_work_handler(struct k_work *work)
 }
 
 static K_WORK_DEFINE(position_send_work, position_work_handler);
+#endif /* CONFIG_MESHTASTIC_GNSS_AUTO_SEND */
 
 static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 {
@@ -167,11 +174,20 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 	due = (now - gnss_state.last_sent_ms) >= send_interval_ms;
 	can_retry = (now - gnss_state.last_attempt_ms) >= retry_interval_ms;
 
-	if (IS_ENABLED(CONFIG_MESHTASTIC_GNSS_AUTO_SEND) && due && can_retry &&
-	    !k_work_busy_get(&position_send_work)) {
+	/* #if, not IS_ENABLED(): IS_ENABLED keeps both arms COMPILED so the
+	 * compiler can check them, which is normally the point — but gnss_send_wq
+	 * only EXISTS under this same guard, so referencing it from a live arm
+	 * fails to build with AUTO_SEND=n. (Found 2026-08-29 building the first
+	 * listener image, which is the first config to turn it off.) */
+#if defined(CONFIG_MESHTASTIC_GNSS_AUTO_SEND)
+	if (due && can_retry && !k_work_busy_get(&position_send_work)) {
 		gnss_state.last_attempt_ms = now;
 		k_work_submit_to_queue(&gnss_send_wq, &position_send_work);
 	}
+#else
+	ARG_UNUSED(due);
+	ARG_UNUSED(can_retry);
+#endif
 	k_mutex_unlock(&gnss_state.lock);
 
 	meshtastic_emit_event(MESHTASTIC_EVENT_GNSS_FIX, 0, NULL);
@@ -180,20 +196,38 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 GNSS_DT_DATA_CALLBACK_DEFINE(MESHTASTIC_GNSS_NODE, gnss_data_cb);
 #endif
 
-int meshtastic_gnss_init(void)
+/* Both stamps start one full interval in the past so the very first fix after
+ * boot is immediately due rather than waiting out an interval the node spent
+ * unpowered. */
+static void gnss_gate_reset(void)
 {
-	k_mutex_init(&gnss_state.lock);
 	gnss_state.last_sent_ms =
 		-((int64_t)CONFIG_MESHTASTIC_GNSS_SEND_INTERVAL_SEC * MSEC_PER_SEC);
 	gnss_state.last_attempt_ms =
 		-((int64_t)CONFIG_MESHTASTIC_GNSS_RETRY_INTERVAL_SEC * MSEC_PER_SEC);
+}
+
+#if defined(CONFIG_ZTEST)
+void meshtastic_gnss_test_reset(void)
+{
+	k_mutex_lock(&gnss_state.lock, K_FOREVER);
+	gnss_gate_reset();
+	gnss_state.has_fix = false;
+	k_mutex_unlock(&gnss_state.lock);
+}
+#endif
+
+int meshtastic_gnss_init(void)
+{
+	k_mutex_init(&gnss_state.lock);
+	gnss_gate_reset();
 
 #if MESHTASTIC_HAS_GNSS_ALIAS
-	if (IS_ENABLED(CONFIG_MESHTASTIC_GNSS_AUTO_SEND)) {
-		k_work_queue_start(&gnss_send_wq, gnss_send_wq_stack,
-				   K_THREAD_STACK_SIZEOF(gnss_send_wq_stack),
-				   CONFIG_MESHTASTIC_GNSS_SEND_WORK_PRIORITY, NULL);
-	}
+#if defined(CONFIG_MESHTASTIC_GNSS_AUTO_SEND)
+	k_work_queue_start(&gnss_send_wq, gnss_send_wq_stack,
+			   K_THREAD_STACK_SIZEOF(gnss_send_wq_stack),
+			   CONFIG_MESHTASTIC_GNSS_SEND_WORK_PRIORITY, NULL);
+#endif
 
 	if (!device_is_ready(gnss_dev)) {
 		LOG_WRN("GNSS alias exists but device is not ready");

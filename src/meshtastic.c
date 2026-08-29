@@ -1224,6 +1224,18 @@ bool meshtastic_nodedb_is_ignored(uint32_t node_num)
 	return false;
 }
 
+/* No NodeDB means no favourites, so a CLIENT_BASE node has nothing to treat as
+ * router-like and falls through to the client behaviour (cancel the dupe relay).
+ * Missing from this block until the variant sweep tried NODEDB=n and the link
+ * failed on meshtastic_router.c's relay_dupe_action() — agents-zo3o.4. */
+bool meshtastic_nodedb_is_from_or_to_favorite(uint32_t from, uint32_t to)
+{
+	ARG_UNUSED(from);
+	ARG_UNUSED(to);
+
+	return false;
+}
+
 int meshtastic_nodedb_remove(uint32_t node_num)
 {
 	ARG_UNUSED(node_num);
