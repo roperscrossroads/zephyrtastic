@@ -173,6 +173,39 @@
 };
 
 /*
+ * The GNSS module's 1PPS output, wired to GPIO41.
+ *
+ * This pin was on the board the whole time and we had simply never described it.
+ * Our own documentation asserted the opposite — "no PPS / timepulse pin is wired
+ * on either V4 board, checked both DTS files" — and the way that was wrong is
+ * worth keeping: it checked OUR devicetree, which is a statement about the port,
+ * not about the hardware. A pin missing from a devicetree is a pin nobody wrote
+ * down.
+ *
+ * Corroborated four ways before being believed: the vendor schematics route net
+ * PPS to 41 on the 8-pin GNSS connector on V4.2, V4.3 and R8 alike; upstream's
+ * variant headers define PIN_GPS_PPS (41) for both boards; this board's own
+ * README records it; and the pin was unclaimed in every one of our board files.
+ * Then measured on hardware with a fix: 1 Hz, 23 us peak-to-peak jitter.
+ *
+ * It lives in the COMMON dtsi because it is one of the things that did not move
+ * between the V4 and the R8 — the R8 includes this file, so both boards get it
+ * from one description. GPIO41 is gpio1 pin 9 (41 - 32).
+ *
+ * GPIO41 is MTDI of the JTAG block, as are the three pins this board already
+ * uses for the GNSS UART and its control lines: the GNSS connector simply
+ * occupies that block. It is not a strapping pin (those are 0/3/45/46), and it
+ * is only ever configured as an input.
+ */
+/ {
+	gnss_pps: gnss-pps {
+		compatible = "meshtastic,gnss-pps";
+		pps-gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;	/* GPIO41 */
+		status = "okay";
+	};
+};
+
+/*
  * The RF front-end module (FEM) control pins — VFEM power (GPIO7), CSD
  * chip-enable (GPIO2), and the per-FEM mode pin (GC1109 CPS = GPIO46 /
  * KCT8103L CTX = GPIO5) — are NOT hogged here. They are owned by the board C

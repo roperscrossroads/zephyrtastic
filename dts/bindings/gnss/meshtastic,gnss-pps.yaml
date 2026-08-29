@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: GPL-3.0
+#
+# A GNSS receiver's 1PPS output, as seen by THIS SoC's input pin.
+#
+# Zephyr has nothing that describes this. Its gnss-pps.yaml configures a
+# receiver's own timepulse over the module's command protocol — a property of the
+# module, not a wire into us — and gnss_driver_api.get_latest_timepulse is
+# declared but implemented by no in-tree driver. So the host-side pin needs its
+# own description.
+#
+# Why it is worth describing at all: the pulse is the only microsecond-grade time
+# reference on the board. The NMEA sentence carrying the same second arrives
+# ~853 ms later (measured), because the receiver's fix latency and the whole
+# sentence's UART time both land before the parser hands it over. The pin is
+# ~37,000x better than the sentence and costs one GPIO.
+#
+# Deliberately not a property of the gnss node: the module and the pin are
+# different things. The receiver drives the pulse whatever the host does with it,
+# and on a board that routes it nowhere this node is simply absent.
+
+description: |
+  Host-side 1PPS (one pulse per second) input from a GNSS receiver.
+
+  The pulse's rising edge marks the start of a UTC second. Pairing that edge with
+  the whole second from the next NMEA sentence gives an anchor good to
+  microseconds instead of to the sentence's arrival time.
+
+compatible: "meshtastic,gnss-pps"
+
+include: base.yaml
+
+properties:
+  pps-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      The SoC pin the receiver's 1PPS output is wired to. Configured as an INPUT
+      and never driven: this node describes something arriving, not something
+      the host controls.

@@ -686,8 +686,22 @@ static int cmd_gps_pinmux(const struct shell *sh, size_t argc, char **argv)
  *   gps pps stop            disarm
  * ---------------------------------------------------------------------------
  */
+/*
+ * The pin comes from the devicetree now (see the gnss_pps node in the common
+ * dtsi), not from a constant here. It was a constant while the question was
+ * still "does the module even drive this?"; now that the answer is yes, the pin
+ * is board description and belongs where the rest of the board is described —
+ * which is also what stops a future board from silently inheriting GPIO41.
+ */
+#define GPS_PPS_NODE DT_NODELABEL(gnss_pps)
+#if !DT_NODE_HAS_STATUS(GPS_PPS_NODE, okay)
+#error "gnss_pps node missing: this board file needs a 1PPS pin description"
+#endif
+static const struct gpio_dt_spec gps_pps = GPIO_DT_SPEC_GET(GPS_PPS_NODE, pps_gpios);
+
+/* Kept only for the human-readable output: the SoC pin number is not derivable
+ * from a gpio_dt_spec (it holds a port device plus a pin within that port). */
 #define GPS_PPS_GPIO 41
-#define GPS_PPS_PIN  (GPS_PPS_GPIO - 32) /* gpio1 bank */
 
 static struct gpio_callback gps_pps_cb_data;
 static bool gps_pps_armed;
@@ -701,7 +715,7 @@ static struct {
 	uint32_t max_d;
 	uint64_t sum_d;
 	uint32_t n_d;
-} gps_pps;
+} gps_pps_stats;
 
 static void gps_pps_isr(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins)
 {
@@ -713,27 +727,27 @@ static void gps_pps_isr(const struct device *port, struct gpio_callback *cb, gpi
 	ARG_UNUSED(cb);
 	ARG_UNUSED(pins);
 
-	have_d = (gps_pps.count > 0U);
+	have_d = (gps_pps_stats.count > 0U);
 	if (have_d) {
-		d = now - gps_pps.last_cyc; /* unsigned: correct across one wrap */
-		if (gps_pps.n_d == 0U || d < gps_pps.min_d) {
-			gps_pps.min_d = d;
+		d = now - gps_pps_stats.last_cyc; /* unsigned: correct across one wrap */
+		if (gps_pps_stats.n_d == 0U || d < gps_pps_stats.min_d) {
+			gps_pps_stats.min_d = d;
 		}
-		if (gps_pps.n_d == 0U || d > gps_pps.max_d) {
-			gps_pps.max_d = d;
+		if (gps_pps_stats.n_d == 0U || d > gps_pps_stats.max_d) {
+			gps_pps_stats.max_d = d;
 		}
-		gps_pps.sum_d += d;
-		gps_pps.n_d++;
+		gps_pps_stats.sum_d += d;
+		gps_pps_stats.n_d++;
 	}
-	gps_pps.last_cyc = now;
-	gps_pps.count++;
+	gps_pps_stats.last_cyc = now;
+	gps_pps_stats.count++;
 
 	if (gps_pps_log) {
 		if (have_d) {
-			LOG_INF("PPS #%u cyc=%u d=%u cyc (%u us)", gps_pps.count, now, d,
+			LOG_INF("PPS #%u cyc=%u d=%u cyc (%u us)", gps_pps_stats.count, now, d,
 				(unsigned int)k_cyc_to_us_near32(d));
 		} else {
-			LOG_INF("PPS #%u cyc=%u (first edge)", gps_pps.count, now);
+			LOG_INF("PPS #%u cyc=%u (first edge)", gps_pps_stats.count, now);
 		}
 	}
 }
@@ -744,33 +758,32 @@ static void gps_pps_isr(const struct device *port, struct gpio_callback *cb, gpi
  */
 static int gps_pps_arm(bool log_edges)
 {
-	const struct device *gpio1 = gps_gpio1();
 	int ret;
 
-	if (gpio1 == NULL) {
+	if (!gpio_is_ready_dt(&gps_pps)) {
 		return -ENODEV;
 	}
 
 	gps_pps_log = log_edges;
 
-	ret = gpio_pin_configure(gpio1, GPS_PPS_PIN, GPIO_INPUT);
+	ret = gpio_pin_configure_dt(&gps_pps, GPIO_INPUT);
 	if (ret < 0) {
 		return ret;
 	}
 
 	if (!gps_pps_armed) {
-		gpio_init_callback(&gps_pps_cb_data, gps_pps_isr, BIT(GPS_PPS_PIN));
-		ret = gpio_add_callback(gpio1, &gps_pps_cb_data);
+		gpio_init_callback(&gps_pps_cb_data, gps_pps_isr, BIT(gps_pps.pin));
+		ret = gpio_add_callback(gps_pps.port, &gps_pps_cb_data);
 		if (ret < 0) {
 			return ret;
 		}
 	}
 
-	memset(&gps_pps, 0, sizeof(gps_pps));
+	memset(&gps_pps_stats, 0, sizeof(gps_pps_stats));
 
-	ret = gpio_pin_interrupt_configure(gpio1, GPS_PPS_PIN, GPIO_INT_EDGE_RISING);
+	ret = gpio_pin_interrupt_configure_dt(&gps_pps, GPIO_INT_EDGE_TO_ACTIVE);
 	if (ret < 0) {
-		gpio_remove_callback(gpio1, &gps_pps_cb_data);
+		gpio_remove_callback(gps_pps.port, &gps_pps_cb_data);
 		return ret;
 	}
 
@@ -811,16 +824,15 @@ static int cmd_gps_pps_stop(const struct shell *sh, size_t argc, char **argv)
 		return 0;
 	}
 
-	gpio_pin_interrupt_configure(gpio1, GPS_PPS_PIN, GPIO_INT_DISABLE);
-	gpio_remove_callback(gpio1, &gps_pps_cb_data);
+	gpio_pin_interrupt_configure_dt(&gps_pps, GPIO_INT_DISABLE);
+	gpio_remove_callback(gps_pps.port, &gps_pps_cb_data);
 	gps_pps_armed = false;
-	shell_print(sh, "PPS capture disarmed (%u edges counted)", gps_pps.count);
+	shell_print(sh, "PPS capture disarmed (%u edges counted)", gps_pps_stats.count);
 	return 0;
 }
 
 static int cmd_gps_pps(const struct shell *sh, size_t argc, char **argv)
 {
-	const struct device *gpio1 = gps_gpio1();
 	uint32_t hz = sys_clock_hw_cycles_per_sec();
 	unsigned int key;
 	uint32_t count, last, min_d, max_d, n_d;
@@ -831,17 +843,17 @@ static int cmd_gps_pps(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	key = irq_lock();
-	count = gps_pps.count;
-	last = gps_pps.last_cyc;
-	min_d = gps_pps.min_d;
-	max_d = gps_pps.max_d;
-	sum_d = gps_pps.sum_d;
-	n_d = gps_pps.n_d;
+	count = gps_pps_stats.count;
+	last = gps_pps_stats.last_cyc;
+	min_d = gps_pps_stats.min_d;
+	max_d = gps_pps_stats.max_d;
+	sum_d = gps_pps_stats.sum_d;
+	n_d = gps_pps_stats.n_d;
 	irq_unlock(key);
 
-	if (gpio1 != NULL) {
-		gpio_pin_configure(gpio1, GPS_PPS_PIN, GPIO_INPUT);
-		level = gpio_pin_get_raw(gpio1, GPS_PPS_PIN);
+	if (gpio_is_ready_dt(&gps_pps)) {
+		gpio_pin_configure_dt(&gps_pps, GPIO_INPUT);
+		level = gpio_pin_get_dt(&gps_pps);
 	}
 
 	shell_print(sh, "GPIO%u (PPS): armed=%s  pad=%d  cycle clock=%u Hz", GPS_PPS_GPIO,
