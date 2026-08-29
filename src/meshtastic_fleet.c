@@ -287,6 +287,8 @@ int meshtastic_fleet_pick(const struct meshtastic_fleet_candidate *c, unsigned i
 #include "meshtastic_ble_peer_codec.h"
 #include "meshtastic_smp_central.h"
 
+#include <zephyr/settings/settings.h>
+
 #if defined(CONFIG_MCUBOOT_IMG_MANAGER)
 #include <zephyr/dfu/mcuboot.h>
 #endif
@@ -306,6 +308,7 @@ enum courier_state {
 	CS_WAIT_CONFIRM,
 	CS_DONE,
 	CS_REVERTED,
+	CS_REFUSED,  /* the target's image manager rejected the image at verify (F7: bad signature) */
 };
 
 struct courier_nbr {
@@ -331,6 +334,9 @@ static struct {
 	struct k_work_delayable tick;
 	struct k_work_q wq;
 	bool armed;
+	/* Uptime before which a RESTORED arm does not push (0 = no hold). The
+	 * courier's own health window; see courier_holdoff_left_ms(). */
+	int64_t rearm_at_ms;
 	int active_slot; /* the slot with a job in flight, or -1 */
 	struct courier_nbr nbr[MESHTASTIC_BLE_REG_SLOTS];
 } courier = { .active_slot = -1 };
@@ -342,6 +348,9 @@ static struct {
 static K_THREAD_STACK_DEFINE(courier_stack, 4096);
 static K_MUTEX_DEFINE(courier_lock);
 
+/* Defined with the arm/persist machinery below; the tick gate needs it here. */
+static int64_t courier_holdoff_left_ms(void);
+
 static const char *courier_state_str(enum courier_state s)
 {
 	switch (s) {
@@ -350,6 +359,7 @@ static const char *courier_state_str(enum courier_state s)
 	case CS_WAIT_CONFIRM: return "wait-confirm";
 	case CS_DONE:         return "done";
 	case CS_REVERTED:     return "reverted";
+	case CS_REFUSED:      return "refused";
 	default:              return "?";
 	}
 }
@@ -468,6 +478,18 @@ static void courier_poll_active(void)
 			n->node, (unsigned int)(n->target_version >> 24),
 			(unsigned int)((n->target_version >> 16) & 0xFFU),
 			(unsigned int)(n->target_version & 0xFFFFU));
+	} else if (strcmp(job.fail_stage, "verify") == 0) {
+		/* The target's image manager would not mark the uploaded image
+		 * for test: with a real signing key on its bootloader (F7 P0) that
+		 * is a bad signature — deterministic for this (image, target), so a
+		 * retry every backoff is wasted airtime (bench 2026-08-28: three
+		 * pushes of a dev-signed image, each refused). Latch; a new intent
+		 * or `fleet clear` releases. */
+		n->state = CS_REFUSED;
+		LOG_WRN("courier: 0x%08x REFUSED %u.%u.%u at verify (mgmt %d) — wrong signing key? latched, `fleet clear` to retry",
+			n->node, (unsigned int)(n->target_version >> 24),
+			(unsigned int)((n->target_version >> 16) & 0xFFU),
+			(unsigned int)(n->target_version & 0xFFFFU), job.rc);
 	} else {
 		n->state = CS_IDLE;
 		n->attempts++;
@@ -521,6 +543,19 @@ static void courier_track(void)
 				n->node, (unsigned int)(n->target_version >> 24),
 				(unsigned int)((n->target_version >> 16) & 0xFFU),
 				(unsigned int)(n->target_version & 0xFFFFU));
+		} else if (n->state == CS_REVERTED && n->present && n->running_known &&
+			   n->running == n->target_version &&
+			   (n->flags & MESHTASTIC_BLE_PEER_FLAG_TESTBOOT) == 0U) {
+			/* Latched on "never came back" — but here it is, beating the
+			 * delivered version, confirmed. The job's reconnect failed for
+			 * a reason that was not a revert (bench 2026-08-28: the target
+			 * had just switched its SMP service to RW_ENCRYPT and this
+			 * courier could not pair). The beats are the evidence that
+			 * matters; the latch was wrong. */
+			n->state = CS_DONE;
+			n->attempts = 0U;
+			LOG_INF("courier: 0x%08x came back after all — running the delivered version, confirmed",
+				n->node);
 		} else if (n->state == CS_DONE && n->present && n->running_known &&
 			   n->running < n->target_version) {
 			/* The delivered version was live and now an older one
@@ -563,7 +598,7 @@ static void courier_candidates(struct meshtastic_fleet_candidate *c, uint32_t *w
 		want_version[i] = 0U;
 		c[i].node = n->node;
 		c[i].present = n->present;
-		c[i].latched = (n->state == CS_REVERTED);
+		c[i].latched = (n->state == CS_REVERTED || n->state == CS_REFUSED);
 		c[i].in_flight = (n->state == CS_UPDATING || n->state == CS_WAIT_CONFIRM);
 		c[i].attempts = n->attempts;
 		c[i].last_beat_ms = n->last_beat_ms;
@@ -573,6 +608,11 @@ static void courier_candidates(struct meshtastic_fleet_candidate *c, uint32_t *w
 			continue;
 		}
 		have = meshtastic_fleet_desired_for(n->node, n->class_id, &want);
+		if (n->state == CS_REFUSED && have && want.version != n->target_version) {
+			/* The refusal was for one image; a new intent is a new question. */
+			n->state = CS_IDLE;
+			c[i].latched = false;
+		}
 		c[i].verdict = meshtastic_fleet_evaluate(n->running, n->running_known, n->flags,
 							 n->hw_model, have ? &want : NULL);
 		if (c[i].verdict == MESHTASTIC_FLEET_SKIP_HW_MISMATCH && !n->hw_logged) {
@@ -659,7 +699,8 @@ static void courier_tick_fn(struct k_work *work)
 	courier_refresh();
 	courier_poll_active();
 	courier_track();
-	if (courier.armed && courier.active_slot < 0 && courier_self_ready()) {
+	if (courier.armed && courier.active_slot < 0 && courier_holdoff_left_ms() == 0 &&
+	    courier_self_ready()) {
 		courier_maybe_start();
 	}
 	k_mutex_unlock(&courier_lock);
@@ -667,11 +708,87 @@ static void courier_tick_fn(struct k_work *work)
 	(void)k_work_reschedule_for_queue(&courier.wq, &courier.tick, COURIER_TICK);
 }
 
+/*
+ * The arm decision in flash, and the health window that guards its restore.
+ *
+ * `arm on` is a standing operator decision — "this node keeps its neighbours up
+ * to date" — so it belongs in flash. It was RAM-only until 2026-08-28, when a
+ * BLE-controller fault reset the courier mid-delivery: it came back DISARMED,
+ * the fleet stopped converging, and nothing said so. A silent stop is the worst
+ * failure an unattended actuator can have.
+ *
+ * What comes back is the DECISION, not the WORK. In-flight job state stays in
+ * RAM on purpose: after a reset the only trustworthy account of what a target
+ * is running is the target's own beat, and the loop re-decides from those
+ * within a tick. Persisting `updating` would restore a belief instead.
+ *
+ * A restored arm is held for REARM_DELAY_S of uptime first — the mirror of the
+ * target's autoconfirm window. Without it a courier that reboots mid-push comes
+ * straight back and pushes again, turning a boot loop into a push loop against
+ * every neighbour. Two other gates already cover the case where the courier
+ * itself is the thing that is broken: courier_self_ready() refuses to push
+ * while this image is unconfirmed or while we are holding. This is the third,
+ * for the reboot whose cause we do not know.
+ *
+ * A live `arm on` from the console is NOT held: an operator watching the node
+ * is a better health check than a timer.
+ */
+struct courier_arm_rec {
+	uint8_t armed;
+} __packed;
+
+static void courier_arm_save(bool on)
+{
+	struct courier_arm_rec rec = { .armed = on ? 1U : 0U };
+
+	if (settings_save_one("mtfleet/arm", &rec, sizeof(rec)) != 0) {
+		LOG_WRN("courier: arm state save failed — it will not survive a reboot");
+	}
+}
+
+static int courier_arm_settings_set(const char *key, size_t len, settings_read_cb read_cb,
+				    void *cb_arg)
+{
+	struct courier_arm_rec rec;
+
+	if (strcmp(key, "arm") != 0) {
+		return -ENOENT;
+	}
+	if (len != sizeof(rec) || read_cb(cb_arg, &rec, len) != (ssize_t)len) {
+		return -EINVAL;
+	}
+	if (rec.armed == 0U) {
+		return 0;
+	}
+
+	k_mutex_lock(&courier_lock, K_FOREVER);
+	courier.armed = true;
+	courier.rearm_at_ms = k_uptime_get() +
+			      (int64_t)CONFIG_MESHTASTIC_FLEET_COURIER_REARM_DELAY_S * 1000;
+	k_mutex_unlock(&courier_lock);
+	LOG_INF("courier: ARMED (restored) — holding pushes for %d s",
+		CONFIG_MESHTASTIC_FLEET_COURIER_REARM_DELAY_S);
+	return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mt_fleet, "mtfleet", NULL, courier_arm_settings_set, NULL, NULL);
+
+/* Milliseconds left on a restored arm's health window; 0 when it may push. */
+static int64_t courier_holdoff_left_ms(void)
+{
+	int64_t left = courier.rearm_at_ms - k_uptime_get();
+
+	return left > 0 ? left : 0;
+}
+
 void meshtastic_fleet_courier_arm(bool on)
 {
 	k_mutex_lock(&courier_lock, K_FOREVER);
 	courier.armed = on;
+	/* An operator at the console is the health check; nothing to wait for. */
+	courier.rearm_at_ms = 0;
 	k_mutex_unlock(&courier_lock);
+	courier_arm_save(on);
 	LOG_INF("courier: %s", on ? "ARMED" : "disarmed");
 	(void)k_work_reschedule_for_queue(&courier.wq, &courier.tick, K_NO_WAIT);
 }
@@ -679,6 +796,16 @@ void meshtastic_fleet_courier_arm(bool on)
 bool meshtastic_fleet_courier_armed(void)
 {
 	return courier.armed;
+}
+
+uint32_t meshtastic_fleet_courier_holdoff_s(void)
+{
+	int64_t left;
+
+	k_mutex_lock(&courier_lock, K_FOREVER);
+	left = courier_holdoff_left_ms();
+	k_mutex_unlock(&courier_lock);
+	return (uint32_t)((left + 999) / 1000);
 }
 
 void meshtastic_fleet_courier_clear(uint32_t node_id)

@@ -4607,9 +4607,25 @@ static int cmd_fleet_status(const struct shell *sh, size_t argc, char **argv)
 		/* F6: the star. Every row is a neighbour the loop can serve; `->`
 		 * marks the one meshtastic_fleet_pick() would push next (none while
 		 * a job is in flight). Slots: BT_MAX_CONN, minus one for the host. */
-		shell_print(sh, "courier : %s — %u row(s) of %u slot(s)",
-			    meshtastic_fleet_courier_armed() ? "ARMED" : "disarmed", nr,
-			    (unsigned int)MESHTASTIC_BLE_REG_SLOTS);
+		{
+			uint32_t hold = meshtastic_fleet_courier_holdoff_s();
+			char armed[48];
+
+			/* A restored arm that is still inside its health window is
+			 * ARMED and not pushing — say both, or `status` reads as a
+			 * courier that is ignoring its orders. */
+			if (meshtastic_fleet_courier_armed() && hold != 0U) {
+				snprintf(armed, sizeof(armed),
+					 "ARMED (restored — holding %u s)", hold);
+			} else {
+				strncpy(armed, meshtastic_fleet_courier_armed() ? "ARMED"
+									       : "disarmed",
+					sizeof(armed) - 1U);
+				armed[sizeof(armed) - 1U] = '\0';
+			}
+			shell_print(sh, "courier : %s — %u row(s) of %u slot(s)", armed, nr,
+				    (unsigned int)MESHTASTIC_BLE_REG_SLOTS);
+		}
 		for (uint16_t i = 0U; i < nr; i++) {
 			shell_print(sh, "%s0x%08x class %u run %u.%u.%u want %u.%u.%u [%c%c%c] %s x%u",
 				    rows[i].next ? "-> " : "   ", rows[i].node_id, rows[i].class_id,
@@ -4642,7 +4658,16 @@ static int cmd_fleet_arm(const struct shell *sh, size_t argc, char **argv)
 			return -EINVAL;
 		}
 	}
-	shell_print(sh, "courier: %s", meshtastic_fleet_courier_armed() ? "ARMED" : "disarmed");
+	{
+		uint32_t hold = meshtastic_fleet_courier_holdoff_s();
+
+		if (meshtastic_fleet_courier_armed() && hold != 0U) {
+			shell_print(sh, "courier: ARMED (restored — holding pushes %u s)", hold);
+		} else {
+			shell_print(sh, "courier: %s",
+				    meshtastic_fleet_courier_armed() ? "ARMED" : "disarmed");
+		}
+	}
 	return 0;
 }
 
@@ -4795,7 +4820,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #endif
 #if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
 	SHELL_CMD(arm, NULL, SHELL_HELP("Arm/disarm the courier loop.", "[on|off]"), cmd_fleet_arm),
-	SHELL_CMD(clear, NULL, SHELL_HELP("Clear a node's reverted/backoff latch.", "<node-hex>"),
+	SHELL_CMD(clear, NULL, SHELL_HELP("Clear a node's reverted/refused/backoff latch.", "<node-hex>"),
 		  cmd_fleet_clear),
 #endif
 	SHELL_SUBCMD_SET_END);

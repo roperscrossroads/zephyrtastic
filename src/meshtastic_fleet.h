@@ -118,7 +118,7 @@ const char *meshtastic_fleet_verdict_str(enum meshtastic_fleet_verdict v);
 struct meshtastic_fleet_candidate {
 	uint32_t node;
 	bool present;      /* a fresh v2 beat within the last few seconds */
-	bool latched;      /* REVERTED: off limits until `fleet clear` */
+	bool latched;      /* REVERTED or REFUSED: off limits until `fleet clear` (or a new intent, for REFUSED) */
 	bool in_flight;    /* updating, or delivered and awaiting its self-confirm */
 	bool has_cargo;    /* the depot holds a classed image of the wanted version */
 	enum meshtastic_fleet_verdict verdict; /* meshtastic_fleet_evaluate() for it */
@@ -139,9 +139,17 @@ int meshtastic_fleet_pick(const struct meshtastic_fleet_candidate *c, unsigned i
 			  int64_t now);
 
 #if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
-/* Arm/disarm the courier loop (manual in F3; off at boot). */
+/* Arm/disarm the courier loop. Manual (F3), and — since
+ * MESHTASTIC_FLEET_COURIER_ARM_PERSIST — remembered across a reboot, because a
+ * courier that silently comes back disarmed stops a fleet converging with no
+ * symptom. Arming from here never waits; only a RESTORED arm serves its health
+ * window first. */
 void meshtastic_fleet_courier_arm(bool on);
 bool meshtastic_fleet_courier_armed(void);
+
+/* Seconds left before a restored arm starts pushing; 0 when it is free to.
+ * Always 0 for an arm made from the shell. */
+uint32_t meshtastic_fleet_courier_holdoff_s(void);
 
 /* Forget a neighbour's REVERTED latch so it may be tried again. */
 void meshtastic_fleet_courier_clear(uint32_t node_id);
@@ -153,7 +161,7 @@ struct meshtastic_fleet_courier_row {
 	uint32_t running;      /* packed; 0 = unknown */
 	uint32_t desired;      /* packed; 0 = no intent */
 	uint8_t flags;         /* last beat flags */
-	const char *state;     /* "idle"/"updating"/"wait-confirm"/"done"/"reverted"/… */
+	const char *state;     /* "idle"/"updating"/"wait-confirm"/"done"/"reverted"/"refused" */
 	uint32_t attempts;
 	bool next;             /* the row meshtastic_fleet_pick() would serve next */
 };

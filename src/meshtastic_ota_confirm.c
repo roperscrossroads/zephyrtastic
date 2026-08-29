@@ -39,10 +39,58 @@ LOG_MODULE_REGISTER(mt_otaconfirm, CONFIG_MESHTASTIC_LOG_LEVEL);
 /* Consent, said out loud: while a courier (or a host) is writing into our
  * slot1, our beats carry HOLD so nobody else starts a competing upload.
  * DFU_STARTED fires on the first chunk, DFU_STOPPED when the upload ends
- * (complete, aborted or timed out); PENDING/CONFIRMED are the image-state
+ * (complete, aborted or erased); PENDING/CONFIRMED are the image-state
  * writes that follow and are not an upload. RAM-only: the reboot into the
- * new image clears it, and a target that is never rebooted (a failed job)
- * is released by STOPPED. */
+ * new image clears it.
+ *
+ * STOPPED is not enough on its own. img_mgmt raises it only from inside a
+ * request it is processing, so a writer that VANISHES mid-upload — no abort,
+ * no last chunk — leaves the flag raised with nothing left to lower it, and
+ * every courier from then on skips this node as busy. That is not theoretical:
+ * on 2026-08-28 the courier's BLE controller faulted 41 s into a push and the
+ * target sat in HOLD until an operator cleared it by hand. So the flag is also
+ * on a dead-man timer, rearmed by each chunk written and cancelled by STOPPED.
+ * `hold_is_ours` keeps it honest: a HOLD an operator raised with
+ * `blepeer hold on` is never lowered by this module. */
+static void dfu_hold_release(const char *why);
+
+static bool hold_is_ours;
+
+#if CONFIG_MESHTASTIC_OTA_HOLD_IDLE_TIMEOUT_S > 0
+static void dfu_hold_idle_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	dfu_hold_release("no upload progress for "
+			 STRINGIFY(CONFIG_MESHTASTIC_OTA_HOLD_IDLE_TIMEOUT_S)
+			 " s — the writer is gone");
+}
+static K_WORK_DELAYABLE_DEFINE(dfu_hold_idle, dfu_hold_idle_fn);
+
+static void dfu_hold_idle_rearm(void)
+{
+	(void)k_work_reschedule(&dfu_hold_idle,
+				K_SECONDS(CONFIG_MESHTASTIC_OTA_HOLD_IDLE_TIMEOUT_S));
+}
+
+static void dfu_hold_idle_cancel(void)
+{
+	(void)k_work_cancel_delayable(&dfu_hold_idle);
+}
+#else
+static void dfu_hold_idle_rearm(void) { }
+static void dfu_hold_idle_cancel(void) { }
+#endif
+
+static void dfu_hold_release(const char *why)
+{
+	if (!hold_is_ours) {
+		return; /* an operator's hold, or none — not ours to lower */
+	}
+	hold_is_ours = false;
+	meshtastic_ble_peer_hold_set(false);
+	LOG_INF("OTA: %s — HOLD released", why);
+}
+
 static enum mgmt_cb_return dfu_hold_cb(uint32_t event, enum mgmt_cb_return prev_status,
 				       int32_t *rc, uint16_t *group, bool *abort_more, void *data,
 				       size_t data_size)
@@ -55,18 +103,25 @@ static enum mgmt_cb_return dfu_hold_cb(uint32_t event, enum mgmt_cb_return prev_
 	ARG_UNUSED(data_size);
 
 	if (event == MGMT_EVT_OP_IMG_MGMT_DFU_STARTED) {
-		LOG_INF("OTA: upload into slot1 started — beats say HOLD");
-		meshtastic_ble_peer_hold_set(true);
+		if (!meshtastic_ble_peer_hold_get()) {
+			LOG_INF("OTA: upload into slot1 started — beats say HOLD");
+			hold_is_ours = true;
+			meshtastic_ble_peer_hold_set(true);
+		}
+		dfu_hold_idle_rearm();
+	} else if (event == MGMT_EVT_OP_IMG_MGMT_DFU_CHUNK_WRITE_COMPLETE) {
+		dfu_hold_idle_rearm();
 	} else if (event == MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED) {
-		LOG_INF("OTA: upload stopped — HOLD released");
-		meshtastic_ble_peer_hold_set(false);
+		dfu_hold_idle_cancel();
+		dfu_hold_release("upload stopped");
 	}
 	return MGMT_CB_OK;
 }
 
 static struct mgmt_callback dfu_hold_callback = {
 	.callback = dfu_hold_cb,
-	.event_id = MGMT_EVT_OP_IMG_MGMT_DFU_STARTED | MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED,
+	.event_id = MGMT_EVT_OP_IMG_MGMT_DFU_STARTED | MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED |
+		    MGMT_EVT_OP_IMG_MGMT_DFU_CHUNK_WRITE_COMPLETE,
 };
 #endif /* CONFIG_MESHTASTIC_OTA_HOLD_DURING_DFU */
 

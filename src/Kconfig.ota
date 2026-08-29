@@ -55,6 +55,23 @@ config MESHTASTIC_OTA_HOLD_DURING_DFU
 	  a second courier sees "busy" instead of starting a competing job. The
 	  flag is RAM-only and clears with the reboot into the new image.
 
+config MESHTASTIC_OTA_HOLD_IDLE_TIMEOUT_S
+	int "Release a DFU HOLD after this many seconds with no upload progress"
+	default 120
+	range 0 3600
+	depends on MESHTASTIC_OTA_HOLD_DURING_DFU
+	help
+	  img_mgmt raises DFU_STARTED on the first chunk and DFU_STOPPED only
+	  when an upload ends through it — complete, aborted or erased. A writer
+	  that simply VANISHES (the courier rebooted mid-push: bench 2026-08-28,
+	  a BLE-controller fault took rzr3 down 41 s into a push) leaves no event
+	  at all, so the target's HOLD never clears and every future courier
+	  skips it as busy, forever, until an operator runs `blepeer hold off`
+	  or reboots it. This releases the flag after the given idle period,
+	  rearmed on every chunk written. 0 disables the timeout (the old
+	  behaviour). It only releases a HOLD this module raised; an operator's
+	  `blepeer hold on` is never touched.
+
 config MESHTASTIC_OTA_FAULT_TEST_SEC
 	int "TEST ONLY: fault (k_oops) this many seconds after boot, 0 = off"
 	default 0
@@ -179,5 +196,23 @@ config MESHTASTIC_FLEET_COURIER_TICK_SEC
 	int "Courier poll interval (seconds)"
 	default 5
 	depends on MESHTASTIC_FLEET_COURIER
+
+config MESHTASTIC_FLEET_COURIER_REARM_DELAY_S
+	int "Hold a restored arm for this many seconds after boot"
+	default 120
+	range 0 3600
+	depends on MESHTASTIC_FLEET_COURIER
+	help
+	  A courier's own health window, and the mirror of the target's
+	  MESHTASTIC_OTA_AUTOCONFIRM: prove you are staying up before you start
+	  pushing images at other people. Without it a courier that reboots
+	  mid-push comes straight back and pushes again, so a boot loop becomes
+	  a push loop against every neighbour.
+
+	  This is the UPTIME half only. A courier running an image MCUboot has
+	  not confirmed already refuses to push at all (courier_self_ready()),
+	  which covers "I just took an update"; this covers "I rebooted and do
+	  not know why". A live `arm on` from the shell is not held — an operator
+	  at the console IS the health check. 0 disables the hold.
 
 endif # MESHTASTIC_FLEET
