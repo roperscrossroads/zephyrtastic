@@ -34,6 +34,17 @@ tests:
       - CONFIG_MESHTASTIC_SCANNER=y
       - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
 
+  # The listener's posture: the survey starts by itself, so the node must come up
+  # MUTE. The gate closing at boot rather than when the sweep starts is the whole
+  # point of this scenario — ztest runs after init, so a test here cannot observe
+  # the boot window directly, but it can observe that the gate is shut with no
+  # test having started a sweep, and that stop() can reopen it from that state.
+  meshtastic.shell.scanner_autostart.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SCANNER=y
+      - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
+      - CONFIG_MESHTASTIC_SCANNER_AUTOSTART=y
+
   # `meshtastic rf`. native_sim has no board FEM override, so this scenario is
   # also the only place the "[--] not on this hardware" branch compiles AND runs
   # — on the bench boards that row is always the controllable one.

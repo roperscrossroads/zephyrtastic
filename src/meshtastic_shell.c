@@ -1514,8 +1514,20 @@ static int cmd_scan_status(const struct shell *sh, size_t argc, char **argv)
 	total = meshtastic_scanner_total();
 	blocked = meshtastic_scanner_tx_blocked();
 
-	shell_print(sh, "sweeping: %s   tx: %s", meshtastic_scanner_sweeping() ? "yes" : "no",
-		    meshtastic_scanner_active() ? "REFUSED (scanning)" : "allowed");
+	{
+		bool sweeping = meshtastic_scanner_sweeping();
+		bool shut = meshtastic_scanner_active();
+
+		/* Shut-but-not-sweeping is a real state on an autostart image — the gate
+		 * closes before main() while the sweep starts at the end of init — so
+		 * report it as itself rather than as "scanning", which would be a lie
+		 * during the boot window and, if the sweep failed to start, a permanent
+		 * one. */
+		shell_print(sh, "sweeping: %s   tx: %s", sweeping ? "yes" : "no",
+			    !shut	 ? "allowed"
+			    : sweeping	 ? "REFUSED (scanning)"
+					 : "REFUSED (gate shut, sweep not running)");
+	}
 	shell_print(sh, "captured: %u total   withheld from stack: %u", total,
 		    meshtastic_scanner_rx_dropped());
 	if (blocked > 0U) {

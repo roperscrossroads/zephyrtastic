@@ -20,6 +20,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/lora.h>
+#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
@@ -30,6 +31,7 @@
 
 #include "meshtastic_clock.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_scanner.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 
@@ -1049,3 +1051,73 @@ ZTEST(meshtastic_shell, test_logring_rejects_a_bad_count)
 	zassert_not_equal(run_cmd("logring 0", &out), 0, "zero lines is not a request");
 }
 #endif /* CONFIG_MESHTASTIC_LOGRING */
+
+#if defined(CONFIG_MESHTASTIC_SCANNER_AUTOSTART)
+/* ---- an autostart image comes up mute ------------------------------------
+ *
+ * The defect this pins: the TX gate used to close when the SWEEP started, and
+ * the sweep starts at the tail of init because starting it earlier fights the
+ * radio bring-up. On hardware that left an ~11 s window at every boot — the
+ * sweep began at uptime 11 s and the node transmitted at ~8 s, heard by two
+ * neighbours, on every cold boot.
+ *
+ * What made it durable is that the refusal counter read ZERO throughout. The
+ * counter only counts what the gate refuses, so a frame sent before the gate
+ * exists is invisible to it — and the listener's central claim, that it did not
+ * perturb what it measured, rests on that zero.
+ */
+/*
+ * Sampled from a SYS_INIT, which is the only vantage point that can see this.
+ *
+ * The fixture calls meshtastic_init(), and init's tail is what autostarts the
+ * sweep — so by the time any ZTEST body runs the gate is shut either way, and a
+ * test that merely asserts "the gate is shut" passes with the fix reverted. It
+ * was written that way first and proved exactly nothing. A SYS_INIT runs before
+ * main(), hence before the fixture, so what it records is the state the node
+ * boots in rather than the state init leaves behind.
+ */
+static bool gate_shut_before_init;
+
+static int sample_boot_gate(void)
+{
+	gate_shut_before_init = meshtastic_scanner_active();
+	return 0;
+}
+SYS_INIT(sample_boot_gate, APPLICATION, 99);
+
+ZTEST(meshtastic_shell, test_scanner_autostart_a_comes_up_with_tx_refused)
+{
+	const char *out;
+
+	zassert_true(gate_shut_before_init,
+		     "an autostart image must refuse TX from BOOT, not from the moment "
+		     "init's tail starts the sweep — that gap is ~11 s on hardware");
+
+	zassert_ok(run_cmd("meshtastic scan status", &out), "scan status failed");
+	zassert_not_null(strstr(out, "REFUSED"), "status must report the gate as shut");
+}
+
+/*
+ * The a_/b_ in these two names is load-bearing: ztest runs in NAME order, and
+ * the second test opens the gate the first one needs shut. Without the ordering
+ * they sort the other way round ('_' < 'u') and the first fails for a reason
+ * that has nothing to do with what it checks.
+ */
+ZTEST(meshtastic_shell, test_scanner_autostart_b_gate_can_be_reopened)
+{
+	const char *out;
+
+	/* Recoverability, and the reason stop() no longer keys on `sweeping`.
+	 * "Shut but not sweeping" is reachable — an autostart image boots in it and
+	 * stays there if the sweep fails to start — and an early return on !sweeping
+	 * made it PERMANENT: a node mute for the rest of its life, no way back short
+	 * of a reflash. */
+	zassert_true(meshtastic_scanner_active(), "precondition: the gate is shut");
+
+	zassert_ok(run_cmd("meshtastic scan stop", &out), "scan stop failed");
+	zassert_false(meshtastic_scanner_active(), "stop must reopen a boot-shut gate");
+
+	zassert_ok(run_cmd("meshtastic scan status", &out), "scan status failed");
+	zassert_not_null(strstr(out, "allowed"), "and say so");
+}
+#endif /* CONFIG_MESHTASTIC_SCANNER_AUTOSTART */

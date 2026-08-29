@@ -85,7 +85,34 @@ static struct {
 	uint32_t rx_dropped; /* frames surveyed but withheld from the stack */
 	uint32_t parks;      /* times the sweep thread has parked; stop()'s handshake */
 	struct meshtastic_scan_stats stats[MESHTASTIC_SCANNER_MAX_PRESETS];
-} scan;
+} scan = {
+	/*
+	 * An autostart image comes up with the TX gate ALREADY SHUT, from before
+	 * any code runs.
+	 *
+	 * The sweep cannot start this early — scanner_init() runs before the radio
+	 * is configured, and starting there had the sweep and the bring-up fighting
+	 * over the transceiver (see the note on scanner_init below). So autostart
+	 * happens at the tail of meshtastic_init(), and until 2026-08-29 the gate
+	 * went with it. That left a window: measured on a listener, the sweep began
+	 * at uptime 11 s and the node transmitted at ~8 s. Two neighbours heard it,
+	 * once, on every cold boot.
+	 *
+	 * The refusal counter could not see it, which is the part that matters. The
+	 * counter only counts what the gate refuses, so a frame sent before the gate
+	 * exists leaves it reading zero — and a listener's whole claim, that it did
+	 * not perturb what it measured, rests on that zero. It was not measuring
+	 * silence; it was measuring the wrong interval.
+	 *
+	 * Closing the gate is a bool, not a retune: it touches no hardware and
+	 * cannot race the radio bring-up the way starting the sweep did. The file
+	 * already keeps `sweeping` and `tx_closed` apart because the distinction is
+	 * load-bearing; this is that same distinction extended to the boot window.
+	 * A static initializer rather than a SYS_INIT so there is no init-order
+	 * question to get wrong: the gate is shut before main().
+	 */
+	.tx_closed = IS_ENABLED(CONFIG_MESHTASTIC_SCANNER_AUTOSTART),
+};
 
 /* The ring is the big allocation, so it goes to PSRAM where the board has one.
  * CPU-only and mutex-guarded, which is what MESHTASTIC_EXT_RAM_BSS_ATTR requires:
@@ -289,13 +316,20 @@ int meshtastic_scanner_start(void)
 
 int meshtastic_scanner_stop(void)
 {
+	bool was_sweeping;
 	int ret;
 
 	scan_lock();
-	if (!scan.sweeping) {
+	/* "Shut but not sweeping" is now a reachable state, not a contradiction: an
+	 * autostart image boots in it, and stays in it if the sweep fails to start.
+	 * Early-returning on !sweeping would have made that state permanent — a node
+	 * mute for the rest of its life with no way back short of a reflash — so the
+	 * condition is the GATE, which is what this function is really here to open. */
+	if (!scan.sweeping && !scan.tx_closed) {
 		scan_unlock();
 		return -EALREADY;
 	}
+	was_sweeping = scan.sweeping;
 	scan.sweeping = false;
 	scan_unlock();
 
@@ -305,10 +339,17 @@ int meshtastic_scanner_stop(void)
 	 * the note there. The timeout is a backstop: a genuinely missed ack costs a
 	 * redundant retune, never a transmit, because tx_closed is still set until
 	 * after the restore succeeds. */
-	k_sem_give(&scan_wake);
-	(void)k_sem_take(&scan_idle, K_MSEC(2000));
+	if (was_sweeping) {
+		k_sem_give(&scan_wake);
+		(void)k_sem_take(&scan_idle, K_MSEC(2000));
+	}
 
-	/* Return through the preset path rather than a hand-rolled tune: it
+	/* The restore runs either way. With no sweep the radio is already on the
+	 * operating preset and this is close to a no-op, but it costs one retune and
+	 * buys the invariant outright: the gate opens only after the radio is
+	 * PROVABLY where it should be, never because we reasoned it had not moved.
+	 *
+	 * Return through the preset path rather than a hand-rolled tune: it
 	 * re-derives the channel hashes and keeps mt.modem_preset agreeing with the
 	 * radio, which an explicit tune deliberately does not. */
 	ret = meshtastic_preset_switch(mt.modem_preset, NULL);
@@ -583,6 +624,12 @@ void meshtastic_scanner_autostart(void)
 #endif
 	if (meshtastic_scanner_start() == 0) {
 		LOG_INF("scanner: autostarted — this node is an instrument, not a participant");
+	} else {
+		/* The gate is still shut (statically), so the node is safe — but it is
+		 * now mute AND blind, which is the one combination worth shouting
+		 * about. Say how to recover, because the state is otherwise indefinite. */
+		LOG_ERR("scanner: AUTOSTART FAILED — TX stays refused and nothing is being "
+			"captured; `scan start` to retry, `scan stop` to rejoin the mesh");
 	}
 #endif
 }
