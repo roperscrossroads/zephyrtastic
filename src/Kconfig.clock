@@ -1,0 +1,82 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+DT_CHOSEN_MT_PERSIST_COUNTER := meshtastic,persist-counter
+
+config MESHTASTIC_CLOCK_PERSIST
+	bool "Carry the wall clock across a warm reset"
+	default n
+	depends on MESHTASTIC_BOOTLOG
+	depends on $(dt_chosen_enabled,$(DT_CHOSEN_MT_PERSIST_COUNTER))
+	select COUNTER
+	help
+	  Keep the epoch in retained RAM and bring it forward across a reset,
+	  using a free-running counter to measure how long the node was down.
+
+	  This closes the largest gap in the port's time handling. Acquiring the
+	  time is well covered — GNSS, SNTP, a phone, a peer — but every one of
+	  those needs an external event, so a node that reboots is left with no
+	  clock at all until one happens to arrive. In the field that can be a
+	  long time, and everything epoch-stamped in between is stamped with
+	  nothing.
+
+	  Two things are needed and both are already here: retained RAM that
+	  survives the reset (the same mechanism the boot log uses, measured
+	  surviving `west flash`, a software reboot and an image swap), and a
+	  counter that keeps running across it to measure the gap.
+
+	  It restores at DEVICE quality, NOT at the quality the time originally
+	  had, and that is deliberate — see the note in the source. Restoring at
+	  the original quality would let a remembered time outrank a live source.
+
+	  A true power cycle clears retained RAM, so this covers warm resets only:
+	  watchdog, software reboot, fault.
+
+	  ⚠️ DEFAULT n, AND NOT YET PROVEN ON HARDWARE. The logic is built and unit
+	  tested on native_sim (see tests/protocol), but the first image carrying it
+	  did not survive its test boot on a V4: it took a watchdog reset and
+	  MCUboot reverted, which is the safety net working exactly as designed and
+	  is also the reason this is not on by default. The cause is not yet known
+	  and was not diagnosable from where that node was — battery powered, no
+	  console, reachable only over BLE.
+
+	  The first suspect is the counter itself. That board's devicetree notes
+	  that the RTC timer is "INERT unless the application sets CONFIG_PM",
+	  and this option selects COUNTER regardless, so the driver now initialises
+	  — allocating an IRAM interrupt — in a build that never did so before.
+	  Bring this up on a node with a console attached before turning it on.
+
+	  Do NOT raise the default without that bring-up. An image that fails to
+	  boot is recoverable here only because every image is test-swapped first.
+
+if MESHTASTIC_CLOCK_PERSIST
+
+config MESHTASTIC_CLOCK_PERSIST_INTERVAL_S
+	int "Seconds between saves"
+	default 30
+	range 1 3600
+	help
+	  How often the epoch and the counter reading are written to retained
+	  RAM. They are saved together, so a stale save costs nothing in
+	  accuracy — the downtime is measured from the counter, not from how
+	  recent the save was. The interval only bounds how much of a live
+	  clock's progress is lost if the node dies between saves.
+
+config MESHTASTIC_CLOCK_PERSIST_MAX_DOWNTIME_S
+	int "Refuse to restore across a gap longer than this"
+	default 300
+	range 1 28800
+	help
+	  A sanity bound on the measured downtime, and the guard that makes the
+	  counter's 32-bit wrap a non-issue.
+
+	  A warm reset takes seconds. A computed downtime of hours therefore means
+	  something is wrong — the counter wrapped, or the saved record is garbage
+	  that happened to pass its magic check — and the honest response is to
+	  decline rather than to seed the clock with a confident wrong answer.
+
+	  The counter wraps every ~8.8 h at this SoC's RTC frequency. An outage
+	  that long would have cleared retained RAM along with everything else, so
+	  a wrapped delta cannot be a real downtime; this bound rejects it.
+
+endif # MESHTASTIC_CLOCK_PERSIST

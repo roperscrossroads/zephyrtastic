@@ -138,6 +138,7 @@ config MESHTASTIC_LOG_WALLCLOCK
 	  ignores select on those) is what actually renders the same value as a
 	  calendar date. Found 2026-08-09 -- see docs/uart0-console-investigation.md.
 
+rsource "Kconfig.clock"
 rsource "Kconfig.core"
 rsource "Kconfig.nodedb"
 rsource "Kconfig.nodeinfo"

@@ -53,6 +53,7 @@
 #include "meshtastic_build.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
+#include "meshtastic_clock_persist.h"
 #include "meshtastic_hlc.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
@@ -462,6 +463,26 @@ static int cmd_time(const struct shell *sh, size_t argc, char **argv)
 			return 0;
 		}
 		shell_print(sh, "clock: epoch %u, source %s", epoch, clock_quality_name(q));
+#if defined(CONFIG_MESHTASTIC_CLOCK_PERSIST)
+		{
+			enum meshtastic_clock_persist_result pr;
+			uint32_t down_ms;
+
+			/* Worth surfacing rather than leaving implicit: a restored clock
+			 * reads exactly like a synced one, and the difference matters —
+			 * it is only as good as the epoch that was saved plus the
+			 * counter's estimate of the gap, and it deliberately carries
+			 * DEVICE quality so a real source can still replace it. */
+			meshtastic_clock_persist_status(&pr, &down_ms);
+			if (pr == MESHTASTIC_CLOCK_PERSIST_RESTORED) {
+				shell_print(sh, "       %s (%u ms gap)",
+					    meshtastic_clock_persist_result_str(pr), down_ms);
+			} else if (pr != MESHTASTIC_CLOCK_PERSIST_COLD) {
+				shell_print(sh, "       persist: %s",
+					    meshtastic_clock_persist_result_str(pr));
+			}
+		}
+#endif
 		return 0;
 	}
 	if (argc != 3U || strcmp(argv[1], "set") != 0) {

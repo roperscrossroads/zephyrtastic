@@ -1,0 +1,21 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+/*
+ * A counter for the clock-persistence module to measure downtime against.
+ *
+ * Without a meshtastic,persist-counter chosen the module compiles out entirely,
+ * and a module that compiles out is a module with no tests — which is exactly
+ * how a configuration reaches the bench having never been built. native_sim
+ * ships a counter; pointing the chosen at it brings the decision logic under
+ * test, even though nothing here survives a reset (there is no reset to
+ * survive, so the boot path reports a cold start and the tests drive the
+ * decision through its seam instead).
+ */
+/ {
+	chosen {
+		meshtastic,persist-counter = &counter0;
+	};
+};
+
+&counter0 {
+	status = "okay";
+};

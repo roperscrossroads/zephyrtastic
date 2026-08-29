@@ -337,6 +337,26 @@
 };
 
 /*
+ * The RTC timer is also what lets the wall clock survive a reset.
+ *
+ * k_uptime restarts at zero on every boot, so a node that reboots knows how long
+ * it has been up and nothing about how long it was DOWN — and without that gap
+ * a saved epoch cannot be brought forward. This counter can supply it: the SoC
+ * documentation is explicit that "any reset/sleep mode, except for the power-up
+ * reset, will not stop or reset the RTC Timer", which is exactly the set of
+ * resets that also preserve retained RAM.
+ *
+ * Named through a chosen rather than by node label so the code that reads it
+ * stays portable: another board points this at whatever survives ITS resets, and
+ * a board with nothing suitable simply omits it and compiles the feature out.
+ */
+/ {
+	chosen {
+		meshtastic,persist-counter = &rtc_timer;
+	};
+};
+
+/*
  * gpio0 carries both wake-capable pins we care about: the USER button (GPIO0) and
  * the SX1262's DIO1 IRQ (GPIO14). Both are <= GPIO21, so both are RTC-capable and
  * inside the ESP32-S3 GPIO-wake mask (GPIO0-GPIO21). Keep the controller powered

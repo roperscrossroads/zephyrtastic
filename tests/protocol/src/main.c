@@ -3864,6 +3864,67 @@ ZTEST(protocol_stack, test_clock_refuses_an_anchor_in_the_future)
 		       "and must be clamped to now, not honoured");
 }
 
+#if defined(CONFIG_MESHTASTIC_CLOCK_PERSIST)
+#include "meshtastic_clock_persist.h"
+
+/*
+ * Restoring a remembered clock. Both assertions here are about decisions that
+ * are SILENT when wrong: a node comes back looking like it knows the time.
+ */
+ZTEST(protocol_stack, test_clock_persist_restores_at_device_quality)
+{
+	const int64_t saved = 1800000000LL * 1000;
+	enum meshtastic_clock_persist_result r;
+
+	meshtastic_clock_test_reset();
+
+	/* Saved while the node had GPS — the best source there is. */
+	r = meshtastic_clock_persist_test_restore(saved, MESHTASTIC_CLOCK_QUALITY_GPS, 4000);
+	zassert_equal(r, MESHTASTIC_CLOCK_PERSIST_RESTORED, "a 4 s gap must restore");
+
+	/* The epoch is carried forward by the measured gap, not simply replayed. */
+	zassert_within(meshtastic_clock_now_epoch_ms(), saved + 4000, 200,
+		       "the saved epoch must be advanced by the downtime");
+
+	/*
+	 * And it comes back at DEVICE, NOT at the GPS it was saved with. This is
+	 * the whole correctness point: a remembered time restored at GPS would
+	 * outrank every live source, so the node would sit on a stale clock it
+	 * refused to let anything correct. DEVICE says exactly what this is —
+	 * time from an onboard peripheral after boot.
+	 */
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_DEVICE,
+		      "a restored clock must not inherit the quality it was saved with");
+
+	/* Which means a real source can still take over immediately. */
+	meshtastic_clock_set_epoch(1800009999U, MESHTASTIC_CLOCK_QUALITY_NTP);
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_NTP,
+		      "a live NTP source must be able to replace a restored clock");
+}
+
+ZTEST(protocol_stack, test_clock_persist_refuses_an_implausible_gap)
+{
+	const int64_t saved = 1800000000LL * 1000;
+	enum meshtastic_clock_persist_result r;
+
+	meshtastic_clock_test_reset();
+
+	/*
+	 * A warm reset takes seconds. A gap of hours is not a downtime — it is a
+	 * wrapped counter or a record that passed its magic check by accident — and
+	 * seeding the clock from it would put a confident wrong epoch on everything
+	 * stamped afterwards. Declining costs one missing clock.
+	 */
+	r = meshtastic_clock_persist_test_restore(
+		saved, MESHTASTIC_CLOCK_QUALITY_GPS,
+		(CONFIG_MESHTASTIC_CLOCK_PERSIST_MAX_DOWNTIME_S + 60) * 1000U);
+	zassert_equal(r, MESHTASTIC_CLOCK_PERSIST_IMPLAUSIBLE,
+		      "a gap beyond the bound must be refused");
+	zassert_false(meshtastic_clock_valid(),
+		      "and must leave the clock unset rather than confidently wrong");
+}
+#endif /* CONFIG_MESHTASTIC_CLOCK_PERSIST */
+
 /* --- T-A: source-quality ladder gates clock writes ------------------------ */
 
 /* A lower-trust time source (SNTP / phone set_time = NTP) must not overwrite the
