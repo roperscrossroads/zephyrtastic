@@ -12,6 +12,34 @@ menuconfig MESHTASTIC
 	select PSA_WANT_ALG_CTR
 	select PSA_WANT_KEY_TYPE_AES
 	select EXPERIMENTAL
+	# THIS STACK GENERATES FLOATING-POINT INSTRUCTIONS FROM SEVERAL THREADS, so
+	# the kernel has to preserve the FP registers across a context switch.
+	#
+	# Float is used in meshtastic_airtime.c, meshtastic_duty.c, meshtastic_metrics.c,
+	# meshtastic_nodedb.c, meshtastic_display.c and meshtastic_power.c among others,
+	# and those are reached from at least the LoRa RX callback, the outbound worker,
+	# the metrics work queue, the display thread and the shell. Verified in the
+	# shipped image: `objdump -d` shows mul.s / ufloat.s / rfr / wfr.
+	#
+	# Without FPU_SHARING the kernel saves no FP registers, so a thread preempted
+	# mid-calculation has its in-flight value overwritten by the next float user.
+	# The window is a few instructions and we have never caught it happening — but
+	# the result is a silently wrong NUMBER, not a fault, and this stack is about to
+	# start computing a clock-rate correction that gets written to flash. Zephyr's
+	# own FPU_SHARING help warns about exactly this shape: "some compiler
+	# configurations may activate a floating point context by generating FP
+	# instructions for any thread, and that context must be preserved".
+	#
+	# On Xtensa the FPU is always physically enabled (arch/xtensa/core/thread.c:
+	# "xtensa always has FPU enabled so cannot be disabled"), so these options buy
+	# only the save/restore -- they do not turn hardware on. Measured cost on the
+	# Heltec V4 class-4 image: +192 B DRAM, +184 B IRAM, +7.6 kB flash.
+	#
+	# Excluded on ARCH_POSIX: native_sim also reports CPU_HAS_FPU, but its threads
+	# are host threads and the host OS preserves FP state, so there is nothing here
+	# to fix and nothing to pay for.
+	select FPU if CPU_HAS_FPU && !ARCH_POSIX
+	select FPU_SHARING if CPU_HAS_FPU && !ARCH_POSIX
 	help
 	  Enable the Meshtastic mesh radio stack.
 
