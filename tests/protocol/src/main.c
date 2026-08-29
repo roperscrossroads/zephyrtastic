@@ -3724,6 +3724,95 @@ ZTEST(protocol_stack, test_clock_rejects_out_of_range_epoch)
 		       "pre-floor epoch must be rejected, clock unchanged");
 }
 
+/*
+ * The seqlock's one NEW failure mode, made deterministic.
+ *
+ * The anchor is a tuple now — (epoch_ms, anchor_uptime_ms) — so readers cannot
+ * simply take whatever is in memory: a new epoch paired with a stale anchor
+ * uptime is wrong by the whole size of the step, and can read BACKWARDS. Hence
+ * a seqlock. But a seqlock's reader retries, and this reader runs in ISR
+ * context (meshtastic_log_timestamp(), and the scanner's resolver off the LoRa
+ * RX callback), where an unbounded retry is a hang.
+ *
+ * So the retry is bounded and gives up into "unseeded". That fallback is the
+ * only code path the seqlock adds, and a race test could not reach it
+ * reliably — the tear window is two stores wide with interrupts masked. The
+ * test seam pins the sequence odd instead, which is exactly the state a reader
+ * must survive, and asserts it survives it by RETURNING rather than by spinning.
+ * If this test hangs, it has failed in the way that matters.
+ */
+ZTEST(protocol_stack, test_clock_reader_gives_up_rather_than_spins)
+{
+	const uint32_t epoch = 1800000000U;
+
+	meshtastic_clock_test_reset();
+	meshtastic_clock_set_epoch(epoch, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_true(meshtastic_clock_valid(), "precondition: the clock is seeded");
+	zassert_within(meshtastic_clock_now_epoch(), epoch, 5U, "precondition: reads the seed");
+
+	/* Pin the anchor mid-write. Every reader must now report the pre-sync state. */
+	meshtastic_clock_test_hold_write(true);
+
+	zassert_false(meshtastic_clock_valid(),
+		      "a reader that cannot get a consistent anchor must report unseeded");
+	zassert_equal(meshtastic_clock_now_epoch(), 0U,
+		      "and must return 0 (unknown), not a half-updated time");
+	zassert_equal(meshtastic_clock_now_epoch_ms(), 0, "same for the ms form");
+	zassert_equal(meshtastic_clock_uptime_ms_to_epoch_ms(1000), 0, "same for the resolver");
+	zassert_equal(meshtastic_clock_uptime_to_epoch(1U), 0U, "same for the seconds resolver");
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_NONE,
+		      "quality is part of the same tuple, so it degrades with it");
+
+	/* Releasing the hold must restore the clock untouched: giving up is a read
+	 * failure, not a write, and must not have cost the node its time. */
+	meshtastic_clock_test_hold_write(false);
+
+	zassert_true(meshtastic_clock_valid(), "the anchor survives a reader giving up");
+	zassert_within(meshtastic_clock_now_epoch(), epoch, 5U, "and still reads the seed");
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_GPS,
+		      "including its quality");
+}
+
+/*
+ * The tuple representation must be value-neutral against the single-anchor form
+ * it replaced. epoch_ms + (now - anchor_uptime_ms) is the same integer as the
+ * old boot_epoch_ms + now; what changes is that the elapsed interval is now
+ * explicit, which is what rate correction will multiply. Pin that here so a
+ * later skew change has a fixed point to be measured against: with no skew
+ * applied, a resolved past uptime and the live clock must stay exactly one
+ * elapsed interval apart.
+ */
+ZTEST(protocol_stack, test_clock_resolver_tracks_the_anchor_interval)
+{
+	const uint32_t epoch = 1800000000U;
+	int64_t at_seed;
+	int64_t resolved;
+	int64_t later;
+
+	meshtastic_clock_test_reset();
+	at_seed = k_uptime_get();
+	meshtastic_clock_set_epoch(epoch, MESHTASTIC_CLOCK_QUALITY_GPS);
+
+	/* A past uptime resolves to a time BEFORE the seed by exactly that gap. */
+	resolved = meshtastic_clock_uptime_ms_to_epoch_ms(at_seed - 250);
+	zassert_within(resolved, (int64_t)epoch * 1000 - 250, 20,
+		       "an uptime 250 ms before the anchor must resolve 250 ms earlier");
+
+	k_msleep(100);
+	later = meshtastic_clock_now_epoch_ms();
+	zassert_true(later - resolved >= 300,
+		     "the live clock must advance with uptime past a resolved point; got %lld",
+		     later - resolved);
+
+	/* Re-dating is retroactive: a later, better anchor moves an OLD observation
+	 * with it. That is the property the scanner tap depends on, and it is why the
+	 * tap stores monotonic time and resolves at presentation. */
+	meshtastic_clock_set_epoch(epoch + 3600U, MESHTASTIC_CLOCK_QUALITY_GPS);
+	zassert_within(meshtastic_clock_uptime_ms_to_epoch_ms(at_seed - 250),
+		       (int64_t)(epoch + 3600U) * 1000 - 250 - 100, 40,
+		       "the same stored uptime must re-date against the NEW anchor");
+}
+
 /* --- T-A: source-quality ladder gates clock writes ------------------------ */
 
 /* A lower-trust time source (SNTP / phone set_time = NTP) must not overwrite the

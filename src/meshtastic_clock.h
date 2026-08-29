@@ -79,6 +79,18 @@ enum meshtastic_clock_quality meshtastic_clock_get_quality(void);
 #if defined(CONFIG_ZTEST)
 /* Test-only: return the clock to the never-set state. See the definition. */
 void meshtastic_clock_test_reset(void);
+
+/**
+ * Test-only: pin the anchor's seqlock into the "write in flight" state.
+ *
+ * There is no production path that can leave it there — a writer holds a
+ * spinlock (interrupts masked) and has no early return between the two sequence
+ * bumps — so this seam exists purely to reach the reader's bounded-retry
+ * fallback, which is the one code path the seqlock ADDS and therefore the one
+ * worth proving. Readers must then report an unseeded clock and return, rather
+ * than spin: an ISR reader that spun here would hang the node.
+ */
+void meshtastic_clock_test_hold_write(bool held);
 #endif
 
 /** True once a valid epoch has been seeded. */
@@ -99,5 +111,21 @@ int64_t meshtastic_clock_now_epoch_ms(void);
 
 /** Convert a k_uptime-relative second count to epoch seconds, 0 if unseeded. */
 uint32_t meshtastic_clock_uptime_to_epoch(uint32_t uptime_sec);
+
+/**
+ * @brief Millisecond form: convert a k_uptime-relative ms count to epoch ms.
+ *
+ * The resolver for anything that STORES monotonic time and wants to present it
+ * as civil time later — the scanner tap being the first such consumer. Doing the
+ * conversion at presentation time rather than at capture time is what lets a
+ * clock seeded LATE re-date observations already taken, which the absolute-stamp
+ * arrangement could not: its zeros were burned in.
+ *
+ * @param uptime_ms A k_uptime_get() value, past or present.
+ * @return Epoch milliseconds, or 0 if the clock has never been seeded. Note 0 is
+ *         "unknown", not "1970" — callers should print it as such rather than
+ *         rendering a date nobody meant.
+ */
+int64_t meshtastic_clock_uptime_ms_to_epoch_ms(int64_t uptime_ms);
 
 #endif /* MESHTASTIC_CLOCK_H_ */
