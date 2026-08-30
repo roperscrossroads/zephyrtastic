@@ -63,6 +63,43 @@ config MESHTASTIC_DFU_BOOT_GUARD
 	  park itself in DFU until someone plugs a cable in. (The nRF WDT
 	  cannot be stopped once started, so the feeder never quits.)
 
+config MESHTASTIC_DFU_BOOT_GUARD_REQUIRED
+	bool "Fail the build if the boot guard is silently lost"
+	depends on MESHTASTIC_DFU_TRIGGER
+	default n
+	help
+	  Set this on any board whose ONLY hands-free recovery from a boot hang
+	  is MESHTASTIC_DFU_BOOT_GUARD -- i.e. a board with no reset button,
+	  where losing the guard means tweezers on an RST pad.
+
+	  It exists because the guard can be taken away silently. The guard arms
+	  the nRF hardware watchdog directly and therefore carries
+	  `depends on !WATCHDOG`; MESHTASTIC_WATCHDOG *selects* WATCHDOG. So
+	  enabling the task watchdog on such a board -- the obvious thing to do
+	  when making diagnostics uniform across the fleet -- drops
+	  MESHTASTIC_DFU_BOOT_GUARD to n with no error, no warning and a
+	  perfectly good build. The board keeps booting, and has quietly lost
+	  the only way to recover it without hands on the pads. Nobody finds out
+	  until a board is already unreachable.
+
+	  With this set, that config fails the build and says why.
+
+	  The other software DFU entry paths remain, and are worth knowing
+	  because they cover different failures:
+
+	    MESHTASTIC_DFU_TOUCH      host opens the CDC at 1200 baud. Needs a
+	                              running app and a cable.
+	    `meshtastic dfu` (shell)  needs a running shell -- but that shell is
+	                              reachable REMOTELY over BLE wherever
+	                              MCUMGR_GRP_SHELL is enabled, so this works
+	                              on a node you cannot physically reach.
+	    MESHTASTIC_DFU_ON_FATAL   a crash lands in the bootloader. Covers
+	                              faults, not hangs, and defeats
+	                              revert-on-bad-boot, so it is bring-up only.
+	    MESHTASTIC_DFU_BOOT_GUARD a HANG lands in the bootloader. The only
+	                              one that covers a board too wedged to run
+	                              any of the above.
+
 config MESHTASTIC_DFU_BOOT_GUARD_TIMEOUT_S
 	int "Boot-guard watchdog timeout (seconds)"
 	depends on MESHTASTIC_DFU_BOOT_GUARD

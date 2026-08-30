@@ -34,6 +34,31 @@
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
+/*
+ * The boot guard can be taken away silently, and this is the tripwire.
+ *
+ * MESHTASTIC_DFU_BOOT_GUARD arms the nRF hardware watchdog itself, so it carries
+ * `depends on !WATCHDOG` -- and MESHTASTIC_WATCHDOG *selects* WATCHDOG. Enabling
+ * the task watchdog on a board that depends on the guard therefore drops the
+ * guard to n with no error, no warning, and a build that works fine. The board
+ * boots, behaves, and has quietly lost the only recovery that does not need
+ * tweezers on an RST pad. That is exactly the change someone makes while
+ * making diagnostics uniform across a fleet.
+ *
+ * A board declares MESHTASTIC_DFU_BOOT_GUARD_REQUIRED to say "this one has no
+ * other hands-free way back", and this turns the silent loss into a build
+ * failure that names the cause.
+ */
+#if defined(CONFIG_MESHTASTIC_DFU_BOOT_GUARD_REQUIRED)
+BUILD_ASSERT(IS_ENABLED(CONFIG_MESHTASTIC_DFU_BOOT_GUARD),
+	     "This board requires MESHTASTIC_DFU_BOOT_GUARD and it is disabled. "
+	     "Almost certainly something enabled WATCHDOG (MESHTASTIC_WATCHDOG selects it), "
+	     "and the guard's `depends on !WATCHDOG` silently dropped it. "
+	     "The guard is this board's only hands-free recovery from a boot hang: "
+	     "keep WATCHDOG off here, or clear MESHTASTIC_DFU_BOOT_GUARD_REQUIRED "
+	     "deliberately and accept reset-pad recovery.");
+#endif
+
 #define DFU_MAGIC_UF2_RESET         0x57U
 #define DFU_MAGIC_SERIAL_ONLY_RESET 0x4EU
 
