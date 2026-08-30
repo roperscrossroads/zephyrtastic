@@ -114,3 +114,11 @@ tests:
   meshtastic.variants.no_clock_skew.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_CLOCK_SKEW=n
+
+  # MESHTASTIC_SHELL_CRASHTEST is default-N, so unlike its neighbours above the
+  # untested arm is =y -- and it is untested twice over, because the app build
+  # carries no -Werror while twister does. It compiles a deliberately infinite
+  # recursion, which is precisely the shape a compiler likes to warn about.
+  meshtastic.variants.shell_crashtest.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SHELL_CRASHTEST=y

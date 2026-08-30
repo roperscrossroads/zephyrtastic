@@ -71,3 +71,32 @@ config MESHTASTIC_SHELL_PSK_HEX
 	  "channel list" only ever prints the summary.
 
 endif # MESHTASTIC_SHELL
+
+config MESHTASTIC_SHELL_CRASHTEST
+	bool "Shell command that deliberately crashes the node"
+	default n
+	help
+	  Adds "meshtastic crashtest <kind>", which faults on purpose.
+
+	  This exists because a crash-capture pipeline is otherwise only ever
+	  exercised by the bug it was built to catch, and therefore is first
+	  discovered to be broken at the exact moment it was needed. That is not
+	  hypothetical here: the coredump path shipped for months writing to a
+	  backend too slow to finish before the watchdog reset the node, so every
+	  dump it produced was truncated to the first quarter of RAM. Thousands of
+	  #CD: lines scrolled past and none of them were usable, and nobody knew,
+	  because nobody had ever crashed a node on purpose and read one back.
+
+	  With this, the whole chain -- fault, dump written, reset survived, dump
+	  read back, parsed, symbolised -- is provable in a couple of minutes on a
+	  bench node, against the image that is actually about to be deployed.
+
+	  Kinds:
+	    panic  k_panic() from thread context. The simplest fatal path.
+	    stack  unbounded recursion until the stack guard fires. Reproduces the
+	           SHAPE of agents-quo6 (a stack overflow) rather than a generic
+	           fault, so the dump can be checked for the thing that actually
+	           needs reading.
+
+	  DEFAULT n, and it should stay that way for anything on a mast. Turn it on
+	  for diagnostic builds, alongside the flash coredump backend.

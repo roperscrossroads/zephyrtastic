@@ -451,6 +451,74 @@ static int cmd_owner(const struct shell *sh, size_t argc, char **argv)
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 }
 
+#if defined(CONFIG_MESHTASTIC_SHELL_CRASHTEST)
+/*
+ * Deliberately fault, so the crash-capture pipeline can be proven on demand
+ * rather than discovered broken by the bug it was meant to catch. See
+ * CONFIG_MESHTASTIC_SHELL_CRASHTEST for why this exists.
+ */
+
+static volatile uint32_t crashtest_sink;
+
+/*
+ * Recurse for real, until the stack runs out.
+ *
+ * The obvious version of this does not work, and failed silently on the bench
+ * before this comment existed: marking the locals `volatile` and using the
+ * result is NOT enough, because the compiler can still see that the recursion
+ * is self-contained and turn the whole thing into a LOOP. A loop never grows
+ * the stack, so instead of overflowing, the node simply spins in this thread
+ * forever -- the console stops accepting input while everything else keeps
+ * running, which looks nothing like the fault being reproduced. The
+ * disassembly gave it away: no `entry` instruction, no call, just a branch.
+ *
+ * So the recursive call goes through a VOLATILE function pointer. The compiler
+ * must reload it every iteration and cannot prove what it points at, so it can
+ * neither inline the call nor convert it to a loop, and each level gets a real
+ * stack frame. `pad` is written and read so the frame cannot be elided either.
+ */
+static uint32_t crashtest_recurse(uint32_t depth);
+static uint32_t (*volatile crashtest_indirect)(uint32_t) = crashtest_recurse;
+
+__attribute__((noinline)) static uint32_t crashtest_recurse(uint32_t depth)
+{
+	volatile uint32_t pad[16];
+
+	pad[depth % ARRAY_SIZE(pad)] = depth;
+	crashtest_sink = pad[depth % ARRAY_SIZE(pad)];
+
+	return pad[0] + crashtest_indirect(depth + 1);
+}
+
+static int cmd_crashtest(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc != 2U) {
+		shell_error(sh, "usage: meshtastic crashtest <panic|stack>");
+		return -EINVAL;
+	}
+
+	if (strcmp(argv[1], "panic") == 0) {
+		shell_print(sh, "crashtest: panicking on purpose");
+		/* Let the line reach the console before the node stops running. */
+		k_sleep(K_MSEC(200));
+		k_panic();
+	} else if (strcmp(argv[1], "stack") == 0) {
+		shell_print(sh, "crashtest: overflowing this thread's stack on purpose");
+		k_sleep(K_MSEC(200));
+		crashtest_sink = crashtest_recurse(0);
+	} else {
+		shell_error(sh, "unknown kind '%s' (want panic or stack)", argv[1]);
+		return -EINVAL;
+	}
+
+	/* Unreachable: both paths above are fatal. If control ever arrives here the
+	 * fatal path did NOT fire, which is itself the finding -- say so rather
+	 * than returning success. */
+	shell_error(sh, "crashtest: still running — the fatal path did not fire");
+	return -EIO;
+}
+#endif /* CONFIG_MESHTASTIC_SHELL_CRASHTEST */
+
 static int cmd_time(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc == 1U) {
@@ -4933,6 +5001,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  SHELL_HELP("Show or set this node's owner names.",
 			     "[set <long> [short]]"),
 		  cmd_owner),
+#if defined(CONFIG_MESHTASTIC_SHELL_CRASHTEST)
+	SHELL_CMD(crashtest, NULL,
+		  SHELL_HELP("Crash on purpose, to prove the coredump pipeline works "
+			     "before a real fault needs it.", "<panic|stack>"),
+		  cmd_crashtest),
+#endif
 #if defined(CONFIG_NETWORKING)
 	SHELL_CMD(netpause, NULL,
 		  SHELL_HELP("Take the network down for N seconds, then restore it. "
