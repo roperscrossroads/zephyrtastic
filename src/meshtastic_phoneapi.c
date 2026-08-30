@@ -298,6 +298,14 @@ int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 					  const meshtastic_FromRadio *from)
 {
 	struct meshtastic_phoneapi_frame frame;
+	/* Did THIS call have to evict a protected frame? The saturation latch
+	 * below keys off this, not off whether the enqueue succeeded -- after
+	 * queue_drop_oldest() it always succeeds, so keying off success made the
+	 * latch flap set/clear on every single packet and emit TWO warnings where
+	 * the unlatched version emitted one. Caught on hardware 2026-08-30: the
+	 * resulting storm starved the system workqueue until its watchdog channel
+	 * timed out, rebooting the node every 90-210 s. */
+	bool dropped_protected = false;
 	uint8_t rank = fromradio_evict_rank(from);
 	/* Capture the single eviction policy field once so it stays stable for the
 	 * whole decision below (a shell writer could otherwise flip it mid-way). */
@@ -349,15 +357,45 @@ int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 					api->name, (unsigned int)victim_rank, (unsigned int)rank);
 				return 0;
 			} else {
-				/* Saturated with protected frames — last resort. */
+				/* Saturated with protected frames — last resort.
+				 *
+				 * EDGE-TRIGGERED, and that matters. With no phone attached
+				 * the queue fills with protected frames and STAYS full, so
+				 * this branch is not an event, it is the steady state --
+				 * and a node that never sees a phone is the normal case on
+				 * this fleet. Logged unconditionally it fired 4619 times in
+				 * a five-hour run, 19 %% of all output, and it poisons any
+				 * "hold the ring to WRN+" filter because it IS a WRN.
+				 *
+				 * Nothing is lost by going quiet: queue_drop_oldest()
+				 * already counts every drop via
+				 * meshtastic_sched_stat_phone_drop(), so the volume stays
+				 * visible in `stats`, which is where a rate belongs. What a
+				 * log is good for is the transition. */
 				queue_drop_oldest(api);
-				LOG_WRN("%s queue full of protected frames, dropping oldest",
-					api->name);
+				dropped_protected = true;
+				if (!api->saturated) {
+					api->saturated = true;
+					LOG_WRN("%s queue saturated with protected "
+						"frames; further drops are counted, "
+						"not logged (see `stats`)",
+						api->name);
+				}
 			}
 		} else {
 			queue_drop_oldest(api);
 			LOG_WRN("%s FromRadio queue full, dropping oldest frame", api->name);
 		}
+	}
+
+	if (api->saturated && !dropped_protected) {
+		/* Recovery edge: an enqueue finally got through WITHOUT evicting
+		 * anything protected, so the condition really has cleared and the
+		 * next saturation is a fresh event. Gated on dropped_protected
+		 * rather than on reaching this line, because reaching this line is
+		 * not evidence of anything -- the drop path arrives here too. */
+		api->saturated = false;
+		LOG_WRN("%s queue no longer saturated", api->name);
 	}
 
 	api->queue[api->head] = frame;

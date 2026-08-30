@@ -86,6 +86,11 @@ struct meshtastic_phoneapi {
 	uint8_t head;
 	uint8_t tail;
 	uint8_t count;
+	/* True while the queue is full of frames too valuable to evict. Exists
+	 * so the drop is reported on its EDGES rather than on every occurrence:
+	 * with no phone attached this condition is the steady state, not an
+	 * event, and logging it per-drop was 19 %% of all log output. */
+	bool saturated;
 	bool current_valid;
 	uint32_t from_num;
 	enum meshtastic_phoneapi_config_state config_state;
