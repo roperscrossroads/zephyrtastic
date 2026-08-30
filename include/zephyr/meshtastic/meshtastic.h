@@ -118,6 +118,16 @@ enum meshtastic_portnum {
 	MESHTASTIC_PORT_TRACEROUTE = 70,
 	/** Private / application-defined. */
 	MESHTASTIC_PORT_PRIVATE = 256,
+	/**
+	 * Supervisor health alert (raw UTF-8 text, this port's only consumer).
+	 * Phone-local only, via meshtastic_phoneapi_on_packet() -- never sent to
+	 * meshtastic_send_data() or the radio, so it is not subject to
+	 * meshtastic_sched_tier_for() airtime gating and carries no wire-format
+	 * compatibility burden. 258 is reserved for the future mesh-facing health
+	 * channel (a bounded, allowlisted struct, not free text); this is
+	 * deliberately a different port so the two are never confused.
+	 */
+	MESHTASTIC_PORT_SUPERVISOR_ALERT = 259,
 };
 
 /** Meshtastic stack event type. */

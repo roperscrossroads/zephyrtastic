@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_SUPERVISOR
+	bool "Health supervisor: watch headroom shrink, don't wait for a fault"
+	default y
+	depends on THREAD_ANALYZER
+	select STATS
+	help
+	  Phase 3 of the diagnostics-baseline plan. thread_analyzer_run() and
+	  the system heap already carry the numbers that flag trouble coming --
+	  stack%, per-thread CPU%, free heap -- but nothing thresholds them or
+	  acts on them; meshtastic_thread_summary.c only prints them on a timer.
+	  This is the real mitigation for a fault class this project has
+	  actually hit on hardware: ESP32-S3 has no MPU stack guard, so a fast
+	  deep recursion can smash the sentinel and wedge the system before any
+	  detection fires (`meshtastic crashtest stack` reproduces it -- bare
+	  WATCHDOG reset, no fatal, no coredump, nothing in the log ring). A
+	  supervisor that watches headroom SHRINK catches that class before the
+	  overflow, instead of waiting for a detection that may never come.
+
+	  Own low-priority thread, modelled on meshtastic_thread_summary.c.
+	  Escalates on a state TRANSITION only (OK -> WARN, WARN -> OK), never
+	  every sample -- the same discipline as the cluster's push-on-change,
+	  and the reason a periodic sampler does not become a periodic
+	  transmitter. Each rung of the ladder below is independent of the
+	  ones above it, so losing one does not silently lose the rest:
+
+	    1. STATS counter (`stats list`, group "mt_supervisor") -- costs
+	       nothing, survives with no console and no phone attached.
+	    2. LOG_WRN on its own module -- carried by the console AND the RTC
+	       log ring, so a transition is in `logring prev` after a reset
+	       even if nobody was watching live.
+	    3. The phone, if attached, over PhoneAPI (MESHTASTIC_PORT_SUPERVISOR_ALERT)
+	       -- zero airtime, and independent of MESHTASTIC_PHONELOG's runtime
+	       verbosity knob, which an operator could otherwise turn down and
+	       silently lose this too.
+	    4. The mesh, bounded and opt-in -- Phase 4, not built yet.
+
+	  The supervisor thread never feeds the watchdog. Its own liveness is
+	  not evidence of anything else's -- that is meshtastic_watchdog.c's
+	  sysworkq heartbeat's job, unaffected by this.
+
+if MESHTASTIC_SUPERVISOR
+
+config MESHTASTIC_SUPERVISOR_INTERVAL
+	int "Sample interval (seconds)"
+	default 30
+	help
+	  Deliberately shorter than MESHTASTIC_THREAD_SUMMARY_INTERVAL's 300 s
+	  default: that thread reports steady state on a timer, this one exists
+	  to catch a trend building INSIDE one of its intervals.
+
+config MESHTASTIC_SUPERVISOR_STACK_SIZE
+	int "Stack size for the supervisor thread"
+	default 2048
+	help
+	  Matches meshtastic_thread_summary.c's stack size -- same job (walk
+	  and format every other thread's info via thread_analyzer_run()),
+	  same margin needed.
+
+config MESHTASTIC_SUPERVISOR_STACK_WARN_PCT
+	int "Per-thread stack-used percent that trips a WARN"
+	default 85
+	range 50 99
+	help
+	  Any thread's stack_used/stack_size crossing this is the early-warning
+	  signal for the overflow class described above -- the sentinel itself
+	  is checked only at context switch and can be smashed past before it
+	  ever fires, so this is the only chance to catch it ahead of time.
+
+config MESHTASTIC_SUPERVISOR_CPU_WARN_PCT
+	int "Per-thread CPU utilization percent that trips a WARN"
+	default 80
+	range 10 100
+	depends on THREAD_RUNTIME_STATS
+	help
+	  A single non-idle thread pinned above this for
+	  MESHTASTIC_SUPERVISOR_CPU_WARN_CYCLES consecutive samples signals a
+	  runaway or starved thread. Silently a no-op (never fires) when
+	  THREAD_RUNTIME_STATS is off, same as meshtastic_thread_summary.c's
+	  cpu% column reading "--" instead of a real number.
+
+config MESHTASTIC_SUPERVISOR_CPU_WARN_CYCLES
+	int "Consecutive over-threshold samples before a CPU WARN fires"
+	default 3
+	depends on THREAD_RUNTIME_STATS
+	help
+	  Debounces a legitimate short burst (a TX, a crypto op) from a genuine
+	  stuck thread. At the default interval this is 90 s of sustained load
+	  before it escalates.
+
+config MESHTASTIC_SUPERVISOR_TO_PHONE
+	bool "Escalate a WARN/recovery transition to the phone, zero airtime"
+	default y
+	depends on MESHTASTIC_PHONEAPI
+	help
+	  Rung 3 of the ladder -- see the parent help text. Sends
+	  MESHTASTIC_PORT_SUPERVISOR_ALERT via meshtastic_phoneapi_on_packet(),
+	  the same local-only fan-out meshtastic_send_local_stats_to_phone()
+	  uses. Turning this off still leaves rungs 1 (STATS) and 2 (log ring)
+	  intact.
+
+config MESHTASTIC_SUPERVISOR_HEAP_MIN_BYTES
+	int "Free system-heap bytes below which a WARN fires"
+	default 4096
+	help
+	  Same _system_heap meshtastic_watchdog.c's heartbeat already logs
+	  free/allocated/max_allocated for every interval -- this just puts a
+	  floor under the free number instead of only ever reporting it.
+
+endif # MESHTASTIC_SUPERVISOR
