@@ -119,6 +119,15 @@ enum meshtastic_portnum {
 	/** Private / application-defined. */
 	MESHTASTIC_PORT_PRIVATE = 256,
 	/**
+	 * Mesh-facing health/crash-loop announcement -- a small fixed struct
+	 * (boot number, reset-cause bits, MESHTASTIC_BOOT_F_* flags, previous
+	 * uptime, which crash breadcrumb fired), never free text or config
+	 * values. Resolved to a NAMED channel at send time (never the
+	 * primary), and MT_SCHED_TIER_BG-gated -- see
+	 * meshtastic_sched_tier_for() and Kconfig.health.
+	 */
+	MESHTASTIC_PORT_HEALTH = 258,
+	/**
 	 * Supervisor health alert (raw UTF-8 text, this port's only consumer).
 	 * Phone-local only, via meshtastic_phoneapi_on_packet() -- never sent to
 	 * meshtastic_send_data() or the radio, so it is not subject to

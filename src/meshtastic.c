@@ -41,6 +41,7 @@
 #include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
 #include "meshtastic_sched.h"
+#include "meshtastic_health.h"
 #include "meshtastic_heap_trace.h"
 #include "meshtastic_watchdog.h"
 
@@ -699,6 +700,12 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	 * image was built with MESHTASTIC_SCANNER_AUTOSTART. */
 	meshtastic_scanner_autostart();
 #endif
+
+	/* After everything above: needs the radio and the channel table both
+	 * up (it resolves a channel by name and sends over the same path any
+	 * other originated traffic uses). No-op unless this boot has a
+	 * pending crash breadcrumb — see meshtastic_health.h. */
+	meshtastic_health_init();
 
 	return 0;
 }

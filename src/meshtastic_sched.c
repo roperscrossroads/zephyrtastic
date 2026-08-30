@@ -109,6 +109,12 @@ uint8_t meshtastic_sched_tier_for(uint32_t portnum)
 	case MESHTASTIC_PORT_POSITION:
 	case MESHTASTIC_PORT_NODEINFO:
 	case MESHTASTIC_PORT_TELEMETRY:
+	case MESHTASTIC_PORT_HEALTH:
+		/* MESHTASTIC_PORT_HEALTH must land here, not the NORMAL default: an
+		 * unmapped port is exempt from the airtime gate entirely (see
+		 * send_wire_tail()'s BG + K_NO_WAIT + broadcast check in
+		 * meshtastic.c), and a boot-loop announcement escaping that gate
+		 * defeats its own crash-loop guard. */
 		return MT_SCHED_TIER_BG;
 	default:
 		/* Text and everything else default to NORMAL; relays are tiered

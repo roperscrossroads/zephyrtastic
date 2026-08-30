@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_HEALTH_REPORT
+	bool "Announce an abnormal boot to a named health channel"
+	default n
+	depends on MESHTASTIC_BOOTLOG
+	help
+	  Phase 4 of the diagnostics-baseline plan: rung 4 of
+	  Kconfig.supervisor's escalation ladder, the only rung that costs
+	  airtime. On a boot with a pending crash breadcrumb (watchdog channel
+	  timeout, hw-watchdog stage-0, or fatal error -- see
+	  zephyr/meshtastic/diagnostics.h), broadcasts a small fixed struct
+	  (boot number, reset-cause bits, MESHTASTIC_BOOT_F_* flags, previous
+	  uptime, which breadcrumb fired) on MESHTASTIC_PORT_HEALTH -- boot
+	  number and cause bits ONLY, never thread names, free text, or config
+	  values. OBSERVABILITY-AND-COURIER.md §6 is explicit that a free-form
+	  event channel is a way past the secret boundary the cluster
+	  enforces; this stays a closed allowlist on purpose.
+
+	  Resolved BY NAME at send time, never cached, exactly like
+	  meshtastic_cluster.c's channel binding: if no channel named
+	  MESHTASTIC_HEALTH_CHANNEL_NAME is provisioned, this idles with no
+	  primary fallback, ever. That makes the feature structurally unable
+	  to leak onto the public mesh, which the standing rule calls
+	  read-only territory. Default n; the fleet overlay turns it on, and
+	  even then it stays inert until a "health" channel actually exists.
+
+	  Crash-loop guard, from meshtastic_bootlog.c's already-retained
+	  history (nothing new stored): the 1st abnormal boot in a run
+	  announces after MESHTASTIC_HEALTH_ANNOUNCE_DELAY_1ST_S; a 2nd
+	  consecutive short-lived boot waits
+	  MESHTASTIC_HEALTH_ANNOUNCE_DELAY_2ND_S; a 3rd and beyond stays
+	  SILENT and only counts in `stats list` (group mt_health) -- a node
+	  stuck in a boot loop therefore produces LESS traffic over time, not
+	  more, the same shape as the courier's re-arm health window
+	  (DECLARATIVE-FLEET.md §18.3, "so a boot loop cannot become a push
+	  loop").
+
+if MESHTASTIC_HEALTH_REPORT
+
+config MESHTASTIC_HEALTH_CHANNEL_NAME
+	string "Health channel name"
+	default "health"
+	help
+	  Case-sensitive exact match against a provisioned, non-disabled
+	  channel's name, checked fresh on every announce -- see the parent
+	  help text for why this is never cached.
+
+config MESHTASTIC_HEALTH_SHORT_UPTIME_S
+	int "Previous-run length (seconds) below which a boot counts as a loop"
+	default 120
+	help
+	  Read against meshtastic_boot_record.prev_uptime_s in the retained
+	  history. A prev_uptime_s of 0 (unknown) is treated as NOT part of a
+	  loop -- ambiguous data does not extend the streak either way.
+
+config MESHTASTIC_HEALTH_ANNOUNCE_DELAY_1ST_S
+	int "Delay before the 1st abnormal-boot announcement (seconds)"
+	default 30
+	help
+	  Startup delay so the announcement does not race radio bring-up --
+	  the send goes out over meshtastic_send_packet() like any other
+	  originated traffic, which needs the stack fully initialized.
+
+config MESHTASTIC_HEALTH_ANNOUNCE_DELAY_2ND_S
+	int "Delay before a 2nd consecutive short-lived boot's announcement (seconds)"
+	default 300
+	help
+	  Longer than the 1st-boot delay on purpose: escalating backoff is
+	  the crash-loop guard itself, not just a courtesy delay.
+
+endif # MESHTASTIC_HEALTH_REPORT
