@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -662,9 +663,26 @@ int meshtastic_config_store_seed(const struct meshtastic_config *cfg)
 
 	copy_string(store.long_name, sizeof(store.long_name),
 		    (cfg->long_name != NULL) ? cfg->long_name : CONFIG_MESHTASTIC_NODE_LONG_NAME);
-	copy_string(store.short_name, sizeof(store.short_name),
-		    (cfg->short_name != NULL) ? cfg->short_name
-					      : CONFIG_MESHTASTIC_NODE_SHORT_NAME);
+	if (cfg->short_name != NULL) {
+		copy_string(store.short_name, sizeof(store.short_name), cfg->short_name);
+	} else {
+		/* zephyr/meshtastic/meshtastic.h documents short_name as "derived
+		 * from the node ID where needed" when unset -- but this used to
+		 * copy the fixed CONFIG_MESHTASTIC_NODE_SHORT_NAME string ("ZEPH")
+		 * instead, so every never-configured node had the IDENTICAL short
+		 * name everywhere it surfaces: the BLE advert, NodeInfo, the phone
+		 * app's node list. That's the exact collision class
+		 * meshtastic_ble_name.c's own node-id fallback exists to prevent
+		 * (agents-xhli.15) -- except this placeholder reached that
+		 * fallback's call site as a non-NULL, non-empty string and always
+		 * won, so the fallback never ran. Four hex digits of the node ID,
+		 * matching upstream's own default (NodeDB.cpp: "%04x",
+		 * getNodeNum() & 0xffff) and this field's width
+		 * (OWNER_SHORT_NAME_LEN == 5, i.e. 4 chars + NUL).
+		 */
+		(void)snprintf(store.short_name, sizeof(store.short_name), "%04x",
+			       (unsigned int)(mt.node_id & 0xffffU));
+	}
 
 	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		const meshtastic_Channel *channel = meshtastic_channels_get(i);

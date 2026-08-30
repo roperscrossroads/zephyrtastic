@@ -267,7 +267,14 @@ config MESHTASTIC_NODE_SHORT_NAME
 	string "Default node short name"
 	default "ZEPH"
 	help
-	  Short node name used when meshtastic_config.short_name is NULL.
+	  Transient value held between meshtastic_init() and
+	  meshtastic_config_store_apply_core(), a few lines later in the same
+	  call — meshtastic_config_store_seed() immediately overrides it with
+	  four hex digits of the node ID (e.g. "ce41") when
+	  meshtastic_config.short_name is NULL, per that field's documented
+	  contract. NOT what an unconfigured node actually ends up advertising;
+	  a fixed value here would collide across every such node (BLE advert,
+	  NodeInfo, the phone app's node list).
 
 choice MESHTASTIC_NODE_ID_SOURCE
 	prompt "Node ID source"

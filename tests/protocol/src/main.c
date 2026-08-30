@@ -496,6 +496,25 @@ static void inject_rx_frame(const uint8_t *wire, uint32_t wire_len, int16_t rssi
 }
 
 
+/* An unconfigured short name must be derived from the node ID, per
+ * zephyr/meshtastic/meshtastic.h's documented contract for
+ * meshtastic_config.short_name — NOT the fixed CONFIG_MESHTASTIC_NODE_SHORT_NAME
+ * placeholder ("ZEPH"), which collided across every never-configured node
+ * everywhere the short name surfaces (BLE advert, NodeInfo, the phone app's
+ * node list, and the on-device "<short> H<hop>" home screen row). Suite setup
+ * initializes with cfg.short_name unset, so this is exactly that case.
+ */
+ZTEST(protocol_stack, test_default_short_name_is_derived_from_node_id)
+{
+	const char *sn = meshtastic_short_name();
+
+	zassert_str_equal(sn, "5678", "expected 4 hex digits of TEST_NODE_ID (0x%08x), got \"%s\"",
+			   TEST_NODE_ID, sn);
+	zassert_true(strcmp(sn, "ZEPH") != 0,
+		     "must not be the fixed placeholder — that is the exact collision this "
+		     "guards against");
+}
+
 /* Every packet we originate must carry Data.bitfield, with bit 0 reflecting
  * config.lora.config_ok_to_mqtt (parity: mqtt #1, our half of the consent).
  *
