@@ -991,7 +991,8 @@ ZTEST(mesh_sim, test_preset_hop_refuses_without_a_clock)
 	meshtastic_clock_test_reset();
 	hop_seeded_the_clock = false;
 	if (had_clock) {
-		meshtastic_clock_set_epoch_ms(saved_ms, saved_quality);
+		meshtastic_clock_set_epoch_ms(saved_ms, saved_quality,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	}
 	zassert_ok(meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
 					    NULL), "restore failed");
@@ -2290,7 +2291,8 @@ static void cluster_channel(bool on)
 		 * one this node has no opinion about when anything happened
 		 * (D12) and every stamp is accepted, which would make the
 		 * horizon tests vacuous. */
-		meshtastic_clock_set_epoch_ms(TEST_EPOCH_MS, MESHTASTIC_CLOCK_QUALITY_NTP);
+		meshtastic_clock_set_epoch_ms(TEST_EPOCH_MS, MESHTASTIC_CLOCK_QUALITY_NTP,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	}
 }
 

@@ -219,8 +219,8 @@ static bool skew_estimate(int64_t d_ref_ms, int64_t d_local_ms, int32_t *out_ppb
  *         window, being refused, or closing a window still too short).
  */
 static bool skew_feed(int64_t epoch_ms, int64_t uptime_ms,
-		      enum meshtastic_clock_quality quality, bool rate_reference,
-		      struct clock_anchor *next)
+		      enum meshtastic_clock_quality quality,
+		      enum meshtastic_clock_precision precision, struct clock_anchor *next)
 {
 	int32_t ppb;
 
@@ -235,23 +235,21 @@ static bool skew_feed(int64_t epoch_ms, int64_t uptime_ms,
 	}
 
 	/*
-	 * AND it must know the time to better than a whole second, which quality
-	 * alone does not say. `meshtastic time set <sec>` and the phone's admin
-	 * set_time_only are both NTP-class and both carry only whole seconds — the
-	 * protobuf field has no sub-second part and a human typing at a console has
-	 * no sub-second intent. Such a source is +/-1 s, which over a ten-hour
-	 * window estimates to 28 ppm: comfortably inside the plausibility bound,
-	 * and fourteen times larger than the 2 ppm error it would be correcting.
-	 * A correction that big is worse than none.
+	 * AND it must know the INSTANT to better than a whole second, which is a
+	 * different property from trust and one quality cannot express. The phone's
+	 * admin set_time_only is NTP-class and the phone knows the time perfectly
+	 * well, but the protobuf field carries whole seconds, so what arrives is
+	 * +/-1 s; an operator typing at a console is the same. Over a ten-hour
+	 * window that reads as 28 ppm — inside the plausibility bound, and more than
+	 * ten times the error being corrected. A correction that large is worse
+	 * than none.
 	 *
-	 * The distinction is the ENTRY POINT rather than the quality, and it lands
-	 * exactly where it should because the API is already split that way: the
-	 * seconds-taking setter is not a rate reference, the millisecond ones are.
-	 * SNTP (+/-5 ms), a PPS-anchored fix (+/-23 us) and even the NMEA fallback
-	 * (+/-100 ms) all come through the millisecond forms; the console and the
-	 * phone do not.
+	 * The source states this rather than having it inferred. It used to be
+	 * inferred from which setter was called, which was true of every caller at
+	 * the time and would have silently stopped being true as soon as a
+	 * millisecond-resolution console command existed.
 	 */
-	if (!rate_reference) {
+	if (precision != MESHTASTIC_CLOCK_PRECISION_SUBSECOND) {
 		return false;
 	}
 
@@ -318,19 +316,20 @@ static bool clock_should_set(enum meshtastic_clock_quality quality, int64_t now_
 	return false;
 }
 
-void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quality quality)
+void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quality quality,
+				   enum meshtastic_clock_precision precision)
 {
 	/* "Now" is the ordinary assumption: the value became true when it arrived. */
-	meshtastic_clock_set_epoch_ms_at(epoch_ms, k_uptime_get(), quality);
+	meshtastic_clock_set_epoch_ms_at(epoch_ms, k_uptime_get(), quality, precision);
 }
 
 /**
- * The one implementation. @p rate_reference says whether this source is precise
- * enough to measure the oscillator with — see skew_feed(); it is false only for
- * the whole-second entry point.
+ * The one implementation. @p precision is the source's own claim about how
+ * tightly it pins the instant; skew_feed() decides what that is good for.
  */
 static void clock_set(int64_t epoch_ms, int64_t at_uptime_ms,
-		      enum meshtastic_clock_quality quality, bool rate_reference)
+		      enum meshtastic_clock_quality quality,
+		      enum meshtastic_clock_precision precision)
 {
 	struct clock_anchor next;
 	k_spinlock_key_t key;
@@ -338,7 +337,7 @@ static void clock_set(int64_t epoch_ms, int64_t at_uptime_ms,
 	int64_t now_ms;
 
 #if !defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
-	ARG_UNUSED(rate_reference);
+	ARG_UNUSED(precision);
 #endif
 
 	if (epoch_ms < 0) {
@@ -380,7 +379,7 @@ static void clock_set(int64_t epoch_ms, int64_t at_uptime_ms,
 		 * clock (see the skew note above). */
 		next.skew_ppb = anchor.skew_ppb;
 		next.skew_valid = anchor.skew_valid;
-		(void)skew_feed(epoch_ms, at_uptime_ms, quality, rate_reference, &next);
+		(void)skew_feed(epoch_ms, at_uptime_ms, quality, precision, &next);
 #endif
 		anchor_write(&next);
 	}
@@ -439,16 +438,18 @@ void meshtastic_clock_test_hold_write(bool held)
 #endif
 
 void meshtastic_clock_set_epoch_ms_at(int64_t epoch_ms, int64_t at_uptime_ms,
-				      enum meshtastic_clock_quality quality)
+				      enum meshtastic_clock_quality quality,
+				      enum meshtastic_clock_precision precision)
 {
-	clock_set(epoch_ms, at_uptime_ms, quality, true);
+	clock_set(epoch_ms, at_uptime_ms, quality, precision);
 }
 
 void meshtastic_clock_set_epoch(uint32_t epoch_now, enum meshtastic_clock_quality quality)
 {
-	/* Whole seconds, so NOT a rate reference however good its source: see the
-	 * second gate in skew_feed(). It still sets the clock exactly as before. */
-	clock_set((int64_t)epoch_now * 1000, k_uptime_get(), quality, false);
+	/* Whole seconds in, so a whole-second instant out, however good the clock
+	 * behind it. Sets the clock exactly as before; never disciplines the rate. */
+	clock_set((int64_t)epoch_now * 1000, k_uptime_get(), quality,
+		  MESHTASTIC_CLOCK_PRECISION_SECOND);
 }
 
 enum meshtastic_clock_quality meshtastic_clock_get_quality(void)
@@ -570,7 +571,7 @@ bool meshtastic_clock_test_skew_estimate(int64_t d_ref_ms, int64_t d_local_ms, i
 
 bool meshtastic_clock_test_skew_feed(int64_t epoch_ms, int64_t uptime_ms,
 				     enum meshtastic_clock_quality quality,
-				     bool rate_reference)
+				     enum meshtastic_clock_precision precision)
 {
 	struct clock_anchor next;
 	k_spinlock_key_t key = k_spin_lock(&anchor_write_lock);
@@ -580,7 +581,7 @@ bool meshtastic_clock_test_skew_feed(int64_t epoch_ms, int64_t uptime_ms,
 	 * synthetic (epoch, uptime) pair — because the real path anchors against
 	 * k_uptime_get() and the windows worth testing are hours long. */
 	next = anchor;
-	produced = skew_feed(epoch_ms, uptime_ms, quality, rate_reference, &next);
+	produced = skew_feed(epoch_ms, uptime_ms, quality, precision, &next);
 	anchor_write(&next);
 	k_spin_unlock(&anchor_write_lock, key);
 

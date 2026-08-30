@@ -216,9 +216,10 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 			 * rather than a wrong answer.
 			 */
 			if (meshtastic_gnss_pps_last_edge(&edge_uptime_ms, &edge_age_ms)) {
-				meshtastic_clock_set_epoch_ms_at(epoch * MSEC_PER_SEC,
-								 edge_uptime_ms,
-								 MESHTASTIC_CLOCK_QUALITY_GPS);
+				meshtastic_clock_set_epoch_ms_at(
+					epoch * MSEC_PER_SEC, edge_uptime_ms,
+					MESHTASTIC_CLOCK_QUALITY_GPS,
+					MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 				LOG_DBG("gnss: clock anchored on PPS edge %lld ms ago",
 					edge_age_ms);
 			} else {
@@ -233,7 +234,8 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 				meshtastic_clock_set_epoch_ms(
 					epoch * MSEC_PER_SEC +
 						CONFIG_MESHTASTIC_GNSS_FIX_LATENCY_MS,
-					MESHTASTIC_CLOCK_QUALITY_GPS);
+					MESHTASTIC_CLOCK_QUALITY_GPS,
+					MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 			}
 		}
 	}

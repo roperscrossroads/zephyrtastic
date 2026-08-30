@@ -3831,7 +3831,8 @@ ZTEST(protocol_stack, test_clock_anchors_at_a_past_instant)
 	/* "This epoch was true 500 ms ago" must read 500 ms LATER than the same
 	 * epoch anchored at now — the whole correction PPS exists to apply. */
 	at = k_uptime_get() - 500;
-	meshtastic_clock_set_epoch_ms_at((int64_t)epoch * 1000, at, MESHTASTIC_CLOCK_QUALITY_GPS);
+	meshtastic_clock_set_epoch_ms_at((int64_t)epoch * 1000, at, MESHTASTIC_CLOCK_QUALITY_GPS,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	now_ms = meshtastic_clock_now_epoch_ms();
 
 	zassert_within(now_ms, (int64_t)epoch * 1000 + 500, 50,
@@ -3847,7 +3848,8 @@ ZTEST(protocol_stack, test_clock_refuses_an_anchor_in_the_future)
 	meshtastic_clock_test_reset();
 
 	meshtastic_clock_set_epoch_ms_at((int64_t)epoch * 1000, k_uptime_get(),
-					 MESHTASTIC_CLOCK_QUALITY_GPS);
+					 MESHTASTIC_CLOCK_QUALITY_GPS,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	first = meshtastic_clock_now_epoch_ms();
 
 	/* A future anchor would mean "this was true at a time that has not happened",
@@ -3855,7 +3857,8 @@ ZTEST(protocol_stack, test_clock_refuses_an_anchor_in_the_future)
 	 * up — a clock running backwards, which is the one outcome the tuple
 	 * representation exists to prevent. It is clamped to now instead. */
 	meshtastic_clock_set_epoch_ms_at((int64_t)epoch * 1000, k_uptime_get() + 60000,
-					 MESHTASTIC_CLOCK_QUALITY_GPS);
+					 MESHTASTIC_CLOCK_QUALITY_GPS,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	second = meshtastic_clock_now_epoch_ms();
 
 	zassert_true(second >= first,
@@ -3940,16 +3943,18 @@ ZTEST(protocol_stack, test_clock_skew_ignores_untrusted_sources)
 	meshtastic_clock_test_reset();
 
 	/* Two NET syncs an ideal window apart must teach the estimator nothing. */
-	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_NET, true);
+	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_NET,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
-					      MESHTASTIC_CLOCK_QUALITY_NET, true);
+					      MESHTASTIC_CLOCK_QUALITY_NET, MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	zassert_false(meshtastic_clock_skew(NULL, NULL),
 		      "a peer-relayed time must not be used as a rate reference");
 
 	/* Same for a restored clock. */
-	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_DEVICE, true);
+	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_DEVICE,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
-					      MESHTASTIC_CLOCK_QUALITY_DEVICE, true);
+					      MESHTASTIC_CLOCK_QUALITY_DEVICE, MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	zassert_false(meshtastic_clock_skew(NULL, NULL),
 		      "a restored clock must not be used to measure itself");
 }
@@ -3958,8 +3963,8 @@ ZTEST(protocol_stack, test_clock_skew_ignores_untrusted_sources)
  * Quality is not enough on its own: `meshtastic time set` and the phone's admin
  * set_time_only are both NTP-class and both whole seconds. A +/-1 s source over
  * a ten-hour window estimates to 28 ppm — inside the plausibility bound, and
- * fourteen times the real 2 ppm error. So the estimator gates on the entry
- * point too, and this is that gate.
+ * fourteen times the real 2 ppm error. So the estimator gates on the source's
+ * declared PRECISION as well, and this is that gate.
  */
 ZTEST(protocol_stack, test_clock_skew_ignores_whole_second_sources)
 {
@@ -3968,23 +3973,25 @@ ZTEST(protocol_stack, test_clock_skew_ignores_whole_second_sources)
 
 	meshtastic_clock_test_reset();
 
-	/* GPS quality, ideal window — and still refused, because the value came in
-	 * through the seconds-taking setter. */
+	/* GPS quality, ideal window — and still refused, because the source itself
+	 * declares it only pins the instant to a second. */
 	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_GPS,
-					      false);
+					      MESHTASTIC_CLOCK_PRECISION_SECOND);
 	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
-					      MESHTASTIC_CLOCK_QUALITY_GPS, false);
+					      MESHTASTIC_CLOCK_QUALITY_GPS,
+					      MESHTASTIC_CLOCK_PRECISION_SECOND);
 	zassert_false(meshtastic_clock_skew(NULL, NULL),
 		      "a whole-second source must never discipline the rate");
 
-	/* The negative control: the identical pair through a millisecond entry
-	 * point IS accepted, so the test above is failing for the reason claimed
-	 * rather than because nothing works. */
+	/* The negative control: the identical pair declaring SUBSECOND IS accepted,
+	 * so the test above fails for the reason claimed rather than because
+	 * nothing estimates at all. */
 	meshtastic_clock_test_reset();
 	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_GPS,
-					      true);
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
-					      MESHTASTIC_CLOCK_QUALITY_GPS, true);
+					      MESHTASTIC_CLOCK_QUALITY_GPS,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	zassert_true(meshtastic_clock_skew(NULL, NULL),
 		     "the same window through a millisecond source must be accepted");
 }
@@ -4017,7 +4024,7 @@ ZTEST(protocol_stack, test_clock_seconds_setter_is_not_a_rate_reference)
 	 * and would otherwise show up as a rate. */
 	zassert_false(meshtastic_clock_test_skew_feed((int64_t)epoch * 1000 + 86400000LL,
 						      86400000LL, MESHTASTIC_CLOCK_QUALITY_GPS,
-						      true),
+						      MESHTASTIC_CLOCK_PRECISION_SUBSECOND),
 		      "a millisecond sync must find NO window open — the seconds setter "
 		      "must not have started one");
 	zassert_false(meshtastic_clock_skew(NULL, NULL),
@@ -4030,10 +4037,11 @@ ZTEST(protocol_stack, test_clock_seconds_setter_is_not_a_rate_reference)
 	 */
 	meshtastic_clock_test_reset();
 	(void)meshtastic_clock_test_skew_feed((int64_t)epoch * 1000, 0,
-					      MESHTASTIC_CLOCK_QUALITY_GPS, true);
+					      MESHTASTIC_CLOCK_QUALITY_GPS,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	zassert_true(meshtastic_clock_test_skew_feed((int64_t)epoch * 1000 + 86400000LL,
 						     86400000LL, MESHTASTIC_CLOCK_QUALITY_GPS,
-						     true),
+						     MESHTASTIC_CLOCK_PRECISION_SUBSECOND),
 		     "control: the same sync must close a window a millisecond source "
 		     "opened");
 }
@@ -4049,13 +4057,15 @@ ZTEST(protocol_stack, test_clock_skew_learns_from_two_trusted_syncs)
 	meshtastic_clock_test_reset();
 
 	zassert_false(meshtastic_clock_test_skew_feed(base_epoch, 0,
-						      MESHTASTIC_CLOCK_QUALITY_GPS, true),
+						      MESHTASTIC_CLOCK_QUALITY_GPS,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND),
 		      "the first sync opens the window, it cannot close one");
 	zassert_false(meshtastic_clock_skew(&ppb, &window_s), "so there is no estimate yet");
 	zassert_equal(window_s, 0U, "and no window has elapsed");
 
 	zassert_true(meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
-						     MESHTASTIC_CLOCK_QUALITY_GPS, true),
+						     MESHTASTIC_CLOCK_QUALITY_GPS,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND),
 		     "a second sync a long window later must produce an estimate");
 	zassert_true(meshtastic_clock_skew(&ppb, &window_s), "which must then be reported");
 	zassert_within(ppb, -5000, 20, "5 ppm fast over two hours; got %d ppb", ppb);
@@ -4074,11 +4084,14 @@ ZTEST(protocol_stack, test_clock_skew_keeps_a_long_baseline)
 
 	meshtastic_clock_test_reset();
 
-	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_GPS, true);
+	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_GPS,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms,
-					      MESHTASTIC_CLOCK_QUALITY_GPS, true);
+					      MESHTASTIC_CLOCK_QUALITY_GPS,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	(void)meshtastic_clock_test_skew_feed(base_epoch + 2 * window_ms, 2 * window_ms,
-					      MESHTASTIC_CLOCK_QUALITY_GPS, true);
+					      MESHTASTIC_CLOCK_QUALITY_GPS,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 
 	zassert_true(meshtastic_clock_skew(NULL, &window_s), "precondition: an estimate exists");
 	zassert_equal(window_s, (uint32_t)(2 * window_ms / 1000),
@@ -4138,13 +4151,16 @@ ZTEST(protocol_stack, test_clock_skew_arrival_does_not_step_the_clock)
 	meshtastic_clock_test_reset();
 
 	/* Open the window, then seed the live clock from the same source. */
-	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_GPS, true);
-	meshtastic_clock_set_epoch_ms(base_epoch + window_ms, MESHTASTIC_CLOCK_QUALITY_GPS);
+	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_GPS,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
+	meshtastic_clock_set_epoch_ms(base_epoch + window_ms, MESHTASTIC_CLOCK_QUALITY_GPS,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	before = meshtastic_clock_now_epoch_ms();
 
 	/* Close it: a 5 ppm estimate lands, on a clock just re-anchored. */
 	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
-					      MESHTASTIC_CLOCK_QUALITY_GPS, true);
+					      MESHTASTIC_CLOCK_QUALITY_GPS,
+					      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	after = meshtastic_clock_now_epoch_ms();
 
 	zassert_true(meshtastic_clock_skew(NULL, NULL), "precondition: an estimate landed");
@@ -4390,7 +4406,8 @@ ZTEST(protocol_stack, test_clock_ms_anchor_preserves_subsecond)
 	int64_t now_ms;
 
 	/* GPS: top of the ladder, so this is order-independent w.r.t. other tests. */
-	meshtastic_clock_set_epoch_ms(epoch_ms, MESHTASTIC_CLOCK_QUALITY_GPS);
+	meshtastic_clock_set_epoch_ms(epoch_ms, MESHTASTIC_CLOCK_QUALITY_GPS,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	zassert_true(meshtastic_clock_valid(), "an in-window ms epoch must seed the clock");
 
 	now_ms = meshtastic_clock_now_epoch_ms();
@@ -4424,22 +4441,27 @@ ZTEST(protocol_stack, test_clock_ms_form_keeps_range_and_ladder)
 {
 	const int64_t good_ms = 1700000000LL * 1000;
 
-	meshtastic_clock_set_epoch_ms(good_ms, MESHTASTIC_CLOCK_QUALITY_GPS);
+	meshtastic_clock_set_epoch_ms(good_ms, MESHTASTIC_CLOCK_QUALITY_GPS,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U, "baseline seed");
 
 	/* Out of range, both ends, plus a negative — all refused, clock unchanged. */
-	meshtastic_clock_set_epoch_ms(4000000000LL * 1000, MESHTASTIC_CLOCK_QUALITY_GPS);
+	meshtastic_clock_set_epoch_ms(4000000000LL * 1000, MESHTASTIC_CLOCK_QUALITY_GPS,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U,
 		       "far-future ms epoch must be rejected");
-	meshtastic_clock_set_epoch_ms(1000000000LL * 1000, MESHTASTIC_CLOCK_QUALITY_GPS);
+	meshtastic_clock_set_epoch_ms(1000000000LL * 1000, MESHTASTIC_CLOCK_QUALITY_GPS,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U,
 		       "pre-floor ms epoch must be rejected");
-	meshtastic_clock_set_epoch_ms(-1, MESHTASTIC_CLOCK_QUALITY_GPS);
+	meshtastic_clock_set_epoch_ms(-1, MESHTASTIC_CLOCK_QUALITY_GPS,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U,
 		       "negative ms epoch must be rejected");
 
 	/* Ladder still applies: NTP must not clobber a live GPS fix. */
-	meshtastic_clock_set_epoch_ms(1600000000LL * 1000, MESHTASTIC_CLOCK_QUALITY_NTP);
+	meshtastic_clock_set_epoch_ms(1600000000LL * 1000, MESHTASTIC_CLOCK_QUALITY_NTP,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	zassert_within(meshtastic_clock_now_epoch(), 1700000000U, 5U,
 		       "a lower-trust NTP ms write must not clobber a GPS fix");
 }

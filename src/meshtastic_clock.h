@@ -41,6 +41,37 @@
  * on the 2020 floor. Stays within uint32 range (~2.84e9 < UINT32_MAX). */
 #define MESHTASTIC_EPOCH_MAX (MESHTASTIC_EPOCH_MIN + 40ULL * 365ULL * 24ULL * 60ULL * 60ULL)
 
+/**
+ * @brief How well a source knows the INSTANT it is describing.
+ *
+ * Orthogonal to @ref meshtastic_clock_quality, and the pair is easy to conflate.
+ * Quality is about TRUST — may this source overwrite what a better one set.
+ * Precision is about RESOLUTION — how tightly does it pin down the moment.
+ *
+ * They have to be separate because a source can be highly trusted and coarse at
+ * the same time. A phone's admin set_time_only is NTP-class, and the phone
+ * really does know the time to milliseconds — but the protobuf field carries
+ * whole seconds, so what ARRIVES is +/-1 s. Likewise an operator typing
+ * `meshtastic time set`. Quality cannot express that, and rate estimation must
+ * not run on it: +/-1 s over a ten-hour window reads as 28 ppm, which is inside
+ * the plausibility bound and more than ten times the error being corrected.
+ *
+ * State what the source actually knows and let the clock decide what that is
+ * good for. This used to be inferred from WHICH SETTER was called — the
+ * seconds-taking one being coarse by construction — which was true of every
+ * caller at the time and would have quietly stopped being true the moment a
+ * millisecond-resolution console command was added, which is a planned change.
+ */
+enum meshtastic_clock_precision {
+	/** The instant is known only to about a second: a human, or a
+	 *  whole-second wire field. Sets the clock, never disciplines its rate. */
+	MESHTASTIC_CLOCK_PRECISION_SECOND = 0,
+	/** The instant is known to well inside a second — SNTP with its path-delay
+	 *  correction, or a fix anchored on a timepulse edge. Usable as a rate
+	 *  reference IF its quality also clears the ladder. */
+	MESHTASTIC_CLOCK_PRECISION_SUBSECOND,
+};
+
 enum meshtastic_clock_quality {
 	MESHTASTIC_CLOCK_QUALITY_NONE = 0,   /**< No time set yet. */
 	MESHTASTIC_CLOCK_QUALITY_DEVICE = 1, /**< Onboard peripheral / battery-backed RTC. */
@@ -58,11 +89,9 @@ enum meshtastic_clock_quality {
  * NTP-class source past a 30-minute drift window. Otherwise the current time is
  * kept.
  *
- * NOT a rate reference (@ref MESHTASTIC_CLOCK_SKEW): whole seconds cannot
- * measure an oscillator to parts per million over any window worth waiting for,
- * so a value arriving here sets the clock but never disciplines it. This is the
- * console's and the phone's path — both are +/-1 s regardless of how good the
- * clock behind them is, because neither carries a sub-second part.
+ * Takes no precision argument because it has nothing to state: a whole-second
+ * value cannot pin an instant to better than a second, so this is always
+ * @ref MESHTASTIC_CLOCK_PRECISION_SECOND and never disciplines the rate.
  */
 void meshtastic_clock_set_epoch(uint32_t epoch_now, enum meshtastic_clock_quality quality);
 
@@ -74,15 +103,16 @@ void meshtastic_clock_set_epoch(uint32_t epoch_now, enum meshtastic_clock_qualit
  * Prefer this wherever the source actually knows the sub-second part; passing
  * `sec * 1000` here is exactly equivalent to the seconds form and costs nothing.
  *
- * IS a rate reference (@ref MESHTASTIC_CLOCK_SKEW), unlike the seconds form —
- * so do not reach for it merely to avoid a multiplication. A source that does
- * not really know the sub-second part will be believed to, and will be used to
- * measure the oscillator.
+ * @p precision is a claim about the SOURCE, not about the units: passing
+ * `sec * 1000` here is @ref MESHTASTIC_CLOCK_PRECISION_SECOND, however many
+ * zeroes the value carries. Declaring SUBSECOND for a source that is not means
+ * the oscillator gets measured against it.
  *
  * @param epoch_ms Unix epoch in milliseconds. Negative values are ignored.
  * @param quality  Trust level of the source (see @ref meshtastic_clock_quality).
  */
-void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quality quality);
+void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quality quality,
+				   enum meshtastic_clock_precision precision);
 
 /**
  * @brief Seed the clock with an epoch that was true at a KNOWN PAST INSTANT.
@@ -105,7 +135,8 @@ void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quali
  * @param quality       Trust level of the source.
  */
 void meshtastic_clock_set_epoch_ms_at(int64_t epoch_ms, int64_t at_uptime_ms,
-				      enum meshtastic_clock_quality quality);
+				      enum meshtastic_clock_quality quality,
+				      enum meshtastic_clock_precision precision);
 
 /** Trust level of the source that last set the clock (NONE if never set). */
 enum meshtastic_clock_quality meshtastic_clock_get_quality(void);
@@ -173,7 +204,7 @@ bool meshtastic_clock_test_skew_estimate(int64_t d_ref_ms, int64_t d_local_ms, i
  */
 bool meshtastic_clock_test_skew_feed(int64_t epoch_ms, int64_t uptime_ms,
 				     enum meshtastic_clock_quality quality,
-				     bool rate_reference);
+				     enum meshtastic_clock_precision precision);
 
 /** Test-only: install a correction directly, to check how it is APPLIED. */
 void meshtastic_clock_test_set_skew(int32_t ppb);

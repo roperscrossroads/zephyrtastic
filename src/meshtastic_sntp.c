@@ -53,7 +53,8 @@ static void sntp_do_sync(struct k_work *work)
 		int32_t sub_ms = meshtastic_sntp_subsecond_ms(ts.fraction, ts.rsp_delay_us);
 		int64_t epoch_ms = (int64_t)ts.seconds * 1000 + sub_ms;
 
-		meshtastic_clock_set_epoch_ms(epoch_ms, MESHTASTIC_CLOCK_QUALITY_NTP);
+		meshtastic_clock_set_epoch_ms(epoch_ms, MESHTASTIC_CLOCK_QUALITY_NTP,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 		/* Log the parts, not just the sum: a wrong fraction (e.g. someone enabling
 		 * CONFIG_SNTP_UNCERTAINTY without revisiting the conversion) shows up here
 		 * as an implausible sub-second value rather than silently skewing time. */

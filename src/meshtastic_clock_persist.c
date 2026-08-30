@@ -149,7 +149,8 @@ static enum meshtastic_clock_persist_result persist_apply(uint64_t downtime_ms)
 	 * would come back from a reset holding a stale time it refused to correct.
 	 */
 	meshtastic_clock_set_epoch_ms(saved.epoch_ms + (int64_t)downtime_ms,
-				      MESHTASTIC_CLOCK_QUALITY_DEVICE);
+				      MESHTASTIC_CLOCK_QUALITY_DEVICE,
+				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	last_downtime_ms = (uint32_t)downtime_ms;
 	LOG_INF("clock: restored across a %u ms reset (saved at quality %u)",
 		(unsigned int)downtime_ms, (unsigned int)saved.quality);
