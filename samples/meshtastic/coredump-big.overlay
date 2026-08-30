@@ -1,0 +1,43 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0
+ *
+ * Give the coredump partition room for a WHOLE-RAM dump, at the depot's
+ * expense. Diagnostic builds only -- pair with overlay-coredump-flash.conf.
+ *
+ * Why whole-RAM and not a thread dump: agents-quo6 is a stack overflow that
+ * spills OUT of the faulting thread's stack into z_interrupt_stacks. Neither
+ * MEMORY_DUMP_MIN (the faulting thread only) nor MEMORY_DUMP_THREADS (all
+ * thread stacks) contains z_interrupt_stacks -- it is not a thread stack -- so
+ * the frames that say what actually ran deep are in neither. Only LINKER_RAM
+ * has them, and that is 330 KB against the stock 64 KB partition.
+ *
+ * Safe from the app side: MCUboot reads slot0, slot1 and scratch, and none of
+ * those move. Verified by grep -- the bootloader never references either
+ * partition touched here. So this needs NO bootloader reflash.
+ *
+ * The space comes off the END of the depot so the depot's START does not move,
+ * which keeps the change as small as possible for a node that actually carries
+ * one. The new coredump area is placed in the freed tail rather than grown in
+ * place, so both nodes keep unit addresses that match their reg -- growing
+ * coredump in place would shove the depot up and leave `partition@4d0000`
+ * describing something at 0x540000, which devicetree warns about and which is
+ * exactly the kind of quiet inconsistency a flash map should not carry.
+ */
+
+&flash0 {
+	partitions {
+		/* Replaced below at the tail of flash, 512 KB instead of 64 KB. */
+		/delete-node/ partition@4c0000;
+
+		coredump_partition: partition@f80000 {
+			compatible = "zephyr,mapped-partition";
+			label = "coredump";
+			reg = <0xf80000 DT_SIZE_K(512)>;
+		};
+	};
+};
+
+/* Start unchanged at 0x4d0000; only the tail is given up. */
+&depot_partition {
+	reg = <0x4d0000 DT_SIZE_K(10944)>;
+};
