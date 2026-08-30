@@ -88,3 +88,79 @@ config MESHTASTIC_CLOCK_PERSIST_MAX_DOWNTIME_S
 	  a wrapped delta cannot be a real downtime; this bound rejects it.
 
 endif # MESHTASTIC_CLOCK_PERSIST
+
+config MESHTASTIC_CLOCK_SKEW
+	# A PM build blends two rates into k_uptime and nothing here can model that:
+	# CCOUNT stops in light sleep and CONFIG_XTENSA_TIMER_LPM_TIMER_HOOK compensates
+	# with an exactness established nowhere on this SoC. A single constant ppb cannot
+	# describe a rate that depends on sleep duty, so the estimate would be a measure
+	# of how much the node slept. Off there until somebody measures it.
+	bool "Correct the clock's rate error between syncs"
+	default n if PM
+	default y
+	help
+	  Learn how fast this board's oscillator runs against a trusted time
+	  source, and correct for it between syncs.
+
+	  Acquiring the time is well covered and persisting it now works, but both
+	  leave the same gap: between one sync and the next the clock free-runs on
+	  a crystal that is not exactly right. Measured on a V4 here: -2 ppm. That
+	  is 173 ms of error per day, every day, on a node that cannot see a time
+	  source.
+
+	  BE CLEAR ABOUT WHAT THIS IS WORTH. A node holding a GNSS fix re-anchors
+	  on every PPS edge, so the elapsed time this correction applies to is
+	  about one second and the correction is nanoseconds. It does nothing for
+	  a node that can see the sky. Its customers are the nodes that cannot:
+	  one that syncs from a peer or a phone occasionally, one that had a fix
+	  and lost it, and one that just rebooted. For those the correction is the
+	  difference between a sync lasting hours and lasting days.
+
+	  The estimate is a two-point measurement — how much local time elapsed
+	  against how much real time elapsed — so it is only as good as the two
+	  syncs bounding it, which is what MIN_WINDOW_S is really about.
+
+	  Costs one int32 in the clock anchor and a multiply-and-divide on each
+	  clock read.
+
+if MESHTASTIC_CLOCK_SKEW
+
+config MESHTASTIC_CLOCK_SKEW_MIN_WINDOW_S
+	int "Shortest interval between two syncs that may produce an estimate"
+	default 3600
+	range 60 604800
+	help
+	  Refuse to estimate a rate from a window shorter than this.
+
+	  This is the one number here that needs thought, because it is set by the
+	  ACCURACY OF THE SOURCE, not by taste. A two-point estimate divides the
+	  source's own error by the length of the window, so:
+
+	    window needed = (source error) / (rate accuracy wanted)
+
+	  With PPS-disciplined GNSS the source error is ~23 us (measured), so an
+	  hour gives 0.006 ppm — far better than needed. With SNTP at ~5 ms it
+	  gives 1.4 ppm, which is the same size as the crystal error being
+	  measured; an NTP-only node wants this set very much higher, or it will
+	  confidently learn noise.
+
+	  The default suits a node that sees GNSS. It is deliberately not a
+	  literal in the source because the right value depends on which source a
+	  given node actually has.
+
+config MESHTASTIC_CLOCK_SKEW_MAX_PPM
+	int "Reject an estimate larger than this many ppm"
+	default 100
+	range 1 10000
+	help
+	  A sanity bound. Crystals are specified at +/-10 to 20 ppm and this board
+	  measured -2 ppm, so an estimate of hundreds of ppm is not a rate — it is
+	  a bad pair of syncs (a source that stepped, a stale base, an epoch from
+	  a receiver that had not settled). Rejecting it keeps a single bad sync
+	  from poisoning the clock until the next reboot.
+
+	  Note this is the guard that makes a wrong answer fail SAFE: a rejected
+	  estimate leaves the previous correction in place, and no correction at
+	  all is exactly today's behaviour.
+
+endif # MESHTASTIC_CLOCK_SKEW

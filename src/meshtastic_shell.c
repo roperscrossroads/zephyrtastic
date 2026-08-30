@@ -463,6 +463,28 @@ static int cmd_time(const struct shell *sh, size_t argc, char **argv)
 			return 0;
 		}
 		shell_print(sh, "clock: epoch %u, source %s", epoch, clock_quality_name(q));
+#if defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
+		{
+			int32_t ppb;
+			uint32_t window_s;
+
+			/* Worth a line of its own: this is the only place the board's
+			 * measured oscillator error is visible, and it is a health metric
+			 * as much as a clock one — an estimate that wanders between reads
+			 * is a hardware problem nothing else here would show. */
+			if (meshtastic_clock_skew(&ppb, &window_s)) {
+				shell_print(sh, "       skew %d ppb (%d.%03d ppm) over %u s",
+					    ppb, ppb / 1000, (ppb < 0 ? -ppb : ppb) % 1000,
+					    window_s);
+			} else {
+				shell_print(sh,
+					    "       skew: not yet measured (%u s of the %d s "
+					    "window)",
+					    window_s,
+					    CONFIG_MESHTASTIC_CLOCK_SKEW_MIN_WINDOW_S);
+			}
+		}
+#endif
 #if defined(CONFIG_MESHTASTIC_CLOCK_PERSIST)
 		{
 			enum meshtastic_clock_persist_result pr;

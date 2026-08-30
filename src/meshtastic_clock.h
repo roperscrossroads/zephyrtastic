@@ -57,6 +57,12 @@ enum meshtastic_clock_quality {
  * strictly higher than the current source, GPS (which always re-applies), or an
  * NTP-class source past a 30-minute drift window. Otherwise the current time is
  * kept.
+ *
+ * NOT a rate reference (@ref MESHTASTIC_CLOCK_SKEW): whole seconds cannot
+ * measure an oscillator to parts per million over any window worth waiting for,
+ * so a value arriving here sets the clock but never disciplines it. This is the
+ * console's and the phone's path — both are +/-1 s regardless of how good the
+ * clock behind them is, because neither carries a sub-second part.
  */
 void meshtastic_clock_set_epoch(uint32_t epoch_now, enum meshtastic_clock_quality quality);
 
@@ -67,6 +73,11 @@ void meshtastic_clock_set_epoch(uint32_t epoch_now, enum meshtastic_clock_qualit
  *
  * Prefer this wherever the source actually knows the sub-second part; passing
  * `sec * 1000` here is exactly equivalent to the seconds form and costs nothing.
+ *
+ * IS a rate reference (@ref MESHTASTIC_CLOCK_SKEW), unlike the seconds form —
+ * so do not reach for it merely to avoid a multiplication. A source that does
+ * not really know the sub-second part will be believed to, and will be used to
+ * measure the oscillator.
  *
  * @param epoch_ms Unix epoch in milliseconds. Negative values are ignored.
  * @param quality  Trust level of the source (see @ref meshtastic_clock_quality).
@@ -118,6 +129,56 @@ void meshtastic_clock_test_hold_write(bool held);
 
 /** True once a valid epoch has been seeded. */
 bool meshtastic_clock_valid(void);
+
+#if defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
+/**
+ * @brief The measured rate error of this board's oscillator, in parts per
+ *        billion, and the interval it was measured over.
+ *
+ * Between syncs the clock free-runs on k_uptime, whose crystal is not exactly
+ * right — measured on a V4 here at -2 ppm, or 173 ms per day. This is the
+ * correction applied to every reading, learned by comparing how much real time
+ * passed against how much local time passed between two trusted syncs.
+ *
+ * Also a free health metric, which is the reason it is exposed rather than kept
+ * private: a board whose estimate wanders is a board with a hardware problem
+ * that nothing else here would show.
+ *
+ * @param ppb       Filled with the correction (may be NULL). Negative means the
+ *                  local clock runs fast and time is being subtracted.
+ * @param window_s  Filled with the length of the measurement window (may be
+ *                  NULL). Filled in even when the return is false, where it
+ *                  means "this far into a window that is not yet long enough" —
+ *                  which is what the caller actually wants to report.
+ * @return true if an estimate exists. False means no window has closed yet, in
+ *         which case @p ppb is zero and the clock is uncorrected, exactly as it
+ *         was before this existed.
+ */
+bool meshtastic_clock_skew(int32_t *ppb, uint32_t *window_s);
+
+#if defined(CONFIG_ZTEST)
+/**
+ * Test-only: the estimator as a pure function of the two intervals, so every
+ * guard in it (window too short, result implausible) is reachable by choosing
+ * two numbers rather than by waiting an hour.
+ */
+bool meshtastic_clock_test_skew_estimate(int64_t d_ref_ms, int64_t d_local_ms, int32_t *ppb);
+
+/**
+ * Test-only: fold a synthetic (epoch, uptime) sync into the estimator, through
+ * the same path an accepted clock write uses. The real path anchors against
+ * k_uptime_get(), and the windows worth testing are hours long.
+ *
+ * @return true if this call installed an estimate.
+ */
+bool meshtastic_clock_test_skew_feed(int64_t epoch_ms, int64_t uptime_ms,
+				     enum meshtastic_clock_quality quality,
+				     bool rate_reference);
+
+/** Test-only: install a correction directly, to check how it is APPLIED. */
+void meshtastic_clock_test_set_skew(int32_t ppb);
+#endif /* CONFIG_ZTEST */
+#endif /* CONFIG_MESHTASTIC_CLOCK_SKEW */
 
 /** Current wall-clock time in Unix epoch seconds, or 0 if not yet seeded. */
 uint32_t meshtastic_clock_now_epoch(void);

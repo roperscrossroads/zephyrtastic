@@ -72,6 +72,15 @@ struct clock_anchor {
 	enum meshtastic_clock_quality quality;
 	/** False until a source has ever been accepted. */
 	bool valid;
+#if defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
+	/** Rate correction in parts per billion; see the skew note below. Rides in
+	 *  the anchor so the hot path reads it under the same seqlock, and so a
+	 *  reader can never pair a new anchor with a stale correction. */
+	int32_t skew_ppb;
+	/** False until a window long enough to measure has closed. Distinct from
+	 *  skew_ppb == 0, which is a perfectly good estimate. */
+	bool skew_valid;
+#endif
 };
 
 static struct clock_anchor anchor = {
@@ -122,6 +131,160 @@ static bool anchor_read(struct clock_anchor *out)
 	return false;
 }
 
+#if defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
+/*
+ * RATE CORRECTION — the clock is disciplined, not merely stepped.
+ *
+ * Everything above establishes WHAT time it is at one instant. Between those
+ * instants the clock free-runs on k_uptime, and k_uptime runs on a crystal that
+ * is not exactly right — measured on this board at -2 ppm, which is 173 ms of
+ * error per day. Acquisition cannot fix that; only measuring the rate can.
+ *
+ * The measurement is a two-point one and deliberately nothing cleverer. Hold the
+ * (epoch, uptime) pair of one trusted sync as a base; when a later trusted sync
+ * arrives, compare how much real time passed against how much local time passed.
+ * The difference over the interval IS the rate error:
+ *
+ *     skew_ppb = 1e9 * (real elapsed - local elapsed) / local elapsed
+ *
+ * so a local clock running FAST gives local > real, a negative ppb, and a
+ * correction that subtracts. All integer: this value is consumed by
+ * epoch_ms_at_uptime() below, which runs in the LoRa RX callback and in
+ * meshtastic_log_timestamp(), i.e. in ISR context, where float has no business.
+ *
+ * WHY THIS CANNOT STEP THE CLOCK. A new estimate changes the reported time by
+ * (elapsed since anchor) * (change in ppb). skew_estimate() is only ever called
+ * from inside an ACCEPTED clock write — the same write that re-anchors — so at
+ * the moment a new value lands, elapsed is zero, or ~853 ms for a PPS anchor
+ * sitting slightly in the past. At 2 ppm that is 1.7 microseconds. A correction
+ * that arrives with the anchor cannot produce the backwards step the seqlock
+ * above exists to prevent, and the test asserts it.
+ *
+ * WHAT IT DOES NOT DO. A node holding a GNSS fix re-anchors every second, so the
+ * elapsed time this multiplies is ~1 s and the correction is nanoseconds. This
+ * is worth nothing to a node that can see the sky and a great deal to one that
+ * cannot — which is the honest framing, and the one in the Kconfig help.
+ */
+
+/** The sync that opened the current measurement window. */
+static int64_t skew_base_epoch_ms;
+static int64_t skew_base_uptime_ms;
+/** The most recent sync folded in, for reporting the window length. */
+static int64_t skew_last_uptime_ms;
+static bool skew_base_valid;
+
+#define SKEW_PPB_PER_PPM 1000LL
+#define SKEW_MAX_PPB ((int64_t)CONFIG_MESHTASTIC_CLOCK_SKEW_MAX_PPM * SKEW_PPB_PER_PPM)
+#define SKEW_MIN_WINDOW_MS ((int64_t)CONFIG_MESHTASTIC_CLOCK_SKEW_MIN_WINDOW_S * 1000LL)
+
+/**
+ * The whole estimator, as a pure function of the two intervals.
+ *
+ * Pure so it can be tested exactly rather than approximately: every guard below
+ * is a branch a test can hit by choosing two numbers, with no clock, no waiting
+ * and no hardware.
+ *
+ * @return true if the window produced a usable estimate.
+ */
+static bool skew_estimate(int64_t d_ref_ms, int64_t d_local_ms, int32_t *out_ppb)
+{
+	int64_t ppb;
+
+	/* Too short a window divides the source's own error by too small a number
+	 * and reports the result as a rate. See MIN_WINDOW_S's help: the bound is
+	 * set by how accurate the SOURCE is, not by how patient we are. */
+	if (d_local_ms < SKEW_MIN_WINDOW_MS) {
+		return false;
+	}
+
+	ppb = ((d_ref_ms - d_local_ms) * 1000000000LL) / d_local_ms;
+
+	/* Beyond the sanity bound this is not a rate, it is a bad pair of syncs.
+	 * Refusing leaves the previous correction standing, and having none at all
+	 * is exactly the behaviour before this existed — so the failure is safe in
+	 * both directions. */
+	if (ppb > SKEW_MAX_PPB || ppb < -SKEW_MAX_PPB) {
+		return false;
+	}
+
+	*out_ppb = (int32_t)ppb;
+	return true;
+}
+
+/**
+ * Fold one accepted sync into the estimate. Callers must hold
+ * anchor_write_lock; @p next is the anchor about to be published.
+ *
+ * @return true if THIS call installed an estimate (as opposed to opening the
+ *         window, being refused, or closing a window still too short).
+ */
+static bool skew_feed(int64_t epoch_ms, int64_t uptime_ms,
+		      enum meshtastic_clock_quality quality, bool rate_reference,
+		      struct clock_anchor *next)
+{
+	int32_t ppb;
+
+	/*
+	 * Only a source that independently knows the time can measure our rate.
+	 * NET is another node's opinion, carrying that node's own error; DEVICE is
+	 * a clock we restored from our own retained RAM, so feeding it would have
+	 * the estimator measure itself and conclude, with confidence, zero.
+	 */
+	if (quality < MESHTASTIC_CLOCK_QUALITY_NTP) {
+		return false;
+	}
+
+	/*
+	 * AND it must know the time to better than a whole second, which quality
+	 * alone does not say. `meshtastic time set <sec>` and the phone's admin
+	 * set_time_only are both NTP-class and both carry only whole seconds — the
+	 * protobuf field has no sub-second part and a human typing at a console has
+	 * no sub-second intent. Such a source is +/-1 s, which over a ten-hour
+	 * window estimates to 28 ppm: comfortably inside the plausibility bound,
+	 * and fourteen times larger than the 2 ppm error it would be correcting.
+	 * A correction that big is worse than none.
+	 *
+	 * The distinction is the ENTRY POINT rather than the quality, and it lands
+	 * exactly where it should because the API is already split that way: the
+	 * seconds-taking setter is not a rate reference, the millisecond ones are.
+	 * SNTP (+/-5 ms), a PPS-anchored fix (+/-23 us) and even the NMEA fallback
+	 * (+/-100 ms) all come through the millisecond forms; the console and the
+	 * phone do not.
+	 */
+	if (!rate_reference) {
+		return false;
+	}
+
+	if (!skew_base_valid) {
+		skew_base_epoch_ms = epoch_ms;
+		skew_base_uptime_ms = uptime_ms;
+		skew_last_uptime_ms = uptime_ms;
+		skew_base_valid = true;
+		return false;
+	}
+
+	skew_last_uptime_ms = uptime_ms;
+
+	/*
+	 * The base is NOT replaced on success. A two-point secant has no filtering,
+	 * so its only defence against noise is a long baseline — re-basing on every
+	 * sync would reset the window to zero and make the estimate permanently as
+	 * bad as the shortest interval. The window therefore grows without bound,
+	 * which also means the estimate stops tracking a rate that changes with
+	 * temperature. Accepted for now: a crystal's tempco is far below the error
+	 * this removes, and a node that reboots re-bases anyway.
+	 */
+	if (!skew_estimate(epoch_ms - skew_base_epoch_ms, uptime_ms - skew_base_uptime_ms,
+			   &ppb)) {
+		return false;
+	}
+
+	next->skew_ppb = ppb;
+	next->skew_valid = true;
+	return true;
+}
+#endif /* CONFIG_MESHTASTIC_CLOCK_SKEW */
+
 /* Gate a clock write by source quality (T-A), mirroring the reference
  * perhapsSetRTC ladder: accept a strictly higher quality, always re-apply GPS
  * (top of the ladder), re-apply an NTP-class source only past the drift window,
@@ -161,13 +324,22 @@ void meshtastic_clock_set_epoch_ms(int64_t epoch_ms, enum meshtastic_clock_quali
 	meshtastic_clock_set_epoch_ms_at(epoch_ms, k_uptime_get(), quality);
 }
 
-void meshtastic_clock_set_epoch_ms_at(int64_t epoch_ms, int64_t at_uptime_ms,
-				      enum meshtastic_clock_quality quality)
+/**
+ * The one implementation. @p rate_reference says whether this source is precise
+ * enough to measure the oscillator with — see skew_feed(); it is false only for
+ * the whole-second entry point.
+ */
+static void clock_set(int64_t epoch_ms, int64_t at_uptime_ms,
+		      enum meshtastic_clock_quality quality, bool rate_reference)
 {
 	struct clock_anchor next;
 	k_spinlock_key_t key;
 	int64_t epoch_sec;
 	int64_t now_ms;
+
+#if !defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
+	ARG_UNUSED(rate_reference);
+#endif
 
 	if (epoch_ms < 0) {
 		return;
@@ -201,6 +373,15 @@ void meshtastic_clock_set_epoch_ms_at(int64_t epoch_ms, int64_t at_uptime_ms,
 		next.anchor_uptime_ms = at_uptime_ms;
 		next.quality = quality;
 		next.valid = true;
+#if defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
+		/* The learned rate is a property of the board, not of this sync, so it
+		 * survives the re-anchor. Then let this sync refine it — inside the
+		 * same write, which is what keeps a new estimate from stepping the
+		 * clock (see the skew note above). */
+		next.skew_ppb = anchor.skew_ppb;
+		next.skew_valid = anchor.skew_valid;
+		(void)skew_feed(epoch_ms, at_uptime_ms, quality, rate_reference, &next);
+#endif
 		anchor_write(&next);
 	}
 
@@ -228,6 +409,18 @@ void meshtastic_clock_test_reset(void)
 	 * everything is worse than no reset. */
 	atomic_set(&anchor_seq, 0);
 
+#if defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
+	/* The estimator's base lives OUTSIDE the anchor, so clearing the anchor does
+	 * not clear it. Leaving it behind would let one test's base pair with the
+	 * next test's sync and produce an estimate over a window that never existed
+	 * — and ztest runs in name order, so which tests collide would change every
+	 * time a test is renamed. */
+	skew_base_valid = false;
+	skew_base_epoch_ms = 0;
+	skew_base_uptime_ms = 0;
+	skew_last_uptime_ms = 0;
+#endif
+
 	/* Goes through anchor_write() rather than assigning the struct, so a reader
 	 * that raced the reset still gets a consistent tuple. */
 	anchor_write(&cleared);
@@ -245,9 +438,17 @@ void meshtastic_clock_test_hold_write(bool held)
 }
 #endif
 
+void meshtastic_clock_set_epoch_ms_at(int64_t epoch_ms, int64_t at_uptime_ms,
+				      enum meshtastic_clock_quality quality)
+{
+	clock_set(epoch_ms, at_uptime_ms, quality, true);
+}
+
 void meshtastic_clock_set_epoch(uint32_t epoch_now, enum meshtastic_clock_quality quality)
 {
-	meshtastic_clock_set_epoch_ms((int64_t)epoch_now * 1000, quality);
+	/* Whole seconds, so NOT a rate reference however good its source: see the
+	 * second gate in skew_feed(). It still sets the clock exactly as before. */
+	clock_set((int64_t)epoch_now * 1000, k_uptime_get(), quality, false);
 }
 
 enum meshtastic_clock_quality meshtastic_clock_get_quality(void)
@@ -273,7 +474,22 @@ bool meshtastic_clock_valid(void)
  * change when rate correction arrives (it becomes elapsed + elapsed*ppb/1e9). */
 static int64_t epoch_ms_at_uptime(const struct clock_anchor *a, int64_t uptime_ms)
 {
-	return a->epoch_ms + (uptime_ms - a->anchor_uptime_ms);
+	int64_t elapsed_ms = uptime_ms - a->anchor_uptime_ms;
+
+#if defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
+	/* Integer throughout: this runs in ISR context. elapsed_ms is bounded by
+	 * uptime and skew_ppb by SKEW_MAX_PPB, so the product cannot overflow
+	 * int64 for any uptime this hardware will ever reach (1e9 ms x 1e5 ppb is
+	 * 1e14, against a 9.2e18 ceiling).
+	 *
+	 * elapsed_ms is negative when resolving a PAST uptime — the scanner's
+	 * records, last_heard — and C truncates division toward zero, so the
+	 * correction is asymmetric about the anchor by less than one millisecond.
+	 * Below the resolution of everything that consumes it. */
+	return a->epoch_ms + elapsed_ms + (elapsed_ms * a->skew_ppb) / 1000000000LL;
+#else
+	return a->epoch_ms + elapsed_ms;
+#endif
 }
 
 uint32_t meshtastic_clock_now_epoch(void)
@@ -319,6 +535,71 @@ uint32_t meshtastic_clock_uptime_to_epoch(uint32_t uptime_sec)
 
 	return (uint32_t)(epoch_ms_at_uptime(&a, (int64_t)uptime_sec * 1000) / 1000);
 }
+
+#if defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
+bool meshtastic_clock_skew(int32_t *ppb, uint32_t *window_s)
+{
+	k_spinlock_key_t key = k_spin_lock(&anchor_write_lock);
+	bool valid = anchor.skew_valid;
+
+	/* Not the hot path — this is a reporting call, so it takes the writers'
+	 * lock rather than the seqlock and reads the base statics beside the
+	 * anchor consistently. */
+	if (ppb != NULL) {
+		*ppb = anchor.skew_ppb;
+	}
+	if (window_s != NULL) {
+		/* Filled in even when no estimate exists yet: "N seconds into a window
+		 * that needs M" is the answer to the question someone typing
+		 * `meshtastic time` is actually asking, and zero would read as
+		 * "nothing is happening". */
+		*window_s = skew_base_valid
+				    ? (uint32_t)((skew_last_uptime_ms - skew_base_uptime_ms) / 1000)
+				    : 0U;
+	}
+	k_spin_unlock(&anchor_write_lock, key);
+
+	return valid;
+}
+
+#if defined(CONFIG_ZTEST)
+bool meshtastic_clock_test_skew_estimate(int64_t d_ref_ms, int64_t d_local_ms, int32_t *ppb)
+{
+	return skew_estimate(d_ref_ms, d_local_ms, ppb);
+}
+
+bool meshtastic_clock_test_skew_feed(int64_t epoch_ms, int64_t uptime_ms,
+				     enum meshtastic_clock_quality quality,
+				     bool rate_reference)
+{
+	struct clock_anchor next;
+	k_spinlock_key_t key = k_spin_lock(&anchor_write_lock);
+	bool produced;
+
+	/* Drives the SAME skew_feed() the accepted-write path calls, with a
+	 * synthetic (epoch, uptime) pair — because the real path anchors against
+	 * k_uptime_get() and the windows worth testing are hours long. */
+	next = anchor;
+	produced = skew_feed(epoch_ms, uptime_ms, quality, rate_reference, &next);
+	anchor_write(&next);
+	k_spin_unlock(&anchor_write_lock, key);
+
+	return produced;
+}
+
+void meshtastic_clock_test_set_skew(int32_t ppb)
+{
+	struct clock_anchor next;
+	k_spinlock_key_t key = k_spin_lock(&anchor_write_lock);
+
+	next = anchor;
+	next.skew_ppb = ppb;
+	next.skew_valid = true;
+	anchor_write(&next);
+	k_spin_unlock(&anchor_write_lock, key);
+}
+#endif /* CONFIG_ZTEST */
+#endif /* CONFIG_MESHTASTIC_CLOCK_SKEW */
 
 #if defined(CONFIG_MESHTASTIC_LOG_WALLCLOCK)
 

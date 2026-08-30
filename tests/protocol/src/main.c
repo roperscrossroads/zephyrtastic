@@ -3864,6 +3864,299 @@ ZTEST(protocol_stack, test_clock_refuses_an_anchor_in_the_future)
 		       "and must be clamped to now, not honoured");
 }
 
+#if defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
+/*
+ * --- Phase E: rate correction ---------------------------------------------
+ *
+ * These use synthetic intervals rather than real elapsed time. The windows that
+ * matter here are an hour long by default, and a test that waited an hour would
+ * simply not be run.
+ */
+
+/* The estimator is a pure function of two intervals, so its arithmetic can be
+ * checked exactly rather than approximately. A local clock running FAST reports
+ * more elapsed ms than really passed, and must produce a NEGATIVE correction. */
+ZTEST(protocol_stack, test_clock_skew_math_and_sign)
+{
+	const int64_t window_ms = 2LL * 3600 * 1000; /* 2 h, comfortably over the bound */
+	int32_t ppb = 0;
+
+	/* Local ran 2 h + 36 ms against 2 h of real time: +5 ppm fast. */
+	zassert_true(meshtastic_clock_test_skew_estimate(window_ms, window_ms + 36, &ppb),
+		     "a two-hour window must produce an estimate");
+	zassert_within(ppb, -5000, 20,
+		       "a local clock running fast must give a negative ppb; got %d", ppb);
+
+	/* And the other way: local ran SLOW, so time must be added. */
+	zassert_true(meshtastic_clock_test_skew_estimate(window_ms, window_ms - 36, &ppb),
+		     "the slow direction must estimate too");
+	zassert_within(ppb, 5000, 20, "a slow local clock must give a positive ppb; got %d",
+		       ppb);
+
+	/* A perfect crystal is a real answer, not a missing one. */
+	zassert_true(meshtastic_clock_test_skew_estimate(window_ms, window_ms, &ppb),
+		     "a zero-error window is still a successful measurement");
+	zassert_equal(ppb, 0, "and must report exactly zero, not fail");
+}
+
+/* The window bound exists because a two-point estimate divides the SOURCE's own
+ * error by the length of the window. Too short a window reports that error as a
+ * rate, confidently. */
+ZTEST(protocol_stack, test_clock_skew_refuses_a_short_window)
+{
+	const int64_t too_short = (int64_t)CONFIG_MESHTASTIC_CLOCK_SKEW_MIN_WINDOW_S * 1000 - 1;
+	const int64_t long_enough = (int64_t)CONFIG_MESHTASTIC_CLOCK_SKEW_MIN_WINDOW_S * 1000;
+	int32_t ppb = 0;
+
+	zassert_false(meshtastic_clock_test_skew_estimate(too_short, too_short, &ppb),
+		      "one millisecond under the bound must be refused");
+	zassert_true(meshtastic_clock_test_skew_estimate(long_enough, long_enough, &ppb),
+		     "and exactly at the bound must be accepted");
+}
+
+/* Beyond the sanity bound the number is not a rate — it is a bad pair of syncs.
+ * Refusing leaves the previous correction standing, which is the safe failure:
+ * no correction at all is exactly the behaviour before this existed. */
+ZTEST(protocol_stack, test_clock_skew_rejects_an_implausible_rate)
+{
+	const int64_t window_ms = 2LL * 3600 * 1000;
+	const int64_t over = (window_ms * (CONFIG_MESHTASTIC_CLOCK_SKEW_MAX_PPM + 50)) / 1000000;
+	int32_t ppb = 0;
+
+	zassert_false(meshtastic_clock_test_skew_estimate(window_ms + over, window_ms, &ppb),
+		      "a rate past the bound must be refused, not stored");
+	zassert_false(meshtastic_clock_test_skew_estimate(window_ms - over, window_ms, &ppb),
+		      "and likewise in the negative direction");
+}
+
+/* Only a source that independently knows the time can measure our rate. NET is
+ * another node's opinion; DEVICE is a clock we restored from our own retained
+ * RAM, so feeding it would have the estimator measure itself. */
+ZTEST(protocol_stack, test_clock_skew_ignores_untrusted_sources)
+{
+	const int64_t base_epoch = 1700000000LL * 1000;
+	const int64_t window_ms = 2LL * 3600 * 1000;
+
+	meshtastic_clock_test_reset();
+
+	/* Two NET syncs an ideal window apart must teach the estimator nothing. */
+	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_NET, true);
+	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
+					      MESHTASTIC_CLOCK_QUALITY_NET, true);
+	zassert_false(meshtastic_clock_skew(NULL, NULL),
+		      "a peer-relayed time must not be used as a rate reference");
+
+	/* Same for a restored clock. */
+	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_DEVICE, true);
+	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
+					      MESHTASTIC_CLOCK_QUALITY_DEVICE, true);
+	zassert_false(meshtastic_clock_skew(NULL, NULL),
+		      "a restored clock must not be used to measure itself");
+}
+
+/*
+ * Quality is not enough on its own: `meshtastic time set` and the phone's admin
+ * set_time_only are both NTP-class and both whole seconds. A +/-1 s source over
+ * a ten-hour window estimates to 28 ppm — inside the plausibility bound, and
+ * fourteen times the real 2 ppm error. So the estimator gates on the entry
+ * point too, and this is that gate.
+ */
+ZTEST(protocol_stack, test_clock_skew_ignores_whole_second_sources)
+{
+	const int64_t base_epoch = 1700000000LL * 1000;
+	const int64_t window_ms = 2LL * 3600 * 1000;
+
+	meshtastic_clock_test_reset();
+
+	/* GPS quality, ideal window — and still refused, because the value came in
+	 * through the seconds-taking setter. */
+	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_GPS,
+					      false);
+	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
+					      MESHTASTIC_CLOCK_QUALITY_GPS, false);
+	zassert_false(meshtastic_clock_skew(NULL, NULL),
+		      "a whole-second source must never discipline the rate");
+
+	/* The negative control: the identical pair through a millisecond entry
+	 * point IS accepted, so the test above is failing for the reason claimed
+	 * rather than because nothing works. */
+	meshtastic_clock_test_reset();
+	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_GPS,
+					      true);
+	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
+					      MESHTASTIC_CLOCK_QUALITY_GPS, true);
+	zassert_true(meshtastic_clock_skew(NULL, NULL),
+		     "the same window through a millisecond source must be accepted");
+}
+
+/*
+ * And the whole-second gate reaches the real callers, not just the seam:
+ * meshtastic_clock_set_epoch() is what the console and the phone use.
+ */
+ZTEST(protocol_stack, test_clock_seconds_setter_is_not_a_rate_reference)
+{
+	const uint32_t epoch = 1700000000U;
+
+	meshtastic_clock_test_reset();
+
+	/*
+	 * The claim is that this path does not even OPEN a measurement window.
+	 *
+	 * Asserting that no estimate appears would be worthless here: two console
+	 * writes land microseconds apart, so the window is far too short either
+	 * way and the test would pass with the gate deleted. (It did, when the
+	 * negative control removed it.) The observable difference is what a LATER
+	 * millisecond sync does — if the seconds setter had opened a base, that
+	 * sync would CLOSE it and produce an estimate; if it opened nothing, the
+	 * sync merely opens the base and produces nothing.
+	 */
+	meshtastic_clock_set_epoch(epoch, MESHTASTIC_CLOCK_QUALITY_NTP);
+
+	/* A day later, through a millisecond source. The long window leaves ample
+	 * room for native_sim's real uptime at the base, which is a few hundred ms
+	 * and would otherwise show up as a rate. */
+	zassert_false(meshtastic_clock_test_skew_feed((int64_t)epoch * 1000 + 86400000LL,
+						      86400000LL, MESHTASTIC_CLOCK_QUALITY_GPS,
+						      true),
+		      "a millisecond sync must find NO window open — the seconds setter "
+		      "must not have started one");
+	zassert_false(meshtastic_clock_skew(NULL, NULL),
+		      "and so no estimate may exist");
+
+	/*
+	 * Negative control, inline: the identical millisecond sync DOES close a
+	 * window when the base was opened by a millisecond source. Without this
+	 * the assertions above could hold simply because nothing ever estimates.
+	 */
+	meshtastic_clock_test_reset();
+	(void)meshtastic_clock_test_skew_feed((int64_t)epoch * 1000, 0,
+					      MESHTASTIC_CLOCK_QUALITY_GPS, true);
+	zassert_true(meshtastic_clock_test_skew_feed((int64_t)epoch * 1000 + 86400000LL,
+						     86400000LL, MESHTASTIC_CLOCK_QUALITY_GPS,
+						     true),
+		     "control: the same sync must close a window a millisecond source "
+		     "opened");
+}
+
+/* The first trusted sync opens the window; the second closes it. */
+ZTEST(protocol_stack, test_clock_skew_learns_from_two_trusted_syncs)
+{
+	const int64_t base_epoch = 1700000000LL * 1000;
+	const int64_t window_ms = 2LL * 3600 * 1000;
+	int32_t ppb = 0;
+	uint32_t window_s = 0;
+
+	meshtastic_clock_test_reset();
+
+	zassert_false(meshtastic_clock_test_skew_feed(base_epoch, 0,
+						      MESHTASTIC_CLOCK_QUALITY_GPS, true),
+		      "the first sync opens the window, it cannot close one");
+	zassert_false(meshtastic_clock_skew(&ppb, &window_s), "so there is no estimate yet");
+	zassert_equal(window_s, 0U, "and no window has elapsed");
+
+	zassert_true(meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
+						     MESHTASTIC_CLOCK_QUALITY_GPS, true),
+		     "a second sync a long window later must produce an estimate");
+	zassert_true(meshtastic_clock_skew(&ppb, &window_s), "which must then be reported");
+	zassert_within(ppb, -5000, 20, "5 ppm fast over two hours; got %d ppb", ppb);
+	zassert_equal(window_s, (uint32_t)(window_ms / 1000),
+		      "and the reported window must be the measured one");
+}
+
+/* The base is NOT replaced on success: a two-point secant has no filtering, so
+ * a long baseline is its only defence against noise. Re-basing every sync would
+ * make the estimate permanently as bad as the shortest interval between syncs. */
+ZTEST(protocol_stack, test_clock_skew_keeps_a_long_baseline)
+{
+	const int64_t base_epoch = 1700000000LL * 1000;
+	const int64_t window_ms = 2LL * 3600 * 1000;
+	uint32_t window_s = 0;
+
+	meshtastic_clock_test_reset();
+
+	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_GPS, true);
+	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms,
+					      MESHTASTIC_CLOCK_QUALITY_GPS, true);
+	(void)meshtastic_clock_test_skew_feed(base_epoch + 2 * window_ms, 2 * window_ms,
+					      MESHTASTIC_CLOCK_QUALITY_GPS, true);
+
+	zassert_true(meshtastic_clock_skew(NULL, &window_s), "precondition: an estimate exists");
+	zassert_equal(window_s, (uint32_t)(2 * window_ms / 1000),
+		      "the window must span back to the FIRST sync, not the previous one");
+}
+
+/* How the correction is APPLIED, which is separate from how it is measured.
+ * -5000 ppb over an hour is 18 ms of subtraction. */
+ZTEST(protocol_stack, test_clock_skew_corrects_the_reading)
+{
+	const uint32_t epoch = 1700000000U;
+	const int64_t hour_ms = 3600LL * 1000;
+	int64_t at_seed;
+	int64_t uncorrected;
+	int64_t corrected;
+
+	meshtastic_clock_test_reset();
+	at_seed = k_uptime_get();
+	meshtastic_clock_set_epoch(epoch, MESHTASTIC_CLOCK_QUALITY_GPS);
+
+	uncorrected = meshtastic_clock_uptime_ms_to_epoch_ms(at_seed + hour_ms);
+
+	meshtastic_clock_test_set_skew(-5000);
+	corrected = meshtastic_clock_uptime_ms_to_epoch_ms(at_seed + hour_ms);
+
+	zassert_within(uncorrected - corrected, 18, 1,
+		       "-5 ppm over an hour must subtract 18 ms; got %lld",
+		       uncorrected - corrected);
+
+	/* And the correction must scale with the interval rather than being a
+	 * constant offset — a constant would be a step, not a rate. */
+	meshtastic_clock_test_set_skew(-5000);
+	zassert_within(meshtastic_clock_uptime_ms_to_epoch_ms(at_seed + 2 * hour_ms) -
+			       meshtastic_clock_uptime_ms_to_epoch_ms(at_seed + hour_ms),
+		       hour_ms - 18, 2,
+		       "the second hour must be corrected by its own 18 ms");
+}
+
+/*
+ * The property that makes this safe to enable, asserted rather than argued.
+ *
+ * A new estimate changes the reported time by (elapsed since anchor) x (change
+ * in ppb). Because an estimate is only ever installed by the same accepted
+ * write that re-anchors, elapsed is ~0 at that instant and the change is
+ * invisible. If a future refactor ever installs a correction WITHOUT
+ * re-anchoring, this test fails — and it should, because that is a clock that
+ * steps, possibly backwards, which is the one thing the anchor tuple and its
+ * seqlock exist to prevent.
+ */
+ZTEST(protocol_stack, test_clock_skew_arrival_does_not_step_the_clock)
+{
+	const int64_t base_epoch = 1700000000LL * 1000;
+	const int64_t window_ms = 2LL * 3600 * 1000;
+	int64_t before;
+	int64_t after;
+
+	meshtastic_clock_test_reset();
+
+	/* Open the window, then seed the live clock from the same source. */
+	(void)meshtastic_clock_test_skew_feed(base_epoch, 0, MESHTASTIC_CLOCK_QUALITY_GPS, true);
+	meshtastic_clock_set_epoch_ms(base_epoch + window_ms, MESHTASTIC_CLOCK_QUALITY_GPS);
+	before = meshtastic_clock_now_epoch_ms();
+
+	/* Close it: a 5 ppm estimate lands, on a clock just re-anchored. */
+	(void)meshtastic_clock_test_skew_feed(base_epoch + window_ms, window_ms + 36,
+					      MESHTASTIC_CLOCK_QUALITY_GPS, true);
+	after = meshtastic_clock_now_epoch_ms();
+
+	zassert_true(meshtastic_clock_skew(NULL, NULL), "precondition: an estimate landed");
+	zassert_true(after >= before,
+		     "a new estimate must never move the clock backwards (%lld -> %lld)",
+		     before, after);
+	zassert_within(after, before, 50,
+		       "and must not step it forwards either; moved %lld ms",
+		       after - before);
+}
+#endif /* CONFIG_MESHTASTIC_CLOCK_SKEW */
+
 #if defined(CONFIG_MESHTASTIC_CLOCK_PERSIST)
 #include "meshtastic_clock_persist.h"
 
