@@ -1,0 +1,44 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_STACK_PROTECTION
+	bool "Best stack-overflow protection this SoC can offer"
+	default y
+	select HW_STACK_PROTECTION if ARCH_HAS_STACK_PROTECTION
+	select STACK_SENTINEL if !ARCH_HAS_STACK_PROTECTION && !MPU_STACK_GUARD
+	select STACK_USAGE
+	select INIT_STACKS
+	help
+	  Every image gets stack-overflow detection, and the mechanism is chosen
+	  per SoC rather than assumed.
+
+	  This exists because the naive version is WRONG, and was briefly shipped
+	  that way on 2026-08-30: writing CONFIG_STACK_SENTINEL=y into prj.conf
+	  looks like it makes the floor uniform, and on an nRF52840 Kconfig
+	  silently discards it. STACK_SENTINEL carries `depends on
+	  !MPU_STACK_GUARD`, so on any board with an MPU it is refused -- with a
+	  warning nobody reads -- and the config that appears to have raised the
+	  floor everywhere has in fact raised it nowhere new.
+
+	  The two SoCs on this bench sit on opposite sides of that:
+
+	    nRF52840   ARCH_HAS_STACK_PROTECTION=y, so HW_STACK_PROTECTION gives a
+	               real MPU guard REGION. The offending access faults
+	               immediately, at the instruction that made it. The sentinel
+	               is redundant here and correctly excluded.
+
+	    ESP32-S3   declares no ARCH_HAS_STACK_PROTECTION at all, so there is no
+	               guard to have and STACK_SENTINEL is the ONLY option -- a
+	               magic word checked at context switch, which a fast deep
+	               recursion can smash past and wedge the machine before any
+	               switch happens. Measured: `meshtastic crashtest stack` on a
+	               V4 produced a bare `cause 0x10 WATCHDOG` with no fatal, no
+	               coredump and nothing in the log ring.
+
+	  So the ESP32 boards have the WEAKER guarantee, and it is not fixable in
+	  config -- which is the argument for watching stack headroom shrink
+	  rather than waiting for an overflow to be detected.
+
+	  STACK_USAGE and INIT_STACKS come along because without the fill pattern
+	  the thread high-water numbers have nothing to measure against, and those
+	  numbers are the input to the watching.
