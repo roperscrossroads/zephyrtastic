@@ -1,0 +1,26 @@
+diff --git a/dts/bindings/mtd/nordic,qspi-nor.yaml b/dts/bindings/mtd/nordic,qspi-nor.yaml
+index 7aea3bb38d..b673e55f96 100644
+--- a/dts/bindings/mtd/nordic,qspi-nor.yaml
++++ b/dts/bindings/mtd/nordic,qspi-nor.yaml
+@@ -96,3 +96,21 @@ properties:
+     required: true
+     description: |
+       Maximum clock speed supported by the device, in Hz.
++
++  # Not read by this driver itself -- CONFIG_NORDIC_QSPI_NOR_FLASH_LAYOUT_PAGE_SIZE
++  # is what governs the erase granularity used for a swap-using-move MCUboot slot
++  # on this flash. Declared here, matching soc-nv-flash.yaml's pair of the same
++  # name, purely so a downstream fixed-partitions child (e.g. a
++  # zephyr,flash-partition-backed coredump partition; see
++  # subsys/debug/coredump/coredump_backend_flash_partition.c, which reads
++  # write-block-size off the partition's grandparent via DT_PROP()) can declare
++  # them without devicetree validation refusing the property outright.
++  write-block-size:
++    type: int
++    description: |
++      Address alignment required by flash write operations.
++
++  erase-block-size:
++    type: int
++    description: |
++      Address alignment required by flash erase operations.

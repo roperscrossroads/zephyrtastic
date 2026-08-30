@@ -327,3 +327,43 @@ linked and reported a fabricated answer would be much worse.
 `upstreamable: true` — the staged/applied distinction is a property of the
 driver's own design, not of this project, and every user of
 `sx126x_set_rx_boosted_gain()` has the same blind spot.
+
+### 0012-nordic-qspi-nor-write-block-size.patch
+
+Declares `write-block-size` and `erase-block-size` as optional properties on
+`nordic,qspi-nor.yaml`, matching `soc-nv-flash.yaml`'s pair of the same name.
+Neither this binding nor its `jedec,spi-nor-common.yaml` base declared them
+at all.
+
+**Why:** the XIAO nRF52840 coredump-to-flash work (Phase 5, diagnostics-
+baseline plan) puts a `coredump_partition` on the XIAO's QSPI `p25q16h` chip
+(`main/samples/meshtastic/mcuboot-xiao/partitions.dtsi`) — the only free
+flash space on that board; all 1 MB of internal flash is already spoken for
+by MCUboot's own layout. `CONFIG_DEBUG_COREDUMP_BACKEND_FLASH_PARTITION`
+(`subsys/debug/coredump/coredump_backend_flash_partition.c`) reads
+`write-block-size` off the coredump partition's **grandparent** via
+`DT_PROP(FLASH_CONTROLLER, write_block_size)` — for a QSPI-backed partition
+that grandparent is the flash chip node itself, `p25q16h`. Without the
+property declared, devicetree validation refuses the build outright
+(`'write-block-size' appears in ... but is not declared in 'properties:'`),
+not merely a soft warning — no board in this Zephyr tree had combined QSPI
+NOR with `coredump_partition` before, so nothing had ever needed it.
+
+A second `"soc-nv-flash"` compatible on the `p25q16h` node was tried first
+(that binding does declare both properties) and does **not** work: Zephyr
+picks exactly one binding per node for property validation, not a union of
+every listed compatible's schema — it only moved the identical error onto
+`soc-nv-flash`'s much smaller property set instead of resolving it.
+
+> **Verified:** both XIAO build modes succeed (`--sysbuild`, with
+> `write-block-size = <1>` now set on `&p25q16h` and
+> `DEBUG_COREDUMP_BACKEND_FLASH_PARTITION=y` active; plain/legacy, unaffected
+> since it never sets the property at all) and `heltec_wifi_lora32_v4_r8`
+> (unaffected — a different flash binding entirely) builds clean; native_sim
+> 1014/1014 across 46 configs (this binding is nRF-only, not exercised there
+> either way).
+
+`upstreamable: true` — a generic MTD property gap, not specific to this
+project or to QSPI NOR specifically: any board combining
+`coredump_partition` with a flash whose binding omits `write-block-size`
+hits the same wall.

@@ -440,3 +440,37 @@ patches:
       upstreamable: the staged/applied distinction is a property of the
       driver's own design, not of this project, and any user of
       sx126x_set_rx_boosted_gain() has the same blind spot.
+  - path: 0012-nordic-qspi-nor-write-block-size.patch
+    sha256sum: 399e06a3bf9c2ae055aa6fc834195075aa3a9cce4297f2fb441eb8efec6ab619
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-08-30"
+    upstreamable: true
+    comments: |
+      dts/bindings/mtd/nordic,qspi-nor.yaml: declare write-block-size and
+      erase-block-size as optional properties, matching soc-nv-flash.yaml's
+      pair of the same name. Neither this binding nor its jedec,spi-nor-common
+      base declared them at all.
+
+      Needed for the XIAO nRF52840 coredump-to-flash work (Phase 5,
+      diagnostics-baseline plan): DEBUG_COREDUMP_BACKEND_FLASH_PARTITION
+      (coredump_backend_flash_partition.c) reads write-block-size off the
+      coredump partition's GRANDPARENT via DT_PROP(FLASH_CONTROLLER,
+      write_block_size) -- for a coredump_partition placed under the XIAO's
+      QSPI p25q16h chip (main/samples/meshtastic/mcuboot-xiao/partitions.dtsi),
+      that grandparent is p25q16h itself. Without the property declared,
+      devicetree validation refuses the build outright ("'write-block-size'
+      appears in ... but is not declared in 'properties:'"), not merely a
+      soft warning -- no board in this Zephyr tree had combined QSPI NOR with
+      coredump_partition before, so nothing had needed it.
+
+      A second "soc-nv-flash" compatible on the p25q16h node was tried first
+      (that binding does declare both properties) and does NOT work: Zephyr
+      picks exactly one binding per node for property validation, not a union
+      of every listed compatible's schema, so it only moved the identical
+      error onto soc-nv-flash's much smaller property set instead.
+
+      upstreamable: a generic MTD property gap, not specific to this project
+      or to QSPI NOR specifically -- any board combining coredump_partition
+      with a flash whose binding omits write-block-size hits the same wall.

@@ -76,6 +76,30 @@
 };
 
 &p25q16h {
+	/* Only the flash-partition coredump backend reads this (DT_PROP() on
+	 * the coredump partition's grandparent,
+	 * coredump_backend_flash_partition.c) -- MCUboot's own slot1 writes go
+	 * through CONFIG_NORDIC_QSPI_NOR_FLASH_LAYOUT_PAGE_SIZE (the ERASE
+	 * granularity) instead, unaffected by this.
+	 *
+	 * Needs carried patch 0012 (main/zephyr/patches/): nordic,qspi-nor's
+	 * own binding did not declare write-block-size at all -- no board in
+	 * this Zephyr tree had combined QSPI NOR with coredump_partition
+	 * before, so nothing needed it -- and devicetree validation refuses an
+	 * undeclared property outright ("appears ... but is not declared in
+	 * 'properties:'"), not merely a soft warning. A second "soc-nv-flash"
+	 * compatible was tried first (that binding does declare it) and does
+	 * NOT work: Zephyr picks exactly one binding per node for property
+	 * validation, not a union of every listed compatible's schema, so it
+	 * only moved the same error onto soc-nv-flash's much smaller property
+	 * set instead.
+	 *
+	 * 1 is the minimum write granularity a byte-programmable SPI NOR flash
+	 * actually has (no larger alignment requirement the way some MCU-
+	 * internal flash controllers impose).
+	 */
+	write-block-size = <1>;
+
 	partitions {
 		compatible = "fixed-partitions";
 		#address-cells = <1>;
@@ -84,6 +108,28 @@
 		slot1_partition: partition@0 {
 			label = "image-1";
 			reg = <0x00000000 0x000b4000>;
+		};
+
+		/* 320 KB, in the QSPI space slot1 leaves free (0xb4000-0x200000,
+		 * ~1.28 MB) -- no depot partition on this board to compete with,
+		 * unlike the V4's coredump-big.overlay, which has to take the
+		 * space from one. Comfortable margin over a whole-RAM dump: this
+		 * SoC's 256 KB RAM is smaller than the ESP32-S3's, and 512 KB
+		 * covered that dump plus its own header overhead.
+		 *
+		 * NO "zephyr,mapped-partition" compatible, unlike the V4's
+		 * internal-flash coredump_partition (coredump-big.overlay) --
+		 * that compatible requires a soc-nv-flash-lineage (memory-mapped
+		 * XIP) parent, which p25q16h is not: it is SPI-attached, read
+		 * and written through the ordinary flash_area API, exactly like
+		 * slot1_partition just above. A build with the mapped compatible
+		 * here fails devicetree generation outright ("zephyr,mapped-
+		 * partition node lacks soc-nv-flash parent") rather than merely
+		 * misbehaving at runtime.
+		 * See overlay-coredump-flash.conf for the matching Kconfig. */
+		coredump_partition: partition@b4000 {
+			label = "coredump";
+			reg = <0x000b4000 DT_SIZE_K(320)>;
 		};
 	};
 };
