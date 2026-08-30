@@ -388,6 +388,17 @@ bool meshtastic_watchdog_take_last_crash(struct meshtastic_watchdog_crash_info *
 	return true;
 }
 
+bool meshtastic_watchdog_peek_last_crash(struct meshtastic_watchdog_crash_info *out)
+{
+	if (rtc_crash_magic != WATCHDOG_CRASH_MAGIC) {
+		return false;
+	}
+
+	*out = rtc_crash_info;
+
+	return true;
+}
+
 /* Copy the RTC slot into plain RAM and clear it, BEFORE anything can install
  * hw_wdt_stage0_callback() -- so what gets reported is unambiguously "what was
  * in RTC memory when this boot started", i.e. an event that genuinely survived
@@ -426,6 +437,17 @@ bool meshtastic_hw_watchdog_take_last_crash(struct meshtastic_hw_watchdog_crash_
 
 	*out = hw_crash_latched_info;
 	hw_crash_latched_valid = false; /* one-shot, as before */
+
+	return true;
+}
+
+bool meshtastic_hw_watchdog_peek_last_crash(struct meshtastic_hw_watchdog_crash_info *out)
+{
+	if (!hw_crash_latched_valid) {
+		return false;
+	}
+
+	*out = hw_crash_latched_info;
 
 	return true;
 }
@@ -529,7 +551,19 @@ bool meshtastic_watchdog_take_last_crash(struct meshtastic_watchdog_crash_info *
 	return false;
 }
 
+bool meshtastic_watchdog_peek_last_crash(struct meshtastic_watchdog_crash_info *out)
+{
+	ARG_UNUSED(out);
+	return false;
+}
+
 bool meshtastic_hw_watchdog_take_last_crash(struct meshtastic_hw_watchdog_crash_info *out)
+{
+	ARG_UNUSED(out);
+	return false;
+}
+
+bool meshtastic_hw_watchdog_peek_last_crash(struct meshtastic_hw_watchdog_crash_info *out)
 {
 	ARG_UNUSED(out);
 	return false;

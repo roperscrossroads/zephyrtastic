@@ -10,6 +10,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/meshtastic/bootlog.h>
+#include <zephyr/meshtastic/diagnostics.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/version.h>
@@ -3461,6 +3462,77 @@ static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
 }
 #endif /* CONFIG_MESHTASTIC_BOOTLOG */
 
+/* `meshtastic crashinfo` -- the three RTC-persistent crash breadcrumbs
+ * (watchdog channel timeout, hardware-watchdog stage-0, and fatal error), in
+ * one place, read non-destructively so this can be run more than once
+ * without disturbing what the boot-time log still owns. See
+ * zephyr/meshtastic/diagnostics.h.
+ */
+static const char *crashinfo_fatal_reason_name(uint32_t reason)
+{
+	switch (reason) {
+	case K_ERR_CPU_EXCEPTION:
+		return "CPU exception";
+	case K_ERR_SPURIOUS_IRQ:
+		return "unhandled interrupt";
+	case K_ERR_STACK_CHK_FAIL:
+		return "stack overflow";
+	case K_ERR_KERNEL_OOPS:
+		return "kernel oops";
+	case K_ERR_KERNEL_PANIC:
+		return "kernel panic";
+	default:
+		return "unknown";
+	}
+}
+
+static int cmd_crashinfo(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_watchdog_crash_info wdt_crash;
+	struct meshtastic_hw_watchdog_crash_info hw_wdt_crash;
+	struct meshtastic_fatal_crash_info fatal_crash;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+#if defined(CONFIG_MESHTASTIC_WATCHDOG)
+	if (meshtastic_watchdog_peek_last_crash(&wdt_crash)) {
+		shell_print(sh, "watchdog     channel \"%s\" timed out, heap free=%u "
+				"allocated=%u max_allocated=%u, running thread \"%s\"",
+			    wdt_crash.channel, wdt_crash.heap_free, wdt_crash.heap_allocated,
+			    wdt_crash.heap_max_allocated, wdt_crash.thread_name);
+	} else {
+		shell_print(sh, "watchdog     none pending");
+	}
+
+	if (meshtastic_hw_watchdog_peek_last_crash(&hw_wdt_crash)) {
+		shell_print(sh, "hw watchdog  uptime=%u ms, running thread \"%s\"",
+			    hw_wdt_crash.uptime_ms, hw_wdt_crash.thread_name);
+	} else {
+		shell_print(sh, "hw watchdog  none pending");
+	}
+#else
+	shell_print(sh, "watchdog     unsupported (CONFIG_MESHTASTIC_WATCHDOG=n on this build)");
+	shell_print(sh, "hw watchdog  unsupported (CONFIG_MESHTASTIC_WATCHDOG=n on this build)");
+#endif
+
+	if (meshtastic_fatal_peek_last_crash(&fatal_crash)) {
+		shell_print(sh, "fatal        %s (%u), heap free=%u allocated=%u "
+				"max_allocated=%u, faulting thread \"%s\"",
+			    crashinfo_fatal_reason_name(fatal_crash.reason), fatal_crash.reason,
+			    fatal_crash.heap_free, fatal_crash.heap_allocated,
+			    fatal_crash.heap_max_allocated, fatal_crash.thread_name);
+	} else {
+		shell_print(sh, "fatal        none pending");
+	}
+
+	shell_print(sh, "");
+	shell_print(sh, "Non-destructive: does not clear what `meshtastic resets` reports "
+			"at boot.");
+
+	return 0;
+}
+
 static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc == 1U) {
@@ -5060,6 +5132,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 			     NULL),
 		  cmd_resets),
 #endif
+	SHELL_CMD(crashinfo, NULL,
+		  SHELL_HELP("Durable crash breadcrumbs: watchdog, hw-watchdog and "
+			     "fatal-error info from the last abnormal reset.",
+			     NULL),
+		  cmd_crashinfo),
 	SHELL_CMD(preset, NULL,
 		  SHELL_HELP("Live preset switching: what would hold a scheduled hop off, "
 			     "and the counters for the ones that were.",

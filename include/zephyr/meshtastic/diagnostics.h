@@ -61,11 +61,30 @@ struct meshtastic_watchdog_crash_info {
  */
 #if defined(CONFIG_MESHTASTIC_WATCHDOG)
 bool meshtastic_watchdog_take_last_crash(struct meshtastic_watchdog_crash_info *out);
+
+/**
+ * @brief Peek at the watchdog crash breadcrumb without consuming it.
+ *
+ * Same breadcrumb as @ref meshtastic_watchdog_take_last_crash(), but does not
+ * clear it -- for a shell command or other on-demand inspection that must not
+ * disturb the one-shot report the boot path still owns.
+ *
+ * @param out Populated on success. Must not be NULL.
+ * @retval true  A crash breadcrumb is present and @p out was populated.
+ * @retval false No breadcrumb is present.
+ */
+bool meshtastic_watchdog_peek_last_crash(struct meshtastic_watchdog_crash_info *out);
 #else
 /* No watchdog compiled in (meshtastic_watchdog.c is not built) means no
  * breadcrumb can exist -- the honest answer, and it keeps callers linkable on
  * watchdog-less builds (e.g. the nRF52 bring-up images, operator preference). */
 static inline bool meshtastic_watchdog_take_last_crash(struct meshtastic_watchdog_crash_info *out)
+{
+	(void)out;
+	return false;
+}
+
+static inline bool meshtastic_watchdog_peek_last_crash(struct meshtastic_watchdog_crash_info *out)
 {
 	(void)out;
 	return false;
@@ -125,8 +144,27 @@ struct meshtastic_hw_watchdog_crash_info {
  */
 #if defined(CONFIG_MESHTASTIC_WATCHDOG)
 bool meshtastic_hw_watchdog_take_last_crash(struct meshtastic_hw_watchdog_crash_info *out);
+
+/**
+ * @brief Peek at the hardware-watchdog crash breadcrumb without consuming it.
+ *
+ * Same breadcrumb as @ref meshtastic_hw_watchdog_take_last_crash(), non-
+ * destructive -- see @ref meshtastic_watchdog_peek_last_crash() for why this
+ * exists.
+ *
+ * @param out Populated on success. Must not be NULL.
+ * @retval true  A crash breadcrumb is present and @p out was populated.
+ * @retval false No breadcrumb is present.
+ */
+bool meshtastic_hw_watchdog_peek_last_crash(struct meshtastic_hw_watchdog_crash_info *out);
 #else
 static inline bool meshtastic_hw_watchdog_take_last_crash(struct meshtastic_hw_watchdog_crash_info *out)
+{
+	(void)out;
+	return false;
+}
+
+static inline bool meshtastic_hw_watchdog_peek_last_crash(struct meshtastic_hw_watchdog_crash_info *out)
 {
 	(void)out;
 	return false;
@@ -171,6 +209,18 @@ struct meshtastic_fatal_crash_info {
  * @retval false No breadcrumb was present.
  */
 bool meshtastic_fatal_take_last_crash(struct meshtastic_fatal_crash_info *out);
+
+/**
+ * @brief Peek at the fatal-error crash breadcrumb without consuming it.
+ *
+ * Same breadcrumb as @ref meshtastic_fatal_take_last_crash(), non-destructive
+ * -- see @ref meshtastic_watchdog_peek_last_crash() for why this exists.
+ *
+ * @param out Populated on success. Must not be NULL.
+ * @retval true  A crash breadcrumb is present and @p out was populated.
+ * @retval false No breadcrumb is present.
+ */
+bool meshtastic_fatal_peek_last_crash(struct meshtastic_fatal_crash_info *out);
 
 #ifdef __cplusplus
 }

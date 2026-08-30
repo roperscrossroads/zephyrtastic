@@ -43,11 +43,37 @@ FUNC_NORETURN extern void arch_system_halt(unsigned int reason);
 #if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
 #include <esp_attr.h>
 #define FATAL_CRASH_RTC_ATTR RTC_NOINIT_ATTR
+#elif defined(CONFIG_ARCH_POSIX)
+/* native_sim / unit tests: an ordinary static. Nothing survives a reset
+ * there, but there is no reset to survive either -- keeps this file
+ * portable without conditioning it out of the build entirely. */
+#define FATAL_CRASH_RTC_ATTR
+#else
+/* Everywhere else -- nRF above all: __noinit. This used to be lumped in
+ * with the native_sim case above, sharing its empty (plain .bss) attribute
+ * by omission rather than by decision -- the same defect fixed for the log
+ * ring in 5795327 and for the boot log in the file this pattern is copied
+ * from: on a warm reset, .bss is zeroed by the C runtime before this file
+ * ever runs, so a breadcrumb written right before the reboot that caused it
+ * would already be gone by the time meshtastic_fatal_take_last_crash() is
+ * called on the next boot. __noinit demonstrably survives on this target
+ * (verified in the built image for the log ring); this was just not using
+ * it. */
+#define FATAL_CRASH_RTC_ATTR __noinit
+#endif
 
+#if defined(CONFIG_ARCH_POSIX)
+static void fatal_collect_heap_stats(struct meshtastic_fatal_crash_info *info)
+{
+	ARG_UNUSED(info);
+}
+#else
 /* Same pool meshtastic_watchdog.c's periodic logging reads -- see that
- * file's comment for why this is the heap that actually matters here. Not a
- * real symbol on non-ESP32 targets (native_sim), hence guarded alongside the
- * RTC attribute rather than separately. */
+ * file's comment for why this is the heap that actually matters here, and
+ * for confirmation the symbol is real on nRF too (kernel/mempool.c defines
+ * it unconditionally, not per-SoC; meshtastic_watchdog.c already reads it
+ * from this same code path on any board with a watchdog0 alias, XIAO
+ * included). Only native_sim, above, has nothing meaningful to report. */
 extern struct k_heap _system_heap;
 
 static void fatal_collect_heap_stats(struct meshtastic_fatal_crash_info *info)
@@ -59,18 +85,6 @@ static void fatal_collect_heap_stats(struct meshtastic_fatal_crash_info *info)
 		info->heap_allocated = (uint32_t)stats.allocated_bytes;
 		info->heap_max_allocated = (uint32_t)stats.max_allocated_bytes;
 	}
-}
-#else
-/* Non-ESP32 targets (native_sim, unit tests): no RTC-persistent memory to
- * put this in, so it degrades to an ordinary static -- doesn't survive a
- * real reset, but there's nothing to reset in the sense this is meant for
- * on those targets either. Keeps this file portable without conditioning
- * it out of the build entirely. */
-#define FATAL_CRASH_RTC_ATTR
-
-static void fatal_collect_heap_stats(struct meshtastic_fatal_crash_info *info)
-{
-	ARG_UNUSED(info);
 }
 #endif
 
@@ -87,6 +101,17 @@ bool meshtastic_fatal_take_last_crash(struct meshtastic_fatal_crash_info *out)
 
 	*out = rtc_fatal_info;
 	rtc_fatal_magic = 0U; /* one-shot: don't re-report on a later, unrelated boot */
+
+	return true;
+}
+
+bool meshtastic_fatal_peek_last_crash(struct meshtastic_fatal_crash_info *out)
+{
+	if (rtc_fatal_magic != FATAL_CRASH_MAGIC) {
+		return false;
+	}
+
+	*out = rtc_fatal_info;
 
 	return true;
 }
