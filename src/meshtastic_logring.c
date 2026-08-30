@@ -47,7 +47,9 @@
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_backend.h>
+#include <zephyr/logging/log_ctrl.h>
 #include <zephyr/logging/log_output.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/shell/shell.h>
 #include <string.h>
@@ -181,9 +183,26 @@ static uint32_t fmt_flags(void)
 							        : 0);
 }
 
+#if defined(CONFIG_MESHTASTIC_LOGRING_FILTER)
+/* Defined below LOG_BACKEND_DEFINE, because applying the filter needs the backend
+ * object and that object is static and defined at the bottom of this file. */
+static void ring_filter_arm(void);
+#endif
+
 static void backend_process(const struct log_backend *const backend, union log_msg_generic *msg)
 {
 	ARG_UNUSED(backend);
+
+#if defined(CONFIG_MESHTASTIC_LOGRING_FILTER)
+	/* Armed from the FIRST message through here, which is the earliest moment
+	 * backend ids are real. Before the logging thread's first tick every id
+	 * still reads its LOG_BACKEND_DEFINE default of 0, so log_filter_set()
+	 * would silently configure whatever backend happens to hold slot 0 -- the
+	 * trap documented at length in meshtastic_netlog_filter.c, which had to
+	 * hook a network event to get around it. Owning this backend makes the
+	 * first process() call a guarantee instead of a guess. */
+	ring_filter_arm();
+#endif
 
 	log_output_msg_process(&logring_output, &msg->log, fmt_flags());
 }
@@ -220,6 +239,95 @@ static const struct log_backend_api logring_api = {
 };
 
 LOG_BACKEND_DEFINE(log_backend_logring, logring_api, true);
+
+#if defined(CONFIG_MESHTASTIC_LOGRING_FILTER)
+/*
+ * Keep per-packet chatter out of the retained ring. Restricted HERE ONLY -- every
+ * module below stays at its compiled level on the console, where bytes are free.
+ *
+ * The census that picked this list, from a real 5-hour run (~25,000 lines):
+ * powermon 40 %, `meshtastic` RX 20 %, the phone-queue warning 19 %, the heap
+ * heartbeat 13 %, thread_summary 10 %. At that rate the whole 4 KB ring held
+ * about three minutes, and the 300 s thread summary could miss it entirely.
+ *
+ * Size is not the alternative lever: the ring lives in RTC retained memory, 8 KB
+ * total on this SoC and already holding the boot log, the fatal breadcrumb, the
+ * watchdog crash info and the persisted clock (4476 B measured). The ring could
+ * reach ~7.8 KB and no further -- under 2x. Filtering is not bounded that way.
+ */
+static const char *const ring_restricted[] = {
+	/* One line per RX/TX power-state transition -- the largest single source,
+	 * and redundant in the ring because the `meshtastic` RX/TX lines it
+	 * accompanies are deliberately kept. */
+	"powermon",
+
+	/* Radio internals. Same module family whose DEBUG output caused the
+	 * resolved net_pkt-exhaustion flood. */
+	"sx126x",
+	"sx126x_hal",
+	"sx126x_hal_common",
+	"sx12xx_common",
+	"lbm_driver",
+	"sx127x",
+	"lr11xx",
+	"lr11xx_hal",
+	"rylr",
+
+	/* Subsystem internals: volume without narrative. */
+	"meshtastic_mqtt",
+	"meshtastic_pki",
+	"meshtastic_display",
+	"meshtastic_wifi_auto",
+	"heltec_v4_fem",
+
+	/* Defence in depth -- this one once lost ~85 % of its own output to a
+	 * flood it caused, and must never be able to evict a crash tail. */
+	"mt_heap_trace",
+};
+
+/* NOT restricted, and the omissions are the point: `meshtastic` (RX/TX and the
+ * heap heartbeat), `meshtastic_sample` (boot cause + crash breadcrumbs),
+ * `thread_summary`, and `os` (the fault output itself). Those four are the
+ * narrative you actually read after a reset. */
+
+static void ring_filter_work_fn(struct k_work *work)
+{
+	size_t applied = 0;
+
+	ARG_UNUSED(work);
+
+	for (size_t i = 0; i < ARRAY_SIZE(ring_restricted); i++) {
+		int source_id = log_source_id_get(ring_restricted[i]);
+
+		if (source_id < 0) {
+			/* Not compiled into this build -- a LoRa driver variant this
+			 * board does not use, say. Not an error. */
+			continue;
+		}
+
+		(void)log_filter_set(&log_backend_logring, Z_LOG_LOCAL_DOMAIN_ID,
+				     (int16_t)source_id, LOG_LEVEL_WRN);
+		applied++;
+	}
+
+	LOG_INF("logring: %u/%u noisy module(s) held to WRN+ in the retained ring "
+		"(console unaffected)",
+		(unsigned int)applied, (unsigned int)ARRAY_SIZE(ring_restricted));
+}
+
+static K_WORK_DEFINE(ring_filter_work, ring_filter_work_fn);
+static atomic_t ring_filter_armed;
+
+static void ring_filter_arm(void)
+{
+	/* Deferred to the workqueue rather than applied inline: this is called from
+	 * inside the log core's own process callback, and log_filter_set() plus the
+	 * LOG_INF above have no business running there. */
+	if (atomic_cas(&ring_filter_armed, 0, 1)) {
+		(void)k_work_submit(&ring_filter_work);
+	}
+}
+#endif /* CONFIG_MESHTASTIC_LOGRING_FILTER */
 
 bool meshtastic_logring_have_previous(void)
 {

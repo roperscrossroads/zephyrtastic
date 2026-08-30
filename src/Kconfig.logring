@@ -58,3 +58,44 @@ config MESHTASTIC_LOGRING_LOG_LEVEL
 	range 0 4
 
 endif # MESHTASTIC_LOGRING
+
+config MESHTASTIC_LOGRING_FILTER
+	bool "Keep per-packet chatter out of the retained ring"
+	default y
+	help
+	  Restrict a curated list of high-volume modules to WRN-or-worse ON THE
+	  RING BACKEND ONLY. The console keeps every line; what changes is how far
+	  back the ring reaches after a reset.
+
+	  This is the lever that matters, because ring SIZE barely moves. The ring
+	  lives in RTC retained memory, which is 8 KB total on the ESP32-S3 and
+	  already holds the boot log, the fatal breadcrumb, the watchdog crash info
+	  and the persisted clock. Measured 2026-08-30: 4476 B used, so the ring
+	  could reach about 7.8 KB and no further -- under 2x. Filtering is not
+	  bounded that way.
+
+	  The numbers that motivated the list, from a real 5-hour run (~25,000
+	  lines, coredump excluded):
+
+	    powermon: state=            9801   40%   one line per TX/RX transition
+	    meshtastic: RX from         4885   20%
+	    phone queue full (WRN)      4619   19%   see meshtastic_phoneapi.c
+	    Watchdog: system heap       3121   13%
+	    thread_summary              ~2600  10%
+
+	  At that verbosity the whole 4 KB ring held about THREE MINUTES. The
+	  thread summary runs every 300 s, so the one periodic health record most
+	  worth having after a crash could miss the ring entirely.
+
+	  What is deliberately NOT restricted, because it is the narrative you
+	  actually read after a reset: `meshtastic` (RX/TX, heartbeat),
+	  `meshtastic_sample` (boot cause + crash breadcrumbs), `thread_summary`,
+	  and `os` (fault output).
+
+	  Applied lazily on the ring backend's FIRST process() call rather than at
+	  init. Before the logging thread's first tick every backend id still reads
+	  0, so log_filter_set() would silently write into whatever backend holds
+	  slot 0 -- the trap documented at length in meshtastic_netlog_filter.c,
+	  which had to hook a network event to dodge it. Owning this backend means
+	  the first process() call is a guarantee that ids are real, with no timing
+	  guesswork at all.
