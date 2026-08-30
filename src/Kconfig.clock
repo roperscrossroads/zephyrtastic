@@ -5,7 +5,7 @@ DT_CHOSEN_MT_PERSIST_COUNTER := meshtastic,persist-counter
 
 config MESHTASTIC_CLOCK_PERSIST
 	bool "Carry the wall clock across a warm reset"
-	default n
+	default y
 	depends on MESHTASTIC_BOOTLOG
 	depends on $(dt_chosen_enabled,$(DT_CHOSEN_MT_PERSIST_COUNTER))
 	select COUNTER
@@ -32,30 +32,30 @@ config MESHTASTIC_CLOCK_PERSIST
 	  A true power cycle clears retained RAM, so this covers warm resets only:
 	  watchdog, software reboot, fault.
 
-	  ⚠️ DEFAULT n, AND NOT YET PROVEN ON HARDWARE. The logic is built and unit
-	  tested on native_sim (see tests/protocol), but the first image carrying it
-	  did not survive its test boot on a V4: it took a watchdog reset and
-	  MCUboot reverted, which is the safety net working exactly as designed and
-	  is also the reason this is not on by default. The cause is not yet known
-	  and was not diagnosable from where that node was — battery powered, no
-	  console, reachable only over BLE.
+	  PROVEN ON HARDWARE 2026-08-29, on a V4 with a GNSS fix:
 
-	  The cause is genuinely OPEN. The first suspect was the counter driver
-	  newly initialising because this option selects COUNTER — and that was
-	  checked and is WRONG: COUNTER and COUNTER_RTC_ESP32 are already y in
-	  these images with this option off, so the select changes nothing and the
-	  driver was already running. Recorded because a wrong suspect left
-	  standing is worse than none.
+	    clock: epoch 1788049005, source GPS
+	           restored across the reset (12966 ms gap)
 
-	  What remains: the failure is one observation, and a test-boot can be
-	  ended by a reset from any source, not only by this code. The bench also
-	  has a separate fault that panics a node every few hours (agents-quo6),
-	  which is a low-probability but real alternative explanation for a single
-	  reverted test boot. Bring this up on a node with a console attached, where
-	  the fault output can actually be read, before turning it on.
+	  The reported source being GPS is the point rather than an inconsistency:
+	  the clock was restored at DEVICE quality and a live GNSS fix then replaced
+	  it, which is exactly what restoring at the ORIGINAL quality would have
+	  prevented.
 
-	  Do NOT raise the default without that bring-up. An image that fails to
-	  boot is recoverable here only because every image is test-swapped first.
+	  ⚠️ It took two attempts, and the first is worth recording. The first image
+	  carrying this did not survive its test boot — it took a watchdog reset and
+	  MCUboot reverted it. The obvious suspect, that this option's `select
+	  COUNTER` newly initialises the counter driver, was checked and is WRONG:
+	  COUNTER and COUNTER_RTC_ESP32 are already y with this option off, so the
+	  select changes nothing. The IDENTICAL image then booted, saved and restored
+	  correctly on the next attempt, so that failure was a reset from some other
+	  source landing inside the test-boot window; this bench has a fault that
+	  panics a node every few hours (agents-quo6), which is the likeliest
+	  candidate.
+
+	  The lesson is about evidence rather than about this feature: one reverted
+	  test boot does not identify what caused the reset, and reasoning backwards
+	  from it produced a confident wrong diagnosis.
 
 if MESHTASTIC_CLOCK_PERSIST
 
