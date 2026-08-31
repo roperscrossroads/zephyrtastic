@@ -161,7 +161,7 @@ config MESHTASTIC_FLEET_CLASS
 	help
 	  A small operator-assigned number naming what this image is FOR: the
 	  (board, build variant) pair — e.g. the XIAO BLE node, the Heltec R8
-	  courier, the Heltec V4 transmit-disabled node. hw_model alone cannot say
+	  courier, the Heltec V4 passive listener. hw_model alone cannot say
 	  it: one board runs several variants that must never replace each other.
 	  A courier only offers a node an image of the node's own class, and a
 	  node with class 0 is offered nothing. Shown by `meshtastic version`;
