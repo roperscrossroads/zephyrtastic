@@ -52,11 +52,21 @@ config MESHTASTIC_SUPERVISOR_INTERVAL
 
 config MESHTASTIC_SUPERVISOR_STACK_SIZE
 	int "Stack size for the supervisor thread"
-	default 2048
+	default 4096
 	help
-	  Matches meshtastic_thread_summary.c's stack size -- same job (walk
-	  and format every other thread's info via thread_analyzer_run()),
-	  same margin needed.
+	  2048 -- meshtastic_thread_summary.c's size, on the theory that this
+	  thread does the same job (walk every thread via thread_analyzer_run())
+	  -- measured 97% full on rzr4's first real boot (class 4, cluster +
+	  health, 2026-08-30) and would very likely have overflowed shortly
+	  after: ESP32-S3 has no MPU stack guard, so that is a wedge with no
+	  warning, not a caught fault. thread_summary.c's own Kconfig already
+	  records that 2048 was "the tightest margin on the bench" for a
+	  SIMPLER callback than this one's -- this thread's alert() path calls
+	  through to meshtastic_phoneapi_on_packet() (a real send-path call
+	  chain, not just formatting), which thread_summary.c's plain LOG_INF
+	  never does. 4096 is a first correction by doubling, not a measured
+	  floor -- re-measure if a future board's `stats list` or a WARN about
+	  this thread's own name says otherwise.
 
 config MESHTASTIC_SUPERVISOR_STACK_WARN_PCT
 	int "Per-thread stack-used percent that trips a WARN"

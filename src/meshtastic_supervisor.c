@@ -190,24 +190,37 @@ static void check_thread(struct thread_analyzer_info *info)
 	}
 
 #if defined(CONFIG_THREAD_RUNTIME_STATS) && defined(CONFIG_MESHTASTIC_SUPERVISOR_CPU_WARN_PCT)
-	if (info->utilization >= (unsigned int)CONFIG_MESHTASTIC_SUPERVISOR_CPU_WARN_PCT) {
-		if (st->cpu_over_count < UINT16_MAX) {
-			st->cpu_over_count++;
-		}
-		if (!st->cpu_warn &&
-		    st->cpu_over_count >= (uint16_t)CONFIG_MESHTASTIC_SUPERVISOR_CPU_WARN_CYCLES) {
-			st->cpu_warn = true;
-			STATS_INC(mt_supervisor, cpu_warn);
-			alert(true, "supervisor: WARN cpu %s at %u%% for %u samples", info->name,
-			      info->utilization, st->cpu_over_count);
-		}
-	} else {
-		st->cpu_over_count = 0;
-		if (st->cpu_warn) {
-			st->cpu_warn = false;
-			STATS_INC(mt_supervisor, cpu_recovered);
-			alert(false, "supervisor: OK cpu %s recovered, now %u%%", info->name,
-			      info->utilization);
+	/* The plan's own liveness table says "any NON-IDLE thread" -- the idle
+	 * thread being busy IS the system being idle (info->utilization measures
+	 * time spent RUNNING, and idle's job is to run whenever nothing else
+	 * wants the CPU), so a high idle% is the healthy case, not a runaway
+	 * thread. Missing this exclusion made every lightly-loaded boot WARN on
+	 * "cpu idle at ~96%" within a few samples -- caught on rzr4's first real
+	 * boot (2026-08-30), which is also what pushed the supervisor thread's
+	 * own stack usage into ITS warning (see CONFIG_MESHTASTIC_SUPERVISOR_STACK_SIZE):
+	 * a spurious alert exercises the exact same alert()/phoneapi call depth a
+	 * real one would. Zephyr names it "idle" (or "idle NN" with
+	 * CONFIG_MP_MAX_NUM_CPUS > 1; kernel/init.c) -- prefix match covers both. */
+	if (strncmp(info->name, "idle", 4) != 0) {
+		if (info->utilization >= (unsigned int)CONFIG_MESHTASTIC_SUPERVISOR_CPU_WARN_PCT) {
+			if (st->cpu_over_count < UINT16_MAX) {
+				st->cpu_over_count++;
+			}
+			if (!st->cpu_warn && st->cpu_over_count >=
+						     (uint16_t)CONFIG_MESHTASTIC_SUPERVISOR_CPU_WARN_CYCLES) {
+				st->cpu_warn = true;
+				STATS_INC(mt_supervisor, cpu_warn);
+				alert(true, "supervisor: WARN cpu %s at %u%% for %u samples",
+				      info->name, info->utilization, st->cpu_over_count);
+			}
+		} else {
+			st->cpu_over_count = 0;
+			if (st->cpu_warn) {
+				st->cpu_warn = false;
+				STATS_INC(mt_supervisor, cpu_recovered);
+				alert(false, "supervisor: OK cpu %s recovered, now %u%%",
+				      info->name, info->utilization);
+			}
 		}
 	}
 #endif
