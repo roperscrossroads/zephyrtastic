@@ -65,6 +65,30 @@ cause, uptime — surfaced via telemetry/MQTT/telnet. Turns "seems flaky" into d
 and makes R1–R3's effects measurable.
 - **Effort:** S–M. **Risk:** low. Do alongside R1–R3 so their impact is visible.
 
+### R5 — Dead-man timers on peer-visible state  *(MEDIUM — one instance fixed, audit the rest)*
+Any state one node raises on another party's *start* event and lowers on its *stop*
+event latches on forever if that party vanishes. Across a link there is no such
+thing as a guaranteed stop event.
+
+Shipped instance (2026-08-28): the peer-link **HOLD** flag was raised on
+`MGMT_EVT_OP_IMG_MGMT_DFU_STARTED` and lowered on `DFU_STOPPED`. `img_mgmt` raises
+STOPPED only from inside a request it is processing — complete, aborted, erased —
+so a courier that died mid-push (a BLE-controller fault took one down 41 s into an
+upload) left the target beating HOLD with nothing able to lower it. Every later
+courier then skipped that node as busy: permanently unservable until an operator
+ran `blepeer hold off`. Fixed by `MESHTASTIC_OTA_HOLD_IDLE_TIMEOUT_S` (default
+120 s), rearmed on each `DFU_CHUNK_WRITE_COMPLETE`, cancelled by STOPPED, with a
+`hold_is_ours` latch so an operator's own hold is never lowered by the machinery.
+
+- **Design rule:** bound such a flag on *observed progress*, not on the promise of a
+  final event. The document plane already works this way — it is level-triggered, so
+  nothing has to succeed — and this is the same discipline applied to the session
+  plane (SMP jobs, peer links) where it does not come for free.
+- **Do:** audit the remaining start/stop pairs the same way — the courier's own job
+  state (`job_running`, the `updating` row), the `unsub_pending` latch in
+  `meshtastic_smp_central.c`, and anything else cleared only on a success path.
+- **Effort:** S per instance. **Risk:** low.
+
 ---
 
 ## Testability
@@ -78,6 +102,23 @@ and pairing tests in CI.
   non-trivial. But it is the *only* path to automated BLE coverage, and BLE is now
   load-bearing.
 - **Effort:** L.
+- **Evidence it is under-rated (2026-08-28):** three bugs shipped to the bench in one
+  arc, all in *reconnect-to-a-bonded-peer*, none reachable from native_sim:
+  1. Zephyr keeps a GATT subscription across a disconnect for a **bonded** peer
+     (`remove_subscriptions()`), so `bt_gatt_subscribe()` answers `-EALREADY` for
+     reused params — a client with one static `bt_gatt_subscribe_params` works
+     exactly once per boot. Symptom appeared one release after the change (bonding)
+     that caused it.
+  2. `bt_conn_set_security()` answers `-EBUSY` while the peer is already encrypting;
+     treating that as failure ran a second MTU+discovery over the same static params.
+  3. A bring-up that died left a link held but never ready, and every retry answered
+     `-EALREADY` until the job's budget expired.
+
+  The minimal test that catches all three is small and entirely bsim-shaped:
+  **connect → subscribe → disconnect → reconnect → subscribe again, with a bond, and
+  again with the peer initiating.** Each bug cost a build/flash/bench cycle to find
+  and needed hardware to confirm; each would have failed that test in seconds. This
+  is the concrete case for moving T1 up the sequence.
 
 ### T2 — Coverage measurement  *(DONE 2026-07-27)*
 `west twister --coverage --coverage-tool gcovr` on the native_sim suites.
@@ -168,3 +209,10 @@ real-world edge cases become permanent regression guards.
 
 Operator priority (2026-07-27): **R1, R2, R3 high.** T2 started first as the
 cheap objective-signal step.
+
+Since then (2026-08-28): R1 is done (the watchdog landed, and the `wdt_esp32`
+ms-vs-ticks bug behind it is fixed and carried as a patch); **R5** is new, with one
+instance already fixed; and **T1 has earned a promotion** — the node-to-node OTA path
+is now load-bearing, it is BLE end to end, and the three bugs listed under T1 are what
+"no automated BLE coverage" costs in practice. Reconnect-with-a-bond is the single
+highest-yield test to write first.
