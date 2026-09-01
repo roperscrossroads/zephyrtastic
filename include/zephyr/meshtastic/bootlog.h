@@ -114,5 +114,9 @@ void meshtastic_bootlog_test_durable_append(const struct meshtastic_boot_durable
  *  the round trip THROUGH flash — append, wipe RAM, settings_load(), read back —
  *  which is the only property this whole feature exists for. */
 int meshtastic_bootlog_test_durable_save(void);
+/** Run the SAME load the boot path runs. A test must use this rather than
+ *  settings_load(): the boot path loads its own subtree because nothing else
+ *  does, and calling settings_load() instead is what hid that being missing. */
+void meshtastic_bootlog_test_durable_load(void);
 
 #endif /* ZEPHYR_MESHTASTIC_BOOTLOG_H_ */

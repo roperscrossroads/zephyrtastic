@@ -330,6 +330,69 @@ size_t meshtastic_bootlog_durable_history(struct meshtastic_boot_durable *out, s
  * and the rest of the record still carries the reset cause, the warm/cold bit
  * and how long the previous run lasted.
  */
+/* Load our own subtree. NOT optional, and not something to leave to whoever
+ * calls settings first: meshtastic_settings_init() runs from meshtastic_init()
+ * at RUNTIME, long after every SYS_INIT, and it loads only its own subtree. So
+ * at the point this file needs the ring, nothing has read it.
+ *
+ * Bench-caught on 2026-09-01, and only on hardware: without this the cached ring
+ * is zeroed, append() treats that as "never written", and every boot wipes the
+ * history and stores a single entry. `resets durable` then shows exactly one row
+ * forever — which looks plausible on a node that has just been flashed, and is
+ * the failure this whole feature exists to prevent. The sim test missed it by
+ * calling settings_load() itself.
+ *
+ * Doing the load HERE also keeps the record independent of the application
+ * coming up at all, which matters: the boots worth explaining are the ones where
+ * meshtastic_init() never finished.
+ */
+static void bl_durable_load(void)
+{
+	int ret = settings_subsys_init(); /* idempotent; may already have run */
+
+	if (ret != 0) {
+		LOG_WRN("bootlog: settings init %d — durable history unavailable", ret);
+		return;
+	}
+	ret = settings_load_subtree(BL_DUR_SUBTREE);
+	if (ret != 0) {
+		LOG_WRN("bootlog: durable subtree load %d — history may restart", ret);
+	}
+}
+
+static int bl_durable_save(void)
+{
+	return settings_save_one(BL_DUR_KEY, &bl_dur, sizeof(bl_dur));
+}
+
+#define BL_DUR_RETRY_MS   2000
+#define BL_DUR_RETRY_MAX  5
+
+/* Defined before the handler that arms it, and initialised in the SYS_INIT
+ * rather than with K_WORK_DELAYABLE_DEFINE, because the handler references it. */
+static struct k_work_delayable bl_dur_retry;
+
+static void bl_durable_retry_fn(struct k_work *work)
+{
+	static uint8_t tries;
+
+	ARG_UNUSED(work);
+
+	if (bl_durable_save() == 0) {
+		LOG_INF("bootlog: durable record written on retry %u", tries + 1U);
+		return;
+	}
+	if (++tries < BL_DUR_RETRY_MAX) {
+		(void)k_work_schedule(&bl_dur_retry, K_MSEC(BL_DUR_RETRY_MS));
+		return;
+	}
+	/* Say it plainly and once. Silence here would be discovered only when the
+	 * history was needed and absent, which is the failure this ring exists to
+	 * prevent. */
+	LOG_ERR("bootlog: durable history could NOT be saved after %u tries — this "
+		"boot will not survive a power cycle", (unsigned int)BL_DUR_RETRY_MAX);
+}
+
 static int bl_durable_record_boot(void)
 {
 	struct meshtastic_boot_durable rec = {
@@ -340,20 +403,31 @@ static int bl_durable_record_boot(void)
 		.prev_uptime_s = bl_this.prev_uptime_s,
 	};
 
+	k_work_init_delayable(&bl_dur_retry, bl_durable_retry_fn);
+
+	bl_durable_load();
 	bl_durable_append(&rec);
 
-	if (settings_save_one(BL_DUR_KEY, &bl_dur, sizeof(bl_dur)) != 0) {
-		/* Not fatal: the RAM history still works for warm resets. But say so,
-		 * because the whole point of this ring is the case where nobody is
-		 * watching, and a silent failure here would be discovered only when
-		 * the history was needed and absent. */
-		LOG_WRN("bootlog: durable history save FAILED — this boot will not "
-			"survive a power cycle");
+	/* Try now, so a node that dies seconds later still leaves a record. If that
+	 * fails, retry from a work item rather than shrug.
+	 *
+	 * The retry is not defensive programming for its own sake — it is measured.
+	 * On the XIAO (nRF52840 + MCUboot, settings on internal flash) this save
+	 * fails INTERMITTENTLY at SYS_INIT time: bench run 2026-09-01 recorded boots
+	 * #3 and #6 while #4 and #5 went missing, with the ring correct in RAM each
+	 * time. The ESP32 nodes save reliably at the same point. Whatever the nRF
+	 * flash path wants that it does not have this early, it has it a moment
+	 * later — and a boot record that lands only sometimes is worse than useless,
+	 * because a gap reads as "no reset happened".
+	 */
+	if (bl_durable_save() == 0) {
+		LOG_DBG("bootlog: durable record #%u written (%u retained)", rec.boot_num,
+			bl_dur.count);
 		return 0;
 	}
 
-	LOG_DBG("bootlog: durable record #%u written (%u retained)", rec.boot_num,
-		bl_dur.count);
+	LOG_WRN("bootlog: durable save failed at init — retrying shortly");
+	(void)k_work_schedule(&bl_dur_retry, K_MSEC(BL_DUR_RETRY_MS));
 	return 0;
 }
 
@@ -397,7 +471,12 @@ void meshtastic_bootlog_test_durable_append(const struct meshtastic_boot_durable
 
 int meshtastic_bootlog_test_durable_save(void)
 {
-	return settings_save_one(BL_DUR_KEY, &bl_dur, sizeof(bl_dur));
+	return bl_durable_save();
+}
+
+void meshtastic_bootlog_test_durable_load(void)
+{
+	bl_durable_load();
 }
 
 #else /* !CONFIG_MESHTASTIC_BOOTLOG_DURABLE */
@@ -427,6 +506,10 @@ void meshtastic_bootlog_test_durable_append(const struct meshtastic_boot_durable
 int meshtastic_bootlog_test_durable_save(void)
 {
 	return -ENOTSUP;
+}
+
+void meshtastic_bootlog_test_durable_load(void)
+{
 }
 
 #endif /* CONFIG_MESHTASTIC_BOOTLOG_DURABLE */

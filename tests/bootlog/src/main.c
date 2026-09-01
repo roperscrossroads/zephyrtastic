@@ -140,7 +140,13 @@ ZTEST(bootlog_durable, test_history_survives_losing_the_ram_copy)
 		      "the RAM copy should be gone after a reset — otherwise the reload "
 		      "below proves nothing");
 
-	zassert_equal(settings_load(), 0, "settings_load failed");
+	/* Deliberately the module's OWN load, not settings_load(). The boot path
+	 * loads its subtree itself because nothing else does -- meshtastic_settings_init()
+	 * runs from meshtastic_init() at runtime, after every SYS_INIT, and loads only
+	 * its own subtree. Calling settings_load() here instead is precisely what hid
+	 * that missing load: the test passed while every real boot wiped the ring and
+	 * kept a single entry (caught on hardware 2026-09-01). Exercise what boots. */
+	meshtastic_bootlog_test_durable_load();
 
 	zassert_equal(meshtastic_bootlog_durable_history(out, ARRAY_SIZE(out)), n,
 		      "history did NOT survive the reload — this is the whole feature");
