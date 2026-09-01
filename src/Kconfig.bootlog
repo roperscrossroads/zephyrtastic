@@ -27,6 +27,38 @@ config MESHTASTIC_BOOTLOG_ENTRIES
 	  History depth. Twelve bytes each. Eight covers a boot loop long enough
 	  to see its shape without keeping a log nobody reads.
 
+config MESHTASTIC_BOOTLOG_DURABLE
+	bool "Also keep the boot history in flash (survives power loss)"
+	depends on SETTINGS
+	default y
+	help
+	  The retained-RAM history above reports a power event by ABSENCE: the
+	  magic fails to validate and everything before it is gone. You learn
+	  that power was lost and nothing else — not when, not how often, not how
+	  long the node had been up first. The rate is usually most of the signal.
+
+	  That gap is structural on a LoRa+BLE-only fleet, not merely untidy. The
+	  only way to recover a node that has stopped answering both bearers is to
+	  carry it to a USB host, which removes power, which clears the retained
+	  RAM — so the recovery destroys the evidence every single time, and
+	  "no crash recorded" becomes indistinguishable from "the rescue erased
+	  it". A node that fails in the field is un-diagnosable by construction.
+
+	  This writes one record per boot into the settings partition, so the
+	  history outlives the power cycle. Costs one small NVS write per boot —
+	  a handful of records per power cycle, which is nothing against NVS's
+	  sector budget — plus the RAM to cache the ring for appending.
+
+config MESHTASTIC_BOOTLOG_DURABLE_ENTRIES
+	int "Boots retained in flash"
+	depends on MESHTASTIC_BOOTLOG_DURABLE
+	default 16
+	range 4 64
+	help
+	  Sixteen bytes each, held both in flash and in a RAM cache used to
+	  append. Sixteen entries is 256 B of each and covers enough power cycles
+	  to show whether resets are clustering.
+
 endif # MESHTASTIC_BOOTLOG
 
 config MESHTASTIC_FAULTMARK

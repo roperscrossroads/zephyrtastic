@@ -33,6 +33,39 @@ struct meshtastic_boot_record {
  *  meaningless rather than merely zero — the two must not look alike. */
 #define MESHTASTIC_BOOT_F_CAUSE_OK BIT(1)
 
+/**
+ * One boot, in FLASH. Sixteen bytes.
+ *
+ * The retained-RAM ring above reports a power event by ABSENCE — the magic
+ * fails, the counter restarts at 1, and everything before it is gone. That is
+ * enough to say "power was lost" and nothing else: not when, not how often, not
+ * how long the node had been up first. On a fleet whose only bearers are LoRa
+ * and BLE the gap is worse than untidy, because the only way to recover a node
+ * that has stopped answering both is to carry it to a USB host, and that removes
+ * power — so the recovery destroys the evidence, every time. A node that dies in
+ * the field is therefore un-diagnosable by construction (see the 2026-08-31
+ * courier fault, where `crashinfo` read "none pending" purely because the rescue
+ * had cleared it).
+ *
+ * This ring is the durable half. It survives the power cycle that clears the
+ * other one, so the RATE of resets — usually most of the signal — outlives it.
+ */
+struct meshtastic_boot_durable {
+	/** Boot counter at the time of writing. Restarts with the RAM history. */
+	uint32_t boot_num;
+	/** hwinfo cause, as for the RAM record. Meaningful only with F_CAUSE_OK. */
+	uint32_t cause;
+	/** Epoch seconds when this record was written, or 0 if the clock was not
+	 *  valid yet. NOT the moment of the reset: it is early in the NEXT boot,
+	 *  which is the closest honest timestamp available without deferring the
+	 *  write (and a deferred write is one a dying node never makes). */
+	uint32_t wall_s;
+	/** MESHTASTIC_BOOT_F_* — the warm/cold bit is the load-bearing one. */
+	uint16_t flags;
+	/** How long the run BEFORE this boot lasted, seconds. 0 = unknown. */
+	uint16_t prev_uptime_s;
+};
+
 /** @brief This boot's record. */
 void meshtastic_bootlog_this_boot(struct meshtastic_boot_record *out);
 
@@ -59,5 +92,27 @@ void meshtastic_bootlog_report(void);
  * about five minutes in".
  */
 void meshtastic_bootlog_heartbeat(uint32_t uptime_s);
+
+/**
+ * @brief Copy out the FLASH-backed history, oldest first.
+ *
+ * Unlike meshtastic_bootlog_history(), a non-zero return here spans power
+ * cycles. Returns 0 when the durable ring is disabled or has never been written.
+ */
+size_t meshtastic_bootlog_durable_history(struct meshtastic_boot_durable *out, size_t max);
+
+/** @brief Log the durable history (the `resets --all` body). */
+void meshtastic_bootlog_durable_report(void);
+
+/* Test hooks. The ring arithmetic — append, wrap, oldest-first ordering — is
+ * where the bugs live and is pure, so it is tested directly on native_sim
+ * rather than through a flash backend. The settings glue around it is the same
+ * shape already proven by the courier-arm and cluster-scope records. */
+void meshtastic_bootlog_test_durable_reset(void);
+void meshtastic_bootlog_test_durable_append(const struct meshtastic_boot_durable *rec);
+/** Persist the cached ring now, as the boot-time record does. Lets a test prove
+ *  the round trip THROUGH flash — append, wipe RAM, settings_load(), read back —
+ *  which is the only property this whole feature exists for. */
+int meshtastic_bootlog_test_durable_save(void);
 
 #endif /* ZEPHYR_MESHTASTIC_BOOTLOG_H_ */

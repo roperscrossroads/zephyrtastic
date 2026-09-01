@@ -122,3 +122,13 @@ tests:
   meshtastic.variants.shell_crashtest.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_SHELL_CRASHTEST=y
+
+  # The durable boot history subtracted. MESHTASTIC_BOOTLOG_DURABLE is default-y,
+  # so the untested arm is =n -- and =n is not a no-op: it compiles a whole
+  # second set of stub implementations for the public API, drops the settings
+  # handler and the SYS_INIT, and leaves the RAM-only ring as the sole path. That
+  # is exactly the shape that strands an unused static or a now-unreferenced
+  # helper under -Werror.
+  meshtastic.variants.no_bootlog_durable.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_BOOTLOG_DURABLE=n

@@ -217,6 +217,220 @@ const char *meshtastic_bootlog_cause_str(uint32_t cause, char *buf, size_t bufle
 	return buf;
 }
 
+#if defined(CONFIG_MESHTASTIC_BOOTLOG_DURABLE)
+
+/* ---- the durable ring -------------------------------------------------- *
+ *
+ * Everything above lives in retained RAM and dies with the RAM rail. This half
+ * is the same history in flash, for the reason set out in Kconfig.bootlog: on a
+ * fleet reachable only by LoRa and BLE, recovering a node that answers neither
+ * means removing its power, so the rescue is exactly what erases the record of
+ * why it needed rescuing.
+ *
+ * One settings key holds the whole ring rather than a key per slot. That makes
+ * an append a single write of a couple of hundred bytes instead of a
+ * read-modify-write across N keys, and it means the ring can never be found
+ * half-updated with slots from two different generations.
+ */
+#include <zephyr/settings/settings.h>
+
+#include "meshtastic_clock.h"
+
+#define BL_DUR_SUBTREE "mtboot"
+#define BL_DUR_KEY     BL_DUR_SUBTREE "/ring"
+#define BL_DUR_MAGIC   0x424C4452U /* "BLDR" */
+#define BL_DUR_VERSION 1U
+#define BL_DUR_ENTRIES CONFIG_MESHTASTIC_BOOTLOG_DURABLE_ENTRIES
+
+struct bl_durable_blob {
+	uint32_t magic;
+	uint16_t version;
+	uint16_t count; /* valid entries, saturating at BL_DUR_ENTRIES */
+	uint16_t next;  /* next write slot */
+	uint16_t _pad;  /* keep the ring 4-byte aligned and the size stable */
+	struct meshtastic_boot_durable ring[BL_DUR_ENTRIES];
+} __packed;
+
+static struct bl_durable_blob bl_dur;
+
+static void bl_durable_fresh(void)
+{
+	memset(&bl_dur, 0, sizeof(bl_dur));
+	bl_dur.magic = BL_DUR_MAGIC;
+	bl_dur.version = BL_DUR_VERSION;
+}
+
+/* Pure: append into the cached ring. Split out because the wrap arithmetic is
+ * the only part with anywhere to hide a bug, and it is testable without flash. */
+static void bl_durable_append(const struct meshtastic_boot_durable *rec)
+{
+	if (bl_dur.magic != BL_DUR_MAGIC || bl_dur.next >= BL_DUR_ENTRIES ||
+	    bl_dur.count > BL_DUR_ENTRIES) {
+		/* Never written, wrong version, or indices we cannot trust. Starting
+		 * clean loses history; printing garbage would lose the reader. */
+		bl_durable_fresh();
+	}
+
+	bl_dur.ring[bl_dur.next] = *rec;
+	bl_dur.next = (uint16_t)((bl_dur.next + 1U) % BL_DUR_ENTRIES);
+	if (bl_dur.count < BL_DUR_ENTRIES) {
+		bl_dur.count++;
+	}
+}
+
+static int bl_durable_settings_set(const char *key, size_t len, settings_read_cb read_cb,
+				   void *cb_arg)
+{
+	struct bl_durable_blob in;
+
+	if (strcmp(key, "ring") != 0) {
+		return -ENOENT;
+	}
+	/* A size or version change means the on-flash layout is not this one.
+	 * Drop it rather than reinterpret the bytes: a mis-decoded boot history
+	 * is worse than an empty one, because it reads as fact. */
+	if (len != sizeof(in) || read_cb(cb_arg, &in, len) != (ssize_t)len) {
+		return 0;
+	}
+	if (in.magic != BL_DUR_MAGIC || in.version != BL_DUR_VERSION ||
+	    in.next >= BL_DUR_ENTRIES || in.count > BL_DUR_ENTRIES) {
+		return 0;
+	}
+
+	bl_dur = in;
+	return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mt_bootlog, BL_DUR_SUBTREE, NULL, bl_durable_settings_set, NULL,
+			       NULL);
+
+size_t meshtastic_bootlog_durable_history(struct meshtastic_boot_durable *out, size_t max)
+{
+	size_t n;
+
+	if (out == NULL || max == 0U || bl_dur.magic != BL_DUR_MAGIC) {
+		return 0U;
+	}
+
+	n = MIN((size_t)bl_dur.count, max);
+	for (size_t i = 0; i < n; i++) {
+		size_t idx = ((size_t)bl_dur.next + BL_DUR_ENTRIES - n + i) % BL_DUR_ENTRIES;
+
+		out[i] = bl_dur.ring[idx];
+	}
+	return n;
+}
+
+/* Runs after settings have loaded (so the ring is the one from flash) and after
+ * the clock module has had its chance to restore a persisted epoch.
+ *
+ * The record is written IMMEDIATELY rather than waiting for the clock to become
+ * valid from GNSS or the mesh. A timestamp would be nicer; a record that a dying
+ * node never got round to writing is worthless. wall_s == 0 says "no clock yet"
+ * and the rest of the record still carries the reset cause, the warm/cold bit
+ * and how long the previous run lasted.
+ */
+static int bl_durable_record_boot(void)
+{
+	struct meshtastic_boot_durable rec = {
+		.boot_num = bl_this.boot_num,
+		.cause = bl_this.cause,
+		.wall_s = meshtastic_clock_valid() ? meshtastic_clock_now_epoch() : 0U,
+		.flags = bl_this.flags,
+		.prev_uptime_s = bl_this.prev_uptime_s,
+	};
+
+	bl_durable_append(&rec);
+
+	if (settings_save_one(BL_DUR_KEY, &bl_dur, sizeof(bl_dur)) != 0) {
+		/* Not fatal: the RAM history still works for warm resets. But say so,
+		 * because the whole point of this ring is the case where nobody is
+		 * watching, and a silent failure here would be discovered only when
+		 * the history was needed and absent. */
+		LOG_WRN("bootlog: durable history save FAILED — this boot will not "
+			"survive a power cycle");
+		return 0;
+	}
+
+	LOG_DBG("bootlog: durable record #%u written (%u retained)", rec.boot_num,
+		bl_dur.count);
+	return 0;
+}
+
+/* APPLICATION, after MESHTASTIC_SETTINGS_INIT_PRIORITY has loaded the subtree. */
+SYS_INIT(bl_durable_record_boot, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+
+void meshtastic_bootlog_durable_report(void)
+{
+	struct meshtastic_boot_durable hist[BL_DUR_ENTRIES];
+	char cbuf[64];
+	size_t n = meshtastic_bootlog_durable_history(hist, ARRAY_SIZE(hist));
+
+	if (n == 0U) {
+		LOG_INF("durable boot history: empty (nothing written yet)");
+		return;
+	}
+
+	LOG_INF("durable boot history, oldest first (%u kept, survives power loss):",
+		(unsigned int)n);
+	for (size_t i = 0; i < n; i++) {
+		LOG_INF("  #%u %s ran %us at %u cause 0x%08x %s", hist[i].boot_num,
+			(hist[i].flags & MESHTASTIC_BOOT_F_WARM) ? "warm" : "COLD",
+			hist[i].prev_uptime_s, hist[i].wall_s, hist[i].cause,
+			(hist[i].flags & MESHTASTIC_BOOT_F_CAUSE_OK)
+				? meshtastic_bootlog_cause_str(hist[i].cause, cbuf, sizeof(cbuf))
+				: "(cause unavailable)");
+	}
+}
+
+void meshtastic_bootlog_test_durable_reset(void)
+{
+	bl_durable_fresh();
+}
+
+void meshtastic_bootlog_test_durable_append(const struct meshtastic_boot_durable *rec)
+{
+	if (rec != NULL) {
+		bl_durable_append(rec);
+	}
+}
+
+int meshtastic_bootlog_test_durable_save(void)
+{
+	return settings_save_one(BL_DUR_KEY, &bl_dur, sizeof(bl_dur));
+}
+
+#else /* !CONFIG_MESHTASTIC_BOOTLOG_DURABLE */
+
+size_t meshtastic_bootlog_durable_history(struct meshtastic_boot_durable *out, size_t max)
+{
+	ARG_UNUSED(out);
+	ARG_UNUSED(max);
+	return 0U;
+}
+
+void meshtastic_bootlog_durable_report(void)
+{
+	LOG_INF("durable boot history: not built in "
+		"(CONFIG_MESHTASTIC_BOOTLOG_DURABLE=n)");
+}
+
+void meshtastic_bootlog_test_durable_reset(void)
+{
+}
+
+void meshtastic_bootlog_test_durable_append(const struct meshtastic_boot_durable *rec)
+{
+	ARG_UNUSED(rec);
+}
+
+int meshtastic_bootlog_test_durable_save(void)
+{
+	return -ENOTSUP;
+}
+
+#endif /* CONFIG_MESHTASTIC_BOOTLOG_DURABLE */
+
 void meshtastic_bootlog_report(void)
 {
 	struct meshtastic_boot_record hist[BOOTLOG_ENTRIES];

@@ -3393,8 +3393,44 @@ static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
 	char cbuf[64];
 	size_t n;
 
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
+	/* `resets durable` prints the FLASH ring instead: the one that survives the
+	 * power cycle, and therefore the only one that still exists after a node has
+	 * been carried to a USB host to be revived. */
+	if (argc >= 2U && strcmp(argv[1], "durable") == 0) {
+		struct meshtastic_boot_durable d[8];
+		size_t dn = meshtastic_bootlog_durable_history(d, ARRAY_SIZE(d));
+
+		if (dn == 0U) {
+			shell_print(sh, "durable history: empty — nothing written yet, or "
+					"CONFIG_MESHTASTIC_BOOTLOG_DURABLE=n");
+			return 0;
+		}
+		shell_print(sh, "%-6s %-5s %-12s %-11s %s", "boot", "kind", "prev-ran(s)",
+			    "wall(epoch)", "started-by");
+		for (size_t i = 0; i < dn; i++) {
+			char wbuf[16];
+
+			/* 0 is "the clock was not valid when this was written", which is
+			 * ordinary on a node that has not heard the mesh yet. Printing a
+			 * bare 0 would read as 1970. */
+			if (d[i].wall_s == 0U) {
+				(void)snprintk(wbuf, sizeof(wbuf), "%s", "-");
+			} else {
+				(void)snprintk(wbuf, sizeof(wbuf), "%u", d[i].wall_s);
+			}
+			shell_print(sh, "#%-5u %-5s %-12u %-11s 0x%08x", d[i].boot_num,
+				    (d[i].flags & MESHTASTIC_BOOT_F_WARM) ? "warm" : "COLD",
+				    d[i].prev_uptime_s, wbuf, d[i].cause);
+		}
+		shell_print(sh, "");
+		shell_print(sh, "This ring is in FLASH and survives power loss, so a COLD row "
+				"here still has");
+		shell_print(sh, "rows before it — which is the whole difference from the "
+				"retained-RAM view.");
+		shell_print(sh, "wall(epoch) '-' means the clock was not valid yet when the "
+				"record was written.");
+		return 0;
+	}
 
 	meshtastic_bootlog_this_boot(&now);
 
@@ -3488,14 +3524,18 @@ static const char *crashinfo_fatal_reason_name(uint32_t reason)
 
 static int cmd_crashinfo(const struct shell *sh, size_t argc, char **argv)
 {
-	struct meshtastic_watchdog_crash_info wdt_crash;
-	struct meshtastic_hw_watchdog_crash_info hw_wdt_crash;
 	struct meshtastic_fatal_crash_info fatal_crash;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
 #if defined(CONFIG_MESHTASTIC_WATCHDOG)
+	/* Declared inside the guard, not above it: the XIAO class-1 image builds
+	 * MESHTASTIC_WATCHDOG=n, where both of these are unused and warn. Harmless
+	 * today only because the app build carries no -Werror — twister does. */
+	struct meshtastic_watchdog_crash_info wdt_crash;
+	struct meshtastic_hw_watchdog_crash_info hw_wdt_crash;
+
 	if (meshtastic_watchdog_peek_last_crash(&wdt_crash)) {
 		shell_print(sh, "watchdog     channel \"%s\" timed out, heap free=%u "
 				"allocated=%u max_allocated=%u, running thread \"%s\"",
@@ -5128,8 +5168,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  cmd_lora),
 #if defined(CONFIG_MESHTASTIC_BOOTLOG)
 	SHELL_CMD(resets, NULL,
-		  SHELL_HELP("Why this node last rebooted, and the retained boot history.",
-			     NULL),
+		  SHELL_HELP("Why this node last rebooted, and the boot history. "
+			     "`durable` reads the FLASH ring, which survives power loss.",
+			     "[durable]"),
 		  cmd_resets),
 #endif
 	SHELL_CMD(crashinfo, NULL,
