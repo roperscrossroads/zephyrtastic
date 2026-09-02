@@ -2530,6 +2530,39 @@ static int cmd_nodeinfo_send(const struct shell *sh, size_t argc, char **argv)
 	return cmd_deferred_send(sh, argc, argv, SHELL_WORK_SEND_NODEINFO);
 }
 
+/* Unlike `send`, this actually asks: want_response=true, so a compliant peer
+ * replies with ITS NodeInfo. Calls meshtastic_nodeinfo_request() directly
+ * (not through the deferred-work queue `send` uses) — it is already
+ * non-blocking (K_NO_WAIT) and its own per-peer cooldown, so there is
+ * nothing for a queue to protect here that the function does not already
+ * handle itself. */
+static int cmd_nodeinfo_request(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t dest;
+	int ret;
+
+	ARG_UNUSED(argc);
+
+	ret = parse_u32(sh, argv[1], &dest);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = meshtastic_nodeinfo_request(dest);
+	if (ret == -EAGAIN) {
+		shell_print(sh, "suppressed: already requested 0x%08x within the last "
+				"%d s (CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC)",
+			    dest, CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC);
+		return 0;
+	}
+	if (ret < 0) {
+		shell_error(sh, "request failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "requested — watch for a NodeInfo reply from 0x%08x", dest);
+	return 0;
+}
+
 /* Get/set device.node_info_broadcast_secs (agents-t2hb.1). Same shape as
  * `meshtastic device role`/`rebroadcast`: read always available, write gated
  * behind CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE. */
@@ -2589,6 +2622,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodeinfo_cmds,
 			       SHELL_CMD(send, NULL,
 					 SHELL_HELP("Send node information.", "[dest|broadcast]"),
 					 cmd_nodeinfo_send),
+			       SHELL_CMD_ARG(request, NULL,
+					     SHELL_HELP("Ask a peer for ITS NodeInfo "
+							"(want_response=true).",
+							"<dest>"),
+					     cmd_nodeinfo_request, 2, 0),
 			       SHELL_CMD(interval, NULL,
 					 SHELL_HELP("Get/set the auto-broadcast interval "
 						    "(0 = compiled default).",

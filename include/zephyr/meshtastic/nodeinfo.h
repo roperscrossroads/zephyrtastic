@@ -57,6 +57,25 @@ int meshtastic_send_node_info(uint32_t dest);
  */
 uint32_t meshtastic_nodeinfo_interval_secs(void);
 
+/**
+ * @brief Ask one peer for its NodeInfo (a directed, want_response=true send).
+ *
+ * Throttled through the same per-peer request cooldown
+ * (@kconfig{CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC}) the
+ * unknown-PKC-sender path uses internally, so calling this repeatedly for
+ * the same peer in quick succession is safe -- a suppressed repeat returns
+ * -EAGAIN rather than sending.
+ *
+ * @param peer Destination node ID. Must not be 0, broadcast, or our own id.
+ *
+ * @retval 0        Sent.
+ * @retval -EAGAIN  Suppressed by the per-peer cooldown (already asked recently).
+ * @retval -EINVAL  Invalid peer (0, broadcast, or self).
+ * @retval -ENOMEM  Protobuf encoding failed.
+ * @retval -EIO     Crypto or radio transmission failed.
+ */
+int meshtastic_nodeinfo_request(uint32_t peer);
+
 #ifdef __cplusplus
 }
 #endif

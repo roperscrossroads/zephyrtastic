@@ -30,10 +30,7 @@
 #include "meshtastic_pki.h"
 #include <zephyr/meshtastic/nodedb.h>
 #if defined(CONFIG_MESHTASTIC_NODEINFO)
-/* Module-internal (meshtastic_nodeinfo.c): pull a peer's NodeInfo — and thus
- * its public key — throttled per peer and non-blocking. Not in the public
- * header, so declared here. */
-int meshtastic_nodeinfo_request(uint32_t peer);
+#include <zephyr/meshtastic/nodeinfo.h>
 #endif
 #endif
 
