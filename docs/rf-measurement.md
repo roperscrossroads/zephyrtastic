@@ -182,14 +182,30 @@ meshtastic rf reset        start a new window (the lifetime frame count survives
 `rf reset` deliberately keeps the lifetime count: a reset must not destroy the record of
 how much has ever been observed.
 
+### 7.1 The HEALTH block
+
+The tail of `meshtastic rf` is the radio's *mechanisms*, not its gain. Each row is a
+workaround or an interlock with its own counters, and each `[!!]` names the one number on
+that row that should never move.
+
+| row | counters | what a non-zero means |
+|---|---|---|
+| `CAD` | `clear` / `busy` / `timeout` / `error` | listen-before-talk before every transmit (2 symbols, as stock). `busy` climbs with traffic and is healthy; `timeout` or `error` is the chip not answering. |
+| `AGC reset` | `ok` / `fail` / `skipped` / `deferred` / `patch-fail` | the 60 s warm-sleep cycle that keeps the SX126x AGC from latching. `skipped` = a transmit was in flight; `deferred` = a packet was being demodulated, so the reset stood back 1 s rather than lose it. `fail`/`patch-fail` are the bad ones. |
+| `RX activity` | `now: preamble/header`, `busy-rx`, `false-preamble`, `false-header`, and the two `windows` | the chip's latched preamble-detected / header-valid flags this instant, and the verdicts of the two timing rules that turn them into "a packet is arriving": a preamble with no header after twice the preamble time, or a header with no packet after a maximum-length frame's airtime, is retired as noise. `busy-rx` counts the times the answer was yes. `unknown` on both flags means the driver cannot report them (an unpatched tree). |
+| `TX defer` | `busy-rx` / `cad-busy` / `requeued` / `dropped` | transmits the radio refused *for now* — a packet arriving, or CAD hearing one — and the outbound queue re-rolled behind a fresh contention delay with the radio left listening. `dropped` is a frame that used up every defer on a channel that never went quiet (`CONFIG_MESHTASTIC_TX_DEFER_MAX`), and is the only bad number here. |
+| `SPI BUSY streak` | consecutive BUSY-line timeouts | wiring / driver health; anything non-zero is a fault in progress. |
+
+`meshtastic sched stats reset` zeroes every counter in this block together.
+
 ---
 
 ## 8. Status
 
-Built and green on native_sim (13 configs, 383 cases). **Not yet exercised on hardware** —
-the numbers above for bin behaviour and cost are measured, but the report's hardware-only
-rows (a detected front-end, a controllable LNA, real staged-vs-applied readback) have only
-been seen in their absent/unknown forms on the simulated radio.
+Built and green on native_sim. Exercised fleet-wide on hardware since 2026-09-02 (the
+front-end, LNA and staged-vs-applied rows read real values on all eight bench nodes); the
+HEALTH block's `RX activity` and `TX defer` rows (2026-09-02, later) were first read on
+rzr1/rzr2 the evening they shipped.
 
 Still to build: the A/B alternation engine (`rf ab`), which needs carried patch 0011 for
 real rx-boost readback before its verdicts mean anything.

@@ -547,14 +547,16 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power, mt.licensed);
 	mt_lora_cfg.tx = true;
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_LBT;
-	/* 0 = "driver default" (documented in lora.h) -- the sx126x driver
-	 * resolves this to RadioLib's own SX1262 CAD defaults (4 symbols,
-	 * detPeak=SF+13, detMin=10), the same library upstream Meshtastic
-	 * runs, rather than this being a second, possibly-diverging
-	 * source of truth for those numbers. Previously hardcoded to
-	 * LORA_CAD_SYMB_2, which didn't match either upstream's real
-	 * default (4) or anything the driver used to honor at all. */
-	mt_lora_cfg.cad.symbol_num = 0;
+	/* Two symbols, as the reference passes explicitly (RadioInterface.h
+	 * NUM_SYM_CAD = 2, "the default since RadioLib 6.3.0 as per AN1200.48",
+	 * handed to scanChannel() in SX126xInterface::isChannelActive()).
+	 * RadioLib's OWN fallback when told "default" is 4, and until 2026-09-02
+	 * this asked for that fallback in the belief it was what upstream ran --
+	 * so our CAD listened twice as long as a stock node's, and longer than
+	 * the slot time meshtastic_contention.c budgets (NUM_SYM_CAD there is 2).
+	 * detPeak (SF+13) and detMin (10) stay on the driver's defaults, which
+	 * do match upstream. */
+	mt_lora_cfg.cad.symbol_num = LORA_CAD_SYMB_2;
 
 	/* Steer any RF front-end to its TX path before keying the transmitter. */
 	meshtastic_radio_fem_set_tx(true);

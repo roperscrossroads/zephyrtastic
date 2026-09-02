@@ -288,8 +288,14 @@ int meshtastic_collect_local_stats(meshtastic_LocalStats *stats)
 	/* noise_floor is left at 0. Nothing in this port measures one:
 	 * meshtastic_rf_measure.c records per-RECEPTION RSSI/SNR, which is a
 	 * different quantity (a property of a frame that arrived, not of the
-	 * channel when nothing is on it). Upstream also leaves it 0 wherever the
-	 * radio driver cannot supply an average noise floor. */
+	 * channel when nothing is on it). Upstream does measure one -- it does
+	 * not ask the driver, it samples instantaneous RSSI itself
+	 * (RadioLibInterface::updateNoiseFloor: GetRssiInst in idle receive,
+	 * gated on !isActivelyReceiving() && !isIRQPending(), every 5 s, a
+	 * 20-sample mean, default -120 dBm) -- and its only consumer is this
+	 * same telemetry field. Reporting-only; tracked in the tooling repo's
+	 * docs/RF-PARITY-PLAN.md §4, buildable now that the activity gate
+	 * (meshtastic_radio_actively_receiving) exists. */
 
 	return 0;
 }
