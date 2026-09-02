@@ -27,6 +27,37 @@ extern "C" {
  * @retval -EIO     Crypto or radio transmission failed.
  * @retval -ENOTSUP GNSS support is not compiled in.
  */
+/**
+ * @brief What the GNSS receiver is doing, for `meshtastic gnss status`.
+ *
+ * Read-only. Ages are milliseconds since the event, or -1 if it never
+ * happened. `sats`, `fix_status` (enum gnss_fix_status) and `fix_quality`
+ * (enum gnss_fix_quality) are the last data callback's values, fix or not —
+ * a receiver tracking satellites without a fix is visible here, which is
+ * what an indoor bench needs.
+ */
+struct meshtastic_gnss_status {
+	bool present;            /**< a gnss alias exists in the devicetree */
+	bool ready;              /**< and its device is ready */
+	const char *dev_name;    /**< the device's name, or NULL */
+	bool has_fix;            /**< the position module holds a fix */
+	uint32_t callbacks;      /**< data callbacks seen since boot */
+	uint32_t fixes;          /**< of which carried a fix */
+	uint32_t sends;          /**< automatic position sends handed to the queue */
+	uint8_t sats;            /**< satellites in the last callback */
+	uint8_t fix_status;      /**< enum gnss_fix_status, last callback */
+	uint8_t fix_quality;     /**< enum gnss_fix_quality, last callback */
+	uint16_t hdop_centi;     /**< last HDOP in hundredths (0 when unknown) */
+	int64_t last_data_age_ms;
+	int64_t last_fix_age_ms;
+	int64_t last_send_age_ms;
+};
+
+/**
+ * @brief Fill @p out. -ENODEV when the build has no GNSS device at all.
+ */
+int meshtastic_gnss_status_get(struct meshtastic_gnss_status *out);
+
 int meshtastic_send_position(uint32_t dest);
 
 /**

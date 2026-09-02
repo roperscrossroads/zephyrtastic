@@ -42,6 +42,20 @@ static struct {
 	bool has_fix;
 	int64_t last_sent_ms;
 	int64_t last_attempt_ms;
+	/* What the receiver last said, for `meshtastic gnss status`. Written from
+	 * the data callback (the driver's thread), read by the shell; plain
+	 * scalars stamped together, so a torn read is at worst one callback
+	 * stale -- acceptable for a diagnostic, and the lock is not taken on the
+	 * pre-fix path on purpose (that path runs once a second forever). */
+	uint32_t callbacks;      /* data callbacks seen, fix or not */
+	uint32_t fixes;          /* callbacks that carried a fix */
+	uint32_t sends;          /* positions handed to the queue */
+	int64_t last_data_ms;    /* uptime of the last callback; 0 = never */
+	int64_t last_fix_ms;     /* uptime of the last fix; 0 = never */
+	uint8_t sats;            /* satellites in the last callback */
+	uint8_t fix_status;      /* enum gnss_fix_status, last callback */
+	uint8_t fix_quality;     /* enum gnss_fix_quality, last callback */
+	uint16_t hdop_centi;     /* last callback's HDOP, hundredths */
 } gnss_state;
 
 #if MESHTASTIC_HAS_GNSS_ALIAS
@@ -123,6 +137,7 @@ static void position_work_handler(struct k_work *work)
 
 	k_mutex_lock(&gnss_state.lock, K_FOREVER);
 	gnss_state.last_sent_ms = k_uptime_get();
+	gnss_state.sends++;
 	k_mutex_unlock(&gnss_state.lock);
 }
 
@@ -169,9 +184,24 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 	}
 #endif
 
-	if (dev != gnss_dev || data == NULL || data->info.fix_status == GNSS_FIX_STATUS_NO_FIX) {
+	if (dev != gnss_dev || data == NULL) {
 		return;
 	}
+
+	/* Status, before the no-fix gate: a receiver that is tracking satellites
+	 * but has not fixed is exactly what an indoor bench needs to see. */
+	gnss_state.callbacks++;
+	gnss_state.last_data_ms = k_uptime_get();
+	gnss_state.sats = (uint8_t)MIN(data->info.satellites_cnt, UINT8_MAX);
+	gnss_state.fix_status = (uint8_t)data->info.fix_status;
+	gnss_state.fix_quality = (uint8_t)data->info.fix_quality;
+	gnss_state.hdop_centi = (uint16_t)MIN(data->info.hdop / 10U, UINT16_MAX);
+
+	if (data->info.fix_status == GNSS_FIX_STATUS_NO_FIX) {
+		return;
+	}
+	gnss_state.fixes++;
+	gnss_state.last_fix_ms = gnss_state.last_data_ms;
 
 	/* A position fix implies valid UTC — seed the wall clock so uptime-relative
 	 * timestamps (e.g. NodeInfo.last_heard, own Position.time) can be reported as
@@ -287,6 +317,38 @@ static void gnss_gate_reset(void)
 		-((int64_t)CONFIG_MESHTASTIC_GNSS_RETRY_INTERVAL_SEC * MSEC_PER_SEC);
 }
 
+int meshtastic_gnss_status_get(struct meshtastic_gnss_status *out)
+{
+	int64_t now = k_uptime_get();
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	memset(out, 0, sizeof(*out));
+
+#if MESHTASTIC_HAS_GNSS_ALIAS
+	out->present = true;
+	out->ready = device_is_ready(gnss_dev);
+	out->dev_name = gnss_dev->name;
+#else
+	return -ENODEV;
+#endif
+
+	out->callbacks = gnss_state.callbacks;
+	out->fixes = gnss_state.fixes;
+	out->sends = gnss_state.sends;
+	out->has_fix = gnss_state.has_fix;
+	out->sats = gnss_state.sats;
+	out->fix_status = gnss_state.fix_status;
+	out->fix_quality = gnss_state.fix_quality;
+	out->hdop_centi = gnss_state.hdop_centi;
+	out->last_data_age_ms = (gnss_state.last_data_ms == 0) ? -1 : now - gnss_state.last_data_ms;
+	out->last_fix_age_ms = (gnss_state.last_fix_ms == 0) ? -1 : now - gnss_state.last_fix_ms;
+	out->last_send_age_ms = (gnss_state.sends == 0U) ? -1 : now - gnss_state.last_sent_ms;
+
+	return 0;
+}
+
 #if defined(CONFIG_ZTEST)
 void meshtastic_gnss_test_reset(void)
 {
@@ -307,6 +369,10 @@ int meshtastic_gnss_init(void)
 	k_work_queue_start(&gnss_send_wq, gnss_send_wq_stack,
 			   K_THREAD_STACK_SIZEOF(gnss_send_wq_stack),
 			   CONFIG_MESHTASTIC_GNSS_SEND_WORK_PRIORITY, NULL);
+	/* Named, so a fault on this thread says so. Its 2026-09-02 stack overflow
+	 * reported "Current thread: (unknown)", which cost the diagnosis a detour
+	 * through every other candidate first. */
+	k_thread_name_set(k_work_queue_thread_get(&gnss_send_wq), "gnss_send");
 #endif
 
 	if (!device_is_ready(gnss_dev)) {

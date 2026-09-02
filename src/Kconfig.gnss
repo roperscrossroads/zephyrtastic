@@ -39,10 +39,20 @@ if MESHTASTIC_GNSS_AUTO_SEND
 
 config MESHTASTIC_GNSS_SEND_WORK_STACK_SIZE
 	int "GNSS position send workqueue stack size"
-	default 2048
+	default 4096
 	help
 	  Stack for the dedicated workqueue that sends Position packets
-	  (nanopb encoding and PSA AES-CTR on a full payload buffer).
+	  (nanopb encoding and PSA AES-CTR on a full payload buffer, then the
+	  whole egress path: airtime gate, contention plan, outbound enqueue).
+
+	  Was 2048 until 2026-09-02, and that overflowed on the bench: rzr2, a
+	  class-4 V4 member at a window, crash-looped every ~85 s -- an illegal
+	  instruction with SP 192 bytes below this stack's base -- the moment its
+	  first GNSS fix seeded the clock and this queue sent the first position.
+	  The overrun corrupts whatever the linker placed directly below the
+	  stack, which is why the fault was an illegal instruction in an
+	  "unknown" thread rather than a clean stack-check failure. Measure
+	  before lowering it (thread analyzer, TA=1).
 
 config MESHTASTIC_GNSS_SEND_WORK_PRIORITY
 	int "GNSS position send workqueue priority"
