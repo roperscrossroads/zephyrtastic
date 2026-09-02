@@ -1900,11 +1900,18 @@ static int cmd_rf_path(const struct shell *sh, size_t argc, char **argv)
 	case MESHTASTIC_FEM_STATE_FAILED:
 		shell_print(sh, "  [!!] front-end       DETECTION FAILED — this board has one "
 				"and we cannot tell which");
-		shell_print(sh, "                       No gain table is in use, so transmit is "
-				"under-driven by");
-		shell_print(sh, "                       that front-end's gain (11-13 dB on a "
-				"V4). Not a config");
-		shell_print(sh, "                       problem — check the FEM power rail.");
+		shell_print(sh, "                       Transmit assumes the HIGHEST-gain part "
+				"so radiated power");
+		shell_print(sh, "                       stays at or below the request whichever "
+				"is really fitted");
+		shell_print(sh, "                       (and whether or not it is powered) — so "
+				"expect up to 13 dB");
+		shell_print(sh, "                       LESS range, deliberately. Receive is "
+				"whatever the FEM");
+		shell_print(sh, "                       came up in; the LNA is not being driven. "
+				"Not a config");
+		shell_print(sh, "                       problem — suspect the FEM rail or the "
+				"CSD line.");
 		break;
 	case MESHTASTIC_FEM_STATE_NONE:
 	default:
@@ -1957,7 +1964,30 @@ static int cmd_rf_path(const struct shell *sh, size_t argc, char **argv)
 	if (p.tx_drive_was_clamped) {
 		/* Two distinct stories share this line, and conflating them is exactly
 		 * how an operator ends up believing a bare SX1262 radiates 30 dBm. */
-		if (p.tx_fem_gain_applied) {
+		if (p.tx_drive_clamped > p.tx_drive_wanted) {
+			/* The LOW end of the clamp, and the only case here that radiates
+			 * MORE than was asked for. The radio cannot be driven below its
+			 * floor, so a request the front-end's gain would have met at a
+			 * lower drive comes out hot by the difference. Worth its own text:
+			 * the shortfall wording below describes the opposite problem, and
+			 * an operator who deliberately turned power DOWN to be a good
+			 * neighbour is exactly the person this line is for. */
+			shell_print(sh, "  [!!] OVER the request  wanted drive %d dBm, but the "
+					"radio floor is %d dBm",
+				    p.tx_drive_wanted, CONFIG_MESHTASTIC_RADIO_MIN_TX_POWER);
+			shell_print(sh, "       -> radiating about %d dBm, roughly %d dB MORE "
+					"than the %d dBm requested.",
+				    (int)p.tx_drive_clamped +
+					    ((int)p.tx_power_radiated - (int)p.tx_drive_wanted),
+				    (int)p.tx_drive_clamped - (int)p.tx_drive_wanted,
+				    p.tx_power_radiated);
+			shell_print(sh, "          Ask for less than the front-end's gain and "
+					"the transceiver cannot go");
+			shell_print(sh, "          low enough to deliver it. Not a fault — a "
+					"floor. Nothing in software");
+			shell_print(sh, "          can fix it; use a lower-gain antenna or "
+					"accept the figure above.");
+		} else if (p.tx_fem_gain_applied) {
 			shell_print(sh, "       -> wanted drive %d dBm, CLAMPED to [%d..%d]; "
 					"the front-end cannot make up the shortfall",
 				    p.tx_drive_wanted, CONFIG_MESHTASTIC_RADIO_MIN_TX_POWER,

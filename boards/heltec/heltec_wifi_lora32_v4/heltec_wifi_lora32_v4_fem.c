@@ -73,12 +73,36 @@ static const uint8_t fem_gain_kct8103l[] = {
 	13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 12, 12, 11, 11, 10, 9, 8, 7,
 };
 
-/* The detected front-end's gain table, or NULL when detection failed (in which
- * case the conversion below degrades to the identity — the same behaviour as a
- * board with no FEM at all, and the safer direction to fail in: it under-drives
- * rather than over-radiates). */
-static const uint8_t *fem_gain_table;
-static size_t fem_gain_len;
+/*
+ * The gain table used for the transmit-power conversion.
+ *
+ * ⚠️ IT STARTS AT THE HIGHEST-GAIN PART ON PURPOSE, and this is a safety
+ * property, not a default. Until 2026-09-02 it started NULL, so a failed
+ * detection degraded to the identity conversion — documented at the time as
+ * "the safer direction to fail in: it under-drives rather than over-radiates".
+ * That reasoning holds only if the front-end is inert when we do not know what
+ * it is, and on this board it is NOT:
+ *
+ *   heltec_v4_fem_init() powers the VFEM rail BEFORE it reads the detect line.
+ *   If that read fails it returns with the rail up and CSD left an input — and
+ *   CSD is what ENABLES the FEM. On a 4.3/R8 the part biases CSD high (that
+ *   bias IS the detect mechanism), so the front-end is switched ON while we
+ *   believe there is none. The identity conversion then drives the transceiver
+ *   with the full requested figure into ~13 dB of gain: ask for 14 dBm and
+ *   radiate 27; ask for a US region-limit 30, clamp the chip to 22, radiate 35.
+ *   Over the legal limit, from the branch whose comment claimed it was safe.
+ *
+ * Assuming the MOST gain any fitted part can contribute makes the unknown case
+ * bounded in the correct direction: radiated power can then only ever come out
+ * at or below what was asked for, whichever part is really there and whether or
+ * not it is powered. The cost is transmitting up to 13 dB weak until the fault
+ * is fixed, which is the right price — a quiet node is a nuisance, a node
+ * radiating 13 dB hot is a bad neighbour and possibly unlawful.
+ *
+ * Keep this pointing at whichever table has the highest leading gain.
+ */
+static const uint8_t *fem_gain_table = fem_gain_kct8103l;
+static size_t fem_gain_len = ARRAY_SIZE(fem_gain_kct8103l);
 
 /*
  * Whether the fitted part lets software choose the receive path, and which path
@@ -136,7 +160,10 @@ static int heltec_v4_fem_init(void)
 	int csd;
 
 	if (!device_is_ready(gpio0) || !device_is_ready(gpio1)) {
-		LOG_ERR("GPIO controllers not ready; LoRa FEM left unconfigured");
+		LOG_ERR("LoRa FEM: GPIO controllers not ready — front-end left unconfigured "
+			"and UNIDENTIFIED. Transmit will assume the highest-gain part and so "
+			"under-drive by up to 13 dB; receive keeps whatever the FEM powers up "
+			"in. `meshtastic rf` reports this as DETECTION FAILED.");
 		return -ENODEV;
 	}
 
@@ -149,7 +176,18 @@ static int heltec_v4_fem_init(void)
 	k_busy_wait(1000);
 	csd = gpio_pin_get_raw(gpio0, FEM_CSD_PIN);
 	if (csd < 0) {
-		LOG_ERR("FEM detect read failed (%d); LoRa RF may be non-functional", csd);
+		/* ⚠️ The rail is UP and CSD is still an input, so on a part that biases
+		 * CSD high the front-end is now ENABLED while we cannot say which one
+		 * it is. That is precisely why fem_gain_table starts at the
+		 * highest-gain part rather than NULL — see its comment. Do not
+		 * "restore" the identity conversion here.
+		 */
+		LOG_ERR("LoRa FEM: detect read failed (%d) with the rail already powered — "
+			"the front-end may be ENABLED and UNIDENTIFIED. Transmit assumes the "
+			"highest-gain part (13 dB) so radiated power stays at or below the "
+			"request; expect up to 13 dB less range until this is fixed. Suspect "
+			"the FEM rail or the CSD line. `meshtastic rf` shows DETECTION FAILED.",
+			csd);
 		return csd;
 	}
 
@@ -246,6 +284,17 @@ bool meshtastic_radio_fem_lna_get(void)
  */
 const char *meshtastic_radio_fem_name(void)
 {
+	/* Only name a part we actually identified. Since fem_gain_table now starts
+	 * at the KCT8103L table as a SAFE ASSUMPTION for the unknown case, reading
+	 * the name off the table alone would confidently report "KCT8103L" on a
+	 * board whose detection failed — turning a fault into a healthy-looking
+	 * answer, which is the exact failure this file spent the last change
+	 * removing. The state is the authority on whether there is a name to give.
+	 */
+	if ((fem_state != MESHTASTIC_FEM_STATE_DETECTED) &&
+	    (fem_state != MESHTASTIC_FEM_STATE_MISMATCH)) {
+		return NULL;
+	}
 	if (fem_gain_table == fem_gain_kct8103l) {
 		return "KCT8103L";
 	}

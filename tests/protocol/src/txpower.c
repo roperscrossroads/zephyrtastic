@@ -140,6 +140,58 @@ ZTEST(txpower, test_fem_state_none_is_the_zero_value)
 }
 
 /*
+ * The safety property behind the V4 board file's choice of starting gain table:
+ * when the fitted part is UNKNOWN, converting with the highest-gain table can
+ * never radiate above the request, whichever part is actually there.
+ *
+ * The board powers its FEM rail before it reads the detect line, so a failed
+ * read leaves the front-end possibly ENABLED and unidentified. Converting with
+ * the identity there (what the code did until 2026-09-02, under a comment
+ * calling it the safe direction) drives the full request into ~13 dB of gain.
+ * This asserts the direction rather than the mechanism, so it keeps holding if
+ * the tables are ever re-sourced.
+ */
+ZTEST(txpower, test_unknown_fem_assumption_never_over_radiates)
+{
+	/* Every radiated request a region can ask for, per meshtastic_tx_power_resolve. */
+	for (int8_t want = 1; want <= 33; want++) {
+		int8_t drive = meshtastic_fem_gain_convert(gain_kct8103l,
+							   ARRAY_SIZE(gain_kct8103l), want);
+
+		/* Whichever part is really fitted, radiated = drive + that part's gain
+		 * at that drive level. Assuming the biggest table must not let either
+		 * real part exceed the request. */
+		for (size_t i = 0; i < ARRAY_SIZE(gain_gc1109); i++) {
+			if ((int)i != (int)drive) {
+				continue;
+			}
+			zassert_true((int)drive + (int)gain_gc1109[i] <= (int)want,
+				     "GC1109 fitted, KCT assumed: %d dBm drive + %u dB "
+				     "would radiate above the %d dBm requested",
+				     drive, gain_gc1109[i], want);
+			zassert_true((int)drive + (int)gain_kct8103l[i] <= (int)want,
+				     "KCT8103L fitted and assumed: %d dBm drive + %u dB "
+				     "would radiate above the %d dBm requested",
+				     drive, gain_kct8103l[i], want);
+		}
+	}
+}
+
+/* And the converse, which is what makes the choice above the RIGHT one rather
+ * than merely a cautious one: assuming the SMALLER table while the bigger part
+ * is fitted does over-radiate. Documents the trap so nobody "simplifies" the
+ * board file back to a single shared table. */
+ZTEST(txpower, test_assuming_the_smaller_gain_would_over_radiate)
+{
+	int8_t drive = meshtastic_fem_gain_convert(gain_gc1109, ARRAY_SIZE(gain_gc1109), 14);
+
+	zassert_true((int)drive + (int)gain_kct8103l[drive] > 14,
+		     "assuming GC1109 (11 dB) while a KCT8103L (13 dB) is fitted must be "
+		     "the direction that radiates hot — if this ever stops being true the "
+		     "tables have changed and the board file's assumption needs revisiting");
+}
+
+/*
  * Strong override of the weak board hook. native_sim compiles no board file, so
  * without this every conversion is the identity and the licence gate below
  * cannot be observed at all. Uses the real KCT8103L table so the numbers are the

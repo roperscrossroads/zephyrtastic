@@ -180,12 +180,18 @@ int meshtastic_rf_path_get(struct meshtastic_rf_path *out)
 		meshtastic_tx_power_chip_drive(out->tx_power_radiated, out->licensed);
 	out->tx_drive_was_clamped = (out->tx_drive_wanted != out->tx_drive_clamped);
 
-	/* Separate the two reasons the drive differs from the request. Only a real
-	 * front-end that moved the number counts as gain; on a bare transceiver the
-	 * conversion is the weak identity, and for a licensed operator it is not
-	 * applied at all — in both cases any difference is pure clamping. */
-	out->tx_fem_gain_applied =
-		(out->fem_name != NULL) && (out->tx_drive_wanted != out->tx_power_radiated);
+	/* Separate the two reasons the drive differs from the request. On a bare
+	 * transceiver the conversion is the weak identity, and for a licensed
+	 * operator it is not applied at all — in both cases any difference is pure
+	 * clamping.
+	 *
+	 * Keyed on the STATE, not on fem_name. A board whose detection failed has
+	 * no name to give but IS still having gain backed off — the conversion
+	 * assumes the highest-gain part precisely so the unknown case cannot
+	 * over-radiate — and reporting "no front-end gain applied" there would
+	 * explain the drive level with the one story that is not true. */
+	out->tx_fem_gain_applied = (out->fem_state != MESHTASTIC_FEM_STATE_NONE) &&
+				   (out->tx_drive_wanted != out->tx_power_radiated);
 
 	{
 		struct meshtastic_region_info info;
