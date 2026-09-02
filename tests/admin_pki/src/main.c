@@ -36,6 +36,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_preset.h"
 #include "meshtastic_admin_client.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_pki.h"
@@ -252,8 +253,8 @@ static size_t encode_admin_set_role(meshtastic_Config_DeviceConfig_Role role,
 }
 
 /* Encode an AdminMessage set_config(lora) carrying the given passkey. Changing the
- * modem preset is a LoRa change, which F-1 must schedule a reboot for (the SX1262
- * is only reconfigured at radio init). */
+ * modem preset is a LoRa change, which now applies live (agents-k8oe, F-1 fixed
+ * 2026-09-01) via meshtastic_config_store_set_config() -> _preset_apply_stored(). */
 static size_t encode_admin_set_lora_preset(meshtastic_Config_LoRaConfig_ModemPreset preset,
 					   const uint8_t *passkey, size_t passkey_len, uint8_t *buf,
 					   size_t cap)
@@ -618,11 +619,12 @@ ZTEST(admin_pki, test_pkc_admin_key_authorized_applies)
  * old preset/frequency), whereas a live-applied section (device role) must NOT.
  * Upstream reboots on any LoRaConfig change; the port previously excluded lora and
  * silently diverged. */
-ZTEST(admin_pki, test_lora_config_change_schedules_reboot)
+ZTEST(admin_pki, test_lora_config_change_applies_live)
 {
 	uint8_t buf[256];
 	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
 	size_t len;
+	uint32_t generation_before;
 
 	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
 
@@ -637,7 +639,15 @@ ZTEST(admin_pki, test_lora_config_change_schedules_reboot)
 	zassert_false(meshtastic_admin_reboot_scheduled(),
 		      "device-role change applies live and must NOT schedule a reboot");
 
-	/* LoRa preset change needs a radio re-init -> must schedule a reboot (F-1). */
+	/* LoRa preset change now reaches the radio live too (agents-k8oe): the
+	 * reference never reboots for a LoRaConfig change
+	 * (AdminModule.cpp:1108-1110, requiresReboot = false unconditionally for
+	 * lora), and neither should we. Proven two ways: no reboot scheduled, and
+	 * the preset generation counter -- bumped only by a successful
+	 * meshtastic_preset_switch()/_apply_stored() retune -- actually advanced,
+	 * so this isn't just "didn't schedule a reboot" but "really reconfigured
+	 * the radio". */
+	generation_before = meshtastic_preset_generation();
 	meshtastic_admin_cancel_reboot();
 	meshtastic_admin_session_reset();
 	meshtastic_admin_session_current(key);
@@ -645,11 +655,15 @@ ZTEST(admin_pki, test_lora_config_change_schedules_reboot)
 					   sizeof(key), buf, sizeof(buf));
 	inject_pkc_admin(buf, len, 0x0AD1F002U);
 	k_sleep(K_MSEC(50));
-	zassert_true(meshtastic_admin_reboot_scheduled(),
-		     "a LoRa config change must schedule a reboot (F-1)");
+	zassert_false(meshtastic_admin_reboot_scheduled(),
+		      "a LoRa config change applies live and must NOT schedule a reboot");
+	zassert_true(meshtastic_preset_generation() != generation_before,
+		     "a LoRa config change must actually retune the radio, not just skip "
+		     "the reboot");
 
-	/* Cleanup: cancel the scheduled reboot (so the sim doesn't reboot) and restore
-	 * the default preset for any later test. */
+	/* Cleanup: cancel the scheduled reboot (so the sim doesn't reboot, in case
+	 * anything above did schedule one) and restore the default preset for any
+	 * later test. */
 	meshtastic_admin_cancel_reboot();
 	{
 		meshtastic_Config lora = meshtastic_Config_init_zero;

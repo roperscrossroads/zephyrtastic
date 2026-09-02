@@ -3235,11 +3235,11 @@ static int cmd_lora_preset_set(const struct shell *sh, const char *name)
 		shell_error(sh, "lora set failed: %d", ret);
 		return ret;
 	}
-	/* set_config schedules the coalesced save (like `channel set`); it lands well
-	 * before a manual reboot, so no explicit flush is needed here. */
+	/* set_config schedules the coalesced flash save; that's independent of the
+	 * live radio retune meshtastic_config_store_set_config() already did
+	 * above (agents-k8oe) -- no reboot needed either way. */
 
-	shell_print(sh, "modem preset -> %s (persisted); reboot to apply "
-			"(`kernel reboot cold`)",
+	shell_print(sh, "modem preset -> %s (persisted and applied live)",
 		    meshtastic_preset_display_name(preset, true));
 	return 0;
 }

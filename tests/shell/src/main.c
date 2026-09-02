@@ -34,6 +34,7 @@
 #include "meshtastic_scanner.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_preset.h"
 
 #define TEST_NODE_ID 0x12345678U
 
@@ -391,6 +392,38 @@ ZTEST(meshtastic_shell, test_lora_tx_off_persists_and_reads_back)
 				   : "meshtastic lora tx off",
 			   NULL),
 		   "restore failed");
+}
+
+/*
+ * `lora preset` must reach the radio live, no reboot (agents-k8oe) — matching
+ * the reference (AdminModule.cpp:1108-1110, requiresReboot = false
+ * unconditionally for the lora section). Proven the same way an operator
+ * would prove it on the bench: the command's own confirmation text, and the
+ * preset-generation counter, which is bumped only by a successful
+ * meshtastic_preset_switch()/_apply_stored() retune — not by persisting a
+ * config value nobody pushed to the chip.
+ */
+ZTEST(meshtastic_shell, test_lora_preset_applies_live)
+{
+	const char *out = NULL;
+	uint32_t generation_before = meshtastic_preset_generation();
+
+	zassert_ok(run_cmd("meshtastic lora preset ShortTurbo", &out), "lora preset failed");
+	zassert_not_null(strstr(out, "applied live"),
+			 "preset change must say it applied live, not the old 'reboot to "
+			 "apply' (agents-k8oe), got: %s",
+			 out);
+	zassert_true(meshtastic_preset_generation() != generation_before,
+		     "`lora preset` must actually retune the radio, not just persist "
+		     "the config");
+
+	zassert_ok(run_cmd("meshtastic lora", &out), "lora show failed");
+	zassert_not_null(strstr(out, "modem preset: ShortTurbo"),
+			 "the show command should confirm the new preset, got: %s", out);
+
+	/* Leave the store on the fixture's default preset so other tests (and a
+	 * re-run of this one) start from the same place. */
+	zassert_ok(run_cmd("meshtastic lora preset LongFast", NULL), "restore failed");
 }
 
 ZTEST(meshtastic_shell, test_managed_node_refuses_lora_tx_write)

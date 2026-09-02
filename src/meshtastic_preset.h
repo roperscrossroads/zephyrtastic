@@ -58,6 +58,30 @@ meshtastic_Config_LoRaConfig_RegionCode meshtastic_preset_region(void);
 int meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset preset,
 			     struct meshtastic_preset_result *out);
 
+/**
+ * @brief Push the CURRENTLY STORED LoRaConfig to the radio, live, no reboot.
+ *
+ * Unlike meshtastic_preset_switch() above, this does not choose a preset
+ * itself: it assumes meshtastic_config_store_apply_core() has already
+ * resolved mt.modem_preset / mt.use_preset / mt.modem from a just-written
+ * config (a named preset OR custom SF/BW/CR — apply_core() handles both) and
+ * re-derived every channel's hash. This is the missing last step that takes
+ * that resolved RAM state and reprograms the chip: mirrors the reference's
+ * unconditional configChanged observer -> RadioInterface::reconfigure() on
+ * every LoRaConfig (or channel) save (AdminModule.cpp).
+ *
+ * Deliberately NOT routed through meshtastic_preset_hop()'s interlocks below:
+ * those exist for a SCHEDULED, autonomous hop with no human in the loop. An
+ * admin- or operator-driven config write is "because I said so" and should
+ * obey and report, exactly like meshtastic_preset_switch() itself, whose
+ * frequency-resolve/retune/settle tail this function shares.
+ *
+ * @param out Optional; receives what got applied.
+ * @return 0 on success, or a negative errno (no frequency plan for the
+ *         stored region+preset+channel-name combination, or a radio error).
+ */
+int meshtastic_preset_apply_stored(struct meshtastic_preset_result *out);
+
 /* --- Interlocks: docs/MULTI-PRESET-OPERATION.md §4.4 -----------------------
  *
  * meshtastic_preset_switch() above is the primitive: it does what it is told,

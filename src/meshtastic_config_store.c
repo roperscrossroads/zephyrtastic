@@ -21,6 +21,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_hlc.h"
+#include "meshtastic_preset.h"
 #include "meshtastic_settings.h"
 #include <zephyr/meshtastic/fem.h>
 
@@ -972,6 +973,18 @@ int meshtastic_config_store_set_channel(uint8_t index, const meshtastic_Channel 
 		return ret;
 	}
 
+	/* A channel edit can move the PRIMARY channel (role promotion) or rename
+	 * it, and the frequency slot is derived from the primary channel's
+	 * resolved name (meshtastic_channels_set_slot() above has already
+	 * refreshed mt.ch_hash/mt.psk/mt.channel_name) -- so this needs the same
+	 * live retune the lora-config path gets, not for decrypt (which was
+	 * already live: channel_get_key() reads channel_slots[] directly, no
+	 * cache) but for the radio to actually land on the right frequency. */
+	ret = meshtastic_preset_apply_stored(NULL);
+	if (ret < 0) {
+		return ret;
+	}
+
 	store_schedule_save();
 	return 0;
 }
@@ -1010,6 +1023,20 @@ int meshtastic_config_store_set_config(const meshtastic_Config *config)
 	ret = meshtastic_config_store_apply_core();
 	if (ret < 0) {
 		return ret;
+	}
+
+	/* LoRa is the one config section that reaches the radio live, no reboot
+	 * -- matches the reference (AdminModule.cpp:1108-1110, requiresReboot =
+	 * false unconditionally for lora): apply_core() above has already
+	 * resolved mt.modem / mt.use_preset / mt.modem_preset from what was just
+	 * written (preset or custom SF/BW/CR, either way), so this only has to
+	 * resolve the frequency for that and push it to the chip (agents-k8oe).
+	 */
+	if (config->which_payload_variant == meshtastic_Config_lora_tag) {
+		ret = meshtastic_preset_apply_stored(NULL);
+		if (ret < 0) {
+			return ret;
+		}
 	}
 
 	store_schedule_save();

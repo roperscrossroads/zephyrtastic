@@ -22,10 +22,15 @@
  * that backwards yields a node transmitting on the previous preset's slot with
  * the new modem settings — inaudible to everyone, and invisible locally.
  *
- * Upstream reboots on any LoRaConfig change and never does this live. That is a
- * deliberate divergence, not an oversight: the radio is already reconfigured on
- * every single TX (meshtastic_radio.c), so the machinery is proven — it simply
- * was never driven from a preset change.
+ * Upstream does NOT reboot on a LoRaConfig change — verified against
+ * firmware/src/modules/AdminModule.cpp:1108-1110, which sets
+ * `requiresReboot = false` unconditionally for the lora section, because
+ * every save fires the configChanged observer -> RadioInterface::reconfigure()
+ * live. This file's machinery (meshtastic_preset_switch()/_apply_stored()) is
+ * what closes that parity gap (agents-k8oe): the radio is already reconfigured
+ * on every single TX (meshtastic_radio.c), so the machinery was proven before
+ * it was ever driven from a preset or admin config change — see
+ * meshtastic_preset_apply_stored() below for the admin/config-store path.
  */
 
 #include <errno.h>
@@ -204,6 +209,56 @@ int meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset preset,
 	 * preset`, an admin config change and a slot boundary all leave exactly the
 	 * same two problems behind them — an unsettled front end, and a queue that
 	 * may still hold frames addressed to the preset we just left. */
+	gate_lock();
+	gate.generation++;
+	gate_unlock();
+	settle_arm();
+
+	return 0;
+}
+
+int meshtastic_preset_apply_stored(struct meshtastic_preset_result *out)
+{
+	struct meshtastic_freq_plan plan;
+	int ret;
+
+	/* apply_core() has already resolved mt.modem_preset/mt.use_preset/mt.modem
+	 * (preset or custom) and every channel's hash from the config that was
+	 * just written — nothing to validate or recompute here, just resolve the
+	 * frequency for that resolved state and push it all to the radio. */
+	ret = meshtastic_region_freq_plan(meshtastic_preset_region(), mt.modem_preset,
+					  meshtastic_channels_primary_name(), mt.use_preset,
+					  &plan);
+	if (ret < 0) {
+		LOG_ERR("apply stored config: no frequency plan for preset %d (%d)",
+			(int)mt.modem_preset, ret);
+		return ret;
+	}
+
+	k_mutex_lock(&mt.lock, K_FOREVER);
+	mt.frequency = plan.frequency_hz;
+	k_mutex_unlock(&mt.lock);
+
+	ret = meshtastic_radio_retune();
+	if (ret < 0) {
+		LOG_ERR("apply stored config: retune failed (%d)", ret);
+		return ret;
+	}
+
+	LOG_INF("apply stored config: %s, %u Hz, SF%u BW%u ch_hash 0x%02x",
+		meshtastic_preset_display_name(mt.modem_preset, mt.use_preset), plan.frequency_hz,
+		mt.modem.spread_factor, mt.modem.bandwidth_hz / 1000U, mt.ch_hash);
+
+	if (out != NULL) {
+		out->preset = mt.modem_preset;
+		out->frequency_hz = plan.frequency_hz;
+		out->spread_factor = mt.modem.spread_factor;
+		out->bandwidth_hz = mt.modem.bandwidth_hz;
+		out->channel_hash = mt.ch_hash;
+	}
+
+	/* Same tail as meshtastic_preset_switch() — see the comment there: the
+	 * radio does not know or care why it was retuned. */
 	gate_lock();
 	gate.generation++;
 	gate_unlock();

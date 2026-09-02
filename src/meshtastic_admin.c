@@ -719,16 +719,20 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 			/* apply_core applies the DEVICE core fields (role, rebroadcast)
 			 * live, and the power policy (PowerConfig.is_power_saving ->
 			 * light-sleep lock) is re-applied live here under CONFIG_PM. A LoRa
-			 * change is persisted and its channel name/hash re-derived, but the
-			 * SX1262 is NOT reconfigured live (SF/BW/frequency are set at radio
-			 * init), so it needs a reboot to take effect on the air — matching
-			 * the reference, which reboots on any LoRaConfig change. Every other
-			 * section is likewise applied on reboot. (F-1) */
+			 * change is now reconfigured live in meshtastic_config_store_set_config()
+			 * itself (agents-k8oe), so it no longer needs a reboot to take
+			 * effect on the air, matching
+			 * the reference (AdminModule.cpp:1108-1110, requiresReboot = false
+			 * unconditionally for lora -- this comment used to claim upstream
+			 * reboots on any LoRaConfig change, which was wrong). Every other
+			 * section still applies on reboot, matching upstream's default
+			 * there. (was F-1) */
 			pb_size_t which = admin_req.payload_variant.set_config.which_payload_variant;
 
 			if (IS_ENABLED(CONFIG_PM) && which == meshtastic_Config_power_tag) {
 				meshtastic_power_config_apply();
-			} else if (which != meshtastic_Config_device_tag) {
+			} else if (which != meshtastic_Config_device_tag &&
+				   which != meshtastic_Config_lora_tag) {
 				reboot_pending = true;
 			}
 		}
