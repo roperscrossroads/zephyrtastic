@@ -28,6 +28,7 @@
 
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
+#include <zephyr/meshtastic/nodeinfo.h>
 
 #include "meshtastic/admin.pb.h"
 #include "meshtastic/mesh.pb.h"
@@ -274,6 +275,27 @@ static size_t encode_admin_set_lora_preset(meshtastic_Config_LoRaConfig_ModemPre
 	lora->modem_preset = preset;
 	lora->region = meshtastic_Config_LoRaConfig_RegionCode_US;
 	lora->hop_limit = 3;
+	if (passkey != NULL && passkey_len > 0U) {
+		am.session_passkey.size = (pb_size_t)passkey_len;
+		memcpy(am.session_passkey.bytes, passkey, passkey_len);
+	}
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+/* Encode an AdminMessage set_config(device) carrying node_info_broadcast_secs
+ * (agents-t2hb.1) -- proves the admin path reaches this field with NO admin.c
+ * changes needed: set_config_tag already routes every Config section through
+ * meshtastic_config_store_set_config() generically. */
+static size_t encode_admin_set_nodeinfo_interval(uint32_t secs, const uint8_t *passkey,
+						 size_t passkey_len, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
+	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_device_tag;
+	am.payload_variant.set_config.payload_variant.device.node_info_broadcast_secs = secs;
 	if (passkey != NULL && passkey_len > 0U) {
 		am.session_passkey.size = (pb_size_t)passkey_len;
 		memcpy(am.session_passkey.bytes, passkey, passkey_len);
@@ -677,6 +699,38 @@ ZTEST(admin_pki, test_lora_config_change_applies_live)
 		lora.payload_variant.lora.hop_limit = 3;
 		(void)meshtastic_config_store_set_config(&lora);
 	}
+	set_admin_key(NULL, 0U);
+}
+
+/*
+ * agents-t2hb.1: the admin path needs NO per-field code to reach
+ * device.node_info_broadcast_secs -- set_config_tag already routes every
+ * Config section through meshtastic_config_store_set_config() generically.
+ * Proven by driving it through the exact same PKC-encrypted AdminMessage
+ * path a real remote admin client uses, not just the local shell.
+ */
+ZTEST(admin_pki, test_admin_sets_nodeinfo_interval)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	size_t len;
+
+	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_nodeinfo_interval(120U, key, sizeof(key), buf, sizeof(buf));
+	inject_pkc_admin(buf, len, 0x0AD1F003U);
+	k_sleep(K_MSEC(50));
+
+	zassert_equal(meshtastic_nodeinfo_interval_secs(), 120U,
+		     "an admin set_config(device) write must reach node_info_broadcast_secs "
+		     "with no admin.c changes");
+	zassert_false(meshtastic_admin_reboot_scheduled(),
+		      "a device-section change applies live and must NOT schedule a reboot");
+
+	/* Restore, for any later test. */
+	(void)meshtastic_config_store_set_node_info_interval(0U);
 	set_admin_key(NULL, 0U);
 }
 

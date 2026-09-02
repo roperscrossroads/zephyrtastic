@@ -27,8 +27,12 @@
  * SHAPE OF THE SUITE. The announce cadence and the suppression windows cannot
  * be measured in one image -- a start delay short enough to observe would drop
  * announces into the middle of every suppression test's frame capture. So the
- * suite builds three ways (testcase.yaml) and NODEINFO_ANNOUNCE_SCENARIO picks
- * which half compiles.
+ * suite builds four ways (testcase.yaml) and NODEINFO_ANNOUNCE_SCENARIO picks
+ * which half compiles; within the announce half, START_DELAY_SEC's exact
+ * value (2 vs 3) further picks between the plain-cadence test and the
+ * interval-override test (agents-t2hb.1) -- the two cannot share an image
+ * either, since both need to observe the ONE continuously-running auto-send
+ * thread from a clean start.
  */
 #include <string.h>
 
@@ -44,6 +48,7 @@
 
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_sched.h"
@@ -419,6 +424,8 @@ ZTEST(nodeinfo, test_auto_send_off_never_announces_unprompted)
 
 #else /* NODEINFO_ANNOUNCE_SCENARIO */
 
+#if CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC == 2
+
 /*
  * The unprompted announce, measured end to end in one test because the thread
  * runs once: it is created at meshtastic_init(), sleeps START_DELAY, announces,
@@ -461,6 +468,53 @@ ZTEST(nodeinfo, test_announce_waits_for_the_start_delay_then_repeats)
 	c = drain_nodeinfo_tx(K_SECONDS((CONFIG_MESHTASTIC_NODEINFO_INTERVAL_SEC / 2) + 2));
 	zassert_equal(c.count, 1U, "and exactly one once the interval has elapsed");
 }
+
+#elif CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC == 3
+
+/*
+ * agents-t2hb.1: a stored device.node_info_broadcast_secs must beat the
+ * compiled INTERVAL_SEC on the VERY NEXT cycle, no reboot -- the same
+ * "read it live" contract the LoRa preset fix (agents-k8oe) established for
+ * LoRaConfig. INTERVAL_SEC is deliberately left at the same 1 h Kconfig
+ * minimum as the plain announce scenario: an override that silently did
+ * nothing would leave the second announce roughly an hour away, so only a
+ * working override lets this test's tight second window pass.
+ */
+ZTEST(nodeinfo, test_stored_interval_overrides_compiled_default)
+{
+	struct captured c;
+	int64_t delay_ms = (int64_t)CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC * MSEC_PER_SEC;
+	int64_t elapsed = k_uptime_get() - init_uptime_ms;
+
+	zassert_true(elapsed < delay_ms,
+		     "test started %lld ms after init, past the %lld ms delay — nothing to "
+		     "observe",
+		     elapsed, delay_ms);
+
+	/* Set the override before the first (unbudgeted) announce fires, so the
+	 * SECOND cycle -- the one that actually reads the interval -- sees it. */
+	zassert_ok(meshtastic_config_store_set_node_info_interval(5U),
+		   "interval override failed");
+
+	c = drain_nodeinfo_tx(K_NO_WAIT);
+	zassert_equal(c.count, 0U, "nothing may go out before the start delay elapses");
+
+	/* Past the delay, plus room for the send to reach the radio. */
+	c = drain_nodeinfo_tx(K_MSEC((delay_ms - elapsed) + 1000));
+	zassert_equal(c.count, 1U, "exactly one announce at the start delay");
+
+	/* If the override did not take, the next announce is the compiled 1 h
+	 * away -- nothing arrives in this short window. */
+	c = drain_nodeinfo_tx(K_SECONDS(3));
+	zassert_equal(c.count, 0U, "the overridden 5 s interval has not elapsed yet");
+
+	c = drain_nodeinfo_tx(K_SECONDS(4));
+	zassert_equal(c.count, 1U,
+		     "stored node_info_broadcast_secs=5 must override the compiled 1 h "
+		     "default on the very next cycle, no reboot");
+}
+
+#endif
 
 #endif /* NODEINFO_ANNOUNCE_SCENARIO */
 

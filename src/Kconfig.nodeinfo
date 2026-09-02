@@ -32,11 +32,17 @@ config MESHTASTIC_NODEINFO_INTERVAL_SEC
 	int "NodeInfo broadcast interval in seconds"
 	default 10800
 	range 3600 86400
-	depends on MESHTASTIC_NODEINFO_AUTO_SEND
 	help
 	  Interval between automatic NodeInfo broadcasts. The upstream
 	  Meshtastic default is 3 hours (10800 s); broadcasting more than
 	  once an hour is discouraged to limit channel utilisation.
+
+	  NOT gated on MESHTASTIC_NODEINFO_AUTO_SEND (unlike START_DELAY_SEC,
+	  which only means anything to the auto-send thread): this is also the
+	  fallback meshtastic_nodeinfo_interval_secs() returns when no
+	  device.node_info_broadcast_secs is stored (agents-t2hb.1), and that
+	  function is reachable from the shell's `nodeinfo interval` read even
+	  on a build with auto-send off.
 
 config MESHTASTIC_NODEINFO_PEER_CACHE_SIZE
 	int "NodeInfo peer cache size"

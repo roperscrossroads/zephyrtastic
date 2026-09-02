@@ -38,6 +38,25 @@ extern "C" {
  */
 int meshtastic_send_node_info(uint32_t dest);
 
+/**
+ * @brief The interval between automatic NodeInfo broadcasts, in effect right now.
+ *
+ * Resolves @c DeviceConfig.node_info_broadcast_secs the way the rest of this
+ * port resolves an unset numeric config value: 0 (never explicitly
+ * configured, or config unavailable) falls back to
+ * @kconfig{CONFIG_MESHTASTIC_NODEINFO_INTERVAL_SEC}. A nonzero stored value
+ * is used as-is, honouring an operator's explicit request rather than
+ * clamping it to the Kconfig prompt's suggested range.
+ *
+ * Read fresh from the config store on every call rather than cached: the
+ * auto-send thread only calls this once per broadcast (hours apart), so
+ * there is no hot-path cost to paying for a config read there instead of
+ * keeping a cache in sync.
+ *
+ * @return The effective interval in seconds, never 0.
+ */
+uint32_t meshtastic_nodeinfo_interval_secs(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -93,15 +93,19 @@ int meshtastic_config_store_get_device_ui(meshtastic_DeviceUIConfig *device_ui);
 
 /**
  * Field-level edits of the `device` section (shell `meshtastic device role` /
- * `device rebroadcast`). Both mutate one field under a single lock hold and
- * mint a new HLC version for the section, exactly as set_config() does for a
- * whole one — see the rule above stamp_local() for why a field-level setter is
- * no less a local write, and why routing these through set_config() instead
- * would be worse on both counts.
+ * `device rebroadcast` / `nodeinfo interval`). Each mutates one field under a
+ * single lock hold and mints a new HLC version for the section, exactly as
+ * set_config() does for a whole one — see the rule above stamp_local() for
+ * why a field-level setter is no less a local write, and why routing these
+ * through set_config() instead would be worse on both counts.
  */
 int meshtastic_config_store_set_device_role(meshtastic_Config_DeviceConfig_Role role);
 int meshtastic_config_store_set_rebroadcast_mode(
 	meshtastic_Config_DeviceConfig_RebroadcastMode mode);
+
+/** Set device.node_info_broadcast_secs. 0 means "use the compiled default" —
+ *  see meshtastic_nodeinfo_interval_secs(). */
+int meshtastic_config_store_set_node_info_interval(uint32_t secs);
 
 /** Set the node owner (long/short name, licensed/unmessagable flags). Persists. */
 int meshtastic_config_store_set_owner(const meshtastic_User *user);

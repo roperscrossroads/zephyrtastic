@@ -1297,6 +1297,27 @@ int meshtastic_config_store_set_rebroadcast_mode(
 	return 0;
 }
 
+int meshtastic_config_store_set_node_info_interval(uint32_t secs)
+{
+	int idx = index_for_config_tag(meshtastic_Config_device_tag);
+
+	if (idx < 0) {
+		return -EINVAL;
+	}
+
+	store_lock();
+	store.configs[idx].payload_variant.device.node_info_broadcast_secs = secs;
+	stamp_local(&store.config_stamps[idx]);
+	store_unlock();
+
+	/* No live-apply call: meshtastic_nodeinfo_interval_secs() reads this
+	 * straight from the store on every use (agents-t2hb.1), so persisting it
+	 * here is the whole job — the NEXT broadcast picks it up with no reboot
+	 * and no cached state to keep in sync. */
+	store_schedule_save();
+	return 0;
+}
+
 int meshtastic_config_store_set_owner(const meshtastic_User *user)
 {
 	int8_t new_tx_power;

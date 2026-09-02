@@ -28,6 +28,19 @@ tests:
       - CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC=2
       - CONFIG_MESHTASTIC_NODEINFO_INTERVAL_SEC=3600
 
+  # A stored device.node_info_broadcast_secs must beat the compiled interval
+  # live, no reboot (agents-t2hb.1) -- its own image for the same reason the
+  # announce test above has one: one continuously-running thread, so two
+  # "observe from a clean start" tests cannot share it. INTERVAL is left at
+  # the same 1 h Kconfig minimum as the announce scenario on purpose -- an
+  # ignored override would never let the test's second announce arrive on
+  # schedule. START_DELAY_SEC=3 (not 2) is the only thing distinguishing this
+  # build from the announce one at compile time -- see main.c.
+  meshtastic.nodeinfo.interval_override.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC=3
+      - CONFIG_MESHTASTIC_NODEINFO_INTERVAL_SEC=3600
+
   # Fleet class 5's configuration: reactive paths intact, nothing unprompted.
   meshtastic.nodeinfo.no_auto_send.native_sim:
     extra_configs:

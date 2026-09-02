@@ -29,6 +29,8 @@
 
 #include <zephyr/meshtastic/meshtastic.h>
 
+#include <zephyr/meshtastic/nodeinfo.h>
+
 #include "meshtastic_clock.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_scanner.h"
@@ -424,6 +426,33 @@ ZTEST(meshtastic_shell, test_lora_preset_applies_live)
 	/* Leave the store on the fixture's default preset so other tests (and a
 	 * re-run of this one) start from the same place. */
 	zassert_ok(run_cmd("meshtastic lora preset LongFast", NULL), "restore failed");
+}
+
+/*
+ * `nodeinfo interval` (agents-t2hb.1): device.node_info_broadcast_secs must
+ * persist, read back through both the dedicated command and
+ * meshtastic_nodeinfo_interval_secs() (what the auto-send thread actually
+ * calls), and 0 must fall back to the compiled default rather than sticking
+ * at 0 forever — same idiom as LoRa tx_power.
+ */
+ZTEST(meshtastic_shell, test_nodeinfo_interval_persists_and_reads_back)
+{
+	const char *out;
+
+	zassert_ok(run_cmd("meshtastic nodeinfo interval 60", &out), "interval set failed");
+	zassert_not_null(strstr(out, "60 s"), "expected the new interval echoed back, got: %s",
+			 out);
+	zassert_not_null(strstr(out, "no reboot"),
+			 "must confirm this applies without a reboot, got: %s", out);
+	zassert_equal(meshtastic_nodeinfo_interval_secs(), 60U,
+		      "the function the auto-send thread actually calls must see 60");
+
+	zassert_ok(run_cmd("meshtastic nodeinfo interval", &out), "interval show failed");
+	zassert_not_null(strstr(out, "interval: 60 s"), "show should confirm 60 s, got: %s", out);
+
+	zassert_ok(run_cmd("meshtastic nodeinfo interval 0", NULL), "interval reset failed");
+	zassert_equal(meshtastic_nodeinfo_interval_secs(), CONFIG_MESHTASTIC_NODEINFO_INTERVAL_SEC,
+		      "0 must fall back to the compiled default, not stick at 0");
 }
 
 ZTEST(meshtastic_shell, test_managed_node_refuses_lora_tx_write)

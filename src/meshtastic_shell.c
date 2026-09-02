@@ -2530,10 +2530,70 @@ static int cmd_nodeinfo_send(const struct shell *sh, size_t argc, char **argv)
 	return cmd_deferred_send(sh, argc, argv, SHELL_WORK_SEND_NODEINFO);
 }
 
+/* Get/set device.node_info_broadcast_secs (agents-t2hb.1). Same shape as
+ * `meshtastic device role`/`rebroadcast`: read always available, write gated
+ * behind CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE. */
+static int cmd_nodeinfo_interval(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 1U) {
+		meshtastic_Config cfg;
+		bool stored = meshtastic_config_store_get_config(meshtastic_Config_device_tag,
+								 &cfg) == 0 &&
+			      cfg.which_payload_variant == meshtastic_Config_device_tag &&
+			      cfg.payload_variant.device.node_info_broadcast_secs != 0U;
+
+		shell_print(sh, "interval: %u s%s", meshtastic_nodeinfo_interval_secs(),
+			    stored ? "" : " (compiled default; node_info_broadcast_secs unset)");
+		return 0;
+	}
+
+	if (argc != 2U) {
+		shell_error(sh, "usage: meshtastic nodeinfo interval [secs]");
+		return -EINVAL;
+	}
+
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	shell_error(sh, "refused: shell config writes are compiled out "
+			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
+	return -ENOTSUP;
+#else
+	{
+		unsigned long secs;
+		char *end;
+		int ret;
+
+		if (shell_config_write_refused(sh)) {
+			return -EACCES;
+		}
+
+		secs = strtoul(argv[1], &end, 10);
+		if (*end != '\0' || secs > UINT32_MAX) {
+			shell_error(sh, "invalid seconds value: %s", argv[1]);
+			return -EINVAL;
+		}
+
+		ret = meshtastic_config_store_set_node_info_interval((uint32_t)secs);
+		if (ret < 0) {
+			shell_error(sh, "interval set failed: %d", ret);
+			return ret;
+		}
+		shell_print(sh, "interval -> %u s%s (persisted; next broadcast uses it, no reboot)",
+			    meshtastic_nodeinfo_interval_secs(),
+			    secs == 0U ? " (0 == compiled default)" : "");
+		return 0;
+	}
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodeinfo_cmds,
 			       SHELL_CMD(send, NULL,
 					 SHELL_HELP("Send node information.", "[dest|broadcast]"),
 					 cmd_nodeinfo_send),
+			       SHELL_CMD(interval, NULL,
+					 SHELL_HELP("Get/set the auto-broadcast interval "
+						    "(0 = compiled default).",
+						    "[secs]"),
+					 cmd_nodeinfo_interval),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_NODEINFO */
 

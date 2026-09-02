@@ -11,6 +11,7 @@
 #include <pb_encode.h>
 
 #include "meshtastic_channels.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_modules.h"
 
 #include <zephyr/meshtastic/meshtastic.h>
@@ -330,6 +331,19 @@ MESHTASTIC_MODULE_DEFINE(nodeinfo, MESHTASTIC_PORT_NODEINFO, MESHTASTIC_MODULE_A
 			 meshtastic_module_nodeinfo_on_packet,
 			 meshtastic_module_nodeinfo_alloc_reply);
 
+uint32_t meshtastic_nodeinfo_interval_secs(void)
+{
+	meshtastic_Config cfg;
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_device_tag, &cfg) == 0 &&
+	    cfg.which_payload_variant == meshtastic_Config_device_tag &&
+	    cfg.payload_variant.device.node_info_broadcast_secs != 0U) {
+		return cfg.payload_variant.device.node_info_broadcast_secs;
+	}
+
+	return CONFIG_MESHTASTIC_NODEINFO_INTERVAL_SEC;
+}
+
 #if defined(CONFIG_MESHTASTIC_NODEINFO_AUTO_SEND)
 /* Bounded User protobuf build + enqueue. Measured peak ~1.6 KB on hardware;
  * 3584 keeps ~2.2x margin. STACK_SENTINEL guards against an unexpected spike. */
@@ -350,7 +364,11 @@ static void nodeinfo_thread_fn(void *p1, void *p2, void *p3)
 
 	while (true) {
 		(void)meshtastic_send_node_info(MESHTASTIC_NODE_BROADCAST);
-		k_sleep(K_SECONDS(CONFIG_MESHTASTIC_NODEINFO_INTERVAL_SEC));
+		/* Read fresh every cycle, not once at thread start, so a config
+		 * change (agents-t2hb.1) takes effect on the NEXT broadcast without
+		 * a reboot -- the same "why read it live" reasoning as the LoRa
+		 * preset fix (agents-k8oe). */
+		k_sleep(K_SECONDS(meshtastic_nodeinfo_interval_secs()));
 	}
 }
 #endif
