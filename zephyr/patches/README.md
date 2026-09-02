@@ -367,3 +367,41 @@ every listed compatible's schema — it only moved the identical error onto
 project or to QSPI NOR specifically: any board combining
 `coredump_partition` with a flash whose binding omits `write-block-size`
 hits the same wall.
+
+### 0013-sx126x-latch-rx-activity-flags-for-actively-receiving.patch
+
+Enables `PREAMBLE_DETECTED | HEADER_VALID | HEADER_ERR` in the SX126x IRQ
+**enable** mask while leaving the DIO1 mask exactly as it was (the four
+terminal events), so the receive-activity flags latch in the status register
+without raising an interrupt; adds `sx126x_rx_activity()` /
+`sx126x_rx_activity_clear()` to read and retire them; and clears them before
+every `SET_RX` so a re-arm starts clean (RadioLib's `startReceiveCommon()`
+does the same).
+
+**Why:** this is the chip half of upstream Meshtastic's
+`isActivelyReceiving()`, which gates three decisions — a transmit must not
+key up over a packet being demodulated ("doubly bad: we drop the packet on
+the way in, and no one outside will like the one we send"), the periodic AGC
+reset must not tear RX down mid-packet, and the noise floor is not sampled
+under a signal. RadioLib configures the chip with these flags in the IRQ mask
+and `RX_DONE` alone on DIO1, then reads the status register. Our mask never
+had them, so they never latched, so no layer could ask; both the AGC reset
+and every transmit could land on an inbound frame. Found by the 2026-09-02
+RF parity audit (`docs/RF-PARITY-PLAN.md` §1.1 in the tooling repo).
+
+The timing that separates a real reception from a stale flag (twice the
+preamble time without a header; the airtime of a maximum-length frame
+without RX_DONE) lives in `main/src/meshtastic_radio.c`
+(`meshtastic_radio_actively_receiving()`), because it needs the modem the
+radio is on. One deliberate divergence from upstream there: a detection
+judged false is *cleared* via `sx126x_rx_activity_clear()` rather than left
+latched to be re-timed on every call.
+
+Consumed through `__weak` fallbacks in `meshtastic_radio.c` (same pattern as
+0011), so an unpatched tree still links and reports "unknown" / never
+receiving. Verified on the V4 class-4 image; the `RX activity` row of
+`meshtastic rf` shows the raw flags and the two timing rules' verdicts.
+
+Built with the reconstruction recipe above (pristine `6072d4880d` +
+0002/0003/0004/0005/0006/0008/0009/0011), and checked to reproduce the live
+file byte-for-byte.

@@ -110,6 +110,20 @@ bool lora_sim_rx_armed(const struct device *dev);
 /** @brief Force the modelled channel busy for @p ms from now (LBT/contention). */
 void lora_sim_set_busy(const struct device *dev, uint32_t ms);
 
+/**
+ * @brief Model the SX126x's latched PREAMBLE_DETECTED / HEADER_VALID flags.
+ *
+ * What meshtastic_radio_actively_receiving() reads on hardware. A test sets
+ * them to stand in for "a frame is being demodulated"; they clear the way the
+ * real flags do — on a re-arm, on an injected (completed) frame, on an
+ * explicit clear from the stack, and on lora_sim_reset().
+ */
+void lora_sim_set_rx_activity(const struct device *dev, bool preamble, bool header);
+/** @brief The flags as the stack sees them (false/false while not listening). */
+int lora_sim_rx_activity(const struct device *dev, bool *preamble, bool *header);
+/** @brief The stack retiring a detection it judged stale. */
+int lora_sim_rx_activity_clear(const struct device *dev);
+
 /** @brief Silently drop the next @p n transmissions (retransmit/reliability). */
 void lora_sim_drop_next(const struct device *dev, unsigned int n);
 

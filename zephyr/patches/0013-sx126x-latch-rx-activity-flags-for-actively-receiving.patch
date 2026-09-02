@@ -1,0 +1,210 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+index ddb950b..d1d282a 100644
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -28,6 +28,40 @@ LOG_MODULE_REGISTER(sx126x, CONFIG_LORA_LOG_LEVEL);
+  */
+ #define SX126X_BUSY_RECOVERY_THRESHOLD	4
+ 
++/*
++ * The standing DIO1 interrupt set: the terminal events the IRQ work handler
++ * acts on. Unchanged from before the RX-activity work below.
++ */
++#define SX126X_IRQ_STD_DIO1 \
++	(SX126X_IRQ_TX_DONE | SX126X_IRQ_RX_DONE | SX126X_IRQ_RX_TX_TIMEOUT | \
++	 SX126X_IRQ_CRC_ERR)
++
++/*
++ * RX-activity flags: the non-terminal receive events that say "a packet is
++ * being demodulated right now". They are ENABLED in the IRQ mask so they latch
++ * in the status register, but deliberately NOT routed to DIO1 -- a preamble
++ * detection is not an event to act on, only a fact to consult. This is how
++ * RadioLib configures the chip for Meshtastic (RADIOLIB_IRQ_RX_DEFAULT_FLAGS
++ * plus PREAMBLE_DETECTED in the enable mask, RX_DONE alone on DIO1), and it is
++ * the entire mechanism behind upstream's isActivelyReceiving(): read the
++ * status register, look at these bits.
++ *
++ * Without them in the enable mask the bits never latch at all, so no amount of
++ * reading the status register can tell a caller a packet is arriving. That was
++ * the state of this driver before 2026-09-02, which is why the periodic AGC
++ * reset and every transmit could land on top of an inbound frame.
++ *
++ * HEADER_ERR is in the set for the opposite reason: it marks the END of an
++ * attempt (the header CRC failed, the demodulator has given up), so a reader
++ * can retire a stale preamble flag immediately instead of waiting out the
++ * timing heuristic in the layer above.
++ */
++#define SX126X_IRQ_RX_ACTIVITY \
++	(SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID | SX126X_IRQ_HEADER_ERR)
++
++/* What the IRQ enable mask carries between operations. */
++#define SX126X_IRQ_STD_ENABLE (SX126X_IRQ_STD_DIO1 | SX126X_IRQ_RX_ACTIVITY)
++
+ static int bandwidth_to_reg(enum lora_signal_bandwidth bw, uint8_t *reg)
+ {
+ 	switch (bw) {
+@@ -406,6 +440,8 @@ static int sx126x_set_rx_duty_cycle(const struct device *dev,
+ static int sx126x_set_rx(const struct device *dev, uint32_t timeout_ms)
+ {
+ 	uint32_t timeout;
++	uint8_t buf[3];
++	int ret;
+ 
+ 	if (timeout_ms == 0) {
+ 		timeout = SX126X_RX_TIMEOUT_CONTINUOUS;
+@@ -413,7 +449,16 @@ static int sx126x_set_rx(const struct device *dev, uint32_t timeout_ms)
+ 		timeout = SX126X_MS_TO_TIMEOUT(timeout_ms);
+ 	}
+ 
+-	uint8_t buf[3];
++	/* A fresh receive starts with no activity on record. The IRQ work handler
++	 * clears whatever it read on a terminal event, but a preamble that never
++	 * became a packet -- noise, or a frame lost to a TX -- leaves its flag
++	 * latched with no event to clear it. RadioLib's startReceiveCommon()
++	 * clears the status register here for the same reason. Only the activity
++	 * bits: a terminal event pending for the work handler must survive. */
++	ret = sx126x_clear_irq_status(dev, SX126X_IRQ_RX_ACTIVITY);
++	if (ret < 0) {
++		return ret;
++	}
+ 
+ 	sys_put_be24(timeout, buf);
+ 	return sx126x_hal_write_cmd(dev, SX126X_CMD_SET_RX, buf, 3);
+@@ -552,10 +597,9 @@ static int sx126x_chip_init(const struct device *dev)
+ 		return ret;
+ 	}
+ 
+-	/* Configure IRQs on DIO1: TX done, RX done, timeout */
+-	uint16_t irq_mask = SX126X_IRQ_TX_DONE | SX126X_IRQ_RX_DONE |
+-			    SX126X_IRQ_RX_TX_TIMEOUT | SX126X_IRQ_CRC_ERR;
+-	ret = sx126x_set_dio_irq_params(dev, irq_mask, irq_mask, 0, 0);
++	/* Configure IRQs: the terminal events on DIO1, plus the RX-activity flags
++	 * latched-but-silent (see SX126X_IRQ_RX_ACTIVITY). */
++	ret = sx126x_set_dio_irq_params(dev, SX126X_IRQ_STD_ENABLE, SX126X_IRQ_STD_DIO1, 0, 0);
+ 	if (ret < 0) {
+ 		LOG_ERR("Set IRQ params failed: %d", ret);
+ 		return ret;
+@@ -890,6 +934,86 @@ out:
+ 	return ret;
+ }
+ 
++/*
++ * Is a packet being demodulated right now? Parity: upstream Meshtastic's
++ * SX126xInterface::isActivelyReceiving() reads the IRQ status register and
++ * looks at HEADER_VALID | PREAMBLE_DETECTED. This is the chip half of that; the
++ * false-detection timing (a preamble that never became a header, a header that
++ * never became a packet) lives in the caller, because it needs the modem's
++ * preamble and packet times, which the driver does not compute.
++ *
++ * Reports through two booleans rather than raw flags so the caller stays
++ * chip-agnostic (the simulated radio answers the same question). A HEADER_ERR
++ * means the attempt is over -- the header CRC failed -- so it is retired here:
++ * the three bits are cleared and the answer is "nothing in progress".
++ *
++ * Only meaningful, and only issued, while the chip is in RX: any SPI
++ * transaction wakes a sleeping SX126x, which would defeat NATIVE_SLEEP, and in
++ * every other state the answer is trivially "no". Under data->lock, which
++ * serialises against the config/send/sleep paths that reprogram the mask; the
++ * IRQ work handler runs unlocked, but it only ever reads status and clears
++ * what it read, so interleaving with this read-and-clear of a disjoint bit set
++ * is harmless.
++ */
++int sx126x_rx_activity(const struct device *dev, bool *preamble, bool *header)
++{
++	struct sx126x_data *data = dev->data;
++	uint16_t status = 0;
++	atomic_val_t state;
++	int ret = 0;
++
++	*preamble = false;
++	*header = false;
++
++	k_mutex_lock(&data->lock, K_FOREVER);
++
++	state = atomic_get(&data->state);
++	if (state != SX126X_STATE_RX && state != SX126X_STATE_RX_DUTY_CYCLE) {
++		goto out;
++	}
++
++	ret = sx126x_get_irq_status(dev, &status);
++	if (ret < 0) {
++		goto out;
++	}
++
++	if (status & SX126X_IRQ_HEADER_ERR) {
++		ret = sx126x_clear_irq_status(dev, SX126X_IRQ_RX_ACTIVITY);
++		goto out;
++	}
++
++	*preamble = (status & SX126X_IRQ_PREAMBLE_DETECTED) != 0U;
++	*header = (status & SX126X_IRQ_HEADER_VALID) != 0U;
++
++out:
++	k_mutex_unlock(&data->lock);
++	return ret;
++}
++
++/*
++ * Retire a stale detection: the caller has decided, on timing, that the
++ * latched preamble/header flag is not a packet after all. Upstream leaves the
++ * bit latched and re-times it on every call, which makes its answer oscillate
++ * on a stale flag; clearing it is the honest fix. Same state and lock rules as
++ * sx126x_rx_activity().
++ */
++int sx126x_rx_activity_clear(const struct device *dev)
++{
++	struct sx126x_data *data = dev->data;
++	atomic_val_t state;
++	int ret = 0;
++
++	k_mutex_lock(&data->lock, K_FOREVER);
++
++	state = atomic_get(&data->state);
++	if (state == SX126X_STATE_RX || state == SX126X_STATE_RX_DUTY_CYCLE) {
++		ret = sx126x_clear_irq_status(dev, SX126X_IRQ_RX_ACTIVITY);
++	}
++
++	k_mutex_unlock(&data->lock);
++	return ret;
++}
++
+ static void sx126x_handle_irq_tx_done(const struct device *dev)
+ {
+ 	struct sx126x_data *data = dev->data;
+@@ -1284,11 +1408,13 @@ bool sx126x_rx_boosted_applied_get(const struct device *dev, bool *out)
+  * this driver accepted in its config struct but never actually implemented.
+  *
+  * Parameters: symbol_num/detection_peak/detection_minimum of 0 mean "auto" --
+- * resolved here to the same defaults RadioLib uses for the SX1262 (the
+- * library upstream Meshtastic itself runs), confirmed against RadioLib
+- * source 2026-08-06: 4-symbol window, detPeak = spreadingFactor + 13
++ * resolved here to RadioLib's own SX126x fallbacks (setCad(), when handed
++ * CAD_PARAM_DEFAULT): 4-symbol window, detPeak = spreadingFactor + 13
+  * (SF-dependent), detMin = 10, always exits to STDBY_RC regardless of
+- * result. A caller may override any of the three explicitly.
++ * result. A caller may override any of the three explicitly. Note that
++ * upstream Meshtastic does NOT take the 4-symbol fallback: it passes
++ * NUM_SYM_CAD = 2 explicitly (RadioInterface.h, per AN1200.48), which is
++ * why meshtastic_radio.c asks for LORA_CAD_SYMB_2 rather than 0.
+  *
+  * Caller contract: must hold data->lock and have the chip in a state where
+  * SetCadParams/SetCad are valid (sx126x_ensure_ready() has already run) --
+@@ -1408,15 +1534,10 @@ static int sx126x_do_cad(const struct device *dev, const struct lora_modem_confi
+ restore_mask:
+ 	sx126x_clear_irq_status(dev, SX126X_IRQ_ALL);
+ 
+-	/* Restore the mask sx126x_lora_config() sets, unconditionally -- the
+-	 * subsequent SetTx's TX_DONE IRQ depends on it, whether CAD found the
++	/* Restore the standing mask sx126x_chip_init() sets, unconditionally --
++	 * the subsequent SetTx's TX_DONE IRQ depends on it, whether CAD found the
+ 	 * channel busy or clear. */
+-	sx126x_set_dio_irq_params(dev,
+-				  SX126X_IRQ_TX_DONE | SX126X_IRQ_RX_DONE |
+-					  SX126X_IRQ_RX_TX_TIMEOUT | SX126X_IRQ_CRC_ERR,
+-				  SX126X_IRQ_TX_DONE | SX126X_IRQ_RX_DONE |
+-					  SX126X_IRQ_RX_TX_TIMEOUT | SX126X_IRQ_CRC_ERR,
+-				  0, 0);
++	sx126x_set_dio_irq_params(dev, SX126X_IRQ_STD_ENABLE, SX126X_IRQ_STD_DIO1, 0, 0);
+ 
+ 	/* Re-enable unconditionally, mirroring sx126x_ensure_ready()'s own
+ 	 * re-enable after sx126x_set_sleep() -- every path from here on

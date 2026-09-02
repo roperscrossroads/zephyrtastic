@@ -474,3 +474,35 @@ patches:
       upstreamable: a generic MTD property gap, not specific to this project
       or to QSPI NOR specifically -- any board combining coredump_partition
       with a flash whose binding omits write-block-size hits the same wall.
+  - path: 0013-sx126x-latch-rx-activity-flags-for-actively-receiving.patch
+    sha256sum: dbe811a3ba93006f722cc1bbfe67183c396b21386d0d29ce152af9adbd5e277d
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-02"
+    upstreamable: false
+    comments: |
+      sx126x: enable PREAMBLE_DETECTED | HEADER_VALID | HEADER_ERR in the IRQ
+      enable mask -- latched in the status register, NOT routed to DIO1 --
+      and expose them: sx126x_rx_activity() (are the preamble/header flags
+      set right now, valid only in RX; a HEADER_ERR retires the attempt) and
+      sx126x_rx_activity_clear() (the caller judged the detection stale).
+      sx126x_set_rx() now clears the activity bits before SET_RX, as
+      RadioLib's startReceiveCommon() does, so a re-arm starts clean.
+
+      This is the chip half of upstream Meshtastic's isActivelyReceiving():
+      RadioLib configures the SX126x with those flags in the IRQ mask and
+      RX_DONE alone on DIO1, and reads the status register to answer "is a
+      packet being demodulated". Without the bits in the enable mask they
+      never latch, so nothing above the driver could ask -- which is why,
+      until 2026-09-02, both the periodic AGC reset and every transmit could
+      land on top of an inbound frame. The false-detection timing (a preamble
+      that never became a header, a header that never became a packet) is
+      the caller's (meshtastic_radio.c), because it needs the modem's
+      preamble and packet times. Consumed via __weak fallbacks there, so the
+      firmware still links -- and honestly answers "cannot tell" -- against
+      an unpatched tree.
+
+      Layered on 0002/0003/0004/0005/0006/0008/0009/0011 (all touch
+      sx126x.c); built with the README's reconstruction recipe and verified
+      to reproduce the live file byte-for-byte on pristine+earlier.

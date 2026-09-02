@@ -37,6 +37,13 @@ struct lora_sim_data {
 	int64_t      busy_until_ms; /* channel modelled busy until this uptime */
 	unsigned int drop_next;     /* silently drop this many upcoming TX */
 
+	/* The SX126x's latched PREAMBLE_DETECTED / HEADER_VALID flags, as a test
+	 * sets them. Cleared by a re-arm (as the real driver's SetRx does), by an
+	 * injected frame (RX_DONE clears them on hardware), by an explicit clear
+	 * from the stack (a detection judged stale) and by lora_sim_reset(). */
+	bool act_preamble;
+	bool act_header;
+
 	struct k_msgq txq;
 	char          txq_buf[CONFIG_LORA_SIM_TX_QUEUE_DEPTH *
 			      sizeof(struct lora_sim_frame)];
@@ -204,6 +211,11 @@ static int lora_sim_recv_async(const struct device *dev, lora_recv_cb cb, void *
 	k_mutex_lock(&d->lock, K_FOREVER);
 	d->rx_cb   = cb; /* cb == NULL cancels, per the API */
 	d->rx_user = user_data;
+	if (cb != NULL) {
+		/* A fresh receive starts with no activity on record (sx126x_set_rx). */
+		d->act_preamble = false;
+		d->act_header = false;
+	}
 	k_mutex_unlock(&d->lock);
 	return 0;
 }
@@ -269,6 +281,47 @@ static int lora_sim_inject_common(const struct device *dev, bool match_tuning, u
 	 * stack may synchronously turn around and transmit a relay/ACK. */
 	memcpy(frame, data, len);
 	cb(dev, frame, len, rssi, snr, user);
+
+	/* RX_DONE: the driver's IRQ handler clears every flag it read, the
+	 * preamble/header pair included. A completed frame ends the detection. */
+	k_mutex_lock(&d->lock, K_FOREVER);
+	d->act_preamble = false;
+	d->act_header = false;
+	k_mutex_unlock(&d->lock);
+	return 0;
+}
+
+void lora_sim_set_rx_activity(const struct device *dev, bool preamble, bool header)
+{
+	struct lora_sim_data *d = dev->data;
+
+	k_mutex_lock(&d->lock, K_FOREVER);
+	d->act_preamble = preamble;
+	d->act_header = header;
+	k_mutex_unlock(&d->lock);
+}
+
+int lora_sim_rx_activity(const struct device *dev, bool *preamble, bool *header)
+{
+	struct lora_sim_data *d = dev->data;
+
+	k_mutex_lock(&d->lock, K_FOREVER);
+	/* Only meaningful while listening, as on the SX126x (sx126x_rx_activity
+	 * answers "nothing" in every state but RX). */
+	*preamble = (d->rx_cb != NULL) && d->act_preamble;
+	*header = (d->rx_cb != NULL) && d->act_header;
+	k_mutex_unlock(&d->lock);
+	return 0;
+}
+
+int lora_sim_rx_activity_clear(const struct device *dev)
+{
+	struct lora_sim_data *d = dev->data;
+
+	k_mutex_lock(&d->lock, K_FOREVER);
+	d->act_preamble = false;
+	d->act_header = false;
+	k_mutex_unlock(&d->lock);
 	return 0;
 }
 
@@ -375,6 +428,8 @@ void lora_sim_reset(const struct device *dev)
 	k_msgq_purge(&d->txq);
 	d->drop_next     = 0U;
 	d->busy_until_ms = 0;
+	d->act_preamble  = false;
+	d->act_header    = false;
 	k_mutex_unlock(&d->lock);
 }
 
