@@ -254,6 +254,80 @@ static inline void meshtastic_radio_cad_agc_stats_reset(void)
 #endif
 
 /**
+ * @brief Is a packet being demodulated right now?
+ *
+ * Parity: upstream Meshtastic's RadioLibInterface::isActivelyReceiving() /
+ * receiveDetected(). The radio driver reports the chip's latched
+ * preamble-detected and header-valid flags; this layer applies the timing
+ * rules that separate a real reception from a stale flag: a preamble that has
+ * not become a header within twice the preamble time was noise, and a header
+ * that has not become a packet within the airtime of a maximum-length frame
+ * was a false header. Either is retired (the flag is cleared) rather than left
+ * to oscillate.
+ *
+ * Three decisions gate on this, exactly as upstream: a transmit must not key up
+ * over a frame that is arriving ("not only would we drop the packet that was
+ * on the way in, we almost certainly guarantee no one outside will like the
+ * packet we are sending"), the periodic AGC reset must not tear RX down
+ * mid-packet, and the noise floor must not be sampled while a signal is
+ * present.
+ *
+ * Call with @c mt_radio_sem held: the detection timer it keeps is shared by the
+ * transmit path and the AGC reset, and the semaphore is what serialises those.
+ *
+ * @return true while a reception is believed to be in progress.
+ */
+bool meshtastic_radio_actively_receiving(void);
+
+/** @brief Counters behind meshtastic_radio_actively_receiving(), for `meshtastic rf`. */
+struct meshtastic_radio_rx_activity_stats {
+	uint32_t busy_rx;        /**< answers of "yes, a packet is arriving" */
+	uint32_t false_preamble; /**< preamble flags retired by the 2x-preamble rule */
+	uint32_t false_header;   /**< header flags retired by the max-packet rule */
+	uint32_t agc_deferred;   /**< AGC resets postponed because a packet was arriving */
+	uint32_t preamble_ms;    /**< the current modem's preamble time */
+	uint32_t max_packet_ms;  /**< airtime of a maximum-length frame on it */
+};
+
+void meshtastic_radio_rx_activity_stats_get(struct meshtastic_radio_rx_activity_stats *out);
+void meshtastic_radio_rx_activity_stats_reset(void);
+
+/**
+ * @brief Counters for the transmit defer path (MESHTASTIC_TX_DEFER), for `meshtastic rf`.
+ *
+ * A defer is a frame the radio refused to key up "right now" and the outbound
+ * queue re-scheduled behind a contention delay; a drop is a frame that used up
+ * CONFIG_MESHTASTIC_TX_DEFER_MAX of them on a channel that never went quiet.
+ */
+struct meshtastic_radio_tx_defer_stats {
+	uint32_t busy_rx;  /**< refused because a packet was being demodulated */
+	uint32_t cad_busy; /**< refused because CAD heard activity */
+	uint32_t requeued; /**< frames put back in the queue behind a fresh delay */
+	uint32_t dropped;  /**< frames abandoned at the defer cap */
+};
+
+void meshtastic_radio_tx_defer_stats_get(struct meshtastic_radio_tx_defer_stats *out);
+void meshtastic_radio_tx_defer_stats_reset(void);
+
+/** @brief Outbound drain -> radio: a deferred frame went back in the queue. Counter only. */
+void meshtastic_radio_tx_defer_requeued(void);
+
+/**
+ * @brief Outbound drain -> radio: a frame was dropped at the defer cap.
+ *
+ * Accounts exactly as any other failed transmit did before the defer path
+ * existed: tx_failures, and MESHTASTIC_EVENT_TX_FAILED with -EBUSY.
+ */
+void meshtastic_radio_tx_dropped_busy(void);
+
+/**
+ * @brief The chip's raw activity flags right now, untimed. For the report only.
+ *
+ * @return 0 with both flags filled, -ENOTSUP when the driver cannot say.
+ */
+int meshtastic_radio_rx_activity_now(bool *preamble, bool *header);
+
+/**
  * @brief Three-state answer for a setting the radio may not be able to report.
  *
  * UNKNOWN is a first-class value, not a placeholder. A driver that cannot tell

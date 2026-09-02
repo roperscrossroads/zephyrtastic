@@ -76,6 +76,15 @@ struct meshtastic_rf_path {
 	uint32_t cad_clear, cad_busy, cad_timeout, cad_error;
 	uint32_t agc_ok, agc_fail, agc_skipped, agc_patch_fail;
 	uint32_t busy_streak;
+
+	/* Receive activity: the chip's latched preamble/header flags right now
+	 * (UNKNOWN when the driver cannot report them), and the counters behind
+	 * meshtastic_radio_actively_receiving(). */
+	enum meshtastic_radio_tristate rx_act_preamble;
+	enum meshtastic_radio_tristate rx_act_header;
+	struct meshtastic_radio_rx_activity_stats rx_act;
+	/* Transmits refused "for now" and re-queued, and those dropped at the cap. */
+	struct meshtastic_radio_tx_defer_stats tx_defer;
 };
 
 /**

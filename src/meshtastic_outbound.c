@@ -17,7 +17,10 @@
 
 #include "meshtastic_packet.h"
 
+#include "meshtastic_airtime.h"
 #include "meshtastic_ble_peer.h"
+#include "meshtastic_contention.h"
+#include "meshtastic_core.h"
 #include "meshtastic_duty.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_outbound.h"
@@ -52,6 +55,9 @@ struct ob_item {
 	 * outlives a preset switch is addressed to a channel nobody on the new
 	 * preset is listening for. Stamped at enqueue, checked at dequeue. */
 	uint32_t gen;
+	/* Times the radio has answered MESHTASTIC_TX_DEFER for this frame and it
+	 * went back in the queue. Bounded by CONFIG_MESHTASTIC_TX_DEFER_MAX. */
+	uint8_t defers;
 	struct k_sem *done; /* non-NULL => a blocking caller is waiting; never evict */
 	int *result;
 };
@@ -160,6 +166,55 @@ static void remove_index_locked(int i)
 	ob_count--;
 }
 
+/*
+ * The radio said "not now" (MESHTASTIC_TX_DEFER): a packet was being
+ * demodulated, or CAD heard one. Put the frame back behind a fresh contention
+ * delay, exactly as the reference does — RadioLibInterface::onNotify() answers
+ * both cases with startReceive() + setTransmitDelay(), keeping the packet at
+ * the head of its queue, and never drops a frame for a busy channel. The one
+ * divergence is the bound: a channel that is never quiet cannot pin a frame
+ * here forever, so the CONFIG_MESHTASTIC_TX_DEFER_MAX-th refusal drops it.
+ *
+ * The delay is the own-transmit CSMA draw (util-scaled window, reference
+ * getTxDelayMsec) with a floor of one slot: a draw of zero slots, or a window
+ * pinned off, would otherwise re-ask the radio at once and burn the whole
+ * budget inside the airtime of the packet CAD just heard.
+ *
+ * Called under ob_lock, in the same critical section that clears ob_inflight,
+ * so the preset-hop interlock never sees "queue empty and nothing in flight"
+ * while this frame exists. Returns true when the frame is back in the queue;
+ * false when it was dropped, and the caller completes it as a failure.
+ */
+static bool requeue_deferred_locked(struct ob_item *it)
+{
+	uint32_t slot_ms;
+	uint32_t delay_ms;
+	uint32_t due;
+	uint8_t util = 0U;
+
+	if (it->defers >= CONFIG_MESHTASTIC_TX_DEFER_MAX || ob_count >= OB_MAX) {
+		return false;
+	}
+	it->defers++;
+
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+	util = (uint8_t)meshtastic_airtime_channel_util_percent();
+#endif
+	slot_ms = meshtastic_contention_effective_slot_ms(mt.modem.spread_factor,
+							  mt.modem.bandwidth_hz, false);
+	delay_ms = meshtastic_contention_delay_own_ms(util, slot_ms);
+	delay_ms = MAX(delay_ms, MAX(slot_ms, 1U));
+	due = k_uptime_get_32() + delay_ms;
+
+	it->send_after = (due == 0U) ? 1U : due;
+	ob_items[ob_count++] = *it;
+
+	/* The drain handed this slot back (ob_space) when it dequeued the frame;
+	 * reclaim it if nobody has taken it yet, so the count stays honest. */
+	(void)k_sem_take(&ob_space, K_NO_WAIT);
+	return true;
+}
+
 static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 {
 	static struct ob_item cur; /* single consumer; static keeps it off the stack */
@@ -230,7 +285,22 @@ static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 
 			k_mutex_lock(&ob_lock, K_FOREVER);
 			ob_inflight = false;
+			if (ret == MESHTASTIC_TX_DEFER) {
+				if (requeue_deferred_locked(&cur)) {
+					k_mutex_unlock(&ob_lock);
+					k_sem_give(&ob_avail);
+					meshtastic_radio_tx_defer_requeued();
+					/* Nobody is told: the frame is still pending. */
+					continue;
+				}
+				ret = -EBUSY;
+			}
 			k_mutex_unlock(&ob_lock);
+
+			if (ret == -EBUSY) {
+				meshtastic_sched_stat_drop(cur.tier);
+				meshtastic_radio_tx_dropped_busy();
+			}
 
 			if (cur.result != NULL) {
 				*cur.result = ret;
@@ -346,6 +416,7 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 	/* A deadline of 0 means "now"; bump a zero-valued uptime by 1 ms so the
 	 * sentinel keeps its meaning at the very start of boot. */
 	ob_items[idx].late = false;
+	ob_items[idx].defers = 0U;
 	ob_items[idx].gen = meshtastic_preset_generation();
 	if (delay_ms == 0U) {
 		ob_items[idx].send_after = 0U;

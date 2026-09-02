@@ -10,7 +10,6 @@
 
 #include <zephyr/drivers/lora.h>
 #include <zephyr/kernel.h>
-#include <zephyr/random/random.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
@@ -195,6 +194,14 @@ static void apply_modem_params(void)
 static K_THREAD_STACK_DEFINE(mt_stack, CONFIG_MESHTASTIC_THREAD_STACK_SIZE);
 static struct k_thread mt_thread;
 
+/* State behind meshtastic_radio_actively_receiving() (defined near the end of
+ * this file); here because the AGC reset, inside the SX126x block, counts into
+ * it. Guarded by mt_radio_sem, like every caller of that function. */
+static struct {
+	uint32_t start_ms; /* first sighting of the current detection; 0 = none */
+	struct meshtastic_radio_rx_activity_stats stats;
+} mt_rx_act;
+
 /*
  * Serialises radio state transitions.  Continuous async RX runs in the LoRa
  * driver; only TX and the surrounding stop/re-arm of async RX touch radio
@@ -249,16 +256,31 @@ static int mt_radio_arm_rx(void)
 	return ret;
 }
 
-static uint32_t mt_busy_backoff_ms(void)
+/* Transmit-defer accounting. Written by send_wire_now() under mt_radio_sem and
+ * by the outbound drain (one thread); read by the report. */
+static struct meshtastic_radio_tx_defer_stats mt_tx_defer;
+
+void meshtastic_radio_tx_defer_stats_get(struct meshtastic_radio_tx_defer_stats *out)
 {
-	uint32_t min_ms = CONFIG_MESHTASTIC_TX_BUSY_BACKOFF_MIN_MS;
-	uint32_t max_ms = CONFIG_MESHTASTIC_TX_BUSY_BACKOFF_MAX_MS;
+	*out = mt_tx_defer;
+}
 
-	if (max_ms <= min_ms) {
-		return min_ms;
-	}
+void meshtastic_radio_tx_defer_stats_reset(void)
+{
+	memset(&mt_tx_defer, 0, sizeof(mt_tx_defer));
+}
 
-	return min_ms + (sys_rand32_get() % (max_ms - min_ms + 1U));
+void meshtastic_radio_tx_defer_requeued(void)
+{
+	mt_tx_defer.requeued++;
+}
+
+void meshtastic_radio_tx_dropped_busy(void)
+{
+	mt_tx_defer.dropped++;
+	mt.status.tx_failures++;
+	LOG_WRN("TX dropped: channel never quiet across %u defers", CONFIG_MESHTASTIC_TX_DEFER_MAX);
+	meshtastic_emit_event(MESHTASTIC_EVENT_TX_FAILED, -EBUSY, NULL);
 }
 
 /*
@@ -381,15 +403,11 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 {
 	uint32_t settle;
 	int ret;
-	int retries;
-	int busy_retries = 0;
 
 #if defined(CONFIG_MESHTASTIC_SCANNER_RX_ONLY)
 	/* Dedicated scanner build: no transmit path at all. */
 	ARG_UNUSED(pkt);
 	ARG_UNUSED(pkt_len);
-	ARG_UNUSED(retries);
-	ARG_UNUSED(busy_retries);
 	return -EPERM;
 #else
 
@@ -497,6 +515,22 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 		k_sleep(K_MSEC(settle));
 	}
 
+	/* Parity: RadioLibInterface::canSendImmediately(). "We wait _if_ we are
+	 * partially though receiving a packet (rather than just merely waiting
+	 * for one). To do otherwise would be doubly bad because not only would
+	 * we drop the packet that was on the way in, we almost certainly
+	 * guarantee no one outside will like the packet we are sending."
+	 *
+	 * Asked BEFORE stopping RX, so a refusal costs the radio nothing: it is
+	 * still listening to the very packet that caused it. The frame goes back
+	 * to the outbound queue behind a fresh contention delay. */
+	if (meshtastic_radio_actively_receiving()) {
+		mt_tx_defer.busy_rx++;
+		(void)k_sem_give(&mt_radio_sem);
+		LOG_DBG("TX deferred: a packet is being received");
+		return MESHTASTIC_TX_DEFER;
+	}
+
 	/*
 	 * Continuous async RX must be stopped first: the SX126x driver
 	 * rejects lora_config()/lora_send() with -EBUSY while it is active.
@@ -528,17 +562,13 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	ret = lora_config(mt.lora_dev, &mt_lora_cfg);
 	mt_record_effective(true, ret);
 	if (ret == 0) {
-		retries = CONFIG_MESHTASTIC_TX_BUSY_RETRIES;
-		for (;;) {
-			ret = lora_send(mt.lora_dev, pkt, pkt_len);
-			if (ret != -EBUSY || retries == 0) {
-				break;
-			}
-
-			retries--;
-			busy_retries++;
-			k_sleep(K_MSEC(mt_busy_backoff_ms()));
-		}
+		/* One attempt. A busy CAD (-EBUSY) is not retried here: until
+		 * 2026-09-02 this looped up to six times at 8-40 ms with RX stopped
+		 * and then DROPPED the frame -- on a slow preset the retries fit
+		 * inside the very packet CAD had heard, so a busy channel meant a
+		 * lost frame and a deaf node for the duration. Now the frame is
+		 * deferred through the outbound queue (below) with RX re-armed. */
+		ret = lora_send(mt.lora_dev, pkt, pkt_len);
 	}
 
 	mt_lora_cfg.tx = false;
@@ -563,15 +593,19 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 
 	(void)k_sem_give(&mt_radio_sem);
 
-	if (busy_retries > 0) {
-		LOG_DBG("TX deferred by CAD busy channel (%d retries)", busy_retries);
+	if (ret == -EBUSY) {
+		/* CAD heard a packet. Parity: upstream goes back to receiving it
+		 * ("try receiving this packet, afterwards we'll be trying to transmit
+		 * again") and re-rolls a fresh contention delay, never dropping the
+		 * frame. RX was re-armed just above, so that packet is being received
+		 * right now; the outbound drain owns the re-roll. */
+		mt_tx_defer.cad_busy++;
+		LOG_DBG("TX deferred: channel busy at CAD");
+		return MESHTASTIC_TX_DEFER;
 	}
 #endif /* CONFIG_MESHTASTIC_SCANNER_RX_ONLY */
 
 	if (ret < 0) {
-		if (ret == -EBUSY) {
-			LOG_DBG("TX failed: channel busy after retries exhausted");
-		}
 		mt.status.tx_failures++;
 		meshtastic_emit_event(MESHTASTIC_EVENT_TX_FAILED, ret, NULL);
 	} else {
@@ -771,6 +805,38 @@ extern uint32_t sx126x_agc_reset_skipped_count_get(void);
 extern uint32_t sx126x_agc_patch_fail_count_get(void);
 extern void sx126x_cad_agc_stats_reset(void);
 
+/*
+ * The chip half of meshtastic_radio_actively_receiving(): carried patch 0013
+ * enables the preamble/header IRQ flags in the SX126x's IRQ mask (latched, not
+ * on DIO1) and exposes them here. Declared __weak for the same reason as the
+ * rx-boost readback below: against an unpatched Zephyr tree this must still
+ * link, and the honest answer from a chip we cannot ask is "not receiving"
+ * with -ENOTSUP -- never a confident guess. The report shows it as unknown.
+ */
+__weak int sx126x_rx_activity(const struct device *dev, bool *preamble, bool *header)
+{
+	ARG_UNUSED(dev);
+	*preamble = false;
+	*header = false;
+	return -ENOTSUP;
+}
+
+__weak int sx126x_rx_activity_clear(const struct device *dev)
+{
+	ARG_UNUSED(dev);
+	return -ENOTSUP;
+}
+
+static int mt_rx_activity_get(bool *preamble, bool *header)
+{
+	return sx126x_rx_activity(mt.lora_dev, preamble, header);
+}
+
+static int mt_rx_activity_clear(void)
+{
+	return sx126x_rx_activity_clear(mt.lora_dev);
+}
+
 uint32_t meshtastic_radio_cad_clear_count(void)
 {
 	return sx126x_cad_clear_count_get();
@@ -877,12 +943,22 @@ uint32_t meshtastic_radio_busy_timeout_streak(void)
 static void mt_agc_reset_work_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(mt_agc_reset_work, mt_agc_reset_work_fn);
 
+/* How long to stand back when the reset finds a packet arriving. Upstream
+ * simply skips and waits for its next 60 s tick (main.cpp stamps lastAgcReset
+ * before the call); a short retry is strictly better and costs nothing. */
+#define MT_AGC_RESET_DEFER_MS 1000U
+
 /*
  * Periodic AGC reset (parity: upstream's AGC_RESET_INTERVAL_MS, default 60s —
  * see sx126x_reset_agc() for why this exists at all). Mirrors the TX-prep
  * pattern exactly: take mt_radio_sem, stop continuous async RX before
  * touching the radio, do the operation, re-arm RX, release the semaphore —
  * so this can never race a send.
+ *
+ * And, as upstream's resetAGC() does ("Safety: don't reset mid-packet"), it
+ * asks first whether a frame is being demodulated: stopping RX under one
+ * loses it outright, and the loss looks like ordinary RF packet loss rather
+ * than a bug, which is what made it worth closing.
  */
 static void mt_agc_reset_work_fn(struct k_work *work)
 {
@@ -891,6 +967,13 @@ static void mt_agc_reset_work_fn(struct k_work *work)
 	ARG_UNUSED(work);
 
 	(void)k_sem_take(&mt_radio_sem, K_FOREVER);
+
+	if (meshtastic_radio_actively_receiving()) {
+		mt_rx_act.stats.agc_deferred++;
+		(void)k_sem_give(&mt_radio_sem);
+		(void)k_work_reschedule(&mt_agc_reset_work, K_MSEC(MT_AGC_RESET_DEFER_MS));
+		return;
+	}
 
 	(void)lora_recv_async(mt.lora_dev, NULL, NULL);
 	mt.radio_rx_armed = false;
@@ -964,6 +1047,157 @@ void sx126x_hal_busy_timeout_report(const struct device *dev, uint8_t opcode, ui
 }
 #endif /* CONFIG_PM */
 #endif /* CONFIG_LORA_SX126X */
+
+/*
+ * ---- Is a packet arriving? ------------------------------------------------
+ *
+ * Parity: RadioLibInterface::receiveDetected() (upstream Meshtastic). The chip
+ * tells us two facts -- "a preamble was detected", "a valid header followed"
+ * -- and both are latched flags, not live signals: a preamble that was really
+ * noise stays flagged until something clears it. Upstream separates the two
+ * with timing: a preamble with no header after twice the preamble time was not
+ * a packet; a header with no RX_DONE after the airtime of a maximum-length
+ * frame was not one either. Both timings come from the modem the radio is
+ * actually on, so this lives here rather than in the driver.
+ *
+ * One deliberate divergence: when a detection is judged false, the flag is
+ * CLEARED. Upstream leaves it latched and re-times it from scratch on the
+ * next call, so its answer oscillates true/false on a stale flag until the
+ * next real packet or TX restarts RX. Retiring the flag makes the answer
+ * monotonic and honest.
+ */
+#if !defined(CONFIG_LORA_SX126X)
+#if defined(CONFIG_LORA_SIM)
+#include <meshtastic/lora_sim.h>
+
+static int mt_rx_activity_get(bool *preamble, bool *header)
+{
+	return lora_sim_rx_activity(mt.lora_dev, preamble, header);
+}
+
+static int mt_rx_activity_clear(void)
+{
+	return lora_sim_rx_activity_clear(mt.lora_dev);
+}
+#else
+static int mt_rx_activity_get(bool *preamble, bool *header)
+{
+	*preamble = false;
+	*header = false;
+	return -ENOTSUP;
+}
+
+static int mt_rx_activity_clear(void)
+{
+	return -ENOTSUP;
+}
+#endif
+#endif /* !CONFIG_LORA_SX126X */
+
+/* Upstream's defaults for the same two numbers before applyModemConfig() has
+ * run (RadioInterface.h: preambleTimeMsec = 165, the LongFast figure). Only
+ * reachable if the modem is not configured, where being conservative -- trust
+ * a flag for longer -- is the right failure mode. */
+#define MT_RX_ACT_FALLBACK_PREAMBLE_MS 165U
+#define MT_RX_ACT_FALLBACK_MAX_PACKET_MS 3000U
+
+/* preambleTimeMsec = preambleLength * 2^sf / bw_kHz (RadioInterface.cpp:1396). */
+static uint32_t mt_rx_act_preamble_ms(void)
+{
+	uint32_t bw_hz = mt.modem.bandwidth_hz;
+	uint64_t ms;
+
+	if (bw_hz == 0U) {
+		return MT_RX_ACT_FALLBACK_PREAMBLE_MS;
+	}
+	ms = ((uint64_t)mt_lora_cfg.preamble_len * (1000ULL << mt_lora_cfg.datarate) + bw_hz - 1U) /
+	     bw_hz;
+	return (ms == 0U) ? 1U : (uint32_t)ms;
+}
+
+/* getPacketTime(max payload + header): the driver's own airtime model, on
+ * whatever it is currently configured for -- which is what is on the chip. */
+static uint32_t mt_rx_act_max_packet_ms(void)
+{
+	uint32_t ms = 0U;
+
+	if (mt.lora_dev != NULL && device_is_ready(mt.lora_dev)) {
+		ms = lora_airtime(mt.lora_dev, MESHTASTIC_PKT_MAX);
+	}
+	return (ms == 0U) ? MT_RX_ACT_FALLBACK_MAX_PACKET_MS : ms;
+}
+
+bool meshtastic_radio_actively_receiving(void)
+{
+	bool preamble = false;
+	bool header = false;
+	uint32_t now;
+	uint32_t elapsed;
+
+	if (!mt.radio_rx_armed) {
+		/* Nothing can be arriving on a radio that is not listening, and a
+		 * detection from before RX stopped is over by definition. */
+		mt_rx_act.start_ms = 0U;
+		return false;
+	}
+
+	if (mt_rx_activity_get(&preamble, &header) != 0) {
+		return false;
+	}
+
+	if (!preamble && !header) {
+		mt_rx_act.start_ms = 0U;
+		return false;
+	}
+
+	now = k_uptime_get_32();
+	if (mt_rx_act.start_ms == 0U) {
+		/* First sighting. The timer starts now, not at the (unknown) moment
+		 * the chip set the flag -- conservative in the right direction. */
+		mt_rx_act.start_ms = (now == 0U) ? 1U : now;
+		mt_rx_act.stats.busy_rx++;
+		return true;
+	}
+
+	elapsed = now - mt_rx_act.start_ms;
+	if (!header) {
+		if (elapsed > 2U * mt_rx_act_preamble_ms()) {
+			/* The HEADER_VALID flag should be set by now if it was really a
+			 * packet, so ignore the PREAMBLE_DETECTED flag (and retire it). */
+			mt_rx_act.stats.false_preamble++;
+			(void)mt_rx_activity_clear();
+			mt_rx_act.start_ms = 0U;
+			return false;
+		}
+	} else if (elapsed > mt_rx_act_max_packet_ms()) {
+		/* We should have gotten an RX_DONE by now if it was really a packet,
+		 * so ignore the HEADER_VALID flag (and retire it). */
+		mt_rx_act.stats.false_header++;
+		(void)mt_rx_activity_clear();
+		mt_rx_act.start_ms = 0U;
+		return false;
+	}
+
+	mt_rx_act.stats.busy_rx++;
+	return true;
+}
+
+void meshtastic_radio_rx_activity_stats_get(struct meshtastic_radio_rx_activity_stats *out)
+{
+	*out = mt_rx_act.stats;
+	out->preamble_ms = mt_rx_act_preamble_ms();
+	out->max_packet_ms = mt_rx_act_max_packet_ms();
+}
+
+void meshtastic_radio_rx_activity_stats_reset(void)
+{
+	memset(&mt_rx_act.stats, 0, sizeof(mt_rx_act.stats));
+}
+
+int meshtastic_radio_rx_activity_now(bool *preamble, bool *header)
+{
+	return mt_rx_activity_get(preamble, header);
+}
 
 int meshtastic_radio_init(void)
 {

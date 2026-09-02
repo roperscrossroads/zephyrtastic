@@ -5430,3 +5430,254 @@ ZTEST(mesh_sim, test_fleet_view_cleared_with_the_document)
 		      "a cleared document must not leave agreements about it on record");
 	zassert_false(meshtastic_cluster_fleet_converged(&f), "and must not read as converged");
 }
+
+/* --- is a packet arriving? -------------------------------------------------
+ *
+ * meshtastic_radio_actively_receiving() is upstream's receiveDetected(): the
+ * chip's latched preamble/header flags, judged against the modem's preamble
+ * time and maximum packet time. The sim driver models the flags; these tests
+ * pin the two timing rules and the two ways a detection legitimately ends.
+ */
+
+static uint32_t activity_preamble_ms(void)
+{
+	struct meshtastic_radio_rx_activity_stats st;
+
+	meshtastic_radio_rx_activity_stats_get(&st);
+	zassert_true(st.preamble_ms > 0U, "preamble window must be derived, not zero");
+	zassert_true(st.max_packet_ms > st.preamble_ms,
+		     "a full packet must outlast its own preamble (%u vs %u)", st.max_packet_ms,
+		     st.preamble_ms);
+	return st.preamble_ms;
+}
+
+ZTEST(mesh_sim, test_rx_activity_a_preamble_with_no_header_is_retired_after_two_preamble_times)
+{
+	struct meshtastic_radio_rx_activity_stats before, after;
+	uint32_t preamble_ms = activity_preamble_ms();
+	bool p, h;
+
+	wait_rx_armed();
+	meshtastic_radio_rx_activity_stats_get(&before);
+
+	lora_sim_set_rx_activity(lora_dev, true, false);
+	zassert_true(meshtastic_radio_actively_receiving(),
+		     "a fresh preamble detection is a packet until proven otherwise");
+	k_msleep(preamble_ms); /* within 2x: still believed */
+	zassert_true(meshtastic_radio_actively_receiving(), "one preamble time in, still a packet");
+
+	k_msleep(preamble_ms + 2U); /* past 2x with no header: it was noise */
+	zassert_false(meshtastic_radio_actively_receiving(),
+		      "a preamble that never became a header is not a packet");
+
+	meshtastic_radio_rx_activity_stats_get(&after);
+	zassert_equal(after.false_preamble, before.false_preamble + 1U,
+		      "the false-preamble rule must be the one that fired");
+	zassert_equal(after.false_header, before.false_header, "not the false-header rule");
+
+	/* Deliberate divergence from upstream: the stale flag is CLEARED, so the
+	 * answer stays false instead of oscillating on the next call. */
+	zassert_ok(lora_sim_rx_activity(lora_dev, &p, &h));
+	zassert_false(p, "the stale preamble flag must have been retired on the chip");
+	zassert_false(meshtastic_radio_actively_receiving(), "and the answer must stay false");
+}
+
+ZTEST(mesh_sim, test_rx_activity_a_header_with_no_packet_is_retired_after_max_packet_time)
+{
+	struct meshtastic_radio_rx_activity_stats before, after;
+	uint32_t preamble_ms = activity_preamble_ms();
+	bool p, h;
+
+	wait_rx_armed();
+	meshtastic_radio_rx_activity_stats_get(&before);
+
+	lora_sim_set_rx_activity(lora_dev, true, true);
+	zassert_true(meshtastic_radio_actively_receiving(), "a valid header is a packet");
+
+	/* Well past the preamble rule's window: a header keeps it alive. */
+	k_msleep(3U * preamble_ms);
+	zassert_true(meshtastic_radio_actively_receiving(),
+		     "the preamble rule must not fire once a header is valid");
+
+	k_msleep(before.max_packet_ms + 2U);
+	zassert_false(meshtastic_radio_actively_receiving(),
+		      "a header that never became RX_DONE is not a packet");
+
+	meshtastic_radio_rx_activity_stats_get(&after);
+	zassert_equal(after.false_header, before.false_header + 1U,
+		      "the false-header rule must be the one that fired");
+	zassert_equal(after.false_preamble, before.false_preamble, "not the preamble rule");
+	zassert_ok(lora_sim_rx_activity(lora_dev, &p, &h));
+	zassert_false(h, "the stale header flag must have been retired on the chip");
+}
+
+ZTEST(mesh_sim, test_rx_activity_ends_when_the_packet_completes)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	const char *msg = "done";
+
+	wait_rx_armed();
+	lora_sim_set_rx_activity(lora_dev, true, true);
+	zassert_true(meshtastic_radio_actively_receiving(), "header valid: a packet is arriving");
+
+	/* RX_DONE: the frame the flags were about lands. On hardware the IRQ
+	 * handler clears every flag it read; the sim models the same. */
+	build_peer_text(0xD00D0001U, msg, wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -60, 8), "inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(500)), "the frame must have been delivered");
+
+	zassert_false(meshtastic_radio_actively_receiving(),
+		      "a completed reception is no longer 'arriving'");
+}
+
+ZTEST(mesh_sim, test_rx_activity_is_nothing_while_not_listening)
+{
+	struct lora_sim_frame f;
+	bool p, h;
+
+	wait_rx_armed();
+	lora_sim_set_rx_activity(lora_dev, true, true);
+	zassert_true(meshtastic_radio_actively_receiving(), "armed and flagged: arriving");
+
+	/* Stop RX (as a transmit does). Nothing can be arriving on a radio that is
+	 * not listening, and the flags from before are over by definition. */
+	zassert_ok(lora_recv_async(lora_dev, NULL, NULL));
+	mt.radio_rx_armed = false;
+	zassert_false(meshtastic_radio_actively_receiving(), "not listening: nothing arriving");
+	zassert_ok(lora_sim_rx_activity(lora_dev, &p, &h));
+	zassert_false(p || h, "the sim reports nothing while not listening, as the chip would");
+
+	/* Re-arm through the stack's own path -- a transmit ends by re-arming RX
+	 * -- and a fresh receive must start clean. */
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "rearm"), "send failed");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "no TX captured");
+	wait_rx_armed();
+	zassert_false(meshtastic_radio_actively_receiving(),
+		      "a re-armed receive must not inherit the old flags");
+}
+
+/* --- the transmit defer path -------------------------------------------------
+ *
+ * When the radio cannot key up -- a packet is arriving, or CAD hears one --
+ * the frame is re-queued behind a fresh contention delay with the radio left
+ * listening (reference: RadioLibInterface re-rolls setTransmitDelay and never
+ * drops for a busy channel). Until 2026-09-02 this path looped six times at
+ * 8-40 ms with RX stopped and then dropped the frame.
+ */
+
+/* A frame of our own, fire-and-forget through the outbound queue, so the test
+ * can watch the queue's behaviour instead of blocking inside a send. */
+static void enqueue_own_text(uint32_t id, const char *text)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_packet packet = {
+		.from          = TEST_NODE_ID,
+		.to            = MESHTASTIC_NODE_BROADCAST,
+		.id            = id,
+		.portnum       = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload       = (const uint8_t *)text,
+		.payload_len   = strlen(text),
+		.hop_limit     = 3U,
+		.hop_start     = 3U,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	zassert_ok(meshtastic_build_wire_packet(&packet, wire, &wire_len), "build failed");
+	zassert_ok(meshtastic_radio_send_wire_prio(wire, wire_len, MT_SCHED_TIER_NORMAL),
+		   "enqueue failed");
+}
+
+ZTEST(mesh_sim, test_a_busy_channel_defers_the_transmit_and_keeps_listening)
+{
+	struct meshtastic_radio_tx_defer_stats before, after;
+	struct meshtastic_status st_before, st_after;
+	struct lora_sim_frame f;
+
+	wait_rx_armed();
+	meshtastic_radio_tx_defer_stats_get(&before);
+	zassert_ok(meshtastic_get_status(&st_before));
+
+	/* CAD will hear this for 200 ms of sim time. */
+	lora_sim_set_busy(lora_dev, 200U);
+	enqueue_own_text(0xDEF00001U, "defer me");
+
+	/* Inside the busy window: not sent, not dropped, and -- the point -- the
+	 * radio is LISTENING to the packet that made CAD say busy. */
+	k_msleep(60);
+	zassert_equal(lora_sim_tx_pending(lora_dev), 0, "must not transmit on a busy channel");
+	zassert_true(lora_sim_rx_armed(lora_dev), "RX must stay armed while deferred");
+	meshtastic_radio_tx_defer_stats_get(&after);
+	zassert_true(after.cad_busy > before.cad_busy, "the CAD-busy defer must be counted");
+	zassert_true(after.requeued > before.requeued, "and the frame re-queued");
+
+	/* After it clears: transmitted, never counted as a failure. */
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(2000)), "the frame must go out later");
+	zassert_ok(meshtastic_get_status(&st_after));
+	zassert_equal(st_after.tx_failures, st_before.tx_failures,
+		      "a deferred frame is not a failed one");
+	meshtastic_radio_tx_defer_stats_get(&after);
+	zassert_equal(after.dropped, before.dropped, "nothing dropped");
+}
+
+ZTEST(mesh_sim, test_a_packet_arriving_defers_the_transmit_until_it_completes)
+{
+	struct meshtastic_radio_tx_defer_stats before, after;
+	struct lora_sim_frame f;
+
+	wait_rx_armed();
+	meshtastic_radio_tx_defer_stats_get(&before);
+
+	/* A header is valid: the chip is mid-packet. */
+	lora_sim_set_rx_activity(lora_dev, true, true);
+	enqueue_own_text(0xDEF00002U, "wait for it");
+
+	k_msleep(60);
+	zassert_equal(lora_sim_tx_pending(lora_dev), 0,
+		      "must not key up over a packet being demodulated");
+	zassert_true(lora_sim_rx_armed(lora_dev), "RX must stay armed while deferred");
+	meshtastic_radio_tx_defer_stats_get(&after);
+	zassert_true(after.busy_rx > before.busy_rx, "the busy-rx defer must be counted");
+
+	/* The packet completes (RX_DONE clears the flags): ours goes out next. */
+	zassert_ok(lora_sim_rx_activity_clear(lora_dev));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(2000)), "the frame must go out after");
+}
+
+ZTEST(mesh_sim, test_a_channel_that_never_clears_drops_the_frame_at_the_defer_cap)
+{
+	struct meshtastic_radio_tx_defer_stats before, after;
+	struct meshtastic_status st_before, st_after;
+	int i;
+
+	wait_rx_armed();
+	meshtastic_radio_tx_defer_stats_get(&before);
+	zassert_ok(meshtastic_get_status(&st_before));
+
+	lora_sim_set_busy(lora_dev, 600000U); /* never quiet, as far as this test runs */
+	enqueue_own_text(0xDEF00003U, "doomed");
+
+	/* Each defer waits at least one CSMA slot, so the cap takes a bounded,
+	 * predictable amount of sim time; poll rather than compute it. */
+	for (i = 0; i < 400; i++) {
+		meshtastic_radio_tx_defer_stats_get(&after);
+		if (after.dropped > before.dropped) {
+			break;
+		}
+		k_msleep(10);
+	}
+	zassert_true(after.dropped == before.dropped + 1U, "the frame must be dropped, once");
+	zassert_equal(after.requeued - before.requeued, CONFIG_MESHTASTIC_TX_DEFER_MAX,
+		      "exactly the cap's worth of defers must have been spent (%u)",
+		      after.requeued - before.requeued);
+	zassert_equal(lora_sim_tx_pending(lora_dev), 0, "nothing may have gone out");
+	zassert_equal(meshtastic_outbound_pending(), 0U, "and the queue must be empty");
+
+	/* Accounted exactly as a failed transmit. */
+	zassert_ok(meshtastic_get_status(&st_after));
+	zassert_equal(st_after.tx_failures, st_before.tx_failures + 1U,
+		      "a frame dropped at the cap is a failed transmit");
+
+	lora_sim_set_busy(lora_dev, 0U);
+}

@@ -215,5 +215,23 @@ int meshtastic_rf_path_get(struct meshtastic_rf_path *out)
 	out->agc_patch_fail = meshtastic_radio_agc_patch_fail_count();
 	out->busy_streak = meshtastic_radio_busy_timeout_streak();
 
+	/* --- receive activity ------------------------------------------ */
+	{
+		bool preamble = false;
+		bool header = false;
+
+		if (meshtastic_radio_rx_activity_now(&preamble, &header) == 0) {
+			out->rx_act_preamble = preamble ? MESHTASTIC_RADIO_TRI_ON
+							: MESHTASTIC_RADIO_TRI_OFF;
+			out->rx_act_header = header ? MESHTASTIC_RADIO_TRI_ON
+						    : MESHTASTIC_RADIO_TRI_OFF;
+		} else {
+			out->rx_act_preamble = MESHTASTIC_RADIO_TRI_UNKNOWN;
+			out->rx_act_header = MESHTASTIC_RADIO_TRI_UNKNOWN;
+		}
+	}
+	meshtastic_radio_rx_activity_stats_get(&out->rx_act);
+	meshtastic_radio_tx_defer_stats_get(&out->tx_defer);
+
 	return 0;
 }

@@ -2022,9 +2022,27 @@ static int cmd_rf_path(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "  [%s] CAD              clear %u  busy %u  timeout %u  error %u",
 		    (p.cad_timeout == 0U && p.cad_error == 0U) ? "ok" : "!!", p.cad_clear,
 		    p.cad_busy, p.cad_timeout, p.cad_error);
-	shell_print(sh, "  [%s] AGC reset        ok %u  fail %u  skipped %u  patch-fail %u",
+	shell_print(sh, "  [%s] AGC reset        ok %u  fail %u  skipped %u  deferred %u  "
+			"patch-fail %u",
 		    (p.agc_fail == 0U && p.agc_patch_fail == 0U) ? "ok" : "!!", p.agc_ok,
-		    p.agc_fail, p.agc_skipped, p.agc_patch_fail);
+		    p.agc_fail, p.agc_skipped, p.rx_act.agc_deferred, p.agc_patch_fail);
+	/* "skipped" is a TX in flight; "deferred" is a packet arriving. The
+	 * activity row is the mechanism: the chip's latched flags this instant
+	 * (unknown on a driver that cannot report them), the two timing rules'
+	 * verdicts, and the windows they judge against on the current modem. */
+	shell_print(sh, "  [%s] RX activity      now: preamble %s  header %s   busy-rx %u  "
+			"false-preamble %u  false-header %u",
+		    (p.rx_act_preamble == MESHTASTIC_RADIO_TRI_UNKNOWN) ? "??" : "--",
+		    tri_str(p.rx_act_preamble), tri_str(p.rx_act_header), p.rx_act.busy_rx,
+		    p.rx_act.false_preamble, p.rx_act.false_header);
+	shell_print(sh, "       windows: preamble %u ms, max packet %u ms", p.rx_act.preamble_ms,
+		    p.rx_act.max_packet_ms);
+	/* A defer is a transmit the radio refused for now (a packet arriving, or
+	 * CAD hearing one) and the queue re-rolled; a drop used up every defer on
+	 * a channel that never went quiet. Drops are the only bad number here. */
+	shell_print(sh, "  [%s] TX defer         busy-rx %u  cad-busy %u  requeued %u  dropped %u",
+		    (p.tx_defer.dropped == 0U) ? "ok" : "!!", p.tx_defer.busy_rx,
+		    p.tx_defer.cad_busy, p.tx_defer.requeued, p.tx_defer.dropped);
 	shell_print(sh, "  [%s] SPI BUSY streak  %u", (p.busy_streak == 0U) ? "ok" : "!!",
 		    p.busy_streak);
 
@@ -2899,6 +2917,8 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 	if (argc >= 2U && strcmp(argv[1], "reset") == 0) {
 		meshtastic_sched_stats_reset();
 		meshtastic_radio_cad_agc_stats_reset();
+		meshtastic_radio_rx_activity_stats_reset();
+		meshtastic_radio_tx_defer_stats_reset();
 		shell_print(sh, "sched stats reset");
 		return 0;
 	}

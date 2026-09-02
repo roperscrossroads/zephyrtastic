@@ -182,32 +182,27 @@ rsource "Kconfig.logring"
 rsource "Kconfig.phonelog"
 rsource "Kconfig.power"
 
-menu "LoRa transmit retry"
+menu "LoRa transmit defer"
 
-config MESHTASTIC_TX_BUSY_RETRIES
-	int "Retries when CAD reports busy channel"
-	range 0 32
-	default 6
+config MESHTASTIC_TX_DEFER_MAX
+	int "Defers a frame may take before it is dropped"
+	range 1 255
+	default 32
 	help
-	  Number of retransmission attempts when lora_send() returns -EBUSY
-	  because CAD/LBT detected channel activity.
+	  A transmit is DEFERRED -- put back in the outbound queue behind a fresh
+	  contention delay, with the radio left listening -- when a packet is being
+	  demodulated at the moment it would key up, or when CAD hears activity on
+	  the channel. This is the reference firmware's behaviour
+	  (RadioLibInterface::canSendImmediately / isChannelActive both re-roll
+	  the transmit delay); the reference never gives up. This bound is the one
+	  divergence: a channel that is never quiet cannot pin a frame in the queue
+	  forever. Each defer waits at least one CSMA slot, so at the default the
+	  frame survives seconds of continuous activity before it is dropped, and
+	  the drop is counted (`meshtastic rf`, TX defer row).
 
-config MESHTASTIC_TX_BUSY_BACKOFF_MIN_MS
-	int "Minimum backoff on busy channel (ms)"
-	range 0 60000
-	default 8
-	help
-	  Minimum randomized wait in milliseconds between retry attempts when
-	  the channel is busy.
-
-config MESHTASTIC_TX_BUSY_BACKOFF_MAX_MS
-	int "Maximum backoff on busy channel (ms)"
-	range 0 60000
-	default 40
-	help
-	  Maximum randomized wait in milliseconds between retry attempts when
-	  the channel is busy.
-	  If this is less than the minimum, the minimum value is used.
+	  Replaces the pre-2026-09-02 MESHTASTIC_TX_BUSY_RETRIES/BACKOFF_* loop,
+	  which retried six times at 8-40 ms with RX stopped and then dropped the
+	  frame -- inside the airtime of the very packet CAD had heard.
 
 endmenu
 

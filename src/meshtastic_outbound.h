@@ -44,6 +44,19 @@ int meshtastic_radio_send_wire_wait_prio(const uint8_t *pkt, uint32_t pkt_len, u
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len);
 
 /**
+ * @brief "Not now" — meshtastic_radio_send_wire_now()'s answer when the air is in use.
+ *
+ * Returned when a packet is being demodulated (transmitting would destroy it,
+ * and nobody would decode ours either) or when CAD heard one on the channel.
+ * In both cases the radio has been left LISTENING, so the packet in question is
+ * being received, not lost. The outbound drain re-queues the frame behind a
+ * fresh contention delay (parity: RadioLibInterface re-rolls its transmit
+ * delay and keeps the packet at the head of its queue). Private to the drain
+ * and the radio layer; never surfaces to a caller.
+ */
+#define MESHTASTIC_TX_DEFER (-EINPROGRESS)
+
+/**
  * @brief Push mt.frequency + mt.modem to the radio and re-arm RX.
  *
  * The live-reconfigure step of a preset switch (meshtastic_preset.c). Tears down
