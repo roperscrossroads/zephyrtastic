@@ -109,6 +109,37 @@ ZTEST(txpower, test_gain_convert_without_table_is_identity)
 }
 
 /*
+ * The identity above is right for BOTH "no front-end" and "detection failed",
+ * which is exactly why those two must stay tellable apart somewhere else: the
+ * power conversion cannot distinguish them and neither could the diagnostic,
+ * which printed "none fitted, or detection did not complete" and left the
+ * reader to guess. On a Heltec V4 the second case is silently 11-13 dB of lost
+ * transmit power; on a XIAO the first case is simply correct.
+ *
+ * native_sim compiles no board file, so the weak default is what is under test
+ * here -- and NONE is the right weak answer, because a board that detects at
+ * runtime is obliged to override it (the V4 file does, and starts at FAILED so
+ * an early return cannot masquerade as a bare transceiver).
+ */
+ZTEST(txpower, test_fem_state_weak_default_is_none_not_failed)
+{
+	zassert_equal(MESHTASTIC_FEM_STATE_NONE, meshtastic_radio_fem_state(),
+		      "a board with no FEM hook must report NONE -- reporting FAILED would "
+		      "make every bare-transceiver board look broken");
+}
+
+/* NONE must be the zero value: a memset-cleared report struct has to mean "no
+ * front-end", not "detection failed", or a field nobody populated would raise
+ * a fault that does not exist. */
+ZTEST(txpower, test_fem_state_none_is_the_zero_value)
+{
+	zassert_equal(0, (int)MESHTASTIC_FEM_STATE_NONE);
+	zassert_not_equal(0, (int)MESHTASTIC_FEM_STATE_FAILED);
+	zassert_not_equal(0, (int)MESHTASTIC_FEM_STATE_MISMATCH);
+	zassert_not_equal(0, (int)MESHTASTIC_FEM_STATE_DETECTED);
+}
+
+/*
  * Strong override of the weak board hook. native_sim compiles no board file, so
  * without this every conversion is the identity and the licence gate below
  * cannot be observed at all. Uses the real KCT8103L table so the numbers are the

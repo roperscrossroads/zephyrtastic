@@ -12,6 +12,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <zephyr/meshtastic/fem.h>
+
 #include "meshtastic/config.pb.h"
 #include "meshtastic_core.h"
 
@@ -33,7 +35,9 @@ enum meshtastic_rf_row {
 /** @brief One snapshot of the whole chain, antenna to bits. */
 struct meshtastic_rf_path {
 	/* --- front end ------------------------------------------------ */
-	const char *fem_name;  /**< NULL when none is fitted or detection failed */
+	const char *fem_name;  /**< NULL when none is fitted or detection failed —
+				*   `fem_state` is what tells those two apart */
+	enum meshtastic_fem_state fem_state;
 	bool dio2_rf_switch;   /**< the transceiver drives the T/R switch itself */
 
 	/* --- receive -------------------------------------------------- */

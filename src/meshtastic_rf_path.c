@@ -132,6 +132,7 @@ int meshtastic_rf_path_get(struct meshtastic_rf_path *out)
 
 	/* --- front end ------------------------------------------------ */
 	out->fem_name = meshtastic_radio_fem_name();
+	out->fem_state = meshtastic_radio_fem_state();
 	out->dio2_rf_switch = (MT_RF_DIO2_RF_SWITCH != 0);
 
 	/* --- receive -------------------------------------------------- */

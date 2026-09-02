@@ -94,6 +94,41 @@ static size_t fem_gain_len;
 static bool fem_lna_controllable;
 static bool fem_lna_enabled = true;
 
+/* How the front-end above came to be selected — reported by
+ * meshtastic_radio_fem_state() and rendered by `meshtastic rf`. Starts as a
+ * FAILED detection rather than NONE, because on THIS board "no front-end" is
+ * not a possible truth: every V4 and R8 has one. If init returns early we want
+ * the report to say so, not to claim a bare transceiver.
+ */
+static enum meshtastic_fem_state fem_state = MESHTASTIC_FEM_STATE_FAILED;
+
+/*
+ * Which part this board is KNOWN to carry, where the build knows statically.
+ *
+ * The plain V4 genuinely needs the runtime detect: revisions 4.2 and 4.3 ship
+ * different front-ends and one image serves both, which is the whole reason
+ * heltec_v4_fem_init() reads the CSD bias line at all.
+ *
+ * The R8 is different. It is only ever fitted with the KCT8103L — the board
+ * .dts says so in as many words ("Detection will report KCT8103L"), and the
+ * hardware doc's variant table lists no other option. On that board the detect
+ * is therefore a CHECK, not a selector: the static fact is stronger evidence
+ * than a bias line that has just demonstrated it can be misread, so a
+ * disagreement keeps the known-correct part and reports MISMATCH.
+ *
+ * This matters beyond 2 dB of transmit power. Selecting GC1109 on an R8 would
+ * also take GPIO46 as the PA-mode pin and drive it on every transmit — and on
+ * the R8, GPIO46 is the LED (see heltec-v4-hardware.md's variant table), not a
+ * FEM control at all. The KCT8103L's CTX on GPIO5 would meanwhile go undriven,
+ * losing the LNA. A silent mis-detect there is a genuinely wrong machine, so it
+ * gets asserted rather than trusted.
+ */
+#if defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V4_R8_ESP32S3_PROCPU)
+#define FEM_EXPECTED_KCT8103L 1
+#else
+#define FEM_EXPECTED_KCT8103L 0
+#endif
+
 static int heltec_v4_fem_init(void)
 {
 	const struct device *const gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
@@ -123,6 +158,28 @@ static int heltec_v4_fem_init(void)
 	 *    the radio hook raises it only during TX.
 	 */
 	gpio_pin_configure(gpio0, FEM_CSD_PIN, GPIO_OUTPUT_HIGH);
+
+	/* On a board that can only carry the KCT8103L, the detect is a check. A
+	 * disagreement does NOT get to pick the part — it gets reported while the
+	 * statically-known part is used, because selecting GC1109 here would drive
+	 * the R8's LED pin as a PA-mode line and leave the real LNA control idle.
+	 */
+#if FEM_EXPECTED_KCT8103L
+	/* #if, not if(): on the plain V4 both parts are legitimate, so this check
+	 * is not merely false there — it is meaningless, and neither its branch nor
+	 * its message should exist in that image. */
+	if (csd != 1) {
+		LOG_ERR("FEM detect read LOW (GC1109) on a board that is only ever fitted "
+			"with a KCT8103L — using KCT8103L anyway; suspect the FEM rail or "
+			"the CSD line. `meshtastic rf` reports this as a mismatch.");
+		fem_state = MESHTASTIC_FEM_STATE_MISMATCH;
+		csd = 1;
+	} else {
+		fem_state = MESHTASTIC_FEM_STATE_DETECTED;
+	}
+#else
+	fem_state = MESHTASTIC_FEM_STATE_DETECTED;
+#endif
 
 	if (csd == 1) {
 		LOG_INF("Detected KCT8103L LoRa FEM (V4 rev 4.3 / R8)");
@@ -196,6 +253,11 @@ const char *meshtastic_radio_fem_name(void)
 		return "GC1109";
 	}
 	return NULL;
+}
+
+enum meshtastic_fem_state meshtastic_radio_fem_state(void)
+{
+	return fem_state;
 }
 
 void meshtastic_radio_fem_lna_set(bool enable)

@@ -117,13 +117,55 @@ bool meshtastic_radio_fem_lna_get(void);
  *
  * For diagnostics only. A board that detects its front-end at runtime (the V4
  * reads a bias line to tell a KCT8103L from a GC1109) returns what it actually
- * found, so a report can distinguish "no front-end on this hardware" from
- * "detection failed" — which otherwise look identical from the outside and have
- * very different consequences for transmit power.
+ * found.
+ *
+ * @note A NULL here does NOT distinguish "no front-end on this hardware" from
+ * "detection failed" — they have very different consequences for transmit power
+ * but the same spelling in a pointer. This doc comment used to claim a report
+ * could tell them apart, which was never true of a `const char *` alone; use
+ * @ref meshtastic_radio_fem_state for that.
  *
  * Weak default: NULL.
  */
 const char *meshtastic_radio_fem_name(void);
+
+/**
+ * @brief How the front-end came to be what it is.
+ *
+ * Exists because @ref meshtastic_radio_fem_name cannot express it. A board with
+ * no front-end at all and a board whose detection failed both return NULL from
+ * that call, and the two are not remotely the same thing: the first is correct
+ * and the weak identity power conversion is right for it, while the second
+ * silently under-drives transmit for the whole run. `meshtastic rf` had to
+ * print "none fitted, or detection did not complete" and let the reader guess.
+ *
+ * The same reasoning as @ref meshtastic_rf_row's ABSENT-vs-UNKNOWN split: a
+ * missing readback must never be able to masquerade as a settled answer.
+ */
+enum meshtastic_fem_state {
+	/** No front-end on this hardware. Correct, expected, nothing to report. */
+	MESHTASTIC_FEM_STATE_NONE = 0,
+	/** Detected and configured; @ref meshtastic_radio_fem_name says which. */
+	MESHTASTIC_FEM_STATE_DETECTED,
+	/** Detection could not be carried out. The board HAS a front-end and we
+	 *  do not know which — so no gain table is in use and transmit is being
+	 *  under-driven by that front-end's gain. A fault, not a configuration. */
+	MESHTASTIC_FEM_STATE_FAILED,
+	/** Detection ran and disagreed with what this board is known to carry.
+	 *  Only possible where the build knows statically (the V4-R8 is only ever
+	 *  fitted with a KCT8103L). The static fact wins — see that board's
+	 *  init — but something is wrong with the hardware or the detect line and
+	 *  the report must say so rather than look healthy. */
+	MESHTASTIC_FEM_STATE_MISMATCH,
+};
+
+/**
+ * @brief Report how the front-end was established.
+ *
+ * Weak default: @ref MESHTASTIC_FEM_STATE_NONE — correct for a board with no
+ * front-end, which is the majority and the case the weak hooks exist for.
+ */
+enum meshtastic_fem_state meshtastic_radio_fem_state(void);
 
 #ifdef __cplusplus
 }

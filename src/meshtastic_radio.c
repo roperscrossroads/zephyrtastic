@@ -307,10 +307,19 @@ __weak bool meshtastic_radio_fem_lna_get(void)
 }
 
 /* Default: no front-end fitted. A board that detects one at runtime returns what
- * it actually found, so "absent" and "detection failed" stay distinguishable. */
+ * it actually found. */
 __weak const char *meshtastic_radio_fem_name(void)
 {
 	return NULL;
+}
+
+/* Default: no front-end, which is a settled answer rather than a missing one —
+ * the weak identity power conversion above is exactly right for such a board.
+ * A board that detects at runtime overrides this so a FAILED detection cannot
+ * hide behind the same NULL name as legitimately absent hardware. */
+__weak enum meshtastic_fem_state meshtastic_radio_fem_state(void)
+{
+	return MESHTASTIC_FEM_STATE_NONE;
 }
 
 int meshtastic_radio_tune_explicit(uint32_t frequency_hz, uint8_t spread_factor,

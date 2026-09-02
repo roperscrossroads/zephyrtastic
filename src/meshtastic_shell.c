@@ -1875,15 +1875,41 @@ static int cmd_rf_path(const struct shell *sh, size_t argc, char **argv)
 
 	shell_print(sh, "");
 	shell_print(sh, "FRONT END");
-	if (p.fem_name != NULL) {
-		shell_print(sh, "  [ok] front-end       %s", p.fem_name);
-	} else {
-		/* Two very different situations share this line on a board that
-		 * detects at runtime, so say both: with no FEM the weak identity
-		 * conversion is correct, but a FAILED detection also lands here and
-		 * silently under-drives transmit power. */
-		shell_print(sh, "  [--] front-end       none fitted, or detection did not "
-				"complete");
+	/* These four states used to share two lines, and the NULL-name line had to
+	 * say "none fitted, or detection did not complete" because the board hook
+	 * could not tell the reader which. They are now distinct, because a healthy
+	 * board with no front-end and a board that is silently under-driving
+	 * transmit by 11-13 dB must not print the same thing. */
+	switch (p.fem_state) {
+	case MESHTASTIC_FEM_STATE_DETECTED:
+		shell_print(sh, "  [ok] front-end       %s  (detected at boot)",
+			    (p.fem_name != NULL) ? p.fem_name : "(unnamed)");
+		break;
+	case MESHTASTIC_FEM_STATE_MISMATCH:
+		shell_print(sh, "  [!!] front-end       %s  — DETECTION DISAGREED WITH THE BOARD",
+			    (p.fem_name != NULL) ? p.fem_name : "(unnamed)");
+		shell_print(sh, "                       This board is only ever fitted with the "
+				"part named above,");
+		shell_print(sh, "                       so that is what is in use — but the "
+				"detect line said");
+		shell_print(sh, "                       otherwise. Suspect the FEM rail or the "
+				"CSD line; the");
+		shell_print(sh, "                       radio is working, the evidence for WHY "
+				"is not.");
+		break;
+	case MESHTASTIC_FEM_STATE_FAILED:
+		shell_print(sh, "  [!!] front-end       DETECTION FAILED — this board has one "
+				"and we cannot tell which");
+		shell_print(sh, "                       No gain table is in use, so transmit is "
+				"under-driven by");
+		shell_print(sh, "                       that front-end's gain (11-13 dB on a "
+				"V4). Not a config");
+		shell_print(sh, "                       problem — check the FEM power rail.");
+		break;
+	case MESHTASTIC_FEM_STATE_NONE:
+	default:
+		shell_print(sh, "  [--] front-end       none fitted on this hardware");
+		break;
 	}
 	shell_print(sh, "  [%s] T/R switch      %s",
 		    p.dio2_rf_switch ? "ok" : "--",
@@ -3248,10 +3274,26 @@ static void cmd_lora_show(const struct shell *sh)
 			 * for. (`meshtastic rf path` had this right already — it gates the
 			 * gain claim on fem_name — which is where the correct model came
 			 * from.) */
-			shell_print(sh, "tx power:     %d dBm at the antenna (requested %d%s, "
-					"clamped to the radio's %d dBm max; no front end to "
-					"make up the difference)",
-				    drive, radiated, dflt, drive);
+			if (meshtastic_radio_fem_state() == MESHTASTIC_FEM_STATE_FAILED) {
+				/* "No front end" would be a lie here in the other
+				 * direction: this board HAS one, we just could not
+				 * identify it, so no gain table is in use and the drive
+				 * is the request minus nothing. Saying "no front end"
+				 * would send someone looking at the antenna instead of
+				 * the FEM rail. */
+				shell_print(sh, "tx power:     %d dBm at the antenna "
+						"(requested %d%s, clamped to the radio's %d "
+						"dBm max; FRONT-END DETECTION FAILED, so no "
+						"gain is being compensated — see "
+						"`meshtastic rf`)",
+					    drive, radiated, dflt, drive);
+			} else {
+				shell_print(sh, "tx power:     %d dBm at the antenna "
+						"(requested %d%s, clamped to the radio's %d "
+						"dBm max; no front end to make up the "
+						"difference)",
+					    drive, radiated, dflt, drive);
+			}
 		}
 	}
 
