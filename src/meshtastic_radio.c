@@ -949,6 +949,8 @@ static K_WORK_DELAYABLE_DEFINE(mt_agc_reset_work, mt_agc_reset_work_fn);
  * simply skips and waits for its next 60 s tick (main.cpp stamps lastAgcReset
  * before the call); a short retry is strictly better and costs nothing. */
 #define MT_AGC_RESET_DEFER_MS 1000U
+/* How long the AGC reset may wait for the radio before standing down. */
+#define MT_AGC_RESET_SEM_WAIT_MS 1000U
 
 /*
  * Periodic AGC reset (parity: upstream's AGC_RESET_INTERVAL_MS, default 60s —
@@ -968,7 +970,20 @@ static void mt_agc_reset_work_fn(struct k_work *work)
 
 	ARG_UNUSED(work);
 
-	(void)k_sem_take(&mt_radio_sem, K_FOREVER);
+	/*
+	 * Bounded, never K_FOREVER: this runs on the SYSTEM workqueue, and on a
+	 * XIAO that queue also feeds the DFU boot guard's hardware watchdog
+	 * (meshtastic_dfu_trigger.c, 15 s). Blocking here behind a transmit
+	 * that is stuck in the driver's TX-done wait starved the feeder and
+	 * rebooted the node -- every XIAO watchdog reset on the 2026-09-02 bench
+	 * sat exactly on a 60 s AGC tick. A reset that cannot get the radio
+	 * within a second is simply late; it retries shortly and is counted.
+	 */
+	if (k_sem_take(&mt_radio_sem, K_MSEC(MT_AGC_RESET_SEM_WAIT_MS)) != 0) {
+		mt_rx_act.stats.agc_radio_busy++;
+		(void)k_work_reschedule(&mt_agc_reset_work, K_MSEC(MT_AGC_RESET_DEFER_MS));
+		return;
+	}
 
 	if (meshtastic_radio_actively_receiving()) {
 		mt_rx_act.stats.agc_deferred++;

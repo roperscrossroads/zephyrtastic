@@ -285,6 +285,7 @@ struct meshtastic_radio_rx_activity_stats {
 	uint32_t false_preamble; /**< preamble flags retired by the 2x-preamble rule */
 	uint32_t false_header;   /**< header flags retired by the max-packet rule */
 	uint32_t agc_deferred;   /**< AGC resets postponed because a packet was arriving */
+	uint32_t agc_radio_busy; /**< AGC resets postponed because the radio was held (a TX in flight) */
 	uint32_t preamble_ms;    /**< the current modem's preamble time */
 	uint32_t max_packet_ms;  /**< airtime of a maximum-length frame on it */
 };

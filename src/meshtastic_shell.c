@@ -2023,9 +2023,10 @@ static int cmd_rf_path(const struct shell *sh, size_t argc, char **argv)
 		    (p.cad_timeout == 0U && p.cad_error == 0U) ? "ok" : "!!", p.cad_clear,
 		    p.cad_busy, p.cad_timeout, p.cad_error);
 	shell_print(sh, "  [%s] AGC reset        ok %u  fail %u  skipped %u  deferred %u  "
-			"patch-fail %u",
+			"radio-busy %u  patch-fail %u",
 		    (p.agc_fail == 0U && p.agc_patch_fail == 0U) ? "ok" : "!!", p.agc_ok,
-		    p.agc_fail, p.agc_skipped, p.rx_act.agc_deferred, p.agc_patch_fail);
+		    p.agc_fail, p.agc_skipped, p.rx_act.agc_deferred, p.rx_act.agc_radio_busy,
+		    p.agc_patch_fail);
 	/* "skipped" is a TX in flight; "deferred" is a packet arriving. The
 	 * activity row is the mechanism: the chip's latched flags this instant
 	 * (unknown on a driver that cannot report them), the two timing rules'

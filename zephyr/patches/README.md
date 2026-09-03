@@ -405,3 +405,30 @@ receiving. Verified on the V4 class-4 image; the `RX activity` row of
 Built with the reconstruction recipe above (pristine `6072d4880d` +
 0002/0003/0004/0005/0006/0008/0009/0011), and checked to reproduce the live
 file byte-for-byte.
+
+### 0014-sx126x-recover-a-lost-tx-done-edge-instead-of-stalling-15s.patch
+
+`sx126x_lora_send()` waits for TX completion in 1 s slices and calls
+`sx126x_poll_dio1()` between them, instead of a single 15 s `k_msgq_get()`.
+
+**Why:** a TX_DONE edge can be missed (this driver documents two ways: a
+`ClearIrqStatus` racing the ISR, and the GPIO block being down under light
+sleep). The single wait turned every lost edge into a 15 s stall — the
+frame already on the air, the chip in STDBY_RC, the caller holding the radio
+semaphore — and then reported `-ETIMEDOUT` for a transmit that had
+succeeded. On the bench (2026-09-02) that was the "1 failed TX" on two
+Heltecs, and on the XIAO kits it was a **reboot**: the periodic AGC reset
+runs on the system workqueue and blocked behind the held radio; the DFU
+boot guard's watchdog feeder shares that workqueue and starved; the 15 s
+hardware watchdog fired. Every XIAO watchdog reset that night sat on a 60 s
+AGC tick (60, 120, 300, 3060 s).
+
+`sx126x_poll_dio1()` is exactly the level check the edge missed; if DIO1 is
+asserted it submits the IRQ work, which reads and clears the real status and
+completes the send through the normal path inside a second. The 15 s cap is
+kept as the last resort. The companion fix in `meshtastic_radio.c` makes the
+AGC reset's semaphore wait bounded, so the workqueue can never be held
+hostage by the radio again regardless.
+
+Built on pristine `6072d4880d` + 0002/0003/0004/0005/0006/0008/0009/0011/0013
+with the reconstruction recipe and checked byte-for-byte.

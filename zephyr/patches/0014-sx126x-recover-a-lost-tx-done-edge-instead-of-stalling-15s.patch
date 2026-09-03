@@ -1,0 +1,43 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+index d1d282a..62d875c 100644
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -1660,8 +1660,36 @@ static int sx126x_lora_send(const struct device *dev,
+ 		return ret;
+ 	}
+ 
+-	/* Wait for TX completion */
+-	ret = k_msgq_get(&data->tx_msgq, &result, K_SECONDS(15));
++	/*
++	 * Wait for TX completion -- in 1 s slices, re-checking DIO1 between them.
++	 *
++	 * A TX_DONE edge can be missed: the DIO1 line is an edge interrupt, and
++	 * the driver has two documented ways of losing one (a ClearIrqStatus
++	 * racing the ISR, sx126x_do_cad()'s history; the GPIO block powered down
++	 * under light sleep, sx126x_poll_dio1()'s reason to exist). The old
++	 * single 15 s wait turned every lost edge into a 15 s stall with the
++	 * chip sitting in STDBY_RC, the frame ALREADY on the air, and the caller
++	 * holding the radio -- then reported -ETIMEDOUT for a transmit that had
++	 * succeeded. On a board whose watchdog feeder shares a workqueue with
++	 * anything waiting on that caller, the stall was a reboot (bench,
++	 * 2026-09-02: every XIAO watchdog reset sat on a 60 s AGC tick).
++	 *
++	 * sx126x_poll_dio1() is the level check the edge missed: if DIO1 is
++	 * asserted it submits the IRQ work, which reads and clears the real
++	 * status and completes the send through the normal path. The 15 s cap
++	 * is kept as the last resort for a chip that never raised anything.
++	 */
++	{
++		int64_t deadline = k_uptime_get() + 15000;
++
++		for (;;) {
++			ret = k_msgq_get(&data->tx_msgq, &result, K_MSEC(1000));
++			if (ret == 0 || k_uptime_get() >= deadline) {
++				break;
++			}
++			sx126x_poll_dio1(dev);
++		}
++	}
+ 	if (ret < 0) {
+ 		LOG_ERR("TX timeout");
+ 		/* Chip is still transmitting, abort first */

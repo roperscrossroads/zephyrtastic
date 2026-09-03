@@ -506,3 +506,30 @@ patches:
       Layered on 0002/0003/0004/0005/0006/0008/0009/0011 (all touch
       sx126x.c); built with the README's reconstruction recipe and verified
       to reproduce the live file byte-for-byte on pristine+earlier.
+  - path: 0014-sx126x-recover-a-lost-tx-done-edge-instead-of-stalling-15s.patch
+    sha256sum: 298da4fcabc1fb57407ee9b5edf070ac626f2d2766d17f7ec0d5a45231fe8d7e
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-03"
+    upstreamable: true
+    comments: |
+      sx126x_lora_send(): wait for TX completion in 1 s slices and call
+      sx126x_poll_dio1() between them, instead of one 15 s k_msgq_get().
+
+      DIO1 is an edge interrupt and this driver has two documented ways of
+      losing a TX_DONE edge (a ClearIrqStatus racing the ISR; the GPIO block
+      powered down under light sleep). The single 15 s wait turned every lost
+      edge into a 15 s stall -- frame already on the air, chip in STDBY_RC,
+      the caller holding the radio -- reported as -ETIMEDOUT for a transmit
+      that had succeeded. Bench 2026-09-02: those were the "1 failed TX" on
+      two Heltecs, and on the XIAO kits the stall was a REBOOT: the periodic
+      AGC reset (system workqueue) blocked behind the held radio, the DFU
+      boot guard's watchdog feeder on the same workqueue starved, and the
+      15 s hardware watchdog fired -- every XIAO reset sat on a 60 s AGC
+      tick. sx126x_poll_dio1() is the level check the edge missed: if DIO1
+      is asserted it submits the IRQ work, which completes the send through
+      the normal path within a second. The 15 s cap stays as the last resort.
+
+      upstreamable: any user of lora_send() on this driver has the same stall
+      on a missed edge; the recovery uses the driver's own existing poll.
