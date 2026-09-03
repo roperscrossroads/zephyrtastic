@@ -1,0 +1,25 @@
+diff --git a/subsys/storage/stream/stream_flash.c b/subsys/storage/stream/stream_flash.c
+index c9cd6ef53b..aaaa5ee818 100644
+--- a/subsys/storage/stream/stream_flash.c
++++ b/subsys/storage/stream/stream_flash.c
+@@ -123,7 +123,19 @@ static int stream_flash_erase_to_append(struct stream_flash_ctx *ctx, size_t siz
+ 	if (rc != 0) {
+ 		LOG_ERR("Error %d while erasing page", rc);
+ 	} else {
+-		ctx->erased_up_to += page.size;
++		/*
++		 * The page just erased ends at page.start_offset + page.size, which
++		 * is page-aligned; ctx->offset need not be. Track the real erased
++		 * frontier rather than "one page more than before": for a stream
++		 * that starts mid-page, adding page.size overstates the erased
++		 * range by (offset % page size), so a write that straddles the next
++		 * page boundary is let through without an erase, and the append
++		 * after it erases that page -- wiping the tail the straddling write
++		 * had just put there. Seen with the coredump flash backend, whose
++		 * stream starts one header (16 B) into its partition: every 4 KB
++		 * page of a stored dump began with 16 erased bytes.
++		 */
++		ctx->erased_up_to = page.start_offset + page.size - ctx->offset;
+ 	}
+ #endif
+ 	return rc;

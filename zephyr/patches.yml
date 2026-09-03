@@ -533,3 +533,28 @@ patches:
 
       upstreamable: any user of lora_send() on this driver has the same stall
       on a missed edge; the recovery uses the driver's own existing poll.
+  - path: 0015-stream-flash-erase-frontier-from-page-end-not-page-count.patch
+    sha256sum: a09d81773da9f05f1636fd33ada6f1e6ff2043f29721cdb6f967d28167cdd2d0
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-03"
+    upstreamable: true
+    comments: |
+      stream_flash_erase_to_append(): after erasing a page, set erased_up_to
+      from the page's real end (page.start_offset + page.size - ctx->offset)
+      instead of adding page.size.
+
+      erased_up_to is relative to ctx->offset, and ctx->offset need not be
+      page-aligned. With a stream that starts mid-page, "+= page.size"
+      overstates the erased frontier by (offset % page size): a write that
+      straddles the next page boundary passes the check without an erase,
+      and the append after it erases that page -- wiping the tail the
+      straddling write had just landed there. The coredump flash backend
+      starts its stream 16 B into the partition (after its header), so every
+      4 KB page of a stored dump began with 16 erased bytes and the stored
+      checksum never verified (bench 2026-09-03, ESP32-S3, 84 of 84 page
+      boundaries in a 346 KB dump). Image slots are page-aligned, which is
+      why img_mgmt never showed it.
+
+      upstreamable: pure logic fix, no behaviour change for aligned offsets.

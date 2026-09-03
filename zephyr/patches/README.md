@@ -432,3 +432,26 @@ hostage by the radio again regardless.
 
 Built on pristine `6072d4880d` + 0002/0003/0004/0005/0006/0008/0009/0011/0013
 with the reconstruction recipe and checked byte-for-byte.
+
+### 0015-stream-flash-erase-frontier-from-page-end-not-page-count.patch
+
+`stream_flash_erase_to_append()`: after erasing a page, set `erased_up_to` from
+the page's real end (`page.start_offset + page.size - ctx->offset`) instead of
+`+= page.size`.
+
+**Why:** `erased_up_to` is relative to `ctx->offset`, which need not be
+page-aligned. For a stream that starts mid-page, adding a page size overstates
+the erased frontier by `offset % page`: the write that straddles the next page
+boundary passes the check without an erase, and the append after it erases that
+page, wiping the tail the straddling write had just landed there. The coredump
+flash backend starts its stream 16 B into its partition (after its header), so
+on the bench (2026-09-03, ESP32-S3 members with the 512 KB coredump partition)
+**every 4 KB page of a stored dump began with 16 erased bytes** — 84 of 84
+boundaries in a 346 KB dump — and the header's checksum never verified, so
+`coredump find` reported nothing while esptool could read a dump gdb walked
+happily. Image slots are page-aligned, which is why `img_mgmt`'s progressive
+erase (the other user of this option) never showed it.
+
+**Upstreamable:** yes — pure logic fix, no behaviour change when `ctx->offset`
+is page-aligned. Regression-tested with `tests/subsys/storage/stream` on
+native_sim.
