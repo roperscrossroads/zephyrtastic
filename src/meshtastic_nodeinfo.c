@@ -15,6 +15,7 @@
 #include "meshtastic_modules.h"
 
 #include <zephyr/meshtastic/meshtastic.h>
+#include <zephyr/meshtastic/nodedb.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -256,6 +257,25 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 	if (has_user) {
 		log_user = request_id != 0U || !peer->has_user;
 		peer->has_user = true;
+	}
+
+	/* This cache is RAM: a reboot, or eviction from it, forgets that a peer
+	 * ever identified itself. The NodeDB record does not (it persists under
+	 * NODEDB_PERSIST_RECORDS), and it is what the reference consults before
+	 * asking (MeshService: request only when the NodeDB entry has no user).
+	 * Seed from it, or every reboot re-asks every peer we can already name --
+	 * and keeps re-asking every UNKNOWN_SUPPRESS_SEC, because the peer's reply
+	 * suppression window (REPLY_SUPPRESS_SEC, 12 h, same as stock) has not
+	 * forgotten us. Bench, 2026-09-03: one 70-byte unicast per peer per 10 min
+	 * per node, all refused. nodedb_lock nests inside nodeinfo_lock here;
+	 * NodeDB never calls back into this module, so the order is fixed.
+	 * NODEDB=n: the stub returns -ENOTSUP and the peer stays unknown. */
+	if (IS_ENABLED(CONFIG_MESHTASTIC_NODEDB) && !peer->has_user && !is_nodeinfo) {
+		struct meshtastic_nodedb_node node;
+
+		if (meshtastic_nodedb_get(from, &node) == 0 && node.has_user) {
+			peer->has_user = true;
+		}
 	}
 
 	if (!peer->has_user && !is_nodeinfo &&

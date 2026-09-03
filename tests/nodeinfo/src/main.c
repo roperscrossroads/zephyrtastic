@@ -260,6 +260,7 @@ static void nodeinfo_before(void *fixture)
 #define PEER_REQUESTER_2 0x0B000005U
 #define PEER_EVICTED     0x0B000006U
 #define PEER_SHOUTER     0x0B000007U
+#define PEER_RESTORED    0x0B000008U
 
 ZTEST(nodeinfo, test_unknown_peer_is_asked_to_identify)
 {
@@ -400,6 +401,38 @@ ZTEST(nodeinfo, test_eviction_reopens_the_suppression_window)
 	zassert_equal(c.count, 1U,
 		      "an evicted peer is a stranger again — which is why the cache size is "
 		      "an airtime decision, not just a memory one");
+}
+
+/*
+ * The reverse case, and the one that matters on a real node: the NodeDB
+ * already names the peer (a record restored from NVS after a reboot, or one
+ * that simply outlived this cache), and only the cache has forgotten it.
+ * Eviction is the stand-in for a reboot here: it empties the module's memory
+ * of the peer while the NodeDB record stays. Before 2026-09-03 the module
+ * asked anyway -- every Heltec on the bench re-asked every peer after every
+ * reboot, then every UNKNOWN_SUPPRESS_SEC for up to 12 h, because the peers'
+ * reply-suppression windows had not forgotten it (agents-ooma.20).
+ */
+ZTEST(nodeinfo, test_a_peer_named_in_the_nodedb_is_not_asked_after_cache_loss)
+{
+	struct captured c;
+	struct meshtastic_nodedb_node node;
+
+	inject_peer_nodeinfo(PEER_RESTORED, MESHTASTIC_NODE_BROADCAST, 0x1060U, false);
+	(void)drain_nodeinfo_tx(SETTLE);
+	zassert_ok(meshtastic_nodedb_get(PEER_RESTORED, &node), "precondition: in the NodeDB");
+	zassert_true(node.has_user, "precondition: the NodeDB names it");
+
+	for (int i = 0; i <= CONFIG_MESHTASTIC_NODEINFO_PEER_CACHE_SIZE; i++) {
+		inject_peer_text(0x0D000000U + i, 0x1200U + i, "crowd");
+		(void)drain_nodeinfo_tx(K_MSEC(100));
+	}
+
+	inject_peer_text(PEER_RESTORED, 0x1061U, "back again");
+	c = drain_nodeinfo_tx(SETTLE);
+	zassert_equal(c.count, 0U,
+		      "the NodeDB still names this peer; only the cache forgot -- asking is "
+		      "the post-reboot request storm");
 }
 #endif /* small cache */
 

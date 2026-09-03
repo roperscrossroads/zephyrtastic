@@ -49,8 +49,12 @@ config MESHTASTIC_NODEINFO_PEER_CACHE_SIZE
 	default 16
 	range 4 64
 	help
-	  Number of peers tracked in RAM for ad-hoc NodeInfo behavior. Peers
-	  with known User records do not trigger automatic NodeInfo requests.
+	  Number of peers tracked in RAM for ad-hoc NodeInfo behavior: the
+	  request and reply suppression stamps live here. Whether a peer is
+	  "unknown" (and so gets asked for its NodeInfo) is decided from the
+	  NodeDB record, which persists across reboots, not from this cache;
+	  the cache only remembers when it was last asked or answered. Peers
+	  with a User record in the NodeDB never trigger automatic requests.
 
 config MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC
 	int "Unknown-peer NodeInfo request suppression interval"
