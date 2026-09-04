@@ -11,3 +11,26 @@ config HEAP_MEM_POOL_ADD_SIZE_SHIELD_WIO_SX1262_XIAO
 	int
 	default 4096
 	depends on SHIELD_WIO_SX1262_XIAO
+
+# --- Diagnostics (2026-09-03) ----------------------------------------------
+# The nRF52840 half of what the ESP32 boards' Kconfig.defconfig files set the
+# same day (tooling repo RF-PARITY-PLAN.md 8.16, bead agents-xhli.24). The
+# Cortex-M already has the MPU stack guard, FAULT_DUMP=2 and SPIN_VALIDATE by
+# default; these are the ones it does not.
+
+# Kernel struct offsets for debugger / coredump thread plugins, and the
+# threads-metadata section in the coredump itself (ARM supports it; the ESP32
+# does not, hence only here).
+config DEBUG_THREAD_INFO
+	default y if SHIELD_WIO_SX1262_XIAO
+
+config DEBUG_COREDUMP_THREADS_METADATA
+	default y if SHIELD_WIO_SX1262_XIAO
+
+# Register state collected at a fault, for the coredump and the fatal banner.
+config EXTRA_EXCEPTION_INFO
+	default y if SHIELD_WIO_SX1262_XIAO
+
+# HCI error codes as strings in the Bluetooth logs.
+config BT_HCI_ERR_TO_STR
+	default y if SHIELD_WIO_SX1262_XIAO

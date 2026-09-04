@@ -81,4 +81,53 @@ endchoice
 
 endif # LVGL
 
+# --- Diagnostics (2026-09-03) ----------------------------------------------
+# Zephyr facilities that cost a little flash and nothing on the happy path, and
+# turn a silent reboot into a named one. Defaults only, so an overlay can still
+# switch any of them off. Added after the class-B hang (tooling repo
+# RF-PARITY-PLAN.md 8.16, bead agents-xhli.24): six hardware-watchdog resets
+# with consoles attached and NOTHING printed, because a double exception on
+# this core runs no handler at all.
+#
+# All `!MCUBOOT`: sysbuild configures the bootloader with this same file, and
+# the bootloader must stay exactly what is on every board (the fleet flashes
+# the app slot only). It also cannot link the backtrace helper (no Xtensa HAL
+# in its image) or place .rtc_noinit (its own linker script) -- found the
+# first time this block was built, 2026-09-03.
+
+# The double-exception record and per-level interrupt counters (carried patch
+# 0017). Read by `meshtastic resets` and the boot-time log.
+config XTENSA_FAULT_BREADCRUMBS
+	default y if !MCUBOOT
+
+# Entry treats a nesting count below 1 as "not nested" and switches stacks;
+# exit never goes below 0; both counted (carried patch 0017). The consequence
+# of an unbalanced count -- every interrupt on the interrupted thread's stack,
+# then a silent death -- is what the class-B record of 2026-09-03 showed
+# (nested == -1 in idle). This stops the consequence and reports the event.
+config XTENSA_ISR_NESTING_GUARD
+	default y if !MCUBOOT
+
+# A backtrace on every fatal. Upstream gates the option on the original ESP32
+# series; carried patch 0016 opens it to the whole Espressif family -- the
+# implementation is chip-generic (windowed-ABI frame walk + esp_ptr checks).
+# Upstream's own `default y` would otherwise reach MCUboot once 0016 makes the
+# option available, hence the explicit `n if MCUBOOT` here.
+config XTENSA_ENABLE_BACKTRACE
+	default n if MCUBOOT
+	default y
+
+# Kernel struct offsets for debugger / coredump thread plugins.
+config DEBUG_THREAD_INFO
+	default y if !MCUBOOT
+
+# Spinlock double-lock and wrong-unlock checks. Only live with ASSERT=y, which
+# the app sets; upstream defaults it off on this SoC purely on flash size.
+config SPIN_VALIDATE
+	default y if !MCUBOOT
+
+# HCI error codes as strings in the Bluetooth logs.
+config BT_HCI_ERR_TO_STR
+	default y if !MCUBOOT
+
 endif # BOARD_HELTEC_WIFI_LORA32_V4_R8_ESP32S3_PROCPU
