@@ -558,3 +558,36 @@ patches:
       why img_mgmt never showed it.
 
       upstreamable: pure logic fix, no behaviour change for aligned offsets.
+  - path: 0016-xtensa-backtrace-on-every-espressif-xtensa-soc.patch
+    sha256sum: 2a5a3ab942a1e549bb0f952de483998b2046ef972c839c694f32ddb690564aa8
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-03"
+    upstreamable: true
+    comments: |
+      XTENSA_ENABLE_BACKTRACE: depend on SOC_FAMILY_ESPRESSIF_ESP32 rather than
+      SOC_SERIES_ESP32 only, and take the matching #if branches in
+      xtensa_backtrace.c along. The implementation is chip-generic (a
+      windowed-ABI frame walk plus esp_ptr_executable/esp_stack_ptr_is_sane,
+      which esp_memory_utils.h provides for every Espressif Xtensa part), so
+      the ESP32-S3 had simply never been offered the "default y". Every
+      fatal on the S3 now ends in a backtrace instead of a register dump
+      alone. No behaviour change on the original ESP32.
+
+  - path: 0018-hal-espressif-esp32s3-window-spill-for-xtensa-backtrace.patch
+    sha256sum: a677cc741d824fc718bf3ae0345c6f7d25c2715d90d1460031d3d2d1827181fc
+    module: hal_espressif
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-03"
+    upstreamable: true
+    comments: |
+      zephyr/esp32s3/CMakeLists.txt: compile the Xtensa HAL window-spill
+      (xthal_window_spill) when CONFIG_XTENSA_ENABLE_BACKTRACE is set, the
+      way zephyr/esp32/CMakeLists.txt already does unconditionally. The
+      backtrace helper (arch/xtensa/core/debug_helpers_asm.S) calls it and
+      nothing else on the S3 provides it, which is presumably why upstream
+      never offered the option on this series. Companion to 0016; the file
+      is the esp32 tree's copy, which is the generic HAL source and takes
+      its core config from the include path.

@@ -1,0 +1,17 @@
+diff --git a/zephyr/esp32s3/CMakeLists.txt b/zephyr/esp32s3/CMakeLists.txt
+index d6cbf77174..aed6f53de8 100644
+--- a/zephyr/esp32s3/CMakeLists.txt
++++ b/zephyr/esp32s3/CMakeLists.txt
+@@ -182,6 +182,12 @@ if(CONFIG_SOC_SERIES_ESP32S3)
+ 
+   zephyr_compile_definitions(ESP_PLATFORM)
+ 
++  # xthal_window_spill() for arch/xtensa's backtrace helper
++  # (CONFIG_XTENSA_ENABLE_BACKTRACE). The esp32 tree compiles this same file
++  # unconditionally; the source is the generic Xtensa HAL window spill and
++  # takes its core configuration from the include path, so it is shared.
++  zephyr_sources_ifdef(CONFIG_XTENSA_ENABLE_BACKTRACE ../esp32/src/hal/windowspill_asm.S)
++
+   zephyr_sources(
+     ../../components/efuse/src/esp_efuse_api.c
+     ../../components/efuse/src/esp_efuse_fields.c

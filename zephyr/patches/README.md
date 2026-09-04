@@ -455,3 +455,19 @@ erase (the other user of this option) never showed it.
 **Upstreamable:** yes — pure logic fix, no behaviour change when `ctx->offset`
 is page-aligned. Regression-tested with `tests/subsys/storage/stream` on
 native_sim.
+
+### 0016-xtensa-backtrace-on-every-espressif-xtensa-soc.patch
+
+`arch/xtensa/Kconfig`, `arch/xtensa/core/xtensa_backtrace.c`. Upstream gates
+`XTENSA_ENABLE_BACKTRACE` (default y) on `SOC_SERIES_ESP32`, so the ESP32-S3
+never had it; the code is chip-generic. **Upstreamable as-is.** Found while
+instrumenting the class-B hang (tooling `RF-PARITY-PLAN.md` §8.16).
+
+### 0018-hal-espressif-esp32s3-window-spill-for-xtensa-backtrace.patch
+
+**First patch on a module other than `zephyr/`** (`module: hal_espressif`, path
+`modules/hal/espressif`). One `zephyr_sources_ifdef(CONFIG_XTENSA_ENABLE_BACKTRACE
+...)` line in the S3 CMake, compiling the esp32 tree's `windowspill_asm.S` so
+0016's backtrace helper links. Without it the S3 link fails on
+`xthal_window_spill`. **Upstreamable with 0016.**
+
