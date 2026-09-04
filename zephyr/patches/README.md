@@ -499,6 +499,19 @@ level-6 entries in one 30 s hang), drowning the counters.
 0016's backtrace helper links. Without it the S3 link fails on
 `xthal_window_spill`. **Upstreamable with 0016.**
 
+### 0019-hal-espressif-bt-controller-osi-guard-no-yield-from-isr.patch
+
+`module: hal_espressif`, the C3/S3-family controller adapter. The blob's
+`_task_yield_from_isr` was `k_yield()` — FreeRTOS's `portYIELD_FROM_ISR`, which
+on Zephyr is a context switch from inside an interrupt and leaves the ISR
+nesting count unbalanced (the class-B mechanism, bead `agents-xhli.24`). Now a
+counted no-op in ISR context. Also: the from-ISR wrappers define the
+"higher-priority-task-woken" flag, blocking waits from ISR become non-blocking
+and counted, and the controller's ISRs run behind a guard that restores the
+nesting count if they change it. Counters in `struct esp_bt_osi_stats`; the
+app's heartbeat logs any change and `meshtastic resets` prints the retained
+kernel-side ones. **Upstreamable** (the yield fix on its own is a one-liner).
+
 **Adding to the arch/xtensa files later:** both patches touch
 `arch/xtensa/Kconfig`; a new change there must be diffed against the tree
 *with 0016+0017 applied* (the README's layering rule above), i.e. stage the

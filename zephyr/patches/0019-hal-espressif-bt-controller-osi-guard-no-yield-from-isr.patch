@@ -1,0 +1,215 @@
+diff --git a/components/bt/controller/esp32c3/bt.c b/components/bt/controller/esp32c3/bt.c
+index 22c82f13a5..a3bd1c3f34 100644
+--- a/components/bt/controller/esp32c3/bt.c
++++ b/components/bt/controller/esp32c3/bt.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include <zephyr/kernel.h>
++#include <zephyr/kernel_structs.h> /* _kernel.cpus[0].nested, for the ISR guard */
+ #include <zephyr/sys/printk.h>
+ #include <zephyr/random/random.h>
+ 
+@@ -853,10 +854,59 @@ static inline void esp_bt_power_domain_off(void)
+     esp_wifi_bt_power_domain_off();
+ }
+ 
++struct esp_bt_osi_stats esp_bt_osi_stats;
++
++/* Guard around the controller's interrupt handler. The handler is a blob
++ * written to FreeRTOS conventions; the kernel's per-CPU ISR nesting count and
++ * PS.INTLEVEL must be exactly what they were when it returns, or every later
++ * interrupt runs on the wrong stack. Compare, count, and put the count back.
++ * At most BT_ISR_GUARD_MAX handlers (the controller allocates one per source). */
++#define BT_ISR_GUARD_MAX 4
++struct bt_isr_guard {
++    intr_handler_t fn;
++    void *arg;
++};
++static struct bt_isr_guard bt_isr_guards[BT_ISR_GUARD_MAX];
++
++static void IRAM_ATTR bt_isr_guarded(void *arg)
++{
++    struct bt_isr_guard *g = arg;
++    int nested_before = _kernel.cpus[0].nested;
++    uint32_t ps_before, ps_after;
++
++    __asm__ volatile("rsr.ps %0" : "=r"(ps_before));
++    esp_bt_osi_stats.isr_calls++;
++    g->fn(g->arg);
++    __asm__ volatile("rsr.ps %0" : "=r"(ps_after));
++    if (_kernel.cpus[0].nested != nested_before) {
++        esp_bt_osi_stats.isr_changed_nesting++;
++        esp_bt_osi_stats.isr_last_nesting_delta =
++            (uint32_t)(_kernel.cpus[0].nested - nested_before);
++        _kernel.cpus[0].nested = nested_before;
++    }
++    if ((ps_after & 0xfU) != (ps_before & 0xfU)) {
++        esp_bt_osi_stats.isr_changed_intlevel++;
++    }
++}
++
+ static void btdm_intr_alloc(void *arg)
+ {
+     btdm_isr_alloc_t *p = arg;
+-    p->ret = esp_intr_alloc(p->source, p->flags, p->fn, p->arg, p->handle);
++    struct bt_isr_guard *g = NULL;
++
++    for (int i = 0; i < BT_ISR_GUARD_MAX; i++) {
++        if (bt_isr_guards[i].fn == NULL || bt_isr_guards[i].fn == p->fn) {
++            g = &bt_isr_guards[i];
++            break;
++        }
++    }
++    if (g != NULL) {
++        g->fn = p->fn;
++        g->arg = p->arg;
++        p->ret = esp_intr_alloc(p->source, p->flags, bt_isr_guarded, g, p->handle);
++    } else {
++        p->ret = esp_intr_alloc(p->source, p->flags, p->fn, p->arg, p->handle);
++    }
+ }
+ 
+ static int interrupt_alloc_wrapper(int cpu_id, int source, intr_handler_t handler, void *arg, void **ret_handle)
+@@ -908,6 +958,17 @@ static void IRAM_ATTR task_yield_wrapper(void)
+ 
+ static void IRAM_ATTR task_yield_from_isr(void)
+ {
++    /* FreeRTOS's portYIELD_FROM_ISR. Zephyr reschedules on interrupt exit by
++     * itself, and k_yield() from an ISR is a context switch out of interrupt
++     * context: the interrupted context's interrupt exit never runs, the ISR
++     * nesting count is left one too high, and the machine is doomed from
++     * there. So in ISR context this is a counted no-op. From thread context
++     * (the controller does call it there) a yield is legal and honoured. */
++    if (k_is_in_isr()) {
++        esp_bt_osi_stats.yield_from_isr_in_isr++;
++        return;
++    }
++    esp_bt_osi_stats.yield_from_isr_in_thread++;
+     k_yield();
+ }
+ 
+@@ -932,7 +993,13 @@ static void semphr_delete_wrapper(void *semphr)
+ 
+ static int IRAM_ATTR semphr_take_from_isr_wrapper(void *semphr, void *hptw)
+ {
+-    ARG_UNUSED(hptw);
++    /* FreeRTOS's "higher priority task woken" out-parameter. The blob reads
++     * it to decide whether to call _task_yield_from_isr; define it rather
++     * than leave whatever was on its stack. Zephyr reschedules at interrupt
++     * exit regardless. */
++    if (hptw != NULL) {
++        *(int *)hptw = 0;
++    }
+     if (semphr == NULL) {
+         return 0;
+     }
+@@ -942,7 +1009,13 @@ static int IRAM_ATTR semphr_take_from_isr_wrapper(void *semphr, void *hptw)
+ 
+ static int IRAM_ATTR semphr_give_from_isr_wrapper(void *semphr, void *hptw)
+ {
+-    ARG_UNUSED(hptw);
++    /* FreeRTOS's "higher priority task woken" out-parameter. The blob reads
++     * it to decide whether to call _task_yield_from_isr; define it rather
++     * than leave whatever was on its stack. Zephyr reschedules at interrupt
++     * exit regardless. */
++    if (hptw != NULL) {
++        *(int *)hptw = 0;
++    }
+     if (semphr == NULL) {
+         return 0;
+     }
+@@ -956,7 +1029,12 @@ static int semphr_take_wrapper(void *semphr, uint32_t block_time_ms)
+         return 0;
+     }
+     int ret;
+-    if (block_time_ms == OSI_FUNCS_TIME_BLOCKING) {
++    if (k_is_in_isr()) {
++        /* A blocking wait in ISR context: FreeRTOS would assert, and so
++         * would Zephyr. Count it and do the non-blocking thing. */
++        esp_bt_osi_stats.block_in_isr++;
++        ret = k_sem_take((struct k_sem *)semphr, K_NO_WAIT);
++    } else if (block_time_ms == OSI_FUNCS_TIME_BLOCKING) {
+         ret = k_sem_take((struct k_sem *)semphr, K_FOREVER);
+     } else {
+         ret = k_sem_take((struct k_sem *)semphr, K_MSEC(block_time_ms));
+@@ -1055,7 +1133,13 @@ static int queue_send_wrapper(void *queue, void *item, uint32_t block_time_ms)
+ 
+ static int IRAM_ATTR queue_send_from_isr_wrapper(void *queue, void *item, void *hptw)
+ {
+-    ARG_UNUSED(hptw);
++    /* FreeRTOS's "higher priority task woken" out-parameter. The blob reads
++     * it to decide whether to call _task_yield_from_isr; define it rather
++     * than leave whatever was on its stack. Zephyr reschedules at interrupt
++     * exit regardless. */
++    if (hptw != NULL) {
++        *(int *)hptw = 0;
++    }
+     if (queue == NULL) {
+         return 0;
+     }
+@@ -1069,7 +1153,10 @@ static int queue_recv_wrapper(void *queue, void *item, uint32_t block_time_ms)
+         return 0;
+     }
+     int ret;
+-    if (block_time_ms == OSI_FUNCS_TIME_BLOCKING) {
++    if (k_is_in_isr()) {
++        esp_bt_osi_stats.block_in_isr++;
++        ret = k_msgq_get(&((struct bt_queue_t *)queue)->queue, item, K_NO_WAIT);
++    } else if (block_time_ms == OSI_FUNCS_TIME_BLOCKING) {
+         ret = k_msgq_get(&((struct bt_queue_t *)queue)->queue, item, K_FOREVER);
+     } else {
+         ret = k_msgq_get(&((struct bt_queue_t *)queue)->queue, item, K_MSEC(block_time_ms));
+@@ -1079,7 +1166,13 @@ static int queue_recv_wrapper(void *queue, void *item, uint32_t block_time_ms)
+ 
+ static int IRAM_ATTR queue_recv_from_isr_wrapper(void *queue, void *item, void *hptw)
+ {
+-    ARG_UNUSED(hptw);
++    /* FreeRTOS's "higher priority task woken" out-parameter. The blob reads
++     * it to decide whether to call _task_yield_from_isr; define it rather
++     * than leave whatever was on its stack. Zephyr reschedules at interrupt
++     * exit regardless. */
++    if (hptw != NULL) {
++        *(int *)hptw = 0;
++    }
+     if (queue == NULL) {
+         return 0;
+     }
+diff --git a/components/bt/include/esp32c3/include/esp_bt.h b/components/bt/include/esp32c3/include/esp_bt.h
+index a823b85511..edb3736bb4 100644
+--- a/components/bt/include/esp32c3/include/esp_bt.h
++++ b/components/bt/include/esp32c3/include/esp_bt.h
+@@ -1009,6 +1009,33 @@ typedef enum {
+ 
+ void esp_ble_controller_log_dump_all(bool output);
+ 
++/**
++ * @brief What the controller blob asked of the OS interface that the OS could
++ *        not honour as asked, and what its ISR did to kernel state.
++ *
++ * The controller library was written to FreeRTOS conventions. The adapter
++ * translates its OS-interface calls; where a call is legal in FreeRTOS but not
++ * in Zephyr (a yield or a blocking wait from interrupt context) the adapter now
++ * refuses the illegal part, does the nearest safe thing, and counts it here
++ * instead of letting the kernel's interrupt bookkeeping be corrupted. The
++ * ISR-side fields come from a guard around the controller's interrupt handler
++ * that compares the kernel's ISR nesting count and PS.INTLEVEL before and after
++ * the handler ran, and restores the count if the handler changed it.
++ *
++ * Read-only for callers; cumulative since boot; lives in ordinary RAM.
++ */
++struct esp_bt_osi_stats {
++    uint32_t yield_from_isr_in_isr;   /**< _task_yield_from_isr called in ISR context (refused) */
++    uint32_t yield_from_isr_in_thread;/**< _task_yield_from_isr called in thread context (honoured) */
++    uint32_t block_in_isr;            /**< a blocking take/recv/lock asked for in ISR context (made non-blocking) */
++    uint32_t isr_calls;               /**< controller interrupt handler invocations seen by the guard */
++    uint32_t isr_changed_nesting;     /**< handler returned with the kernel ISR nesting count changed (restored) */
++    uint32_t isr_changed_intlevel;    /**< handler returned with PS.INTLEVEL changed */
++    uint32_t isr_last_nesting_delta;  /**< the last such nesting change, as a signed delta */
++};
++
++extern struct esp_bt_osi_stats esp_bt_osi_stats;
++
+ #ifdef __cplusplus
+ }
+ #endif

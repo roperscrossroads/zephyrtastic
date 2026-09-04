@@ -636,3 +636,36 @@ patches:
       never offered the option on this series. Companion to 0016; the file
       is the esp32 tree's copy, which is the generic HAL source and takes
       its core config from the include path.
+  - path: 0019-hal-espressif-bt-controller-osi-guard-no-yield-from-isr.patch
+    sha256sum: 797dc306afcb19e239db4c59dbb1873b5db8d97e12efea64800ca6e287cc01fa
+    module: hal_espressif
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-03"
+    upstreamable: true
+    comments: |
+      components/bt/controller/esp32c3/bt.c (the C3/S3 family adapter) +
+      esp_bt.h: guard the OS-interface seam between the controller blob
+      (written to FreeRTOS conventions) and Zephyr.
+
+      (1) _task_yield_from_isr was k_yield(). That is portYIELD_FROM_ISR;
+          on Zephyr a yield from ISR context is a context switch out of the
+          interrupt: the interrupted context's interrupt exit never runs,
+          the per-CPU ISR nesting count is left one too high, every later
+          interrupt runs on a thread stack, and the machine dies later in
+          a way that names nothing (bench: nested == -1 in idle at a double
+          exception, 2026-09-03). Zephyr reschedules at interrupt exit by
+          itself, so in ISR context it is now a counted no-op; from thread
+          context (the blob calls it there too) it still yields.
+      (2) The from-ISR queue/semaphore wrappers now write the "higher
+          priority task woken" out-parameter (0) instead of ARG_UNUSED: the
+          blob reads it to decide whether to yield.
+      (3) A blocking take/recv asked for from ISR context is made
+          non-blocking and counted (both OSes would assert).
+      (4) The controller's interrupt handlers are installed behind a guard
+          that compares the kernel nesting count and PS.INTLEVEL before and
+          after the handler, counts a change, and restores the count.
+
+      Counters in struct esp_bt_osi_stats (esp_bt.h), for the application
+      to report. None of this changes behaviour on a well-behaved blob.
+

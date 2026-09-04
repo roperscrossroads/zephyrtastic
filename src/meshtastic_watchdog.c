@@ -33,6 +33,9 @@
 #if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
 #include <zephyr/arch/xtensa/fault_breadcrumbs.h>
 #endif
+#if defined(CONFIG_BT) && defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
+#include <esp_bt.h> /* esp_bt_osi_stats: what the controller blob asked that we refused */
+#endif
 
 #include "meshtastic_core.h" /* meshtastic_radio_cad_/agc_ counter getters */
 #include "meshtastic_watchdog.h"
@@ -320,6 +323,23 @@ static void heartbeat_report_guards(void)
 			seen_clamp[0], seen_clamp[1]);
 	}
 #endif
+#endif
+#if defined(CONFIG_BT) && defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
+	static struct esp_bt_osi_stats seen_bt;
+	struct esp_bt_osi_stats now_bt = esp_bt_osi_stats;
+
+	/* isr_calls climbs every heartbeat on a healthy node; only the anomaly
+	 * counters decide whether this line is worth printing. */
+	now_bt.isr_calls = seen_bt.isr_calls;
+	if (memcmp(&now_bt, &seen_bt, sizeof(seen_bt)) != 0) {
+		seen_bt = esp_bt_osi_stats;
+		LOG_WRN("BT controller OS-interface guard: yield-from-ISR refused %u (honoured "
+			"in thread %u), blocking-in-ISR made non-blocking %u; ISR guard: %u calls, "
+			"nesting changed %u (last delta %d), intlevel changed %u",
+			seen_bt.yield_from_isr_in_isr, seen_bt.yield_from_isr_in_thread,
+			seen_bt.block_in_isr, seen_bt.isr_calls, seen_bt.isr_changed_nesting,
+			(int)seen_bt.isr_last_nesting_delta, seen_bt.isr_changed_intlevel);
+	}
 #endif
 }
 
