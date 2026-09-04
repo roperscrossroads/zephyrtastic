@@ -64,7 +64,10 @@ struct meshtastic_reboot_trace {
 	uint8_t sys_type;
 	/** Whether a caller PC was captured. */
 	bool have_pc;
-	/** Return address of whoever called sys_reboot(). addr2line resolves it. */
+	/** Return address of whoever called sys_reboot().
+	 *  Resolve it MINUS ONE: sys_reboot() is noreturn, so the call is typically the
+	 *  last instruction in its caller and this address is the first byte of the next
+	 *  function. addr2line on the raw value names the wrong one. */
 	uint32_t caller_pc;
 	/** Uptime in seconds at the moment of the reboot. */
 	uint32_t uptime_s;

@@ -3796,9 +3796,16 @@ static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
 				    rt.thread[0] != '\0' ? rt.thread : "?", rt.uptime_s,
 				    meshtastic_reboot_type_str(rt.sys_type));
 			if (rt.have_pc) {
-				shell_print(sh, "            caller 0x%08x  — addr2line this "
-						"against the build's zephyr.elf",
-					    rt.caller_pc);
+				/* Resolve caller_pc MINUS ONE. sys_reboot() is noreturn, so the
+				 * call is usually the last instruction in its caller and the
+				 * return address lands on the first byte of the NEXT function --
+				 * addr2line then names the wrong one. Measured: a shell reboot
+				 * recorded 0x420097f8, which addr2line calls z_thread_is_valid
+				 * and 0x420097f7 correctly calls cmd_kernel_reboot_warm. */
+				shell_print(sh, "            caller 0x%08x  — addr2line 0x%08x "
+						"(PC-1: the call is noreturn, so the return address "
+						"is the next function) against that build's zephyr.elf",
+					    rt.caller_pc, rt.caller_pc - 1U);
 			}
 			if (rt.reason == MESHTASTIC_REBOOT_UNKNOWN) {
 				/* Say plainly that nothing claimed it. An unnamed reboot is a
