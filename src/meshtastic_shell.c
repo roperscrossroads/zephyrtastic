@@ -506,11 +506,44 @@ static int cmd_crashtest(const struct shell *sh, size_t argc, char **argv)
 		k_sleep(K_MSEC(200));
 		k_panic();
 	} else if (strcmp(argv[1], "stack") == 0) {
+		/* NOT a test of the double-exception breadcrumb, though it does end
+		 * in one: on the ESP32-S3 the SRAM that holds IRAM code is the same
+		 * memory as low DRAM at another address, and an unbounded recursion
+		 * walking down from this stack reaches that alias and overwrites the
+		 * code it then faults into -- the interrupt trampolines, the fatal
+		 * handler, the recorder itself. That is why this has always ended in
+		 * a bare WATCHDOG with nothing said. `dblexc` is the clean version. */
 		shell_print(sh, "crashtest: overflowing this thread's stack on purpose");
 		k_sleep(K_MSEC(200));
 		crashtest_sink = crashtest_recurse(0);
+	} else if (strcmp(argv[1], "dblexc") == 0) {
+#if defined(CONFIG_XTENSA)
+		/* A double exception with memory still intact: set PS.EXCM by hand,
+		 * then load from address 0. The load raises LoadProhibited; because
+		 * EXCM is already set the CPU takes the double-exception vector
+		 * instead of the level-1 one. No handler runs there -- the hardware
+		 * watchdog reboots the node ~30 s later, and `meshtastic resets` then
+		 * shows the breadcrumb (CONFIG_XTENSA_FAULT_BREADCRUMBS) naming this
+		 * thread, cause 28 and the l32i below as depc. `stack` is the same
+		 * fault reached the dirty way, after the recursion has walked through
+		 * whatever lay below this thread's stack. */
+		shell_print(sh, "crashtest: raising a double exception on purpose (load from 0 "
+				"with PS.EXCM set)");
+		k_sleep(K_MSEC(200));
+		(void)irq_lock();
+		__asm__ volatile("rsr.ps a2\n"
+				 "movi a3, 0x10\n" /* PS.EXCM */
+				 "or a2, a2, a3\n"
+				 "wsr.ps a2\n"
+				 "rsync\n"
+				 "movi a2, 0\n"
+				 "l32i a2, a2, 0\n" ::: "a2", "a3", "memory");
+#else
+		shell_error(sh, "dblexc: Xtensa only");
+		return -ENOTSUP;
+#endif
 	} else {
-		shell_error(sh, "unknown kind '%s' (want panic or stack)", argv[1]);
+		shell_error(sh, "unknown kind '%s' (want panic, stack or dblexc)", argv[1]);
 		return -EINVAL;
 	}
 
@@ -3665,6 +3698,11 @@ static int cmd_preset(const struct shell *sh, size_t argc, char **argv)
  * only exists while something is attached. A reboot at 03:50 is therefore
  * unobserved by construction. This is how you ask afterwards.
  */
+static void resets_shell_line(void *ctx, const char *line)
+{
+	shell_print((const struct shell *)ctx, "%s", line);
+}
+
 static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
 {
 	struct meshtastic_boot_record hist[CONFIG_MESHTASTIC_BOOTLOG_ENTRIES];
@@ -3773,6 +3811,12 @@ static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "to #N. prev-ran(s) saturates at 65535 (18.2 h).");
 	shell_print(sh, "A COLD row means retained RAM did not survive into that boot, so "
 			"everything before it is gone.");
+
+	/* The faults the rows above cannot explain: a WATCHDOG row with no
+	 * crashinfo and no coredump is exactly what a double exception or an
+	 * interrupt storm leaves behind, and these are their only trace. */
+	shell_print(sh, "");
+	meshtastic_bootlog_fault_lines(resets_shell_line, (void *)sh);
 	return 0;
 }
 #endif /* CONFIG_MESHTASTIC_BOOTLOG */
@@ -5395,7 +5439,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_MESHTASTIC_SHELL_CRASHTEST)
 	SHELL_CMD(crashtest, NULL,
 		  SHELL_HELP("Crash on purpose, to prove the coredump pipeline works "
-			     "before a real fault needs it.", "<panic|stack>"),
+			     "before a real fault needs it.", "<panic|stack|dblexc>"),
 		  cmd_crashtest),
 #endif
 #if defined(CONFIG_NETWORKING)

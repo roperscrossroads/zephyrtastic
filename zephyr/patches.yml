@@ -575,6 +575,51 @@ patches:
       fatal on the S3 now ends in a backtrace instead of a register dump
       alone. No behaviour change on the original ESP32.
 
+  - path: 0017-xtensa-fault-breadcrumbs-double-exception-record-and-irq-stats.patch
+    sha256sum: 2f3fa18631e70a52113370e82497069ccf9b716d43b6b8b5a1e8db518d2c16e6
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-03"
+    upstreamable: true
+    comments: |
+      New CONFIG_XTENSA_FAULT_BREADCRUMBS (default n). Two records that
+      survive a warm reset, for the faults nothing else can report:
+
+      (1) _DoubleExceptionVector jumps to _xtensa_dblexc_breadcrumb in
+          .iram0.text (the vector slot is 64 B and has nowhere to put
+          literals), which stores EXCCAUSE, EPC1, DEPC, EXCVADDR, PS, a0, a1,
+          _current, the ISR nesting count and EXCSAVE1 into
+          xtensa_dblexc_record by fixed offset, writes the magic last, then
+          does what the vector always did (BREAK if configured, spin). Every
+          AR is scratch there -- nothing after a double exception returns.
+      (2) xtensa_handle_irq_lvl() counts entries, dispatches and empty
+          entries per level and keeps the last IRQ dispatched per level in
+          xtensa_irq_stats, with the raw INTERRUPT&INTENABLE mask at the last
+          empty entry. A storm that starves the system until the hardware
+          watchdog names its level and source afterwards.
+
+      Also CONFIG_XTENSA_ISR_NESTING_GUARD (default n): the entry trampoline
+      treats a nesting count below 1 as "not nested" (switch stacks, start
+      from 0) and the exit path floors the count at 0; both counted in
+      xtensa_nesting_clamps[2]. Plus a C-side exit detector: after the ISR
+      bodies ran the count must still be >= 1, else an ISR changed it (a
+      context switch from inside an interrupt handler) -- first occurrence
+      kept with level, IRQ, value and thread. Bench 2026-09-03 20:15 UTC:
+      the first decoded class-B record had nested == -1 in idle.
+
+      Storage is .rtc_noinit on Espressif SoCs (ordinary RAM is reused by the
+      ROM/bootloader before the app runs), .noinit elsewhere; the arch never
+      clears it, the application copies and clears early in the next boot
+      (meshtastic_bootlog.c does, at PRE_KERNEL_1). Header:
+      include/zephyr/arch/xtensa/fault_breadcrumbs.h.
+
+      Why: six TG0WDT resets on ESP32-S3 boards with consoles attached and
+      nothing printed (bench 2026-09-03); the ROM's Saved PC put three in the
+      vector's `1: j 1b` and three in the interrupt entry/exit trampoline.
+      The non-MMU double-exception vector runs no handler, so FATAL,
+      coredump and every breadcrumb built on the C fatal path are
+      structurally blind to it. Cost: a few loads/stores per interrupt.
   - path: 0018-hal-espressif-esp32s3-window-spill-for-xtensa-backtrace.patch
     sha256sum: a677cc741d824fc718bf3ae0345c6f7d25c2715d90d1460031d3d2d1827181fc
     module: hal_espressif

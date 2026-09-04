@@ -30,6 +30,10 @@
 
 #include <zephyr/meshtastic/diagnostics.h>
 
+#if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
+#include <zephyr/arch/xtensa/fault_breadcrumbs.h>
+#endif
+
 #include "meshtastic_core.h" /* meshtastic_radio_cad_/agc_ counter getters */
 #include "meshtastic_watchdog.h"
 
@@ -283,6 +287,42 @@ static void MESHTASTIC_WDT_IRAM_ATTR hw_wdt_stage0_callback(const struct device 
  * own "radio" channel. Also carries the two periodic diagnostics that used
  * to ride the old single feed worker: heap-stat logging and the CAD/AGC
  * stats mirror above. */
+static void heartbeat_report_guards(void)
+{
+#if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
+	static uint32_t seen_bad, seen_broken;
+
+	if (xtensa_irq_stats.nested_broken_by_isr != seen_broken) {
+		seen_broken = xtensa_irq_stats.nested_broken_by_isr;
+		LOG_WRN("an ISR changed the kernel's nesting count: %u times so far; first "
+			"L%u irq %u -> %d, thread then 0x%08x",
+			seen_broken, xtensa_irq_stats.nested_broken_first_level,
+			xtensa_irq_stats.nested_broken_first_irq,
+			(int)xtensa_irq_stats.nested_broken_first_value,
+			xtensa_irq_stats.nested_broken_first_thread);
+	}
+	if (xtensa_irq_stats.nested_bad != seen_bad) {
+		seen_bad = xtensa_irq_stats.nested_bad;
+		LOG_WRN("interrupt entered with nesting count <= 0: %u times so far (first L%u, "
+			"value %d)",
+			seen_bad, xtensa_irq_stats.nested_bad_first_level,
+			(int)xtensa_irq_stats.nested_bad_first_value);
+	}
+#if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
+	static uint32_t seen_clamp[2];
+
+	if (xtensa_nesting_clamps[0] != seen_clamp[0] ||
+	    xtensa_nesting_clamps[1] != seen_clamp[1]) {
+		seen_clamp[0] = xtensa_nesting_clamps[0];
+		seen_clamp[1] = xtensa_nesting_clamps[1];
+		LOG_WRN("ISR nesting guard acted: %u entries started from 0, %u exits floored "
+			"at 0 (the node would otherwise be running interrupts on a thread stack)",
+			seen_clamp[0], seen_clamp[1]);
+	}
+#endif
+#endif
+}
+
 static void heartbeat_work_fn(struct k_work *work)
 {
 	struct sys_memory_stats stats;
@@ -314,6 +354,12 @@ static void heartbeat_work_fn(struct k_work *work)
 			"blocking call will panic this node.",
 			k_uptime_get());
 	}
+
+	/* The live half of the fault breadcrumbs: anything the kernel-side
+	 * nesting guard or the controller-adapter guard has counted since the
+	 * last heartbeat is worth a line NOW, with the node still alive to be
+	 * looked at, not only in `resets` after it has died. */
+	heartbeat_report_guards();
 
 	if (sys_heap_runtime_stats_get(&_system_heap.heap, &stats) == 0) {
 		LOG_INF("Watchdog: system heap free=%zu allocated=%zu max_allocated=%zu",

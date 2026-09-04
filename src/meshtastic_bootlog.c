@@ -66,6 +66,12 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define BOOTLOG_ATTR __noinit
 #endif
 
+#if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
+#include <zephyr/arch/xtensa/fault_breadcrumbs.h>
+#include <zephyr/sw_isr_table.h>
+#include <zephyr/sys/printk.h>
+#endif
+
 #define BOOTLOG_MAGIC   0x424F4F54U /* "BOOT" */
 #define BOOTLOG_ENTRIES CONFIG_MESHTASTIC_BOOTLOG_ENTRIES
 
@@ -76,6 +82,21 @@ static BOOTLOG_ATTR uint32_t bl_count; /* valid entries, saturating at ENTRIES *
 static BOOTLOG_ATTR struct meshtastic_boot_record bl_ring[BOOTLOG_ENTRIES];
 /* Updated while running; read by the NEXT boot, which is the whole point. */
 static BOOTLOG_ATTR uint16_t bl_uptime_s;
+
+#if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
+/* The arch's two records describe the run in progress and are cleared each
+ * boot; these copies live in the same retained region as the ring so the
+ * double-exception record outlives the reboot after the one it explains, and
+ * the interrupt counters always mean "the previous run". */
+static BOOTLOG_ATTR struct xtensa_dblexc_record bl_dblexc;
+static BOOTLOG_ATTR uint32_t bl_dblexc_boot;
+static BOOTLOG_ATTR struct xtensa_irq_stats bl_irq_prev;
+static BOOTLOG_ATTR uint16_t bl_irq_prev_uptime_s;
+static BOOTLOG_ATTR uint32_t bl_irq_prev_magic;
+#if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
+static BOOTLOG_ATTR uint32_t bl_clamps_prev[2];
+#endif
+#endif
 
 /* This boot's record, copied out of retained RAM at init so later reads cannot
  * be confused by the ring having wrapped since. */
@@ -114,6 +135,37 @@ static int bootlog_init(void)
 		warm = false;
 		prev_uptime = 0U;
 	}
+
+#if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
+	/* Before the increment: bl_boot_num is the boot that just ended, which is
+	 * the one any record here belongs to. */
+	if (warm) {
+		if (xtensa_dblexc_record.magic == XTENSA_DBLEXC_MAGIC) {
+			bl_dblexc = xtensa_dblexc_record;
+			bl_dblexc_boot = bl_boot_num;
+		}
+		bl_irq_prev = xtensa_irq_stats;
+		bl_irq_prev_uptime_s = prev_uptime;
+		bl_irq_prev_magic = BOOTLOG_MAGIC;
+#if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
+		bl_clamps_prev[0] = xtensa_nesting_clamps[0];
+		bl_clamps_prev[1] = xtensa_nesting_clamps[1];
+#endif
+	} else {
+		bl_dblexc.magic = 0U;
+		bl_irq_prev_magic = 0U;
+#if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
+		bl_clamps_prev[0] = 0U;
+		bl_clamps_prev[1] = 0U;
+#endif
+	}
+	memset(&xtensa_dblexc_record, 0, sizeof(xtensa_dblexc_record));
+	memset(&xtensa_irq_stats, 0, sizeof(xtensa_irq_stats));
+#if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
+	xtensa_nesting_clamps[0] = 0U;
+	xtensa_nesting_clamps[1] = 0U;
+#endif
+#endif
 
 	bl_boot_num++;
 	bl_uptime_s = 0U;
@@ -514,6 +566,211 @@ void meshtastic_bootlog_test_durable_load(void)
 
 #endif /* CONFIG_MESHTASTIC_BOOTLOG_DURABLE */
 
+/* ---- fault breadcrumbs ---------------------------------------------------- */
+
+static void bootlog_log_line(void *ctx, const char *line)
+{
+	ARG_UNUSED(ctx);
+	LOG_INF("%s", line);
+}
+
+#if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
+bool meshtastic_bootlog_dblexc(struct xtensa_dblexc_record *out, uint32_t *boot_num)
+{
+	if (bl_magic != BOOTLOG_MAGIC || bl_dblexc.magic != XTENSA_DBLEXC_MAGIC) {
+		return false;
+	}
+	if (out != NULL) {
+		*out = bl_dblexc;
+	}
+	if (boot_num != NULL) {
+		*boot_num = bl_dblexc_boot;
+	}
+	return true;
+}
+
+bool meshtastic_bootlog_irq_stats_prev(struct xtensa_irq_stats *out, uint16_t *prev_uptime_s)
+{
+	if (bl_magic != BOOTLOG_MAGIC || bl_irq_prev_magic != BOOTLOG_MAGIC) {
+		return false;
+	}
+	if (out != NULL) {
+		*out = bl_irq_prev;
+	}
+	if (prev_uptime_s != NULL) {
+		*prev_uptime_s = bl_irq_prev_uptime_s;
+	}
+	return true;
+}
+
+#if defined(CONFIG_THREAD_MONITOR)
+struct bl_thread_lookup {
+	const void *target;
+	const char *name;
+};
+
+static void bl_thread_lookup_cb(const struct k_thread *thread, void *user_data)
+{
+	struct bl_thread_lookup *l = user_data;
+
+	if ((const void *)thread == l->target) {
+		l->name = k_thread_name_get((k_tid_t)thread);
+	}
+}
+#endif
+
+/* The pointer is from the previous run; it is only meaningful because the
+ * image, and so every static thread's address, is the same. A dynamic thread
+ * or a different image simply fails to match. */
+static const char *bl_thread_name(uint32_t addr)
+{
+#if defined(CONFIG_THREAD_MONITOR)
+	struct bl_thread_lookup l = { .target = (const void *)(uintptr_t)addr, .name = NULL };
+
+	k_thread_foreach(bl_thread_lookup_cb, &l);
+	if (l.name != NULL && l.name[0] != '\0') {
+		return l.name;
+	}
+#endif
+	return "?";
+}
+
+static const void *bl_isr_of(uint32_t irq)
+{
+	if (irq < (uint32_t)IRQ_TABLE_SIZE) {
+		return (const void *)_sw_isr_table[irq].isr;
+	}
+	return NULL;
+}
+#endif /* CONFIG_XTENSA_FAULT_BREADCRUMBS */
+
+void meshtastic_bootlog_fault_lines(meshtastic_bootlog_line_fn fn, void *ctx)
+{
+#if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
+	struct xtensa_dblexc_record d;
+	struct xtensa_irq_stats st;
+	uint32_t boot;
+	uint16_t ran;
+	char line[160];
+
+	if (fn == NULL) {
+		return;
+	}
+
+	if (meshtastic_bootlog_dblexc(&d, &boot)) {
+		(void)snprintk(line, sizeof(line),
+			       "double exception ended boot #%u: cause %u (%s) at depc 0x%08x, "
+			       "while handling epc1 0x%08x",
+			       boot, d.exccause, xtensa_exccause(d.exccause), d.depc, d.epc1);
+		fn(ctx, line);
+		(void)snprintk(line, sizeof(line),
+			       "  excvaddr 0x%08x  ps 0x%08x  a0 0x%08x  sp 0x%08x  nested %u  "
+			       "excsave1 0x%08x",
+			       d.excvaddr, d.ps, d.a0, d.a1, d.nested, d.excsave1);
+		fn(ctx, line);
+		if (d.ext_valid != 0U) {
+			(void)snprintk(line, sizeof(line), "  thread 0x%08x (%s)", d.current,
+				       bl_thread_name(d.current));
+		} else {
+			(void)snprintk(line, sizeof(line),
+				       "  thread unknown: reading it faulted too, so memory was "
+				       "already corrupt (the recorder kept the registers)");
+		}
+		fn(ctx, line);
+		fn(ctx, "  (no handler runs on that path, so this record is the only trace; "
+			"addr2line both PCs)");
+	}
+
+	if (meshtastic_bootlog_irq_stats_prev(&st, &ran)) {
+		bool any = false;
+
+		for (uint32_t l = 1U; l < XTENSA_IRQ_STATS_LEVELS; l++) {
+			if (st.entries[l] == 0U) {
+				continue;
+			}
+			if (!any) {
+				(void)snprintk(line, sizeof(line),
+					       "interrupts in the previous run (%u s):", ran);
+				fn(ctx, line);
+				any = true;
+			}
+			if (st.dispatched[l] != 0U) {
+				(void)snprintk(line, sizeof(line),
+					       "  L%u: %u entries (~%u/s), %u ISR calls, last irq %u "
+					       "(isr 0x%08x), %u empty entries (last mask 0x%08x)",
+					       l, st.entries[l],
+					       (ran != 0U) ? (st.entries[l] / ran) : st.entries[l],
+					       st.dispatched[l], st.last_irq[l],
+					       (uint32_t)(uintptr_t)bl_isr_of(st.last_irq[l]),
+					       st.undispatched[l], st.last_undispatched_mask[l]);
+			} else {
+				/* Nothing was ever dispatched at this level, so there is no
+				 * "last irq"; every entry found nothing pending+enabled in
+				 * the level's mask. On the ESP32-S3 a flood here at L6 (the
+				 * debug level) is a BREAK instruction re-executing. */
+				(void)snprintk(line, sizeof(line),
+					       "  L%u: %u entries (~%u/s), none dispatched — all "
+					       "empty (last mask 0x%08x)",
+					       l, st.entries[l],
+					       (ran != 0U) ? (st.entries[l] / ran) : st.entries[l],
+					       st.last_undispatched_mask[l]);
+			}
+			fn(ctx, line);
+		}
+		if (st.nested_bad != 0U) {
+			(void)snprintk(line, sizeof(line),
+				       "  ISR NESTING UNDERFLOW: %u entries found nested <= 0; first at "
+				       "L%u with nested %d, thread 0x%08x (%s)",
+				       st.nested_bad, st.nested_bad_first_level,
+				       (int)st.nested_bad_first_value, st.nested_bad_first_thread,
+				       bl_thread_name(st.nested_bad_first_thread));
+			fn(ctx, line);
+			(void)snprintk(line, sizeof(line),
+				       "    last irq per level at that moment: L1 %u (isr 0x%08x)  "
+				       "L3 %u (isr 0x%08x)  L7 %u",
+				       st.nested_bad_first_last_irq[1],
+				       (uint32_t)(uintptr_t)bl_isr_of(st.nested_bad_first_last_irq[1]),
+				       st.nested_bad_first_last_irq[3],
+				       (uint32_t)(uintptr_t)bl_isr_of(st.nested_bad_first_last_irq[3]),
+				       st.nested_bad_first_last_irq[7]);
+			fn(ctx, line);
+		}
+		if (st.nested_broken_by_isr != 0U) {
+			(void)snprintk(line, sizeof(line),
+				       "  ISR CHANGED THE NESTING COUNT: %u times; first at L%u irq %u "
+				       "(isr 0x%08x) left it %d, thread then 0x%08x (%s)",
+				       st.nested_broken_by_isr, st.nested_broken_first_level,
+				       st.nested_broken_first_irq,
+				       (uint32_t)(uintptr_t)bl_isr_of(st.nested_broken_first_irq),
+				       (int)st.nested_broken_first_value, st.nested_broken_first_thread,
+				       bl_thread_name(st.nested_broken_first_thread));
+			fn(ctx, line);
+		}
+#if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
+		if (bl_clamps_prev[0] != 0U || bl_clamps_prev[1] != 0U) {
+			(void)snprintk(line, sizeof(line),
+				       "  nesting guard: %u entries started from 0 (count was "
+				       "negative), %u exits floored at 0",
+				       bl_clamps_prev[0], bl_clamps_prev[1]);
+			fn(ctx, line);
+		}
+#endif
+		if (st.exc_entries != 0U) {
+			(void)snprintk(line, sizeof(line),
+				       "  exceptions: %u (~%u/s), last cause %u (%s) at pc 0x%08x",
+				       st.exc_entries,
+				       (ran != 0U) ? (st.exc_entries / ran) : st.exc_entries,
+				       st.exc_last_cause, xtensa_exccause(st.exc_last_cause),
+				       st.exc_last_pc);
+			fn(ctx, line);
+		}
+	}
+#else
+	ARG_UNUSED(fn);
+	ARG_UNUSED(ctx);
+#endif
+}
+
 void meshtastic_bootlog_report(void)
 {
 	struct meshtastic_boot_record hist[BOOTLOG_ENTRIES];
@@ -549,4 +806,6 @@ void meshtastic_bootlog_report(void)
 				hist[i].prev_uptime_s, hist[i].cause);
 		}
 	}
+
+	meshtastic_bootlog_fault_lines(bootlog_log_line, NULL);
 }

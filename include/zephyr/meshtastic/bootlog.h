@@ -119,4 +119,37 @@ int meshtastic_bootlog_test_durable_save(void);
  *  does, and calling settings_load() instead is what hid that being missing. */
 void meshtastic_bootlog_test_durable_load(void);
 
+#if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
+/*
+ * The faults nothing else can report: a double exception (the vector runs no
+ * handler, so no FATAL, no crashinfo, no coredump -- only the ROM's saved PC)
+ * and an interrupt storm (starves everything until the hardware watchdog).
+ * The arch leaves two records in retained memory; bootlog copies them out at
+ * PRE_KERNEL_1 and keeps the double-exception one until a newer one replaces
+ * it, so it survives the reboot that FOLLOWS the one it explains.
+ */
+struct xtensa_dblexc_record;
+struct xtensa_irq_stats;
+
+/** @return true with @p out and @p boot_num (the boot the fault ended) filled
+ *          if a double-exception record is retained. */
+bool meshtastic_bootlog_dblexc(struct xtensa_dblexc_record *out, uint32_t *boot_num);
+
+/** @return true with the previous run's per-level interrupt counters and how
+ *          long that run lasted (0 = unknown). False on a cold boot. */
+bool meshtastic_bootlog_irq_stats_prev(struct xtensa_irq_stats *out, uint16_t *prev_uptime_s);
+#endif /* CONFIG_XTENSA_FAULT_BREADCRUMBS */
+
+/** One line of report text; @p ctx is whatever the caller passed. */
+typedef void (*meshtastic_bootlog_line_fn)(void *ctx, const char *line);
+
+/**
+ * @brief Emit the fault-breadcrumb report, one line at a time.
+ *
+ * Emits nothing on a build without CONFIG_XTENSA_FAULT_BREADCRUMBS or when
+ * there is nothing retained, so callers need no guard. Shared by the boot-time
+ * log and `meshtastic resets` so the two can never disagree.
+ */
+void meshtastic_bootlog_fault_lines(meshtastic_bootlog_line_fn fn, void *ctx);
+
 #endif /* ZEPHYR_MESHTASTIC_BOOTLOG_H_ */

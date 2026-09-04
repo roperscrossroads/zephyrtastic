@@ -1,0 +1,493 @@
+diff --git a/arch/xtensa/Kconfig b/arch/xtensa/Kconfig
+index 95d983daad..1026eb4bc8 100644
+--- a/arch/xtensa/Kconfig
++++ b/arch/xtensa/Kconfig
+@@ -36,6 +36,40 @@ config XTENSA_ENABLE_BACKTRACE
+ 	help
+ 	  Enable this config option to print backtrace on panic exception
+ 
++config XTENSA_ISR_NESTING_GUARD
++	bool "Tolerate an unbalanced ISR nesting count"
++	help
++	  The interrupt entry path switches to the interrupt stack only when the
++	  per-CPU nesting count goes from 0 to 1, and the exit path decrements it
++	  without a floor. Anything that unbalances the count -- a context switch
++	  performed from inside an ISR by foreign code, a stray write -- then
++	  makes every later interrupt run on the interrupted thread's stack, and
++	  the machine dies some time later in a way that names nothing. With this
++	  option the entry path treats any count below 1 as "not nested" (switch
++	  stacks, start from 0) and the exit path never goes below 0; both cases
++	  are counted in xtensa_nesting_clamps[] (entry, exit), retained across a
++	  warm reset like the fault breadcrumbs. This does not repair whatever
++	  unbalanced the count; it stops the consequence and reports the event.
++
++config XTENSA_FAULT_BREADCRUMBS
++	bool "Retain fault breadcrumbs across a warm reset"
++	help
++	  Two records that survive a warm reset, for the faults nothing else can
++	  report. (1) At a double exception -- an exception raised while PS.EXCM
++	  was already set, i.e. inside exception or interrupt entry/exit -- the
++	  vector runs no handler at all: it spins until a watchdog resets the
++	  part, and the console shows nothing. With this option the vector first
++	  stores EXCCAUSE, EPC1, DEPC, EXCVADDR, PS, a0, a1, the current thread,
++	  the ISR nesting count and EXCSAVE1 into xtensa_dblexc_record. (2) The
++	  interrupt C handlers count entries, dispatches and undispatched entries
++	  per level and keep the last IRQ dispatched per level in
++	  xtensa_irq_stats, so an interrupt storm that starves the system until
++	  the watchdog names its level and source afterwards. Both live in
++	  .rtc_noinit on Espressif SoCs and in .noinit elsewhere; the application
++	  is expected to copy and clear them early in the next boot (see
++	  <zephyr/arch/xtensa/fault_breadcrumbs.h>). Cost: a few loads and stores
++	  per interrupt.
++
+ config XTENSA_SMALL_VECTOR_TABLE_ENTRY
+ 	bool "Workaround for small vector table entries"
+ 	help
+diff --git a/arch/xtensa/core/vector_handlers.c b/arch/xtensa/core/vector_handlers.c
+index 3db48a2bdc..6d71c2e043 100644
+--- a/arch/xtensa/core/vector_handlers.c
++++ b/arch/xtensa/core/vector_handlers.c
+@@ -22,6 +22,34 @@
+ 
+ LOG_MODULE_DECLARE(os, CONFIG_KERNEL_LOG_LEVEL);
+ 
++#ifdef CONFIG_XTENSA_FAULT_BREADCRUMBS
++#include <zephyr/arch/xtensa/fault_breadcrumbs.h>
++
++/* Retained across a warm reset: RTC memory on Espressif parts (ordinary RAM
++ * there is reused by the ROM/bootloader before the application runs), .noinit
++ * elsewhere. Never initialised here -- the next boot reads them.
++ */
++#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
++#define XTENSA_BREADCRUMB_ATTR Z_GENERIC_SECTION(.rtc_noinit)
++#else
++#define XTENSA_BREADCRUMB_ATTR __noinit
++#endif
++
++struct xtensa_dblexc_record xtensa_dblexc_record XTENSA_BREADCRUMB_ATTR;
++struct xtensa_irq_stats xtensa_irq_stats XTENSA_BREADCRUMB_ATTR;
++#endif /* CONFIG_XTENSA_FAULT_BREADCRUMBS */
++
++#ifdef CONFIG_XTENSA_ISR_NESTING_GUARD
++#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
++#define XTENSA_GUARD_ATTR Z_GENERIC_SECTION(.rtc_noinit)
++#else
++#define XTENSA_GUARD_ATTR __noinit
++#endif
++/* [0] entry saw nested < 0 and started from 0; [1] exit would have gone below
++ * 0 and was floored. Written from the assembly trampoline by fixed offset. */
++uint32_t xtensa_nesting_clamps[2] XTENSA_GUARD_ATTR;
++#endif /* CONFIG_XTENSA_ISR_NESTING_GUARD */
++
+ extern char xtensa_arch_except_epc[];
+ extern char xtensa_arch_kernel_oops_epc[];
+ 
+@@ -458,6 +486,30 @@ __unused static void xtensa_handle_irq_lvl(int irq_lvl)
+ 	int irq;
+ 	uint32_t irq_mask;
+ 	uint32_t intenable;
++#ifdef CONFIG_XTENSA_FAULT_BREADCRUMBS
++	uint32_t dispatched = 0U;
++
++	BUILD_ASSERT(MAX_INTR_LEVEL < XTENSA_IRQ_STATS_LEVELS);
++	xtensa_irq_stats.entries[irq_lvl]++;
++	if (_current_cpu->nested <= 0) {
++		if (xtensa_irq_stats.nested_bad++ == 0U) {
++			xtensa_irq_stats.nested_bad_first_level = (uint32_t)irq_lvl;
++			xtensa_irq_stats.nested_bad_first_value = (uint32_t)_current_cpu->nested;
++			xtensa_irq_stats.nested_bad_first_thread = (uint32_t)(uintptr_t)_current;
++			for (int i = 0; i < XTENSA_IRQ_STATS_LEVELS; i++) {
++				xtensa_irq_stats.nested_bad_first_last_irq[i] =
++					xtensa_irq_stats.last_irq[i];
++			}
++		}
++	}
++#define XTENSA_IRQ_STATS_DISPATCH(n)                                                               \
++	do {                                                                                       \
++		xtensa_irq_stats.last_irq[irq_lvl] = (n);                                          \
++		dispatched++;                                                                      \
++	} while (0)
++#else
++#define XTENSA_IRQ_STATS_DISPATCH(n) do { } while (0)
++#endif
+ #if XCHAL_NUM_INTERRUPTS > 0
+ 	__asm__ volatile("rsr.interrupt %0" : "=r"(irq_mask));
+ 	__asm__ volatile("rsr.intenable %0" : "=r"(intenable));
+@@ -465,6 +517,7 @@ __unused static void xtensa_handle_irq_lvl(int irq_lvl)
+ 	irq_mask &= xtensa_lvl_mask[irq_lvl - 1][0];
+ 	while (irq_mask) {
+ 		irq = __builtin_ctz(irq_mask);
++		XTENSA_IRQ_STATS_DISPATCH(irq);
+ 		_sw_isr_table[irq].isr(_sw_isr_table[irq].arg);
+ 		__asm__ volatile("wsr.intclear %0" : : "r"(BIT(irq)));
+ 		irq_mask ^= BIT(irq);
+@@ -477,6 +530,7 @@ __unused static void xtensa_handle_irq_lvl(int irq_lvl)
+ 	irq_mask &= xtensa_lvl_mask[irq_lvl - 1][1];
+ 	while (irq_mask) {
+ 		irq = __builtin_ctz(irq_mask);
++		XTENSA_IRQ_STATS_DISPATCH(irq + 32);
+ 		_sw_isr_table[irq + 32].isr(_sw_isr_table[irq + 32].arg);
+ 		__asm__ volatile("wsr.intclear1 %0" : : "r"(BIT(irq)));
+ 		irq_mask ^= BIT(irq);
+@@ -490,6 +544,7 @@ __unused static void xtensa_handle_irq_lvl(int irq_lvl)
+ 	irq_mask &= xtensa_lvl_mask[irq_lvl - 1][2];
+ 	while (irq_mask) {
+ 		irq = __builtin_ctz(irq_mask);
++		XTENSA_IRQ_STATS_DISPATCH(irq + 64);
+ 		_sw_isr_table[irq + 64].isr(_sw_isr_table[irq + 64].arg);
+ 		__asm__ volatile("wsr.intclear2 %0" : : "r"(BIT(irq)));
+ 		irq_mask ^= BIT(irq);
+@@ -503,11 +558,37 @@ __unused static void xtensa_handle_irq_lvl(int irq_lvl)
+ 
+ 	while (irq_mask) {
+ 		irq = __builtin_ctz(irq_mask);
++		XTENSA_IRQ_STATS_DISPATCH(irq + 96);
+ 		_sw_isr_table[irq + 96].isr(_sw_isr_table[irq + 96].arg);
+ 		__asm__ volatile("wsr.intclear3 %0" : : "r"(BIT(irq)));
+ 		irq_mask ^= BIT(irq);
+ 	}
+ #endif
++#ifdef CONFIG_XTENSA_FAULT_BREADCRUMBS
++	/* The ISR bodies have run. The nesting count must still be what the
++	 * entry path made it (>= 1). If it is not, one of them changed it --
++	 * the direct signature of a context switch performed from inside an
++	 * interrupt handler. Keep the first occurrence with its context. */
++	if (_current_cpu->nested < 1) {
++		if (xtensa_irq_stats.nested_broken_by_isr++ == 0U) {
++			xtensa_irq_stats.nested_broken_first_level = (uint32_t)irq_lvl;
++			xtensa_irq_stats.nested_broken_first_irq = xtensa_irq_stats.last_irq[irq_lvl];
++			xtensa_irq_stats.nested_broken_first_value = (uint32_t)_current_cpu->nested;
++			xtensa_irq_stats.nested_broken_first_thread = (uint32_t)(uintptr_t)_current;
++		}
++	}
++	if (dispatched == 0U) {
++		uint32_t pending, enabled;
++
++		__asm__ volatile("rsr.interrupt %0" : "=r"(pending));
++		__asm__ volatile("rsr.intenable %0" : "=r"(enabled));
++		xtensa_irq_stats.undispatched[irq_lvl]++;
++		xtensa_irq_stats.last_undispatched_mask[irq_lvl] = pending & enabled;
++	} else {
++		xtensa_irq_stats.dispatched[irq_lvl] += dispatched;
++	}
++#endif
++#undef XTENSA_IRQ_STATS_DISPATCH
+ }
+ 
+ #define DEF_INT_C_HANDLER(l)                                                                       \
+@@ -546,6 +627,14 @@ DEF_INT_C_HANDLER(7)
+ #if XCHAL_HAVE_NMI
+ __unused void *xtensa_nmi_c(void *interrupted_stack)
+ {
++#ifdef CONFIG_XTENSA_FAULT_BREADCRUMBS
++	/* The NMI does not go through xtensa_handle_irq_lvl(), so it is
++	 * counted here, under its own level, or an NMI storm would be the one
++	 * kind the counters could not see. */
++	xtensa_irq_stats.entries[XCHAL_NMILEVEL]++;
++	xtensa_irq_stats.dispatched[XCHAL_NMILEVEL]++;
++	xtensa_irq_stats.last_irq[XCHAL_NMILEVEL] = XCHAL_NMI_INTERRUPT;
++#endif
+ 	usage_stop();
+ 	_sw_isr_table[XCHAL_NMI_INTERRUPT].isr(
+ 		_sw_isr_table[XCHAL_NMI_INTERRUPT].arg);
+@@ -579,6 +668,14 @@ void *xtensa_excint1_c(void *esf)
+ 
+ 	cause = bsa->exccause;
+ 
++#ifdef CONFIG_XTENSA_FAULT_BREADCRUMBS
++	if (cause != EXCCAUSE_LEVEL1_INTERRUPT) {
++		xtensa_irq_stats.exc_entries++;
++		xtensa_irq_stats.exc_last_cause = (uint32_t)cause;
++		xtensa_irq_stats.exc_last_pc = (uint32_t)bsa->pc;
++	}
++#endif
++
+ 	switch (cause) {
+ 	case EXCCAUSE_LEVEL1_INTERRUPT:
+ #ifdef CONFIG_XTENSA_MMU
+diff --git a/arch/xtensa/core/xtensa_asm2_util.S b/arch/xtensa/core/xtensa_asm2_util.S
+index 69504bfdf2..7417938aa4 100644
+--- a/arch/xtensa/core/xtensa_asm2_util.S
++++ b/arch/xtensa/core/xtensa_asm2_util.S
+@@ -587,6 +587,14 @@ _DoubleExceptionVector:
+ _TripleFault:
+ #endif /* CONFIG_XTENSA_MMU */
+ 
++#ifdef CONFIG_XTENSA_FAULT_BREADCRUMBS
++	/* Nothing below ever returns, so record what the CPU can still say
++	 * before spinning. The helper lives in .iram0.text because this vector
++	 * slot is too small for the stores and has nowhere to put literals.
++	 */
++	j _xtensa_dblexc_breadcrumb
++#endif
++
+ #if XCHAL_HAVE_DEBUG && defined(CONFIG_XTENSA_BREAK_ON_UNRECOVERABLE_EXCEPTIONS)
+ 	/* Signals an unhandled double exception, and unrecoverable exceptions.
+ 	 * Definitely needs debugger to be attached to the hardware or simulator
+@@ -606,6 +614,68 @@ _TripleFault:
+ 1:
+ 	j	1b
+ 
++#ifdef CONFIG_XTENSA_FAULT_BREADCRUMBS
++.popsection
++.pushsection .iram0.text, "ax"
++.global _xtensa_dblexc_breadcrumb
++.align 4
++_xtensa_dblexc_breadcrumb:
++	/* The system is unrecoverable: no handler runs from here and no register
++	 * will be needed again, so every AR is scratch. Store by fixed offset --
++	 * see struct xtensa_dblexc_record.
++	 *
++	 * Order matters. A double exception can arrive with memory already
++	 * corrupt, and anything this code loads through a pointer can fault,
++	 * which raises ANOTHER double exception and lands back at the vector.
++	 * So: if the magic is already set we are that second fault -- keep the
++	 * first record and spin. Otherwise store the special registers (which
++	 * cannot fault), write the magic, and only then attempt the two loads
++	 * through the CPU struct, flagging them separately if they succeed.
++	 */
++	movi a2, xtensa_dblexc_record
++	movi a4, 0x44424c58
++	l32i a3, a2, 0
++	beq a3, a4, 1f
++	rsr.exccause a3
++	s32i a3, a2, 4
++	rsr.epc1 a3
++	s32i a3, a2, 8
++	rsr.depc a3
++	s32i a3, a2, 12
++	rsr.excvaddr a3
++	s32i a3, a2, 16
++	rsr.ps a3
++	s32i a3, a2, 20
++	s32i a0, a2, 24
++	s32i a1, a2, 28
++	rsr.excsave1 a3
++	s32i a3, a2, 40
++	movi a3, 0
++	s32i a3, a2, 44
++	s32i a4, a2, 0
++	memw
++	rsr.ZSR_CPU a3
++	l32i a4, a3, ___cpu_t_current_OFFSET
++	s32i a4, a2, 32
++	l32i a4, a3, ___cpu_t_nested_OFFSET
++	s32i a4, a2, 36
++	movi a3, 1
++	s32i a3, a2, 44
++	memw
++1:
++	/* No BREAK here, deliberately. Without a debugger attached, a BREAK
++	 * executed at an interrupt level below DEBUGLEVEL raises a debug
++	 * exception that returns to the BREAK itself -- a ~360 kHz loop through
++	 * the debug vector (measured: 10.7 M empty level-6 entries in one 30 s
++	 * hang) that runs the debug handler on whatever stack the fault left
++	 * and drowns the interrupt counters this option exists to keep. The
++	 * record is written; the watchdog does the rest.
++	 */
++	j	1b
++.popsection
++.pushsection .DoubleExceptionVector.text, "ax"
++#endif /* CONFIG_XTENSA_FAULT_BREADCRUMBS */
++
+ #ifdef CONFIG_XTENSA_MMU
+ _handle_tlb_miss_dblexc:
+ 	/* Handle all data TLB misses here.
+diff --git a/arch/xtensa/include/xtensa_asm2.inc.S b/arch/xtensa/include/xtensa_asm2.inc.S
+index f2672472be..c715d71cdc 100644
+--- a/arch/xtensa/include/xtensa_asm2.inc.S
++++ b/arch/xtensa/include/xtensa_asm2.inc.S
+@@ -549,7 +549,15 @@ _not_l1:
+ 	 */
+ 	rsr.ZSR_CPU a3
+ 	l32i a0, a3, \NEST_OFF
++#ifdef CONFIG_XTENSA_ISR_NESTING_GUARD
++	/* Any count below 1 means "not nested", whatever it says: a negative
++	 * count is an underflow left by an unbalanced exit, and honouring it
++	 * would keep every interrupt on the interrupted thread's stack. A4/A5
++	 * are free here: xtensa_save_high_regs has just spilled them. */
++	blti a0, 1, _switch_stacks_\@
++#else
+ 	beqz a0, _switch_stacks_\@
++#endif
+ 
+ 	/* Use the same stack, just copy A1 to A3 after incrementing NEST */
+ 	addi a0, a0, 1
+@@ -558,6 +566,15 @@ _not_l1:
+ 	j _do_call_\@
+ 
+ _switch_stacks_\@:
++#ifdef CONFIG_XTENSA_ISR_NESTING_GUARD
++	bgez a0, _nest_from_zero_\@
++	movi a4, xtensa_nesting_clamps
++	l32i a5, a4, 0
++	addi a5, a5, 1
++	s32i a5, a4, 0
++	movi a0, 0
++_nest_from_zero_\@:
++#endif
+ 	addi a0, a0, 1
+ 	s32i a0, a3, \NEST_OFF
+ 	l32i a3, a3, \INTSTACK_OFF
+@@ -575,6 +592,17 @@ _do_call_\@:
+ 	rsr.ZSR_CPU a3
+ 	l32i a0, a3, \NEST_OFF
+ 	addi a0, a0, -1
++#ifdef CONFIG_XTENSA_ISR_NESTING_GUARD
++	/* Never below 0: an exit without a matching entry is counted and
++	 * floored, not propagated. A4/A5 are restored from the frame later. */
++	bgez a0, _nest_floored_\@
++	movi a4, xtensa_nesting_clamps
++	l32i a5, a4, 4
++	addi a5, a5, 1
++	s32i a5, a4, 4
++	movi a0, 0
++_nest_floored_\@:
++#endif
+ 	s32i a0, a3, \NEST_OFF
+ 
+ 	/* Last trick: the called function returned the "next" handle
+diff --git a/include/zephyr/arch/xtensa/fault_breadcrumbs.h b/include/zephyr/arch/xtensa/fault_breadcrumbs.h
+new file mode 100644
+index 0000000000..9cae19a985
+--- /dev/null
++++ b/include/zephyr/arch/xtensa/fault_breadcrumbs.h
+@@ -0,0 +1,138 @@
++/*
++ * Copyright (c) 2026 Adam Roper
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief Fault breadcrumbs that survive a warm reset (CONFIG_XTENSA_FAULT_BREADCRUMBS)
++ *
++ * Neither record is cleared by the architecture: they are written by the
++ * double-exception vector and the interrupt C handlers and left for the next
++ * boot to read. An application that wants "the previous run" semantics copies
++ * them out early (before interrupts matter) and clears them; on a cold boot the
++ * contents are undefined, so xtensa_dblexc_record.magic is the only validity
++ * signal for that record and the application must decide for xtensa_irq_stats
++ * (typically from its own retained-RAM marker).
++ */
++
++#ifndef ZEPHYR_INCLUDE_ARCH_XTENSA_FAULT_BREADCRUMBS_H_
++#define ZEPHYR_INCLUDE_ARCH_XTENSA_FAULT_BREADCRUMBS_H_
++
++#ifndef _ASMLANGUAGE
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/** Written LAST by the vector, so a torn record is never trusted. "DBLX". */
++#define XTENSA_DBLEXC_MAGIC 0x44424c58U
++
++/**
++ * What the CPU could still say at a double exception.
++ *
++ * Offsets are load-bearing: the vector code stores by fixed offset. Keep the
++ * field order and sizes in step with _xtensa_dblexc_breadcrumb in
++ * xtensa_asm2_util.S.
++ */
++struct xtensa_dblexc_record {
++	uint32_t magic;    /**< XTENSA_DBLEXC_MAGIC once the rest is valid */
++	uint32_t exccause; /**< cause of the SECOND exception (the one the handler raised) */
++	uint32_t epc1;     /**< PC of the FIRST exception, the one being handled */
++	uint32_t depc;     /**< PC of the second exception, inside the handler */
++	uint32_t excvaddr; /**< faulting address, when the cause has one */
++	uint32_t ps;       /**< PS at the double exception */
++	uint32_t a0;       /**< a0 on entry to the vector */
++	uint32_t a1;       /**< a1 (stack pointer) on entry to the vector */
++	uint32_t current;  /**< struct k_thread * that was _current (valid only with ext_valid) */
++	uint32_t nested;   /**< _cpu.nested, the ISR nesting count (valid only with ext_valid) */
++	uint32_t excsave1; /**< EXCSAVE1, whatever the level-1 path had stashed */
++	/**
++	 * Non-zero once current/nested were read. Everything above them comes
++	 * from special registers and cannot fault; those two are loads through
++	 * the CPU struct pointer, which CAN fault when the machine is already
++	 * corrupt (a runaway recursion that walked through _kernel, say). The
++	 * recorder writes the magic before attempting them, and a second double
++	 * exception raised inside the recorder finds the magic set and spins
++	 * without touching the record, so a fault there costs these two fields,
++	 * not the record.
++	 */
++	uint32_t ext_valid;
++};
++
++/** Index = interrupt level (1..XCHAL_NUM_INTLEVELS); slot 0 is unused. */
++#define XTENSA_IRQ_STATS_LEVELS 8
++
++/**
++ * Per-level interrupt accounting, cumulative since it was last cleared.
++ *
++ * An entry that dispatches nothing means the level's vector fired but no
++ * pending+enabled interrupt in that level's mask was found -- the shape of a
++ * storm from a source the C dispatcher does not own. The raw group-0
++ * INTERRUPT & INTENABLE mask seen at the last such entry is kept for that
++ * case.
++ */
++struct xtensa_irq_stats {
++	uint32_t entries[XTENSA_IRQ_STATS_LEVELS];
++	uint32_t dispatched[XTENSA_IRQ_STATS_LEVELS];
++	uint32_t undispatched[XTENSA_IRQ_STATS_LEVELS];
++	uint32_t last_irq[XTENSA_IRQ_STATS_LEVELS];
++	uint32_t last_undispatched_mask[XTENSA_IRQ_STATS_LEVELS];
++	/**
++	 * Level-1 entries that were exceptions rather than interrupts, with the
++	 * last cause and PC. Some causes return silently (a coprocessor-disabled
++	 * trap, a syscall), so a storm of them is invisible to the counters
++	 * above; a fatal one prints, but only if the fatal path still works.
++	 */
++	uint32_t exc_entries;
++	uint32_t exc_last_cause;
++	uint32_t exc_last_pc;
++	/**
++	 * Interrupt C-handler entries that found _cpu.nested <= 0. Inside an
++	 * ISR it must be >= 1; anything else means the exit path ran once more
++	 * than the entry path (an underflow), after which every later interrupt
++	 * skips the switch to the interrupt stack and runs on the interrupted
++	 * thread's stack. The first occurrence is kept: the level and the
++	 * nested value seen, the thread that was current, and the last IRQ
++	 * dispatched per level at that moment (the culprit exited just before).
++	 */
++	uint32_t nested_bad;
++	uint32_t nested_bad_first_level;
++	uint32_t nested_bad_first_value;
++	uint32_t nested_bad_first_thread;
++	uint32_t nested_bad_first_last_irq[XTENSA_IRQ_STATS_LEVELS];
++	/**
++	 * Interrupt C-handler EXITS that found _cpu.nested < 1 after the ISR
++	 * bodies ran: an ISR changed the count, i.e. something switched context
++	 * from inside an interrupt handler. First occurrence kept with the level,
++	 * the IRQ last dispatched at that level (the ISR that did it), the value
++	 * seen and the thread that was current afterwards.
++	 */
++	uint32_t nested_broken_by_isr;
++	uint32_t nested_broken_first_level;
++	uint32_t nested_broken_first_irq;
++	uint32_t nested_broken_first_value;
++	uint32_t nested_broken_first_thread;
++};
++
++#ifdef CONFIG_XTENSA_ISR_NESTING_GUARD
++/** [0] entries that found nested < 0 (started from 0), [1] exits floored at 0. */
++extern uint32_t xtensa_nesting_clamps[2];
++#endif
++
++extern struct xtensa_dblexc_record xtensa_dblexc_record;
++extern struct xtensa_irq_stats xtensa_irq_stats;
++
++/** @brief EXCCAUSE code to a short name (arch/xtensa/core/fatal.c). */
++char *xtensa_exccause(unsigned int cause_code);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _ASMLANGUAGE */
++
++#endif /* ZEPHYR_INCLUDE_ARCH_XTENSA_FAULT_BREADCRUMBS_H_ */

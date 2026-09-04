@@ -463,6 +463,34 @@ native_sim.
 never had it; the code is chip-generic. **Upstreamable as-is.** Found while
 instrumenting the class-B hang (tooling `RF-PARITY-PLAN.md` §8.16).
 
+### 0017-xtensa-fault-breadcrumbs-double-exception-record-and-irq-stats.patch
+
+`arch/xtensa/Kconfig`, `arch/xtensa/core/{vector_handlers.c,xtensa_asm2_util.S}`,
+new `include/zephyr/arch/xtensa/fault_breadcrumbs.h`. `CONFIG_XTENSA_FAULT_BREADCRUMBS`:
+the double-exception vector records EXCCAUSE/EPC1/DEPC/EXCVADDR/PS/a0/a1/
+`_current`/nesting into RTC memory before it spins, and the interrupt C
+handlers keep per-level entry/dispatch counters with the last IRQ per level.
+The app (`meshtastic_bootlog.c`) copies both at PRE_KERNEL_1 and prints them in
+`meshtastic resets` and the boot log. Enabled by each ESP32 board's
+`Kconfig.defconfig`. **Upstreamable as a feature** (default n, no behaviour
+change when off). Motivation and evidence: bead `agents-xhli.24`.
+
+The recorder's order is load-bearing and was wrong once: the first cut read
+`_current` through the CPU-struct pointer *before* writing the magic, and
+`crashtest stack` (a recursion that walks through whatever lies below the
+thread's stack) proved that load can fault inside the recorder — a second
+double exception, back to the vector, forever, magic never written (the ROM's
+Saved PC sat on the vector's first instruction). Now: special registers first,
+magic, *then* the two loads under a separate `ext_valid` flag, and a re-entry
+with the magic already set goes straight to the spin. `meshtastic crashtest
+dblexc` raises a clean double exception to prove the path (proven on rzr4,
+2026-09-03: cause 28, depc in `cmd_crashtest`, thread `shell_uart`). `stack` is
+no test of the recorder at all: on the S3, `_data_start` is the DRAM alias of
+`_iram_end`, so the recursion overwrites the IRAM code below the data — the
+recorder included — before it faults. Also no BREAK after recording: without a
+debugger it raises a debug exception that returns to itself (10.7 M empty
+level-6 entries in one 30 s hang), drowning the counters.
+
 ### 0018-hal-espressif-esp32s3-window-spill-for-xtensa-backtrace.patch
 
 **First patch on a module other than `zephyr/`** (`module: hal_espressif`, path
@@ -471,3 +499,7 @@ instrumenting the class-B hang (tooling `RF-PARITY-PLAN.md` §8.16).
 0016's backtrace helper links. Without it the S3 link fails on
 `xthal_window_spill`. **Upstreamable with 0016.**
 
+**Adding to the arch/xtensa files later:** both patches touch
+`arch/xtensa/Kconfig`; a new change there must be diffed against the tree
+*with 0016+0017 applied* (the README's layering rule above), i.e. stage the
+applied state first and `git diff` against the index.
