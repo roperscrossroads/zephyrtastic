@@ -669,3 +669,42 @@ patches:
       Counters in struct esp_bt_osi_stats (esp_bt.h), for the application
       to report. None of this changes behaviour on a well-behaved blob.
 
+
+  - path: 0020-sx126x-per-opcode-busy-timeout-count-so-recovery-can-fire.patch
+    sha256sum: 4db3a7d5a4583ca20100f68973e87c7de2bc3ace51f994a28601c27476da6ab6
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-04"
+    upstreamable: true
+    comments: |
+      The driver's wedged-radio recovery could not fire for the failure it
+      exists to recover from.
+
+      sx126x_lora_config() resets the chip when the BUSY-timeout streak
+      reaches SX126X_BUSY_RECOVERY_THRESHOLD (patch 0004), on the reasoning
+      that "the app re-runs lora_config on every TX, so a wedge clears within
+      a TX cycle". The count was strictly CONSECUTIVE and cleared on ANY
+      successful wait, across ALL opcodes -- and a chip wedged on ONE command
+      still answers the others.
+
+      Bench, 2026-09-04, two Heltec V4-R8 boards: SET_TX stopped clearing BUSY
+      while every other command still completed. The pre-waits, CAD,
+      WRITE_REGISTER and GET_IRQ_STATUS all succeeded between the failures and
+      each reset the streak, so it never reached 4. One board reported
+      `SPI BUSY streak 0` while 2514 transmits had failed and `tx ok` had not
+      moved for hours; lora_config ran thousands of times over that period
+      (config generation 6497) and the recovery check saw zero every time. A
+      controlled 5.5-minute window with the console detached and nothing
+      touching the port: 26 transmits attempted, 26 failed.
+
+      Now each opcode carries its own count, and only a success on the SAME
+      opcode clears it. A success elsewhere no longer erases the evidence of a
+      per-command wedge. The reported streak is the worst opcode's count, so
+      sx126x_hal_busy_timeout_streak() keeps meaning "how stuck is this radio"
+      for its existing callers and for `meshtastic rf`'s SPI BUSY streak row.
+      Eight tracked opcodes, static, no allocation.
+
+      This does not address WHAT wedges SET_TX after a SET_SLEEP on those
+      boards (bead agents-3raz) -- only that the radio must be able to recover
+      from it rather than transmitting nothing for eleven hours.

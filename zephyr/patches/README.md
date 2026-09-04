@@ -516,3 +516,34 @@ kernel-side ones. **Upstreamable** (the yield fix on its own is a one-liner).
 `arch/xtensa/Kconfig`; a new change there must be diffed against the tree
 *with 0016+0017 applied* (the README's layering rule above), i.e. stage the
 applied state first and `git diff` against the index.
+
+### 0020-sx126x-per-opcode-busy-timeout-count-so-recovery-can-fire.patch
+
+Makes the BUSY-timeout count **per opcode** instead of a strictly consecutive
+count shared by every command.
+
+**Why:** the wedged-radio recovery added by 0004 could not fire for the failure
+it exists to recover from. `sx126x_lora_config()` resets the chip once the
+streak reaches `SX126X_BUSY_RECOVERY_THRESHOLD` (4), reasoning that the app
+re-runs `lora_config` on every TX so a wedge clears within a TX cycle. But the
+streak was cleared by **any** successful wait on **any** opcode — and a chip
+wedged on one command still answers the others.
+
+Bench, 2026-09-04, both Heltec V4-R8 boards: `SET_TX` stopped clearing BUSY
+(`op=0x83 post, prev=0x84`, 448 times across the two) while pre-waits, CAD,
+`WRITE_REGISTER` and `GET_IRQ_STATUS` all still completed. Each of those reset
+the streak, so it never reached 4. One board sat at **`SPI BUSY streak 0` with
+2514 failed transmits** and `tx ok` frozen for hours, while `lora_config` ran
+thousands of times (generation 6497) and the recovery check saw zero every
+single time. A controlled window with the console detached and nothing touching
+the port: 26 transmits attempted, 26 failed.
+
+Only a success on the **same** opcode now clears that opcode's count, so a
+success elsewhere cannot erase the evidence of a per-command wedge. The value
+reported by `sx126x_hal_busy_timeout_streak()` is the worst opcode's count, so
+its existing callers — and `meshtastic rf`'s `SPI BUSY streak` row — keep
+meaning "how stuck is this radio". Eight tracked opcodes, static, no allocation.
+
+This is the *recovery*, not the cause: what wedges `SET_TX` after a `SET_SLEEP`
+on the R8 boards is still open (bead `agents-3raz`). Upstreamable — the
+predicate is wrong for any per-command wedge, not just this one.

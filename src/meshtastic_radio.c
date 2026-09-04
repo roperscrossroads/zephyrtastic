@@ -275,12 +275,38 @@ void meshtastic_radio_tx_defer_requeued(void)
 	mt_tx_defer.requeued++;
 }
 
-void meshtastic_radio_tx_dropped_busy(void)
+/*
+ * A deferred frame can be abandoned for two unrelated reasons, and they used to share
+ * one counter AND one log line that named only the first (agents-q0c6):
+ *
+ *   - the defer cap: the channel never went quiet across CONFIG_MESHTASTIC_TX_DEFER_MAX
+ *     attempts. An RF condition.
+ *   - the outbound queue was full when the frame came back to be re-inserted. Nothing to
+ *     do with the channel, and the LIKELIER of the two under a burst: the queue holds
+ *     CONFIG_MESHTASTIC_OUTBOUND_QUEUE_MAX (16 by default) against a cap of 32, so it is
+ *     the smaller limit and fills first.
+ *
+ * Reporting the second as the first sends the reader to look at CAD and the RF
+ * environment for what is actually queue depth.
+ */
+static void mt_tx_dropped(int reason_ret, const char *why)
 {
 	mt_tx_defer.dropped++;
 	mt.status.tx_failures++;
-	LOG_WRN("TX dropped: channel never quiet across %u defers", CONFIG_MESHTASTIC_TX_DEFER_MAX);
-	meshtastic_emit_event(MESHTASTIC_EVENT_TX_FAILED, -EBUSY, NULL);
+	LOG_WRN("TX dropped: %s", why);
+	meshtastic_emit_event(MESHTASTIC_EVENT_TX_FAILED, reason_ret, NULL);
+}
+
+void meshtastic_radio_tx_dropped_busy(void)
+{
+	mt_tx_defer.dropped_cap++;
+	mt_tx_dropped(-EBUSY, "channel never quiet across the defer cap");
+}
+
+void meshtastic_radio_tx_dropped_queue_full(void)
+{
+	mt_tx_defer.dropped_qfull++;
+	mt_tx_dropped(-ENOBUFS, "outbound queue full when the deferred frame came back");
 }
 
 /*
@@ -362,6 +388,23 @@ int meshtastic_radio_tune_explicit(uint32_t frequency_hz, uint8_t spread_factor,
 	return meshtastic_radio_retune();
 }
 
+#if defined(CONFIG_LORA_SX126X)
+/* RX gain boost override (G-2) — data->rx_boosted, not the devicetree default,
+ * is what sx126x_lora_config() applies on every call, so this survives every
+ * subsequent TX/RX reconfigure rather than being clobbered back. Called once
+ * at boot from meshtastic_radio_init() AND from meshtastic_radio_retune(), so a
+ * live LoRaConfig change carries it too.
+ *
+ * That second call site was missing until 2026-09-04. This comment used to end
+ * "a LoRaConfig change already requires a reboot to take effect (F-1), so there
+ * is no live-apply path to wire" -- true when written, and false from the moment
+ * F-1 was fixed and config writes began retuning the radio live. The premise was
+ * removed and the comment was not revisited, so the one field that needed wiring
+ * never got it (agents-znit). Worth remembering as a shape: a comment asserting
+ * why something is unnecessary outlives the reason and becomes the defect. */
+extern int sx126x_set_rx_boosted_gain(const struct device *dev, bool boosted);
+#endif
+
 int meshtastic_radio_retune(void)
 {
 	int ret;
@@ -382,6 +425,15 @@ int meshtastic_radio_retune(void)
 	mt_lora_cfg.tx = false;
 	mt_lora_cfg.cad.mode = LORA_CAD_MODE_NONE;
 	mt_lora_cfg.cad.symbol_num = 0;
+#if defined(CONFIG_LORA_SX126X)
+	/* Re-stage the RX gain override before every config push, not just the one at
+	 * boot. The driver only STAGES this value; it reaches the chip on the next
+	 * lora_config(), which is the call immediately below. Without this a
+	 * LoRaConfig write applied its frequency/SF/BW half live while leaving the
+	 * chip on the boot-time gain -- an asymmetric apply that left the radio 2-3 dB
+	 * deaf while every stored value read correct (agents-znit). */
+	(void)sx126x_set_rx_boosted_gain(mt.lora_dev, mt.rx_boosted_gain);
+#endif
 	ret = lora_config(mt.lora_dev, &mt_lora_cfg);
 	mt_record_effective(false, ret);
 	k_mutex_unlock(&mt.lock);
@@ -783,12 +835,6 @@ static const struct gpio_dt_spec mt_dio1 = GPIO_DT_SPEC_GET(DT_NODELABEL(lora0),
  * Takes the radio device because the native sx126x driver builds for two compatibles. */
 extern void sx126x_poll_dio1(const struct device *dev);
 
-/* RX gain boost override (G-2) — data->rx_boosted, not the devicetree default,
- * is what sx126x_lora_config() applies on every call, so this survives every
- * subsequent TX/RX reconfigure rather than being clobbered back. Called once
- * at boot from meshtastic_radio_init(); a LoRaConfig change already requires
- * a reboot to take effect (F-1), so there is no live-apply path to wire. */
-extern int sx126x_set_rx_boosted_gain(const struct device *dev, bool boosted);
 
 /* Chip-level AGC reset (warm-sleep cycle + RX sensitivity register patch) —
  * parity: upstream Meshtastic RadioLibInterface::resetAGC(). The driver

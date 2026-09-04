@@ -80,9 +80,12 @@ struct meshtastic_context {
 	 * republished to MQTT by any gateway that hears it. Stamped into every
 	 * packet we originate. */
 	bool config_ok_to_mqtt;
-	/* config.lora.sx126x_rx_boosted_gain: pushed to the radio driver at boot
-	 * (meshtastic_radio_init) — a LoRaConfig change already requires a reboot
-	 * to take effect (F-1), so there is no live-apply path to wire. */
+	/* config.lora.sx126x_rx_boosted_gain: staged into the radio driver at boot
+	 * (meshtastic_radio_init) and again on every retune (meshtastic_radio_retune),
+	 * because the driver only stages it — it reaches the chip on the next
+	 * lora_config(). The retune site was missing until 2026-09-04; see the note
+	 * in meshtastic_radio.c for how the stale "needs a reboot anyway" comment
+	 * outlived its premise and became the bug (agents-znit). */
 	bool rx_boosted_gain;
 	/* config.lora.tx_enabled: false makes the node receive-only. Enforced at
 	 * the single TX choke point in meshtastic_radio.c. Defaults true. */
@@ -304,7 +307,9 @@ struct meshtastic_radio_tx_defer_stats {
 	uint32_t busy_rx;  /**< refused because a packet was being demodulated */
 	uint32_t cad_busy; /**< refused because CAD heard activity */
 	uint32_t requeued; /**< frames put back in the queue behind a fresh delay */
-	uint32_t dropped;  /**< frames abandoned at the defer cap */
+	uint32_t dropped;  /**< frames abandoned: dropped_cap + dropped_qfull */
+	uint32_t dropped_cap;   /**< abandoned at the defer cap: the channel never went quiet */
+	uint32_t dropped_qfull; /**< abandoned because the outbound queue was full on re-insert */
 };
 
 void meshtastic_radio_tx_defer_stats_get(struct meshtastic_radio_tx_defer_stats *out);
@@ -320,6 +325,9 @@ void meshtastic_radio_tx_defer_requeued(void);
  * existed: tx_failures, and MESHTASTIC_EVENT_TX_FAILED with -EBUSY.
  */
 void meshtastic_radio_tx_dropped_busy(void);
+/** @brief A deferred frame was abandoned because the outbound queue was full.
+ *  Distinct from the defer cap above -- see meshtastic_radio.c (agents-q0c6). */
+void meshtastic_radio_tx_dropped_queue_full(void);
 
 /**
  * @brief The chip's raw activity flags right now, untimed. For the report only.

@@ -2077,6 +2077,14 @@ static int cmd_rf_path(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "  [%s] TX defer         busy-rx %u  cad-busy %u  requeued %u  dropped %u",
 		    (p.tx_defer.dropped == 0U) ? "ok" : "!!", p.tx_defer.busy_rx,
 		    p.tx_defer.cad_busy, p.tx_defer.requeued, p.tx_defer.dropped);
+	if (p.tx_defer.dropped != 0U) {
+		/* Attribute the drops. The two causes are unrelated -- one is the channel,
+		 * one is queue depth -- and reporting them as a single number sent readers
+		 * to the RF environment for what was queue-full (agents-q0c6). */
+		shell_print(sh, "       dropped: %u at the defer cap (channel never quiet), "
+				"%u with the outbound queue full",
+			    p.tx_defer.dropped_cap, p.tx_defer.dropped_qfull);
+	}
 	shell_print(sh, "  [%s] SPI BUSY streak  %u", (p.busy_streak == 0U) ? "ok" : "!!",
 		    p.busy_streak);
 

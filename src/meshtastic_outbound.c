@@ -185,14 +185,23 @@ static void remove_index_locked(int i)
  * while this frame exists. Returns true when the frame is back in the queue;
  * false when it was dropped, and the caller completes it as a failure.
  */
-static bool requeue_deferred_locked(struct ob_item *it)
+static bool requeue_deferred_locked(struct ob_item *it, bool *cap_hit)
 {
 	uint32_t slot_ms;
 	uint32_t delay_ms;
 	uint32_t due;
 	uint8_t util = 0U;
 
-	if (it->defers >= CONFIG_MESHTASTIC_TX_DEFER_MAX || ob_count >= OB_MAX) {
+	if (it->defers >= CONFIG_MESHTASTIC_TX_DEFER_MAX) {
+		*cap_hit = true;
+		return false;
+	}
+	if (ob_count >= OB_MAX) {
+		/* Not an RF condition at all: the queue filled while this frame was out
+		 * being deferred. Reported separately (agents-q0c6) because it is the
+		 * likelier of the two under a burst -- OB_MAX (16) is smaller than the
+		 * defer cap (32), so the queue is the limit that bites first. */
+		*cap_hit = false;
 		return false;
 	}
 	it->defers++;
@@ -286,20 +295,25 @@ static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 			k_mutex_lock(&ob_lock, K_FOREVER);
 			ob_inflight = false;
 			if (ret == MESHTASTIC_TX_DEFER) {
-				if (requeue_deferred_locked(&cur)) {
+				bool cap_hit = false;
+
+				if (requeue_deferred_locked(&cur, &cap_hit)) {
 					k_mutex_unlock(&ob_lock);
 					k_sem_give(&ob_avail);
 					meshtastic_radio_tx_defer_requeued();
 					/* Nobody is told: the frame is still pending. */
 					continue;
 				}
-				ret = -EBUSY;
+				ret = cap_hit ? -EBUSY : -ENOBUFS;
 			}
 			k_mutex_unlock(&ob_lock);
 
 			if (ret == -EBUSY) {
 				meshtastic_sched_stat_drop(cur.tier);
 				meshtastic_radio_tx_dropped_busy();
+			} else if (ret == -ENOBUFS) {
+				meshtastic_sched_stat_drop(cur.tier);
+				meshtastic_radio_tx_dropped_queue_full();
 			}
 
 			if (cur.result != NULL) {

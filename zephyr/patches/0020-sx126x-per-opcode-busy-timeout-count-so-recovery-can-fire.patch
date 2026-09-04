@@ -1,0 +1,129 @@
+diff --git a/drivers/lora/native/sx126x/sx126x_hal_common.c b/drivers/lora/native/sx126x/sx126x_hal_common.c
+index 47e0243..6773772 100644
+--- a/drivers/lora/native/sx126x/sx126x_hal_common.c
++++ b/drivers/lora/native/sx126x/sx126x_hal_common.c
+@@ -3,6 +3,8 @@
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
++#include <string.h>
++
+ #include <zephyr/kernel.h>
+ #include <zephyr/device.h>
+ #include <zephyr/drivers/spi.h>
+@@ -26,21 +28,76 @@ LOG_MODULE_REGISTER(sx126x_hal_common, CONFIG_LORA_LOG_LEVEL);
+ static uint8_t sx126x_last_issued_opcode;
+ 
+ /*
+- * agents-oieb: count of CONSECUTIVE BUSY-wait timeouts, cleared on any success. A
+- * wedged radio (BUSY stuck high) stacks these up; the driver triggers a chip reset
+- * when the streak crosses a threshold. Module-scope (single radio on the target),
+- * like sx126x_last_issued_opcode above.
++ * agents-oieb: count of BUSY-wait timeouts. A wedged radio (BUSY stuck high) stacks
++ * these up; the driver triggers a chip reset when the count crosses a threshold.
++ * Module-scope (single radio on the target), like sx126x_last_issued_opcode above.
++ *
++ * agents-3raz: this used to be a strictly CONSECUTIVE count, cleared on ANY successful
++ * wait across ALL opcodes -- and that predicate cannot see the failure it exists to
++ * recover from. A chip that is wedged on one command still answers the others: on the
++ * bench, a board whose SET_TX never cleared BUSY kept completing its pre-waits, CAD,
++ * WRITE_REGISTER and GET_IRQ_STATUS normally. Every one of those reset the streak, so it
++ * never reached the threshold of 4, the recovery in sx126x_lora_config() never ran, and
++ * the board sat with 100% of its transmits failing for eleven hours while reporting
++ * `SPI BUSY streak 0`. 2514 failed transmits, streak zero, recovery check running
++ * thousands of times and always seeing nothing.
++ *
++ * So: only a success on the SAME opcode clears that opcode's count. A success elsewhere
++ * no longer erases the evidence of a per-command wedge. The reported streak is the worst
++ * opcode's count, which keeps the existing accessor (and `meshtastic rf`'s "SPI BUSY
++ * streak" row) meaning "how stuck is this radio".
+  */
+-static uint32_t sx126x_busy_streak;
++#define SX126X_BUSY_TRACKED_OPCODES 8
++
++static struct {
++	uint8_t opcode;
++	uint32_t count;
++} sx126x_busy_fail[SX126X_BUSY_TRACKED_OPCODES];
++
++static uint32_t *sx126x_busy_slot(uint8_t opcode, bool create)
++{
++	uint32_t oldest = 0U;
++
++	for (int i = 0; i < SX126X_BUSY_TRACKED_OPCODES; i++) {
++		if (sx126x_busy_fail[i].count != 0U && sx126x_busy_fail[i].opcode == opcode) {
++			return &sx126x_busy_fail[i].count;
++		}
++	}
++	if (!create) {
++		return NULL;
++	}
++	for (int i = 0; i < SX126X_BUSY_TRACKED_OPCODES; i++) {
++		if (sx126x_busy_fail[i].count == 0U) {
++			sx126x_busy_fail[i].opcode = opcode;
++			return &sx126x_busy_fail[i].count;
++		}
++	}
++	/* Table full: reuse the least-stuck entry rather than losing the newest signal. */
++	for (int i = 1; i < SX126X_BUSY_TRACKED_OPCODES; i++) {
++		if (sx126x_busy_fail[i].count < sx126x_busy_fail[oldest].count) {
++			oldest = (uint32_t)i;
++		}
++	}
++	sx126x_busy_fail[oldest].opcode = opcode;
++	sx126x_busy_fail[oldest].count = 0U;
++	return &sx126x_busy_fail[oldest].count;
++}
+ 
+ uint32_t sx126x_hal_busy_timeout_streak(void)
+ {
+-	return sx126x_busy_streak;
++	uint32_t worst = 0U;
++
++	for (int i = 0; i < SX126X_BUSY_TRACKED_OPCODES; i++) {
++		if (sx126x_busy_fail[i].count > worst) {
++			worst = sx126x_busy_fail[i].count;
++		}
++	}
++	return worst;
+ }
+ 
+ void sx126x_hal_busy_timeout_streak_reset(void)
+ {
+-	sx126x_busy_streak = 0U;
++	memset(sx126x_busy_fail, 0, sizeof(sx126x_busy_fail));
+ }
+ 
+ static int spi_transfer(const struct spi_dt_spec *spi,
+@@ -91,7 +148,12 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
+ 	if (!WAIT_FOR(!sx126x_hal_is_busy(dev),
+ 		      timeout_ms * 1000,
+ 		      k_msleep(1))) {
+-		sx126x_busy_streak++; /* agents-oieb: consecutive-timeout counter */
++		uint32_t *slot = sx126x_busy_slot(opcode, true);
++
++		if (slot != NULL) {
++			(*slot)++; /* agents-3raz: per-opcode, so an unrelated success
++				    * elsewhere cannot erase a per-command wedge */
++		}
+ 		/* On a PRE timeout, sx126x_last_issued_opcode is the op that left BUSY
+ 		 * high (the culprit); on a POST timeout it is this same command. */
+ 		sx126x_hal_busy_timeout_report(dev, opcode, timeout_ms, post,
+@@ -99,7 +161,16 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
+ 		return -ETIMEDOUT;
+ 	}
+ 
+-	sx126x_busy_streak = 0U; /* agents-oieb: any success ends the streak */
++	{
++		/* Only THIS opcode's count is cleared: the radio has just proven it can
++		 * complete this command. Another opcode may still be wedged, and that is
++		 * exactly the state the old all-opcodes reset made invisible. */
++		uint32_t *slot = sx126x_busy_slot(opcode, false);
++
++		if (slot != NULL) {
++			*slot = 0U;
++		}
++	}
+ 	return 0;
+ }
+ 
