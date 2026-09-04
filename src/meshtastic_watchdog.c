@@ -25,6 +25,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/stats/stats.h>
 #include <zephyr/sys/reboot.h>
+
+#include <zephyr/meshtastic/reboot_trace.h>
 #include <zephyr/sys/sys_heap.h>
 #include <zephyr/task_wdt/task_wdt.h>
 
@@ -229,6 +231,9 @@ static void channel_timeout_cb(int channel_id, void *user_data)
 	/* Written last, deliberately -- see the file comment on rtc_crash_magic. */
 	rtc_crash_magic = WATCHDOG_CRASH_MAGIC;
 
+	/* Name the channel that starved, not just the fact of a watchdog reboot: the
+	 * channel is the whole diagnosis. */
+	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_WATCHDOG, channel_name);
 	sys_reboot(SYS_REBOOT_WARM);
 }
 

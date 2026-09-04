@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_REBOOT_TRACE
+	bool "Record where each reboot came from"
+	default y
+	help
+	  Writes a small record into retained RAM whenever this node reboots: who
+	  asked, from which thread, at what uptime, and the return address of the
+	  caller. `meshtastic resets` reports it on the next boot.
+
+	  The boot log already says whether a reset was warm and what hwinfo
+	  reported. It cannot say who asked for it — and on 2026-09-04 that gap cost
+	  a day of investigation when two nodes restarted seconds apart reporting
+	  only "SOFTWARE", a deliberate reboot from firmware, with nothing in the
+	  tree able to name which of the several possible paths had done it. Two of
+	  those paths record something before rebooting; both had recorded nothing;
+	  the answer remained unaccounted for.
+
+	  This works by wrapping sys_reboot() at link time, so every caller is
+	  captured — including the Zephyr shell's `kernel reboot`, MCUmgr, and any
+	  library. That breadth is the point: instrumenting only our own call sites
+	  would leave out exactly the suspects that matter when a reboot is
+	  unexplained. Our own sites additionally leave a note naming their intent,
+	  because a caller address identifies a site but not a reason.
+
+	  Costs a few dozen bytes of retained RAM and a handful of stores on a path
+	  that is about to reboot anyway.

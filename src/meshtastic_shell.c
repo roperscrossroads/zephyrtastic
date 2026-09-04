@@ -10,6 +10,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/meshtastic/bootlog.h>
+#include <zephyr/meshtastic/reboot_trace.h>
 #include <zephyr/meshtastic/diagnostics.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
@@ -3777,6 +3778,40 @@ static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
 				"bootloader before the app ran");
 	}
 	shell_print(sh, "uptime      %lld s", (long long)k_uptime_seconds());
+
+#if defined(CONFIG_MESHTASTIC_REBOOT_TRACE)
+	{
+		struct meshtastic_reboot_trace rt;
+
+		/* The half hwinfo cannot answer: WHO asked. A reset cause of "SOFTWARE"
+		 * says a sys_reboot() happened and nothing about which one, which is
+		 * exactly the gap that left two nodes' restarts unexplained (agents-u0h6). */
+		if (meshtastic_reboot_trace_get(&rt)) {
+			shell_print(sh, "asked by    %s%s%s%s, from thread \"%s\" at %u s uptime "
+					"(%s reboot)",
+				    meshtastic_reboot_reason_str(rt.reason),
+				    rt.detail[0] != '\0' ? " (" : "",
+				    rt.detail[0] != '\0' ? rt.detail : "",
+				    rt.detail[0] != '\0' ? ")" : "",
+				    rt.thread[0] != '\0' ? rt.thread : "?", rt.uptime_s,
+				    meshtastic_reboot_type_str(rt.sys_type));
+			if (rt.have_pc) {
+				shell_print(sh, "            caller 0x%08x  — addr2line this "
+						"against the build's zephyr.elf",
+					    rt.caller_pc);
+			}
+			if (rt.reason == MESHTASTIC_REBOOT_UNKNOWN) {
+				/* Say plainly that nothing claimed it. An unnamed reboot is a
+				 * finding, not a blank field. */
+				shell_print(sh, "            NOTHING claimed this reboot — it did "
+						"not come through a known path");
+			}
+		} else {
+			shell_print(sh, "asked by    no record (power loss, a reset that cleared "
+					"retained RAM, or a build without reboot tracing)");
+		}
+	}
+#endif
 
 	n = meshtastic_bootlog_history(hist, ARRAY_SIZE(hist));
 	if (n == 0U) {

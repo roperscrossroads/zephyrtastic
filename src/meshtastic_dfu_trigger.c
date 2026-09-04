@@ -25,6 +25,8 @@
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/sys/reboot.h>
 
+#include <zephyr/meshtastic/reboot_trace.h>
+
 #include <hal/nrf_power.h>
 #if defined(CONFIG_MESHTASTIC_DFU_BOOT_GUARD)
 #include <cmsis_core.h>
@@ -77,6 +79,7 @@ FUNC_NORETURN void meshtastic_dfu_enter(bool serial_only)
 	k_sleep(K_MSEC(50));
 
 	meshtastic_dfu_mark(serial_only);
+	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_DFU, NULL);
 	sys_reboot(SYS_REBOOT_WARM);
 	CODE_UNREACHABLE;
 }

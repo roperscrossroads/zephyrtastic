@@ -24,6 +24,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/sys/reboot.h>
+
+#include <zephyr/meshtastic/reboot_trace.h>
 #include <zephyr/sys/sys_heap.h>
 
 #include <zephyr/meshtastic/diagnostics.h>
@@ -154,6 +156,7 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 
 #if defined(CONFIG_RESET_ON_FATAL_ERROR)
 	LOG_ERR("Resetting system");
+	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_FATAL, NULL);
 	sys_reboot(SYS_REBOOT_WARM);
 #else
 	LOG_ERR("Halting system");

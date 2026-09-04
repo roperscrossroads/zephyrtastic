@@ -85,6 +85,14 @@ if(CONFIG_MESHTASTIC)
     meshtastic_region_presets.c
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SETTINGS meshtastic_settings.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_REBOOT_TRACE meshtastic_reboot_trace.c)
+  if(CONFIG_MESHTASTIC_REBOOT_TRACE)
+    # Wrap sys_reboot() at LINK time rather than instrumenting call sites. Every caller is
+    # then captured -- the Zephyr shell's `kernel reboot`, MCUmgr, a library -- which is the
+    # whole point: the reboot that could not be accounted for was, by definition, not one of
+    # the sites we already knew about (bead agents-u0h6).
+    zephyr_link_libraries(-Wl,--wrap=sys_reboot)
+  endif()
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_PHONEAPI
     meshtastic_phoneapi.c
     meshtastic_phoneapi_config.c

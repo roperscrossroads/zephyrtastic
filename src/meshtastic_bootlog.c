@@ -51,6 +51,7 @@
 #endif
 
 #include <zephyr/meshtastic/bootlog.h>
+#include <zephyr/meshtastic/reboot_trace.h>
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -128,6 +129,13 @@ static int bootlog_init(void)
 		 * whatever was in the memory. A counter that restarts at 1 IS the
 		 * report: something took the RAM rail down. */
 		bl_magic = BOOTLOG_MAGIC;
+#if defined(CONFIG_MESHTASTIC_REBOOT_TRACE)
+		/* Retained RAM did not survive, so any reboot record in it is not this
+		 * node's last reboot -- it is whatever the RAM happened to hold. Drop it
+		 * rather than let a stale record be reported as fresh; the magic alone is
+		 * only a 1-in-2^32 guard and this is the one moment we KNOW it is void. */
+		meshtastic_reboot_trace_clear();
+#endif
 		bl_boot_num = 0U;
 		bl_next = 0U;
 		bl_count = 0U;

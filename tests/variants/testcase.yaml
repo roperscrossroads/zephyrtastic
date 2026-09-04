@@ -132,3 +132,14 @@ tests:
   meshtastic.variants.no_bootlog_durable.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_BOOTLOG_DURABLE=n
+
+  # Reboot tracing subtracted. MESHTASTIC_REBOOT_TRACE is default-y, so the
+  # untested arm is =n -- and =n is not a no-op in two distinct ways. It drops a
+  # LINKER option (-Wl,--wrap=sys_reboot), which is the kind of thing that only
+  # fails at link time and only in the configuration nobody builds; and it leaves
+  # five call sites in four files whose meshtastic_reboot_trace_note() calls must
+  # then compile to nothing without stranding an unused variable or an orphaned
+  # include under -Werror.
+  meshtastic.variants.no_reboot_trace.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_REBOOT_TRACE=n
