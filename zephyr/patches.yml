@@ -775,3 +775,28 @@ patches:
       cycle stamp, dumped only when a BUSY wait times out. Silent on a
       healthy radio. irq_lock around the ring write because spi_transfer()
       is reachable from ISR context.
+
+  - path: 0023-sx126x-extract-the-busy-timeout-accounting-so-it-can-be-tested.patch
+    sha256sum: e9e89d46f38a995a0521f4413db2306ca89635d7a67e3743f4ec4a262f96c26d
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-05"
+    upstreamable: true
+    description: |
+      sx126x: move the BUSY-timeout accounting into a header so it can be tested.
+
+      Behaviour-preserving. The predicate that decides when the driver resets a
+      wedged radio was wrong twice -- carried patches 0020 and 0021 -- and both
+      bugs reached hardware for the same structural reason: the logic was
+      file-scope static inside a driver that only compiles for real targets, so
+      there was no surface a test could reach.
+
+      sx126x_busy_track.h now holds the table and its four operations as static
+      inline functions over a caller-owned struct, with no Zephyr dependencies
+      (stdint, stdbool, string.h). The driver keeps one instance and delegates.
+
+      Covered by main/tests/sx126x_busy: nine cases including both historical
+      failures. Mutation-tested rather than merely written -- reintroducing
+      0021 (dropping the phase from the key) fails 3 of 9, and reintroducing
+      0020 (any success clears the table) fails all 9.

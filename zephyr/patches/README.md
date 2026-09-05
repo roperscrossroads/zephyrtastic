@@ -610,3 +610,20 @@ from ISR context.
 Read the dump as the ordered list of what genuinely went out on the wire in the
 window before the failure — which is exactly the thing the contradictory
 `last_issued` value makes impossible to reason about from source.
+
+### 0023-sx126x-extract-the-busy-timeout-accounting-so-it-can-be-tested.patch
+
+**Behaviour-preserving refactor.** Moves the BUSY-timeout table and its four
+operations out of `sx126x_hal_common.c` into `sx126x_busy_track.h`, as static
+inline functions over a caller-owned struct with no Zephyr dependencies.
+
+**Why:** this predicate decides when the driver resets a wedged radio. It was
+wrong twice — 0020 and 0021 — and both bugs reached hardware for the same
+structural reason: the logic was file-scope `static` inside a driver that only
+compiles for real targets, so no test could reach it. A wrong predicate that
+cannot be tested will be wrong again.
+
+Covered by `main/tests/sx126x_busy` — nine cases, including both historical
+failures written so they fail if reintroduced. The suite was **mutation-tested**
+rather than merely written: putting bug 0021 back (dropping the phase from the
+key) fails 3 of 9; putting 0020 back (any success clears the table) fails all 9.

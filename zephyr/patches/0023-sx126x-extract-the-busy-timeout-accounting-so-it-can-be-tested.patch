@@ -1,0 +1,253 @@
+diff --git a/drivers/lora/native/sx126x/sx126x_busy_track.h b/drivers/lora/native/sx126x/sx126x_busy_track.h
+new file mode 100644
+index 0000000..a50ebf0
+--- /dev/null
++++ b/drivers/lora/native/sx126x/sx126x_busy_track.h
+@@ -0,0 +1,128 @@
++/*
++ * SX126x BUSY-timeout accounting.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Split out of sx126x_hal_common.c so it can be unit-tested. That is not cosmetic: this
++ * predicate decides when the driver resets a wedged radio, it was wrong twice (carried
++ * patches 0020 and 0021), and both bugs shipped to hardware because the logic lived as
++ * file-scope statics inside a driver that only compiles for real targets. There was no
++ * surface to test. Now there is -- see main/tests/sx126x_busy.
++ *
++ * The two failures worth keeping in mind while reading this:
++ *
++ *   0020: the count was cleared by a success on ANY opcode. A chip wedged on SET_TX still
++ *         answers every other command, so the count never reached the threshold, the
++ *         recovery never ran, and a board failed 2514 transmits reporting `streak 0`.
++ *   0021: keying on the opcode alone was still not enough. Every command waits on BUSY
++ *         twice -- before the SPI transfer and after -- and the PRE wait cannot fail while
++ *         the chip is wedged, because the chip is idle until the command is issued. So the
++ *         pre-wait's success kept clearing the post-wait's count: 0,1,0,1, never 4.
++ *
++ * Hence the key is (opcode, phase). No Zephyr dependencies on purpose: a test should be
++ * able to include this and nothing else.
++ */
++
++#ifndef ZEPHYR_DRIVERS_LORA_SX126X_BUSY_TRACK_H_
++#define ZEPHYR_DRIVERS_LORA_SX126X_BUSY_TRACK_H_
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++/* Distinct (opcode, phase) pairs tracked at once. Static, no allocation. */
++#define SX126X_BUSY_TRACKED_WAITS 8
++
++struct sx126x_busy_wait {
++	uint8_t opcode;
++	bool post;
++	uint32_t count;
++};
++
++struct sx126x_busy_table {
++	struct sx126x_busy_wait w[SX126X_BUSY_TRACKED_WAITS];
++};
++
++/*
++ * Find the slot for (opcode, post). A slot with count 0 is free: the count IS the
++ * occupancy, which is why a cleared slot can be reused by a different wait.
++ */
++static inline uint32_t *sx126x_busy_slot(struct sx126x_busy_table *t, uint8_t opcode,
++					 bool post, bool create)
++{
++	uint32_t oldest = 0U;
++
++	for (int i = 0; i < SX126X_BUSY_TRACKED_WAITS; i++) {
++		if (t->w[i].count != 0U && t->w[i].opcode == opcode && t->w[i].post == post) {
++			return &t->w[i].count;
++		}
++	}
++	if (!create) {
++		return NULL;
++	}
++	for (int i = 0; i < SX126X_BUSY_TRACKED_WAITS; i++) {
++		if (t->w[i].count == 0U) {
++			t->w[i].opcode = opcode;
++			t->w[i].post = post;
++			return &t->w[i].count;
++		}
++	}
++	/* Table full: reuse the least-stuck entry rather than losing the newest signal. */
++	for (int i = 1; i < SX126X_BUSY_TRACKED_WAITS; i++) {
++		if (t->w[i].count < t->w[oldest].count) {
++			oldest = (uint32_t)i;
++		}
++	}
++	t->w[oldest].opcode = opcode;
++	t->w[oldest].post = post;
++	t->w[oldest].count = 0U;
++	return &t->w[oldest].count;
++}
++
++/** A wait on (opcode, phase) timed out. */
++static inline void sx126x_busy_record_timeout(struct sx126x_busy_table *t, uint8_t opcode,
++					      bool post)
++{
++	uint32_t *slot = sx126x_busy_slot(t, opcode, post, true);
++
++	if (slot != NULL) {
++		(*slot)++;
++	}
++}
++
++/**
++ * A wait on (opcode, phase) succeeded.
++ *
++ * Clears ONLY that pair. Neither another opcode nor this opcode's other phase may clear it:
++ * both of those were the bugs.
++ */
++static inline void sx126x_busy_record_success(struct sx126x_busy_table *t, uint8_t opcode,
++					      bool post)
++{
++	uint32_t *slot = sx126x_busy_slot(t, opcode, post, false);
++
++	if (slot != NULL) {
++		*slot = 0U;
++	}
++}
++
++/** Worst count of any tracked wait -- "how stuck is this radio". */
++static inline uint32_t sx126x_busy_worst(const struct sx126x_busy_table *t)
++{
++	uint32_t worst = 0U;
++
++	for (int i = 0; i < SX126X_BUSY_TRACKED_WAITS; i++) {
++		if (t->w[i].count > worst) {
++			worst = t->w[i].count;
++		}
++	}
++	return worst;
++}
++
++/** Forget everything -- called after the recovery resets the chip. */
++static inline void sx126x_busy_reset(struct sx126x_busy_table *t)
++{
++	memset(t, 0, sizeof(*t));
++}
++
++#endif /* ZEPHYR_DRIVERS_LORA_SX126X_BUSY_TRACK_H_ */
+diff --git a/drivers/lora/native/sx126x/sx126x_hal_common.c b/drivers/lora/native/sx126x/sx126x_hal_common.c
+index 6572ffd..ff7808f 100644
+--- a/drivers/lora/native/sx126x/sx126x_hal_common.c
++++ b/drivers/lora/native/sx126x/sx126x_hal_common.c
+@@ -5,6 +5,8 @@
+ 
+ #include <string.h>
+ 
++#include "sx126x_busy_track.h"
++
+ #include <zephyr/kernel.h>
+ #include <zephyr/device.h>
+ #include <zephyr/drivers/spi.h>
+@@ -112,61 +114,16 @@ static void sx126x_oplog_dump(void)
+  * The key is therefore (opcode, phase). Only a POST success on an opcode clears that
+  * opcode's POST count. A slot is a WAIT, not a command -- hence the rename.
+  */
+-#define SX126X_BUSY_TRACKED_WAITS 8
+-
+-static struct {
+-	uint8_t opcode;
+-	bool post;
+-	uint32_t count;
+-} sx126x_busy_fail[SX126X_BUSY_TRACKED_WAITS];
+-
+-static uint32_t *sx126x_busy_slot(uint8_t opcode, bool post, bool create)
+-{
+-	uint32_t oldest = 0U;
+-
+-	for (int i = 0; i < SX126X_BUSY_TRACKED_WAITS; i++) {
+-		if (sx126x_busy_fail[i].count != 0U && sx126x_busy_fail[i].opcode == opcode &&
+-		    sx126x_busy_fail[i].post == post) {
+-			return &sx126x_busy_fail[i].count;
+-		}
+-	}
+-	if (!create) {
+-		return NULL;
+-	}
+-	for (int i = 0; i < SX126X_BUSY_TRACKED_WAITS; i++) {
+-		if (sx126x_busy_fail[i].count == 0U) {
+-			sx126x_busy_fail[i].opcode = opcode;
+-			sx126x_busy_fail[i].post = post;
+-			return &sx126x_busy_fail[i].count;
+-		}
+-	}
+-	/* Table full: reuse the least-stuck entry rather than losing the newest signal. */
+-	for (int i = 1; i < SX126X_BUSY_TRACKED_WAITS; i++) {
+-		if (sx126x_busy_fail[i].count < sx126x_busy_fail[oldest].count) {
+-			oldest = (uint32_t)i;
+-		}
+-	}
+-	sx126x_busy_fail[oldest].opcode = opcode;
+-	sx126x_busy_fail[oldest].post = post;
+-	sx126x_busy_fail[oldest].count = 0U;
+-	return &sx126x_busy_fail[oldest].count;
+-}
++static struct sx126x_busy_table sx126x_busy_fail;
+ 
+ uint32_t sx126x_hal_busy_timeout_streak(void)
+ {
+-	uint32_t worst = 0U;
+-
+-	for (int i = 0; i < SX126X_BUSY_TRACKED_WAITS; i++) {
+-		if (sx126x_busy_fail[i].count > worst) {
+-			worst = sx126x_busy_fail[i].count;
+-		}
+-	}
+-	return worst;
++	return sx126x_busy_worst(&sx126x_busy_fail);
+ }
+ 
+ void sx126x_hal_busy_timeout_streak_reset(void)
+ {
+-	memset(sx126x_busy_fail, 0, sizeof(sx126x_busy_fail));
++	sx126x_busy_reset(&sx126x_busy_fail);
+ }
+ 
+ static int spi_transfer(const struct spi_dt_spec *spi,
+@@ -218,13 +175,9 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
+ 	if (!WAIT_FOR(!sx126x_hal_is_busy(dev),
+ 		      timeout_ms * 1000,
+ 		      k_msleep(1))) {
+-		uint32_t *slot = sx126x_busy_slot(opcode, post, true);
+-
+-		if (slot != NULL) {
+-			(*slot)++; /* agents-3raz: per (opcode, phase), so neither an
+-				    * unrelated opcode nor this command's own pre-wait
+-				    * can erase the evidence of a per-command wedge */
+-		}
++		/* agents-3raz: per (opcode, phase), so neither an unrelated opcode nor
++		 * this command's own pre-wait can erase a per-command wedge. */
++		sx126x_busy_record_timeout(&sx126x_busy_fail, opcode, post);
+ 		/* On a PRE timeout, sx126x_last_issued_opcode is the op that left BUSY
+ 		 * high (the culprit); on a POST timeout it is this same command. */
+ 		sx126x_hal_busy_timeout_report(dev, opcode, timeout_ms, post,
+@@ -235,18 +188,12 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
+ 		return -ETIMEDOUT;
+ 	}
+ 
+-	{
+-		/* Only THIS wait's count is cleared: the radio has just proven it can
+-		 * complete this command at this phase. Another opcode may still be wedged,
+-		 * and so may this opcode's other phase -- the pre-wait of a command whose
+-		 * post-wait never returns succeeds every time, and clearing on it is what
+-		 * pinned the count at 1 while every transmit failed. */
+-		uint32_t *slot = sx126x_busy_slot(opcode, post, false);
++	/* Only THIS wait's count is cleared: the radio has just proven it can complete this
++	 * command at this phase. Another opcode may still be wedged, and so may this opcode's
++	 * other phase -- the pre-wait of a command whose post-wait never returns succeeds every
++	 * time, and clearing on it is what pinned the count at 1 while every transmit failed. */
++	sx126x_busy_record_success(&sx126x_busy_fail, opcode, post);
+ 
+-		if (slot != NULL) {
+-			*slot = 0U;
+-		}
+-	}
+ 	return 0;
+ }
+ 
