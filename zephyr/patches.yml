@@ -708,3 +708,39 @@ patches:
       This does not address WHAT wedges SET_TX after a SET_SLEEP on those
       boards (bead agents-3raz) -- only that the radio must be able to recover
       from it rather than transmitting nothing for eleven hours.
+
+  - path: 0021-sx126x-key-the-busy-count-on-the-wait-not-just-the-opcode.patch
+    sha256sum: 3572428f98d3d118856ff4dca0f31b7086d40dac9171a4eac7f6e79d220a72fc
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-04"
+    upstreamable: true
+    description: |
+      sx126x: key the BUSY-timeout count on the WAIT, not just the opcode.
+
+      Patch 0020 made the count per-opcode because a success on any opcode
+      was erasing the evidence of a wedge on one. That was the right
+      direction and it did not go far enough: the same defect survives one
+      level down, and the recovery still cannot fire.
+
+      sx126x_hal_write_cmd() waits on BUSY twice for the SAME opcode -- once
+      before the SPI transfer and once after. The PRE wait cannot fail in the
+      wedged state: the chip is idle by definition until the command is
+      issued. So every transmit ran PRE-success (clearing SET_TX's count) ->
+      issue -> POST-timeout (count back to 1), and the count oscillated
+      0,1,0,1 forever. It could never reach the threshold of 4.
+
+      Bench, 2026-09-04, on a plain Heltec V4 -- so this is not R8-only:
+      134 consecutive SET_TX post-wait timeouts, every one of them
+      "op=0x83 post, prev=0x84", 114 of 186 transmits failed and 9 of the
+      last 10, while "meshtastic rf" reported "SPI BUSY streak 1" throughout
+      and no node on the bench had ever logged "radio wedged".
+
+      The key is now (opcode, phase), so only a POST success on an opcode
+      clears that opcode's POST count. A slot is a wait rather than a
+      command, hence SX126X_BUSY_TRACKED_OPCODES -> _WAITS. Same eight
+      static slots, no allocation, no behaviour change on a healthy radio.
+
+      Still does not address WHAT wedges SET_TX after a SET_SLEEP (bead
+      agents-3raz) -- only that the recovery can now observe it.

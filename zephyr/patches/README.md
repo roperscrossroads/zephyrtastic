@@ -547,3 +547,38 @@ meaning "how stuck is this radio". Eight tracked opcodes, static, no allocation.
 This is the *recovery*, not the cause: what wedges `SET_TX` after a `SET_SLEEP`
 on the R8 boards is still open (bead `agents-3raz`). Upstreamable — the
 predicate is wrong for any per-command wedge, not just this one.
+
+### 0021-sx126x-key-the-busy-count-on-the-wait-not-just-the-opcode.patch
+
+Keys the BUSY-timeout count on the **(opcode, phase)** pair rather than the
+opcode alone.
+
+**Why:** 0020 was the right direction and did not go far enough — the same
+defect survives one level down, and the recovery still could not fire.
+`sx126x_hal_write_cmd()` waits on BUSY **twice for the same opcode**: once
+before the SPI transfer and once after. The pre-wait cannot fail in the wedged
+state, because the chip is idle by definition until the command is issued. So
+every transmit ran pre-success (clearing `SET_TX`'s count) → issue → post-timeout
+(count back to 1). The count oscillated 0,1,0,1 and could never reach the
+threshold of 4.
+
+Bench, 2026-09-04, on a **plain Heltec V4 — so this is not R8-only**: 134
+consecutive `SET_TX` post-wait timeouts, every one `op=0x83 post, prev=0x84`,
+114 of 186 transmits failed and **9 of the last 10**, while `meshtastic rf`
+reported `SPI BUSY streak 1` throughout and no node on the bench had ever
+logged `radio wedged`. Note the shape of the reported value: 0020's symptom was
+a streak stuck at **0**, this one's is a streak stuck at **1** — the difference
+between "nothing ever fails" and "exactly one thing failed, just now", neither
+of which is 4.
+
+Only a **post** success on an opcode now clears that opcode's post count.
+`SX126X_BUSY_TRACKED_OPCODES` becomes `SX126X_BUSY_TRACKED_WAITS`, because a
+slot is a wait and not a command; the stale name is worth a rename here given
+that this same counter has now twice been described by a comment that outlived
+its premise. Same eight static slots, no allocation, no behaviour change on a
+healthy radio.
+
+Still the *recovery*, not the cause (bead `agents-3raz`). Upstreamable, and for
+the same reason 0020 is: a predicate that a success can clear is the wrong
+predicate for a per-command wedge — this just finishes identifying which
+success.
