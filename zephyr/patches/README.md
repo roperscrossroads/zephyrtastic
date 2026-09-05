@@ -582,3 +582,31 @@ Still the *recovery*, not the cause (bead `agents-3raz`). Upstreamable, and for
 the same reason 0020 is: a predicate that a success can clear is the wrong
 predicate for a per-command wedge — this just finishes identifying which
 success.
+
+### 0022-sx126x-oplog-record-the-opcodes-that-reach-the-wire.patch
+
+**Diagnostic, temporary.** Instrumentation for bead `agents-3raz`. Not a fix,
+not upstreamable as-is, and should be removed when that bead closes.
+
+**Why:** at a `SET_TX` post-wait timeout, `sx126x_last_issued_opcode` reads
+`0x84` (SET_SLEEP) on *every* occurrence — but `sx126x_hal_write_cmd()` sets it
+to the command in flight (`0x83`) via `spi_transfer()`, two statements earlier,
+on the same thread, holding the driver mutex. That cannot happen as the code is
+written.
+
+This was confirmed under JTAG rather than inferred from a log. At the failure:
+`state = SLEEP`, `last_issued = 0x84`, BUSY high, DIO1 callback NULL, inside
+`sx126x_lora_send_async()` at the SET_TX post-wait, mutex held exactly once by
+the transmitting thread. A concurrent writer, the AGC-reset work item and
+`PM_DEVICE` were each ruled out by inspection — the mutex excludes the first two
+and the PM action handler only touches RF GPIOs.
+
+Since static reading did not explain it, this records ground truth instead: a
+16-entry ring of every opcode that actually reaches `spi_transfer()`, with a
+cycle stamp, dumped **only** when a BUSY wait times out. Silent on a healthy
+radio. `irq_lock()` around the ring write because `spi_transfer()` is reachable
+from ISR context.
+
+Read the dump as the ordered list of what genuinely went out on the wire in the
+window before the failure — which is exactly the thing the contradictory
+`last_issued` value makes impossible to reason about from source.

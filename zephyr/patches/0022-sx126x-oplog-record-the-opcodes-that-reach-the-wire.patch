@@ -1,0 +1,82 @@
+diff --git a/drivers/lora/native/sx126x/sx126x_hal_common.c b/drivers/lora/native/sx126x/sx126x_hal_common.c
+index 579bc61..6572ffd 100644
+--- a/drivers/lora/native/sx126x/sx126x_hal_common.c
++++ b/drivers/lora/native/sx126x/sx126x_hal_common.c
+@@ -27,6 +27,59 @@ LOG_MODULE_REGISTER(sx126x_hal_common, CONFIG_LORA_LOG_LEVEL);
+  */
+ static uint8_t sx126x_last_issued_opcode;
+ 
++/*
++ * agents-3raz: a ring of the last SPI opcodes, with the phase that recorded them.
++ *
++ * WHY. At a SET_TX post-wait timeout, `sx126x_last_issued_opcode` reads 0x84 (SET_SLEEP)
++ * on every single occurrence -- but sx126x_hal_write_cmd() sets it to the command in
++ * flight (0x83) via spi_transfer(), two statements earlier, on the same thread, holding
++ * the driver mutex. That is impossible as written, and it was confirmed under JTAG rather
++ * than inferred from a log: state=SLEEP, last_issued=0x84, BUSY high, inside
++ * sx126x_lora_send_async() at the SET_TX post-wait, with the mutex held once by the
++ * transmitting thread. Concurrency, the AGC work item and PM were each ruled out.
++ *
++ * Static reading has not explained it, so record the ground truth instead: every opcode
++ * that actually reaches the wire, in order, with a cycle stamp. Dumped only when a wait
++ * times out, so this is silent on a healthy radio.
++ */
++#define SX126X_OPLOG_N 16
++
++static struct {
++	uint8_t opcode;
++	uint8_t phase;      /* 0 = issued on the wire, 1 = wait timed out */
++	uint32_t cyc;
++} sx126x_oplog[SX126X_OPLOG_N];
++static uint8_t sx126x_oplog_next;
++
++static void sx126x_oplog_put(uint8_t opcode, uint8_t phase)
++{
++	unsigned int key = irq_lock();   /* the ring is touched from ISR context too */
++	uint8_t i = sx126x_oplog_next;
++
++	sx126x_oplog[i].opcode = opcode;
++	sx126x_oplog[i].phase = phase;
++	sx126x_oplog[i].cyc = k_cycle_get_32();
++	sx126x_oplog_next = (uint8_t)((i + 1U) % SX126X_OPLOG_N);
++	irq_unlock(key);
++}
++
++static void sx126x_oplog_dump(void)
++{
++	uint32_t now = k_cycle_get_32();
++
++	for (int n = 0; n < SX126X_OPLOG_N; n++) {
++		uint8_t i = (uint8_t)((sx126x_oplog_next + n) % SX126X_OPLOG_N);
++
++		if (sx126x_oplog[i].cyc == 0U) {
++			continue;
++		}
++		LOG_WRN("  oplog[-%02d] op=0x%02x %s  %u us ago", SX126X_OPLOG_N - n,
++			sx126x_oplog[i].opcode,
++			sx126x_oplog[i].phase == 0U ? "issued " : "TIMEOUT",
++			k_cyc_to_us_floor32(now - sx126x_oplog[i].cyc));
++	}
++}
++
+ /*
+  * agents-oieb: count of BUSY-wait timeouts. A wedged radio (BUSY stuck high) stacks
+  * these up; the driver triggers a chip reset when the count crosses a threshold.
+@@ -126,6 +179,7 @@ static int spi_transfer(const struct spi_dt_spec *spi,
+ 
+ 	if (hdr_len > 0) {
+ 		sx126x_last_issued_opcode = hdr[0];
++		sx126x_oplog_put(hdr[0], 0U);   /* agents-3raz */
+ 	}
+ 
+ 	struct spi_buf tx_bufs[] = {
+@@ -175,6 +229,9 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
+ 		 * high (the culprit); on a POST timeout it is this same command. */
+ 		sx126x_hal_busy_timeout_report(dev, opcode, timeout_ms, post,
+ 					       sx126x_last_issued_opcode);
++		/* agents-3raz: what actually reached the wire, in order. */
++		sx126x_oplog_put(opcode, 1U);
++		sx126x_oplog_dump();
+ 		return -ETIMEDOUT;
+ 	}
+ 

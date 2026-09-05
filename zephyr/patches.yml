@@ -744,3 +744,34 @@ patches:
 
       Still does not address WHAT wedges SET_TX after a SET_SLEEP (bead
       agents-3raz) -- only that the recovery can now observe it.
+
+  - path: 0022-sx126x-oplog-record-the-opcodes-that-reach-the-wire.patch
+    sha256sum: 01fe6c45f09c0c1208d1787fbd5582adff55b9b611888f9649ce25e746617f31
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-05"
+    upstreamable: false
+    description: |
+      sx126x: record the opcodes that actually reach the wire (DIAGNOSTIC).
+
+      Temporary instrumentation for bead agents-3raz, not a fix and not
+      upstreamable as-is. Remove once the bead is closed.
+
+      At a SET_TX post-wait timeout, sx126x_last_issued_opcode reads 0x84
+      (SET_SLEEP) on every single occurrence -- but sx126x_hal_write_cmd()
+      sets it to the command in flight (0x83) via spi_transfer() two
+      statements earlier, on the same thread, holding the driver mutex.
+      That is impossible as the code is written.
+
+      Confirmed under JTAG rather than inferred from a log: at the failure,
+      state = SLEEP, last_issued = 0x84, BUSY high, dio1 callback NULL,
+      inside sx126x_lora_send_async() at the SET_TX post-wait, with the
+      mutex held exactly once by the transmitting thread. Concurrency, the
+      AGC-reset work item and PM_DEVICE were each ruled out by inspection.
+
+      Static reading has not explained it, so this records ground truth: a
+      16-entry ring of every opcode that reaches spi_transfer(), with a
+      cycle stamp, dumped only when a BUSY wait times out. Silent on a
+      healthy radio. irq_lock around the ring write because spi_transfer()
+      is reachable from ISR context.
