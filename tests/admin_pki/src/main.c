@@ -327,6 +327,23 @@ static size_t encode_admin_edit_settings(bool commit, const uint8_t *passkey, si
 	return os.bytes_written;
 }
 
+/* Encode an AdminMessage factory_reset_config carrying the given passkey. */
+static size_t encode_admin_factory_reset_config(const uint8_t *passkey, size_t passkey_len,
+						uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_factory_reset_config_tag;
+	am.payload_variant.factory_reset_config = 1;
+	if (passkey != NULL && passkey_len > 0U) {
+		am.session_passkey.size = (pb_size_t)passkey_len;
+		memcpy(am.session_passkey.bytes, passkey, passkey_len);
+	}
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
 /* Encode an AdminMessage remove_by_nodenum(target) carrying the given passkey. */
 static size_t encode_admin_remove_by_nodenum(uint32_t target, const uint8_t *passkey,
 					     size_t passkey_len, uint8_t *buf, size_t cap)
@@ -881,6 +898,184 @@ ZTEST(admin_pki, test_edit_transaction_suppresses_a_save_already_queued)
 	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_CLIENT, key, sizeof(key),
 				    buf, sizeof(buf));
 	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+	(void)settings_save_subtree("meshtastic");
+
+	set_admin_key(NULL, 0U);
+}
+
+/*
+ * agents-dnr4.2: an edit transaction left open with no commit AND no further
+ * admin activity must not suppress saves forever. Regression test for the
+ * missing idle-timeout in meshtastic_admin.c -- CONFIG_MESHTASTIC_ADMIN_EDIT_
+ * IDLE_MS is lowered to 200 in this suite's prj.conf so the test stays fast.
+ */
+ZTEST(admin_pki, test_edit_transaction_auto_commits_after_idle_timeout)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	size_t len;
+	uint32_t id = 0x0ED10000U;
+
+	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
+
+	/* Clean baseline, flushed. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_CLIENT, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+	zassert_ok(settings_save_subtree("meshtastic"), "baseline flush failed");
+
+	/* Open a transaction... */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_edit_settings(false, key, sizeof(key), buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+
+	/* ...make an edit inside it... */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_ROUTER, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+
+	/* ...and then go silent. Deliberately never send commit_edit_settings. */
+	k_sleep(K_MSEC(CONFIG_MESHTASTIC_ADMIN_EDIT_IDLE_MS + 100));
+
+	/* The idle timeout must have auto-committed by now: a real reload proves
+	 * it (not just that admin_edit_open happens to read false). */
+	zassert_ok(settings_load_subtree("meshtastic"), "settings reload failed");
+	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "an edit transaction idle with no commit must auto-commit, not suppress "
+		      "saves forever");
+
+	/* Clean up: leave the shared suite state at its expected default. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_CLIENT, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+	(void)settings_save_subtree("meshtastic");
+
+	set_admin_key(NULL, 0U);
+}
+
+/*
+ * agents-dnr4.3: a commit_edit_settings with NO transaction open (no prior
+ * begin_edit_settings) must be a no-op, not an unconditional un-suppress +
+ * flush -- otherwise a stray/errant commit arriving while something ELSE has
+ * deliberately suppressed saves (a factory reset mid-wipe, in the few seconds
+ * before its scheduled reboot -- see factory_reset_config/_device in
+ * meshtastic_admin.c) would undo that suppression and resurrect whatever the
+ * live RAM store currently holds, right after the reset went out of its way
+ * not to persist it. This is this port's equivalent of upstream calling
+ * disableBluetooth() around destructive/commit ops: rather than silencing the
+ * transport a stray message could arrive on, refuse to act on a commit that
+ * doesn't correspond to a real open transaction.
+ */
+ZTEST(admin_pki, test_stray_commit_edit_settings_is_a_noop)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	uint8_t peer_key_now[MESHTASTIC_PKI_KEY_LEN];
+	size_t len;
+
+	/* PEER's pinned NodeDB key is not suite-stable (see the comment in
+	 * test_remove_by_nodenum_purges_the_warm_pinned_key) -- admin_key[] must
+	 * match whatever it ACTUALLY is right now, not the suite's original
+	 * peer_pubkey, or this admin message silently fails authorization and the
+	 * test passes vacuously without ever exercising the guard. */
+	zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_NODE_ID, peer_key_now),
+		   "PEER must have SOME pinned key by this point in the suite");
+	set_admin_key(peer_key_now, sizeof(peer_key_now));
+
+	/* Simulate something else (e.g. an in-flight factory reset) having
+	 * deliberately suppressed saves, with no edit transaction actually open. */
+	meshtastic_config_store_set_save_suppressed(true);
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_edit_settings(true, key, sizeof(key), buf, sizeof(buf));
+	inject_pkc_admin(buf, len, 0x0C3D1000U);
+	k_sleep(K_MSEC(50));
+
+	zassert_true(meshtastic_config_store_save_suppressed(),
+		     "a stray commit_edit_settings (no matching begin) must not un-suppress "
+		     "saves someone else deliberately suppressed");
+
+	/* Clean up so later tests see normal save scheduling. */
+	meshtastic_config_store_set_save_suppressed(false);
+	set_admin_key(NULL, 0U);
+}
+
+/*
+ * agents-dnr4.3 (end-to-end): a stray commit_edit_settings arriving in the
+ * few seconds between factory_reset_config wiping NVS and its scheduled
+ * reboot must not resurrect the wiped config/device key. Complements the
+ * isolated guard test above with the real factory_reset_config path.
+ */
+ZTEST(admin_pki, test_factory_reset_config_survives_a_stray_commit)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	size_t len;
+	meshtastic_Config got;
+
+	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
+
+	/* Baseline: a real, flushed, non-default value. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_ROUTER, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, 0x0F0000A1U);
+	k_sleep(K_MSEC(50));
+	zassert_ok(settings_save_subtree("meshtastic"), "baseline flush failed");
+
+	/* Factory-reset-config: wipes NVS (config/device key gone) but the reset
+	 * intentionally leaves RAM untouched and saves suppressed until reboot. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_factory_reset_config(key, sizeof(key), buf, sizeof(buf));
+	inject_pkc_admin(buf, len, 0x0F0000A2U);
+	k_sleep(K_MSEC(50));
+	meshtastic_admin_cancel_reboot(); /* don't actually reboot the test binary */
+
+	/* A stray commit_edit_settings arrives in the vulnerable window (no
+	 * begin_edit_settings ever sent -- exactly the scenario the guard above
+	 * protects). Before the fix this would flush RAM (still ROUTER) straight
+	 * back into the just-wiped key. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_edit_settings(true, key, sizeof(key), buf, sizeof(buf));
+	inject_pkc_admin(buf, len, 0x0F0000A3U);
+	k_sleep(K_MSEC(50));
+
+	/* Probe: overwrite RAM with a sentinel the wiped key can't legitimately
+	 * produce, then reload. If config/device still doesn't exist in NVS (the
+	 * wipe held), the sentinel survives; if the stray commit resurrected it,
+	 * reload overwrites the sentinel back to ROUTER. */
+	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE);
+	zassert_ok(settings_load_subtree("meshtastic"), "settings reload failed");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag, &got),
+		   "device reread failed");
+	zassert_equal(got.payload_variant.device.role,
+		      meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE,
+		      "factory_reset_config's wipe must survive a stray commit_edit_settings "
+		      "arriving before the scheduled reboot -- role should stay at the "
+		      "sentinel (key still absent from NVS), not resurrect as ROUTER");
+
+	/* Clean up: restore a real baseline for later tests. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_CLIENT, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, 0x0F0000A4U);
 	k_sleep(K_MSEC(50));
 	(void)settings_save_subtree("meshtastic");
 

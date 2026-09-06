@@ -98,6 +98,41 @@ static struct admin_ctx {
  * session; the app opens/closes serially). */
 static bool admin_edit_open;
 
+/*
+ * agents-dnr4.2: a client that opens an edit transaction and then goes silent
+ * (without ever sending commit_edit_settings, and without a BLE connect/
+ * disconnect event to trigger meshtastic_admin_reset()) leaves save_suppressed
+ * set forever -- every config write after that point, from ANY source, is
+ * silently never persisted. Upstream guards this with expireStaleEditTransaction(),
+ * checked at the top of every dispatch call, auto-COMMITTING (not discarding)
+ * a transaction idle for EDIT_TRANSACTION_IDLE_MS = 60000 (AdminModule.h/.cpp).
+ * That only self-heals on the NEXT admin message though -- a truly silent
+ * client (no further messages at all) would stay stuck even upstream. This
+ * uses a real timer instead, rescheduled on every admin op processed while the
+ * transaction is open, so a genuinely silent client is covered too: idle for
+ * CONFIG_MESHTASTIC_ADMIN_EDIT_IDLE_MS with nothing happening auto-commits on
+ * its own.
+ */
+static void admin_edit_idle_work_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(admin_edit_idle_work, admin_edit_idle_work_fn);
+
+static void admin_edit_idle_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	k_mutex_lock(&admin_lock, K_FOREVER);
+	if (admin_edit_open) {
+		LOG_WRN("admin: edit transaction idle for %u ms -- auto-committing",
+			CONFIG_MESHTASTIC_ADMIN_EDIT_IDLE_MS);
+		meshtastic_config_store_set_save_suppressed(false);
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+		meshtastic_settings_flush();
+#endif
+		admin_edit_open = false;
+	}
+	k_mutex_unlock(&admin_lock);
+}
+
 /* Set when a write lands a section the port applies only on reboot (module
  * config, and non-core config sections apply_core doesn't apply live). Fired
  * outside a txn immediately, or deferred to commit — mirrors the reference
@@ -176,11 +211,15 @@ bool meshtastic_admin_reboot_scheduled(void)
 	return k_work_delayable_is_pending(&admin_reboot_work);
 }
 
-/* Cancel a scheduled config-change reboot. Used by tests so the sim is not
- * actually rebooted when the deferred work fires. */
+/* Cancel a scheduled admin-triggered reboot -- both the config-change kind and
+ * the post-factory-reset kind (agents-dnr4.3: previously only the former,
+ * which left any test exercising factory_reset_device/config with a live 7s
+ * reboot timer armed against the test binary). Used by tests so the sim is
+ * not actually rebooted when the deferred work fires. */
 void meshtastic_admin_cancel_reboot(void)
 {
 	(void)k_work_cancel_delayable(&admin_reboot_work);
+	(void)k_work_cancel_delayable(&admin_reset_reboot_work);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -674,6 +713,14 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		return;
 	}
 
+	/* Any further activity while a transaction is open pushes its idle
+	 * deadline back out -- mirrors upstream checking expireStaleEditTransaction
+	 * at the top of every dispatch. begin_edit_settings itself schedules the
+	 * timer below (admin_edit_open is still false here on that message). */
+	if (admin_edit_open) {
+		k_work_reschedule(&admin_edit_idle_work, K_MSEC(CONFIG_MESHTASTIC_ADMIN_EDIT_IDLE_MS));
+	}
+
 	switch (admin_req.which_payload_variant) {
 	/* Getters — a response already carries the passkey, so the redundant
 	 * ROUTING ACK is suppressed below when response_sent (firmware behavior). */
@@ -841,15 +888,33 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	case meshtastic_AdminMessage_begin_edit_settings_tag:
 		meshtastic_config_store_set_save_suppressed(true);
 		admin_edit_open = true;
+		k_work_reschedule(&admin_edit_idle_work, K_MSEC(CONFIG_MESHTASTIC_ADMIN_EDIT_IDLE_MS));
 		LOG_DBG("admin: begin edit transaction");
 		break;
 	case meshtastic_AdminMessage_commit_edit_settings_tag:
-		meshtastic_config_store_set_save_suppressed(false);
+		/*
+		 * agents-dnr4.3: only act if a transaction is actually open. Without
+		 * this guard, a stray/errant commit_edit_settings -- one that arrives
+		 * with no matching begin, e.g. during the few seconds a factory reset
+		 * has deliberately suppressed saves before its scheduled reboot --
+		 * would unconditionally un-suppress and flush, resurrecting whatever
+		 * the live RAM store currently holds right after a reset went out of
+		 * its way not to. This is this port's equivalent of upstream calling
+		 * disableBluetooth() around destructive/commit ops: instead of
+		 * silencing the transport a stray message could arrive on, refuse to
+		 * act on a commit that doesn't correspond to a real open transaction.
+		 */
+		if (admin_edit_open) {
+			(void)k_work_cancel_delayable(&admin_edit_idle_work);
+			meshtastic_config_store_set_save_suppressed(false);
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
-		meshtastic_settings_flush();
+			meshtastic_settings_flush();
 #endif
-		admin_edit_open = false;
-		LOG_DBG("admin: commit edit transaction");
+			admin_edit_open = false;
+			LOG_DBG("admin: commit edit transaction");
+		} else {
+			LOG_WRN("admin: commit_edit_settings with no transaction open — ignored");
+		}
 		break;
 
 	/* Reboot (Stage 6) — ACK is emitted below, before the delayed reboot. */
@@ -903,6 +968,12 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	case meshtastic_AdminMessage_factory_reset_config_tag:
 		LOG_INF("admin: factory_reset_config (preserving security identity)");
 		meshtastic_config_store_set_save_suppressed(true);
+		/* agents-dnr4.3: the reset takes precedence over any transaction in
+		 * flight -- clear it (and its idle timer) so neither a stray commit
+		 * nor the idle timeout can act on a transaction the reset already
+		 * superseded. */
+		admin_edit_open = false;
+		(void)k_work_cancel_delayable(&admin_edit_idle_work);
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 		(void)meshtastic_settings_wipe(true); /* keep config/security */
 #endif
@@ -918,6 +989,9 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	case meshtastic_AdminMessage_factory_reset_device_tag:
 		LOG_INF("admin: factory_reset_device (full wipe)");
 		meshtastic_config_store_set_save_suppressed(true);
+		/* agents-dnr4.3: see factory_reset_config above. */
+		admin_edit_open = false;
+		(void)k_work_cancel_delayable(&admin_edit_idle_work);
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 		(void)meshtastic_settings_wipe(false); /* wipe everything incl. identity */
 #endif
@@ -1100,6 +1174,7 @@ void meshtastic_admin_reset(void)
 	if (admin_edit_open) {
 		admin_edit_open = false;
 		meshtastic_config_store_set_save_suppressed(false);
+		(void)k_work_cancel_delayable(&admin_edit_idle_work);
 	}
 	/* Don't let a dropped edit batch strand a reboot that never got committed. */
 	reboot_pending = false;
