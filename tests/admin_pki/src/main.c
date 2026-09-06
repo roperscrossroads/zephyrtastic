@@ -743,6 +743,54 @@ ZTEST(admin_pki, test_lora_config_change_applies_live)
 }
 
 /*
+ * agents-dnr4.5: the test above proves a LoRa config change applies LIVE; it
+ * says nothing about whether the value would still be there after a real
+ * reboot. This is the missing half -- a genuine settings_save_subtree()/
+ * settings_load_subtree("meshtastic") round trip through the real NVS
+ * backend, not the RAM-only struct these config_store setters mutate
+ * directly. Same harness as test_edit_transaction_suppresses_a_save_already_
+ * queued and test_fixed_position_survives_real_reboot; see
+ * docs/ADMIN-CONFIG-CAPABILITY-AUDIT.md §3.
+ */
+ZTEST(admin_pki, test_lora_config_survives_real_reboot)
+{
+	meshtastic_Config lora = meshtastic_Config_init_zero;
+	meshtastic_Config got = meshtastic_Config_init_zero;
+
+	lora.which_payload_variant = meshtastic_Config_lora_tag;
+	lora.payload_variant.lora.tx_enabled = true;
+	lora.payload_variant.lora.use_preset = true;
+	lora.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST;
+	lora.payload_variant.lora.region = meshtastic_Config_LoRaConfig_RegionCode_US;
+	lora.payload_variant.lora.hop_limit = 5;
+	zassert_ok(meshtastic_config_store_set_config(&lora), "set lora failed");
+	zassert_ok(settings_save_subtree("meshtastic"), "lora flush failed");
+
+	/* Change it again, but do NOT flush -- a real reboot must not see this. */
+	lora.payload_variant.lora.hop_limit = 2;
+	lora.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+	zassert_ok(meshtastic_config_store_set_config(&lora), "set lora (unflushed) failed");
+
+	zassert_ok(settings_load_subtree("meshtastic"), "settings reload failed");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &got),
+		   "lora reread failed");
+	zassert_equal(got.payload_variant.lora.hop_limit, 5,
+		      "hop_limit must survive a real reboot at its FLUSHED value, not the "
+		      "unflushed edit");
+	zassert_equal(got.payload_variant.lora.modem_preset,
+		      meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST,
+		      "modem_preset must survive a real reboot at its FLUSHED value");
+
+	/* Restore the suite default for later tests. */
+	lora.payload_variant.lora.tx_enabled = true;
+	lora.payload_variant.lora.use_preset = true;
+	lora.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+	lora.payload_variant.lora.hop_limit = 3;
+	(void)meshtastic_config_store_set_config(&lora);
+	(void)settings_save_subtree("meshtastic");
+}
+
+/*
  * agents-dnr4.1: a save already queued (within the debounce window) before
  * begin_edit_settings opened must NOT be allowed to fire mid-transaction --
  * that would export a partially-edited store to flash and defeat the whole
@@ -1114,6 +1162,49 @@ ZTEST(admin_pki, test_fixed_position_record_roundtrip)
 	zassert_ok(meshtastic_config_store_setting_set("position_fixed", buf, (size_t)len));
 	zassert_equal(meshtastic_config_store_get_fixed_position(&got), -ENOENT,
 		      "cleared fixed position must not resurrect as a (0,0) fix");
+}
+
+/*
+ * agents-dnr4.5: the test above proves the record's encode/decode framing
+ * round-trips, but calls meshtastic_config_store_setting_get/set() directly --
+ * it never touches the real Zephyr settings/NVS subsystem, so it cannot tell
+ * apart "persists" from "would survive a reboot". This is that missing case:
+ * a real settings_save_subtree()/settings_load_subtree("meshtastic") round
+ * trip, the pattern every other Config-section reboot-survival question
+ * should follow (see docs/ADMIN-CONFIG-CAPABILITY-AUDIT.md §3).
+ */
+ZTEST(admin_pki, test_fixed_position_survives_real_reboot)
+{
+	meshtastic_Position pos = meshtastic_Position_init_zero;
+	meshtastic_Position got = meshtastic_Position_init_zero;
+
+	pos.has_latitude_i = true;
+	pos.latitude_i = 400000000; /* 40.0000000 deg */
+	pos.has_longitude_i = true;
+	pos.longitude_i = -1050000000; /* -105.0000000 deg */
+	pos.has_altitude = true;
+	pos.altitude = 1600;
+	pos.precision_bits = 16U;
+
+	zassert_ok(meshtastic_config_store_set_fixed_position(&pos), "set fixed position failed");
+	zassert_ok(settings_save_subtree("meshtastic"), "position flush failed");
+
+	/* Clear it in RAM WITHOUT flushing -- a real reboot must still see the
+	 * flushed fix, not this cleared state. */
+	zassert_ok(meshtastic_config_store_clear_fixed_position(), "clear (unflushed) failed");
+	zassert_equal(meshtastic_config_store_get_fixed_position(&got), -ENOENT,
+		      "should read as cleared in RAM before the reload");
+
+	zassert_ok(settings_load_subtree("meshtastic"), "settings reload failed");
+	zassert_ok(meshtastic_config_store_get_fixed_position(&got),
+		   "fixed position must survive a real reboot, not stay cleared");
+	zassert_equal(got.latitude_i, pos.latitude_i, "latitude not restored from real NVS");
+	zassert_equal(got.longitude_i, pos.longitude_i, "longitude not restored from real NVS");
+	zassert_equal(got.altitude, pos.altitude, "altitude not restored from real NVS");
+
+	/* Clean up so later tests see no fixed position. */
+	zassert_ok(meshtastic_config_store_clear_fixed_position());
+	(void)settings_save_subtree("meshtastic");
 }
 
 /* ---- Persistence: curated (favorite) node identity survives reboot -------- */
