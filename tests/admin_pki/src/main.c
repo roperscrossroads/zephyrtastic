@@ -327,6 +327,23 @@ static size_t encode_admin_edit_settings(bool commit, const uint8_t *passkey, si
 	return os.bytes_written;
 }
 
+/* Encode an AdminMessage remove_by_nodenum(target) carrying the given passkey. */
+static size_t encode_admin_remove_by_nodenum(uint32_t target, const uint8_t *passkey,
+					     size_t passkey_len, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_remove_by_nodenum_tag;
+	am.payload_variant.remove_by_nodenum = target;
+	if (passkey != NULL && passkey_len > 0U) {
+		am.session_passkey.size = (pb_size_t)passkey_len;
+		memcpy(am.session_passkey.bytes, passkey, passkey_len);
+	}
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
 /* Build a genuine PKC-encrypted ADMIN_APP wire frame "from PEER to us" and feed
  * it through the LoRa RX path. Uses the ECDH-symmetry trick described up top. */
 static void inject_pkc_admin(const uint8_t *admin_bytes, size_t admin_len, uint32_t id)
@@ -1163,6 +1180,71 @@ ZTEST(admin_pki, test_favorite_node_record_persists)
 	 * leaks into other tests or a later run sharing this NVS partition. */
 	(void)meshtastic_nodedb_remove(fav);
 	(void)settings_delete("mtrec/0fa00001");
+}
+
+/*
+ * agents-dnr4.4: admin remove_by_nodenum must purge the target's pinned PKC key
+ * from the warm tier too, not just drop the hot NodeDB entry -- otherwise a node
+ * re-admitted with the same id (e.g. a re-flashed/re-keyed board) is silently
+ * re-trusted under its OLD key (meshtastic_nodedb_copy_pubkey() falls back to the
+ * warm ring). Regression test for routing remove_by_nodenum through
+ * meshtastic_nodedb_forget() instead of the bare meshtastic_nodedb_remove().
+ */
+ZTEST(admin_pki, test_remove_by_nodenum_purges_the_warm_pinned_key)
+{
+	const uint32_t victim = 0x0FB00001U;
+	uint8_t key[MESHTASTIC_PKI_KEY_LEN];
+	uint8_t out[MESHTASTIC_PKI_KEY_LEN];
+	uint8_t admin_key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	uint8_t buf[256];
+	size_t len;
+
+	memset(key, 0x7EU, sizeof(key)); /* the victim's pinned identity */
+
+	seed_named_peer(victim, "Victim", key);
+	zassert_ok(meshtastic_nodedb_copy_pubkey(victim, out), "seeded key must be findable");
+	zassert_mem_equal(out, key, sizeof(key), "seeded key mismatch");
+
+	/* Admin-remove it (real PKC-authorized AdminMessage path, same as every
+	 * other mutating op in this suite). PEER's *pinned* NodeDB key is not
+	 * stable across the whole suite -- other tests (e.g.
+	 * test_pkc_dm_uses_zero_wire_marker, test_directed_position_stays_on_
+	 * channel) legitimately re-key PEER with a fresh random key for their own
+	 * unrelated scenarios and never restore peer_pubkey, and the impersonation
+	 * guard means a plain NodeInfo can never re-pin it back once changed. That
+	 * is harmless for inject_pkc_admin() itself (meshtastic_pki_encrypt() looks
+	 * up PEER's key fresh at encrypt time and the RX path looks it up fresh at
+	 * decrypt time -- always self-consistent, whatever the value is) but it
+	 * means admin_key[] must be set to whatever PEER's key ACTUALLY is right
+	 * now, not the suite's original peer_pubkey. */
+	{
+		uint8_t peer_key_now[MESHTASTIC_PKI_KEY_LEN];
+
+		zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_NODE_ID, peer_key_now),
+			   "PEER must have SOME pinned key by this point in the suite");
+		set_admin_key(peer_key_now, sizeof(peer_key_now));
+	}
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(admin_key);
+	len = encode_admin_remove_by_nodenum(victim, admin_key, sizeof(admin_key), buf, sizeof(buf));
+	inject_pkc_admin(buf, len, 0x0FB00002U);
+	k_sleep(K_MSEC(50));
+	set_admin_key(NULL, 0U);
+
+	/* Gone from the hot store either way -- the discriminating assertion is next. */
+	{
+		struct meshtastic_nodedb_node snap;
+
+		zassert_equal(meshtastic_nodedb_get(victim, &snap), -ENOENT,
+			      "victim should be gone from the hot store");
+	}
+
+	/* The real proof: no trace of the key anywhere, hot OR warm. Before routing
+	 * through meshtastic_nodedb_forget(), this would still succeed via the warm
+	 * fallback -- the bug this test catches. */
+	zassert_not_equal(meshtastic_nodedb_copy_pubkey(victim, out), 0,
+			  "admin remove_by_nodenum must purge the warm-tier key too, not just "
+			  "the hot NodeDB entry");
 }
 
 /* ---- Upgrade safety: config record version window ------------------------ */

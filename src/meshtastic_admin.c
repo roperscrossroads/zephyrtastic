@@ -805,7 +805,12 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 			admin_req.payload_variant.remove_ignored_node, ret);
 		break;
 	case meshtastic_AdminMessage_remove_by_nodenum_tag:
-		ret = meshtastic_nodedb_remove(admin_req.payload_variant.remove_by_nodenum);
+		/* forget(), not remove(): a bare remove leaves the peer's pinned PKC
+		 * key parked in the warm tier, so a node re-admitted with the same id
+		 * (e.g. a re-flashed/re-keyed board) is silently re-trusted under its
+		 * OLD key. See meshtastic_nodedb_forget()'s comment (nodedb.c) — same
+		 * bug class the shell's `node forget` exists to avoid, agents-dnr4.4. */
+		ret = meshtastic_nodedb_forget(admin_req.payload_variant.remove_by_nodenum);
 		if (ret == -EINVAL) {
 			/* Refusing to remove the local node is a real client error. */
 			LOG_WRN("admin: remove_by_nodenum rejected (self)");
