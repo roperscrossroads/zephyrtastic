@@ -304,6 +304,29 @@ static size_t encode_admin_set_nodeinfo_interval(uint32_t secs, const uint8_t *p
 	return os.bytes_written;
 }
 
+/* Encode an AdminMessage begin_edit_settings/commit_edit_settings carrying the
+ * given passkey. */
+static size_t encode_admin_edit_settings(bool commit, const uint8_t *passkey, size_t passkey_len,
+					 uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	if (commit) {
+		am.which_payload_variant = meshtastic_AdminMessage_commit_edit_settings_tag;
+		am.payload_variant.commit_edit_settings = true;
+	} else {
+		am.which_payload_variant = meshtastic_AdminMessage_begin_edit_settings_tag;
+		am.payload_variant.begin_edit_settings = true;
+	}
+	if (passkey != NULL && passkey_len > 0U) {
+		am.session_passkey.size = (pb_size_t)passkey_len;
+		memcpy(am.session_passkey.bytes, passkey, passkey_len);
+	}
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
 /* Build a genuine PKC-encrypted ADMIN_APP wire frame "from PEER to us" and feed
  * it through the LoRa RX path. Uses the ECDH-symmetry trick described up top. */
 static void inject_pkc_admin(const uint8_t *admin_bytes, size_t admin_len, uint32_t id)
@@ -699,6 +722,103 @@ ZTEST(admin_pki, test_lora_config_change_applies_live)
 		lora.payload_variant.lora.hop_limit = 3;
 		(void)meshtastic_config_store_set_config(&lora);
 	}
+	set_admin_key(NULL, 0U);
+}
+
+/*
+ * agents-dnr4.1: a save already queued (within the debounce window) before
+ * begin_edit_settings opened must NOT be allowed to fire mid-transaction --
+ * that would export a partially-edited store to flash and defeat the whole
+ * point of the transaction. Regression test for the race fixed in
+ * meshtastic_settings.c's save_work_handler(), which previously called
+ * settings_save_subtree() unconditionally regardless of admin_edit_open.
+ */
+ZTEST(admin_pki, test_edit_transaction_suppresses_a_save_already_queued)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	size_t len;
+	uint32_t id = 0x0AD1E000U;
+
+	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
+
+	/* Clean baseline, flushed to real NVS so the probe below has a known
+	 * pre-transaction value to check against. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_CLIENT, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+	zassert_ok(settings_save_subtree("meshtastic"), "baseline flush failed");
+
+	/* Queue a debounced save (default 1000 ms) by changing the role... */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_ROUTER, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+
+	/* ...then immediately open an edit transaction, BEFORE that save fires. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_edit_settings(false, key, sizeof(key), buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+
+	/* A further edit inside the transaction. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_TRACKER, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+
+	/* Let the originally-queued save's debounce window elapse (comfortably past
+	 * the default 1000ms, comfortably under the suite's 1500ms idle-timeout so
+	 * THAT mechanism doesn't also fire and confuse what this test is isolating).
+	 * Before the fix, save_work_handler() would export the live (mid-transaction)
+	 * store here. */
+	k_sleep(K_MSEC(1100));
+
+	/* Probe NVS directly by reloading the subtree. If nothing was flushed since
+	 * the baseline, the role must come back CLIENT -- not ROUTER (the queued
+	 * write) and definitely not TRACKER (the in-transaction edit). */
+	zassert_ok(settings_load_subtree("meshtastic"), "settings reload failed");
+	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "a save fired mid-transaction: NVS should still hold the pre-transaction "
+		      "role, not an in-progress edit");
+
+	/* The reload just clobbered RAM back to CLIENT -- that's a side effect of
+	 * probing flash, not a real edit. Prove a real commit still works: re-apply
+	 * the edit and commit it. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_TRACKER, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_edit_settings(true, key, sizeof(key), buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+
+	zassert_ok(settings_load_subtree("meshtastic"), "settings reload after commit failed");
+	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_TRACKER,
+		      "commit must persist the transaction's final value");
+
+	/* Clean up: leave the shared suite state at its expected default. */
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_CLIENT, key, sizeof(key),
+				    buf, sizeof(buf));
+	inject_pkc_admin(buf, len, id++);
+	k_sleep(K_MSEC(50));
+	(void)settings_save_subtree("meshtastic");
+
 	set_admin_key(NULL, 0U);
 }
 

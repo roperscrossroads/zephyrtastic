@@ -120,6 +120,17 @@ void meshtastic_config_store_get_owner_flags(bool *is_licensed, bool *is_unmessa
  */
 void meshtastic_config_store_set_save_suppressed(bool suppressed);
 
+/**
+ * @brief Is a save currently suppressed (an edit transaction is open)?
+ *
+ * store_schedule_save() already checks this before SCHEDULING a new debounced
+ * save, but a save scheduled just before the transaction opened is already
+ * queued and would otherwise fire anyway -- exporting a partially-edited
+ * store to flash. meshtastic_settings.c's save_work_handler() checks this too,
+ * so an already-queued save is skipped rather than firing mid-transaction.
+ */
+bool meshtastic_config_store_save_suppressed(void);
+
 int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_len);
 int meshtastic_config_store_setting_set(const char *key, const void *buf, size_t len);
 int meshtastic_config_store_export(int (*export_func)(const char *name, const void *val,

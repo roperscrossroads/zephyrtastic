@@ -941,6 +941,15 @@ void meshtastic_config_store_set_save_suppressed(bool suppressed)
 #endif
 }
 
+bool meshtastic_config_store_save_suppressed(void)
+{
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	return save_suppressed;
+#else
+	return false;
+#endif
+}
+
 /*
  * Route setter persistence through here so an open admin edit transaction can
  * defer the coalesced flash write until commit

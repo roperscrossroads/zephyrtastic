@@ -91,6 +91,20 @@ static void save_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
+	/*
+	 * A save already queued (within the debounce window) before an admin
+	 * begin_edit_settings opened would otherwise fire right here, exporting
+	 * a partially-edited store to flash and defeating the transaction's
+	 * atomicity. meshtastic_config_store_set_save_suppressed() only stops
+	 * NEW saves from being scheduled -- this is the other half. commit
+	 * (or a future idle-timeout auto-commit) does the real flush once the
+	 * transaction actually closes, so skipping here loses nothing.
+	 */
+	if (meshtastic_config_store_save_suppressed()) {
+		LOG_DBG("Meshtastic settings save skipped (edit transaction open)");
+		return;
+	}
+
 	ret = settings_save_subtree(MESHTASTIC_SETTINGS_SUBTREE);
 	if (ret < 0) {
 		LOG_WRN("Meshtastic settings save failed (%d)", ret);
