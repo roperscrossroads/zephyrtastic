@@ -152,3 +152,37 @@ specific revision.
    rather than a phantom voltage.
 3. Sanity-check the percentage at full charge (~4.2 V → ~100%) and a partly
    drained cell against the OCV curve.
+
+## 2026-09-06/07: the `&adc0` fix confirmed on real hardware, and a second gap found
+
+Bench-tested the `&adc1 0` → `&adc0 0` fix (see the correction above) on **rzr4**
+(V4-R8, class 6). Built and flashed twice:
+
+- **0.3.21** (the fix alone, on top of the in-flight sx126x wedge fix): boots
+  clean, radio fully healthy (`meshtastic status`/`rf` all green) — but this
+  build has no code that ever calls into the ADC at all (no battery feature is
+  merged on `main`), so it only proves `&adc0 { status = "okay"; }` alone is
+  harmless. It does not exercise `adc_channel_setup()`.
+- **0.3.22** (0.3.21 + `CONFIG_SENSOR=y CONFIG_VOLTAGE_DIVIDER=y
+  CONFIG_SENSOR_SHELL=y`, a config-only change, no app code): this makes
+  Zephyr's generic `voltage-divider` sensor driver auto-init at boot and
+  actually call `adc_channel_setup_dt()` on the (now-correct) GPIO1 channel.
+  Radio stayed fully healthy afterward — `tx: 7 ok, 0 failed`, `rx: 16
+  decoded`, `radio wedge-resets 0` — real confirmation that whatever the ADC
+  setup call touches now, it is no longer GPIO11/MISO. rzr4 was reflashed back
+  to plain 0.3.21 afterward; 0.3.22 was a throwaway diagnostic build, not
+  registered as a fleet class.
+
+**Second finding, unrelated to the pin fix:** the `vbatt` sensor device came up
+`(DISABLED)` (`device list`) on 0.3.22 — `voltage_init()`
+(`zephyr/drivers/sensor/voltage_divider/voltage.c`) failed, most likely because
+our `vbatt` node has no `channel@0` child under `&adc0` carrying
+`zephyr,gain`/`zephyr,reference`/`zephyr,acquisition-time`/`zephyr,resolution` —
+properties `ADC_DT_SPEC_GET` expects on the channel node the `io-channels`
+phandle points at (see `zephyr/include/zephyr/drivers/adc.h`'s own DT examples).
+This is **independent of adc0 vs adc1** — it would have failed identically
+under the old wrong pin, and the `battery-adc-v2` branch's custom
+`meshtastic_battery.c` (not the generic sensor framework) may or may not hit
+the same gap depending on how it calls the ADC API directly. **Whoever revives
+`battery-adc-v2` needs to check this first**, before assuming the pin fix alone
+unblocks it.
