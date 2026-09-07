@@ -45,6 +45,7 @@
 
 #if defined(CONFIG_MESHTASTIC_BATTERY_CUTOFF)
 #include <zephyr/sys/poweroff.h>
+#include "meshtastic_battery_cutoff.h"
 #include "meshtastic_core.h" /* meshtastic_radio_disarm_dio1_wake() */
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 #include "meshtastic_settings.h"
@@ -286,6 +287,11 @@ bool meshtastic_battery_external_power(void)
  * rather than acting on one, because voltage sags hard under a TX burst or a
  * WiFi association and recovers afterwards. At the default 30 s poll x 10
  * readings the pack must be genuinely low for ~5 minutes.
+ *
+ * The actual counting/threshold decision lives in meshtastic_battery_cutoff.h,
+ * not here -- it has no HAS_POWEROFF dependency (unlike this whole file under
+ * this #if), so main/tests/battery_cutoff can exercise it on native_sim, which
+ * cannot select CONFIG_MESHTASTIC_BATTERY_CUTOFF at all.
  */
 
 /*
@@ -303,8 +309,7 @@ BUILD_ASSERT(CONFIG_MESHTASTIC_BATTERY_CUTOFF_POLL_SEC * MSEC_PER_SEC > BATTERY_
 	     "battery cutoff poll interval must exceed the read cache window, or "
 	     "consecutive readings are the same cached sample counted repeatedly");
 
-static uint8_t low_voltage_counter;
-static bool battery_critical;
+static struct meshtastic_battery_cutoff_state cutoff_state;
 
 static void battery_monitor_work_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(battery_monitor_work, battery_monitor_work_fn);
@@ -313,7 +318,8 @@ static void battery_power_off(int mv)
 {
 	LOG_ERR("Battery critically low (%d mV, %u readings below %d mV): powering "
 		"off to protect the cell. Recharge, then press RESET.",
-		mv, (unsigned int)low_voltage_counter, CONFIG_MESHTASTIC_BATTERY_CUTOFF_MV);
+		mv, (unsigned int)cutoff_state.low_voltage_counter,
+		CONFIG_MESHTASTIC_BATTERY_CUTOFF_MV);
 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 	(void)meshtastic_settings_flush();
@@ -395,64 +401,49 @@ static void battery_float_check(int mv, int64_t now)
 static void battery_monitor_work_fn(struct k_work *work)
 {
 	int mv = meshtastic_battery_millivolts();
+	enum meshtastic_battery_cutoff_action action;
 
 	ARG_UNUSED(work);
 
-	if (mv < 0) {
-		/* No reading at all (ADC not ready, or every sample failed). Never
-		 * act on an absent measurement — an unreadable ADC must not be able
-		 * to switch the node off. */
-		low_voltage_counter = 0;
-		battery_critical = false;
-		goto reschedule;
-	}
-
-	if (mv < BATTERY_NO_BATT_MV) {
-		/* No cell fitted. A mains-powered node with an empty JST reads here,
-		 * and powering that off would strand it — upstream gates the same
-		 * check on getHasBattery() for exactly this reason. */
-		low_voltage_counter = 0;
-		battery_critical = false;
-		goto reschedule;
-	}
-
 #if defined(CONFIG_MESHTASTIC_BATTERY_FLOAT_WARN)
-	battery_float_check(mv, k_uptime_get());
+	if (mv >= 0) {
+		battery_float_check(mv, k_uptime_get());
+	}
 #endif
 
-	if (mv >= CONFIG_MESHTASTIC_BATTERY_CUTOFF_MV) {
-		if (low_voltage_counter != 0) {
-			LOG_INF("Battery recovered to %d mV; low-voltage count cleared", mv);
-		}
-		low_voltage_counter = 0;
-		battery_critical = false;
-		goto reschedule;
-	}
+	action = meshtastic_battery_cutoff_update(&cutoff_state, mv, BATTERY_NO_BATT_MV,
+						   CONFIG_MESHTASTIC_BATTERY_CUTOFF_MV,
+						   CONFIG_MESHTASTIC_BATTERY_CUTOFF_COUNT);
 
-	battery_critical = true;
-	if (low_voltage_counter < UINT8_MAX) {
-		low_voltage_counter++;
-	}
-	LOG_WRN("Battery low: %d mV (%u/%d readings below %d mV)", mv,
-		(unsigned int)low_voltage_counter, CONFIG_MESHTASTIC_BATTERY_CUTOFF_COUNT,
-		CONFIG_MESHTASTIC_BATTERY_CUTOFF_MV);
-
-	if (low_voltage_counter >= CONFIG_MESHTASTIC_BATTERY_CUTOFF_COUNT) {
+	switch (action) {
+	case MESHTASTIC_BATTERY_CUTOFF_NONE:
+		break;
+	case MESHTASTIC_BATTERY_CUTOFF_RECOVERED:
+		LOG_INF("Battery recovered to %d mV; low-voltage count cleared", mv);
+		break;
+	case MESHTASTIC_BATTERY_CUTOFF_LOW:
+		LOG_WRN("Battery low: %d mV (%u/%d readings below %d mV)", mv,
+			(unsigned int)cutoff_state.low_voltage_counter,
+			CONFIG_MESHTASTIC_BATTERY_CUTOFF_COUNT, CONFIG_MESHTASTIC_BATTERY_CUTOFF_MV);
+		break;
+	case MESHTASTIC_BATTERY_CUTOFF_TRIP:
 		battery_power_off(mv); /* does not return */
+		break;
 	}
 
-reschedule:
 	k_work_schedule(&battery_monitor_work,
 			K_SECONDS(CONFIG_MESHTASTIC_BATTERY_CUTOFF_POLL_SEC));
 }
 
 bool meshtastic_battery_is_critical(void)
 {
-	return battery_critical;
+	return cutoff_state.critical != 0U;
 }
 
 static int battery_monitor_init(void)
 {
+	meshtastic_battery_cutoff_init(&cutoff_state);
+
 	/* Deliberately late: the first seconds after boot are the worst possible
 	 * time to judge the pack, with radio and WiFi bring-up inrush sagging the
 	 * rail and the ADC not necessarily set up yet. */
