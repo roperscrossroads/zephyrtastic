@@ -33,6 +33,9 @@
 #include <zephyr/logging/log.h>
 
 #include <zephyr/meshtastic/nodedb.h>
+#if defined(CONFIG_MESHTASTIC_BATTERY)
+#include "meshtastic_battery.h"
+#endif
 #include "meshtastic_core.h" /* public getters + internal name/freq/chan/hop getters */
 #include "meshtastic_airtime.h"  /* channel/tx utilisation (CONFIG_MESHTASTIC_AIRTIME) */
 #include "meshtastic_build.h"    /* build id for the device page */
@@ -331,11 +334,31 @@ static void page_status(void)
 		return;
 	}
 
-	/* Battery readout is deferred (the ADC channel-setup that reads the vbatt
-	 * divider disturbs the SX1262 DIO1 IRQ on the shared RTC-IO controller and
-	 * kills the radio — see docs/cfb-display-ui.md). Show a placeholder until
-	 * that is fixed. RSSI stays available on the node list / Radio page. */
+	/* Battery voltage from the vbatt divider (meshtastic_battery.c), read on
+	 * the correct ADC channel (&adc0/GPIO1 -- see main/docs/battery-provenance.md
+	 * for why this used to break the radio). RSSI stays available on the node
+	 * list / Radio page regardless. */
+#if defined(CONFIG_MESHTASTIC_BATTERY)
+	{
+		int bmv = meshtastic_battery_millivolts();
+		int pct = (bmv >= 0) ? meshtastic_battery_percent() : -1;
+
+		/* '!' marks a pack below the cutoff voltage: the low-voltage counter
+		 * is running and the node will power itself off if it stays there. */
+		const char *crit = meshtastic_battery_is_critical() ? "!" : "";
+
+		if (bmv < 0) {
+			draw_row(0, "Bat -");
+		} else if (pct >= 0) {
+			draw_row(0, "Bat %d.%02dV %d%%%s", bmv / 1000, (bmv % 1000) / 10, pct,
+				 crit);
+		} else {
+			draw_row(0, "Bat %d.%02dV%s", bmv / 1000, (bmv % 1000) / 10, crit);
+		}
+	}
+#else
 	draw_row(0, "Bat -");
+#endif
 	draw_row(1, "TX%u RX%u", st.tx_packets, st.rx_packets);
 	draw_row(2, "Up%us %s", (unsigned int)(k_uptime_get() / 1000),
 		 st.ble_connected ? "BLE" : "");

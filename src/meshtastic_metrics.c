@@ -17,6 +17,9 @@
 #include "meshtastic_telemetry_internal.h"
 #include "meshtastic_airtime.h"
 #include "meshtastic_sched.h"
+#if defined(CONFIG_MESHTASTIC_BATTERY)
+#include "meshtastic_battery.h"
+#endif
 
 #if defined(CONFIG_MESHTASTIC_LOCAL_STATS)
 #include <zephyr/sys/sys_heap.h>
@@ -91,6 +94,48 @@ static void collect_fuel_gauge(meshtastic_DeviceMetrics *metrics)
 #endif
 }
 
+/*
+ * Battery telemetry from the board's VBAT voltage-divider, for the boards that
+ * have one instead of a fuel-gauge IC (the Heltec V4 family). Without this the
+ * divider reading only ever reached the local display, and every node reported
+ * the "powered" sentinel over the mesh no matter what the pack was doing.
+ */
+static void collect_battery_divider(meshtastic_DeviceMetrics *metrics)
+{
+#if defined(CONFIG_MESHTASTIC_BATTERY)
+	int mv = meshtastic_battery_millivolts();
+	int pct;
+
+	if (mv < 0 || !meshtastic_battery_present()) {
+		/* No reading, or no cell fitted: leave both fields unset so the
+		 * caller's fallback advertises "powered" rather than a phantom
+		 * half-volt pack. */
+		return;
+	}
+
+	metrics->has_voltage = true;
+	metrics->voltage = (float)mv / 1000.0f;
+
+	/* Above the charge-termination voltage the pack is being charged, so a
+	 * state-of-charge derived from a resting-voltage curve would be wrong.
+	 * Upstream reports the same sentinel in that case rather than a bad
+	 * percentage. */
+	if (meshtastic_battery_external_power()) {
+		metrics->has_battery_level = true;
+		metrics->battery_level = MESHTASTIC_BATTERY_LEVEL_POWERED;
+		return;
+	}
+
+	pct = meshtastic_battery_percent();
+	if (pct >= 0) {
+		metrics->has_battery_level = true;
+		metrics->battery_level = (uint32_t)pct;
+	}
+#else
+	ARG_UNUSED(metrics);
+#endif
+}
+
 int meshtastic_collect_device_metrics(meshtastic_DeviceMetrics *metrics)
 {
 	if (metrics == NULL) {
@@ -102,6 +147,11 @@ int meshtastic_collect_device_metrics(meshtastic_DeviceMetrics *metrics)
 	metrics->uptime_seconds = k_uptime_seconds();
 
 	collect_fuel_gauge(metrics);
+	if (!metrics->has_battery_level) {
+		/* A real fuel gauge wins; the divider is the fallback for boards
+		 * that only have one of those. */
+		collect_battery_divider(metrics);
+	}
 
 	if (!metrics->has_battery_level) {
 		/* No fuel gauge, or the read failed: report the "powered" sentinel
