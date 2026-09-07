@@ -205,7 +205,7 @@ that row that should never move.
 Built and green on native_sim. Exercised fleet-wide on hardware since 2026-09-02 (the
 front-end, LNA and staged-vs-applied rows read real values on all eight bench nodes); the
 HEALTH block's `RX activity` and `TX defer` rows (2026-09-02, later) were first read on
-rzr1/rzr2 the evening they shipped.
+two bench nodes the evening they shipped.
 
 Still to build: the A/B alternation engine (`rf ab`), which needs carried patch 0011 for
 real rx-boost readback before its verdicts mean anything.

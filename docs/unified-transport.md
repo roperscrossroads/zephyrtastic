@@ -66,7 +66,7 @@ fires.
 ```
 PROFILE=v4-unified just dist          # -> firmware-out/heltec-v4/unified-ota-ui-nomqtt-pm/
 # flash (guard first — two identical V4s):
-devreg guard rzr2 /dev/ttyACM0 && \
+devreg guard <name> /dev/ttyACM0 && \
   firmware-out/heltec-v4/unified-ota-ui-nomqtt-pm/flash.sh /dev/ttyACM0   # then tap RST
 ```
 
@@ -178,7 +178,7 @@ more CPU-only data to PSRAM) are available if a future feature needs them.
   the transport but does not itself carry credentials — bridging
   `NetworkConfig.wifi_ssid/psk` → `wifi_credentials` is a natural follow-up to
   make phone-only WiFi provisioning work.
-- **On-hardware bench test is pending** — neither `rzr1` nor `rzr2` was attached
+- **On-hardware bench test is pending** — no bench node was attached
   when this landed. Test plan: flash `v4-unified` (boots BLE by default) → verify
   BLE + `meshtastic version` build id → `wifi cred add` → `meshtastic transport
   wifi` → `kernel reboot cold` → verify telnet/OTA on WiFi → `meshtastic

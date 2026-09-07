@@ -176,7 +176,7 @@ paths, `set_channel`). Next untested targets: metrics/telemetry/position (0–2 
 `admin` handlers (28 %).
 
 ### T3 — Automated hardware-in-the-loop (HIL) bench  *(HIGH-value, bigger lift)*
-The entire uncommitted batch is gated on **manual** rzr2 testing. A scripted
+The entire uncommitted batch is gated on **manual** bench testing. A scripted
 harness — flash both nodes, run scenarios (send/verify messages, toggle
 transports, force a BLE reconnect, measure drops), assert pass/fail — reusing
 `meshtest.py`/`tsh.py` + the runbox/ask mechanism. The missing "real" test tier;

@@ -108,17 +108,19 @@ corroborated — and largely can't be, because they are tuning, not physics.
 | Choice | Value | Source | Notes |
 |---|---|---|---|
 | ADC attenuation | `ADC_ATTEN_DB_12` (→ Zephyr `ADC_GAIN_1_4`) | `Power.cpp:100` | Heltec's `analogReadMilliVolts()` uses the same ~12 dB default, so loosely corroborated by S2 |
-| Empirical multiplier | **× 1.045** (V4; × 1.035 on R8) | `variant.h:9` (`ADC_MULTIPLIER 4.9 * 1.045`) | **Explicitly a fudge factor.** Upstream's own guidance: *"If the calculated result shows a significant deviation from the actual battery level, please adjust the value of the coefficient."* Exposed as `…_BATTERY_CAL_PERMILLE`. |
+| Empirical multiplier | **× 1.030** (V4; × 1.015 on R8) | corrected against a real cell, see below | **Started as a fudge factor**, not a hardware constant. Upstream's starting point was `4.9 * 1.045` (V4) / `4.9 * 1.035` (R8) (`variant.h:9`), copied here for parity but never checked against real hardware until a direct multimeter cross-check found both variants over-reading by 1.5-2% — corrected to the values above. Upstream's own guidance still applies: *"If the calculated result shows a significant deviation from the actual battery level, please adjust the value of the coefficient."* Exposed as `…_BATTERY_CAL_PERMILLE`. Each correction is a single sample per variant — the divider resistors carry their own tolerance (typically ±1%), so re-check against a meter on any board this matters for rather than assuming these generalize to every unit. |
 | State-of-charge curve | OCV table `4190…3100 mV`, interpolated | `Power.h:24`, `Power.cpp:349-392` | A **generic single-cell LiPo** open-circuit-voltage curve (attributed in-code to G. Russo, 2024) — not board-specific or measured on a V4. Below 2600 mV = "no battery". |
 
 ## What this means for trust
 
 - **Where the divider connects and what the resistors are:** solid. Three
   sources including the manufacturer schematic agree.
-- **The exact voltage the screen shows:** trust it to ~±5%, no better, until
-  bench-verified. The `× 1.045` factor is empirical and the ESP32-S3 ADC needs
-  per-chip calibration; that is why the code and devicetree carry a
-  `VERIFY(hardware)` marker and the factor is a tunable Kconfig.
+- **The exact voltage the screen shows:** the calibration factor has now been
+  checked against a real cell on one board per variant and corrected (see
+  above) — trust it to a couple of percent, not better, since that's a single
+  sample and the ESP32-S3 ADC needs per-chip calibration. That is why the code
+  and devicetree carry a `VERIFY(hardware)` marker and the factor is a tunable
+  Kconfig.
 - **The percentage:** a reasonable estimate from a generic LiPo curve, not a
   fuel-gauge reading. Good enough for a glance; do not treat it as precise.
 
@@ -132,9 +134,9 @@ Do not assume rev 4.2's constants carry over.
 
 | Board | Divider | ADC_CTRL | Multiplier | PSRAM | Watch out for |
 |---|---|---|---|---|---|
-| **V4 rev 4.2** ✅ | 390k/100k (4.9) | GPIO37, **HIGH** | 4.9 × **1.045** | 2 MB quad | — (this document) |
-| **V4 rev 4.3** | same *(expected)* | GPIO37, HIGH *(expected)* | 4.9 × 1.045 | 2 MB quad | Same Zephyr image as 4.2; wiring shared, only the FEM differs. Confirm against a 4.3 schematic if one is published. |
-| **V4-R8** | same | **none** — divider always connected | 4.9 × **1.035** | 8 MB octal | `heltec_v4_r8` defines **no** `ADC_CTRL`. Our code already skips the gate when the `adc_ctrl` node is absent; set `…_BATTERY_CAL_PERMILLE=1035`. |
+| **V4 rev 4.2** ✅ | 390k/100k (4.9) | GPIO37, **HIGH** | 4.9 × **1.030** | 2 MB quad | — (this document) |
+| **V4 rev 4.3** | same *(expected)* | GPIO37, HIGH *(expected)* | 4.9 × 1.030 | 2 MB quad | Same Zephyr image as 4.2; wiring shared, only the FEM differs. Confirm against a 4.3 schematic if one is published. |
+| **V4-R8** | same | **none** — divider always connected | 4.9 × **1.015** | 8 MB octal | `heltec_v4_r8` defines **no** `ADC_CTRL`. Our code already skips the gate when the `adc_ctrl` node is absent; set `…_BATTERY_CAL_PERMILLE=1015`. |
 
 Source for the non-4.2 rows: `firmware/variants/esp32s3/heltec_v{4,4_r8}/variant.h`.
 When you port one of these, re-run the
@@ -152,108 +154,22 @@ specific revision.
    rather than a phantom voltage.
 3. Sanity-check the percentage at full charge (~4.2 V → ~100%) and a partly
    drained cell against the OCV curve.
+4. If using Zephyr's generic `voltage-divider` sensor binding rather than a
+   direct ADC read, the `vbatt` node needs a `channel@0` child under its ADC
+   parent carrying `zephyr,gain`/`zephyr,reference`/`zephyr,acquisition-time`/
+   `zephyr,resolution` — properties `ADC_DT_SPEC_GET` expects on the channel
+   node the `io-channels` phandle points at (see
+   `zephyr/include/zephyr/drivers/adc.h`'s own DT examples). Without it the
+   sensor device comes up `(DISABLED)` at boot with no build-time warning.
+5. Unplugging a charge source (USB) from a board running on battery+USB
+   produces a real, physical settling transient — the reading stays elevated
+   for up to about a minute before relaxing to the true rest voltage. That's
+   Li-ion internal-resistance polarization relaxing once charge current stops,
+   not a firmware artifact — don't treat a reading taken in that window as
+   ground truth when calibrating.
 
-## 2026-09-06/07: the `&adc0` fix confirmed on real hardware, and a second gap found
-
-Bench-tested the `&adc1 0` → `&adc0 0` fix (see the correction above) on **rzr4**
-(V4-R8, class 6). Built and flashed twice:
-
-- **0.3.21** (the fix alone, on top of the in-flight sx126x wedge fix): boots
-  clean, radio fully healthy (`meshtastic status`/`rf` all green) — but this
-  build has no code that ever calls into the ADC at all (no battery feature is
-  merged on `main`), so it only proves `&adc0 { status = "okay"; }` alone is
-  harmless. It does not exercise `adc_channel_setup()`.
-- **0.3.22** (0.3.21 + `CONFIG_SENSOR=y CONFIG_VOLTAGE_DIVIDER=y
-  CONFIG_SENSOR_SHELL=y`, a config-only change, no app code): this makes
-  Zephyr's generic `voltage-divider` sensor driver auto-init at boot and
-  actually call `adc_channel_setup_dt()` on the (now-correct) GPIO1 channel.
-  Radio stayed fully healthy afterward — `tx: 7 ok, 0 failed`, `rx: 16
-  decoded`, `radio wedge-resets 0` — real confirmation that whatever the ADC
-  setup call touches now, it is no longer GPIO11/MISO. rzr4 was reflashed back
-  to plain 0.3.21 afterward; 0.3.22 was a throwaway diagnostic build, not
-  registered as a fleet class.
-
-**Second finding, unrelated to the pin fix:** the `vbatt` sensor device came up
-`(DISABLED)` (`device list`) on 0.3.22 — `voltage_init()`
-(`zephyr/drivers/sensor/voltage_divider/voltage.c`) failed, most likely because
-our `vbatt` node has no `channel@0` child under `&adc0` carrying
-`zephyr,gain`/`zephyr,reference`/`zephyr,acquisition-time`/`zephyr,resolution` —
-properties `ADC_DT_SPEC_GET` expects on the channel node the `io-channels`
-phandle points at (see `zephyr/include/zephyr/drivers/adc.h`'s own DT examples).
-This is **independent of adc0 vs adc1** — it would have failed identically
-under the old wrong pin, and the `battery-adc-v2` branch's custom
-`meshtastic_battery.c` (not the generic sensor framework) may or may not hit
-the same gap depending on how it calls the ADC API directly. **Whoever revives
-`battery-adc-v2` needs to check this first**, before assuming the pin fix alone
-unblocks it.
-
-**Third finding: carried patch 0001 (the `adc_esp32` GPIO-disconnect skip) now
-looks genuinely redundant.** Built **0.3.23** — 0.3.22's config, but with
-`zephyr/patches/0001-adc-esp32-skip-disruptive-gpio-disconnect.patch` reverse-
-applied, i.e. the original disruptive `gpio_pin_configure_dt(GPIO_DISCONNECTED)`
-call restored in `drivers/adc/adc_esp32.c`. If patch 0001 was ever protecting
-against a real "neighbouring RTC-IO pin" mechanism (as its own comment
-theorizes) rather than just masking the wrong-pin bug, this build should have
-broken the radio the moment `adc_channel_setup()` ran. It didn't: `tx: 12 ok, 0
-failed`, `rx: 24 decoded, 0 decode failures`, `radio wedge-resets 0`, `SPI BUSY
-streak 0`, sustained over several minutes on rzr4. (One single `rx armed: NO`
-snapshot appeared mid-test and cleared itself 15s later on a re-check — a
-normal CAD/TX-cycle timing artifact, not a wedge; confirmed by tx/rx counts
-climbing normally across it.) This is real hardware evidence that patch 0001's
-"neighbouring pin" theory was never the actual mechanism — the disruptive
-disconnect call was always landing on whatever pin `io-channels` pointed
-at, and now that it correctly points at GPIO1 (unused for anything else on
-this board), disconnecting it costs nothing. **Not yet long enough to call
-proven** (minutes, not hours) — before actually deleting patch 0001, let this
-soak longer and confirm on a plain V4 too, not just the R8. rzr4 was left
-running 0.3.23 (fix + sensor test + patch 0001 reverted) rather than reverted
-back, specifically to keep gathering evidence on this question.
-
-**Independent cross-check, 2026-09-07:** a maintained community fork,
-[`Amoulier/meshtastic-heltec-v4-firmware`](https://github.com/Amoulier/meshtastic-heltec-v4-firmware)
-(stock Meshtastic/PlatformIO, C++, not Zephyr — explicitly does not build for
-the R8) confirms the same hardware facts independently: `BATTERY_PIN 1`,
-`ADC_CHANNEL 0`, `ADC_CTRL 37` in its own `variant.h`. It reads via ESP-IDF's
-native `adc_oneshot`/`ADC_UNIT_1`/`ADC_CHANNEL_0` directly, so it cannot hit
-our `&adc0`-vs-`&adc1` bug at all — that's a Zephyr devicetree-label trap with
-no ESP-IDF equivalent. Two things worth stealing when `battery-adc-v2` is
-revived: it gates NVS/preference writes on a healthy recent battery reading or
-an active USB host (skips the optional NodeDB save at its critical-voltage
-shutdown path specifically to cut brownout-corruption risk during the exact
-low-battery window this project's own docs already record as having cost two
-swollen cells), and it rate-limits the displayed percentage to ≤1%/min to
-smooth LoRa-TX voltage sag rather than showing every sample's jitter.
-
-## 2026-09-07: first real-cell calibration, both variants over-read by 1.5-2%
-
-The upstream `CAL_PERMILLE` values (1045 V4 / 1035 R8, §"Calibration & curve"
-above) had never been checked against an actual battery on our hardware —
-only against upstream's own source. First real cells on the bench (rzr1 for
-the V4, rzr4 for the R8) gave a direct multimeter cross-check:
-
-| Board | Variant | Firmware read (old CAL) | Multimeter (disconnected cell) | Error | New CAL_PERMILLE |
-|---|---|---|---|---|---|
-| rzr1 | V4 | 4.17 V (1045) | 4.11 V | +1.5% | **1030** |
-| rzr4 | V4-R8 | 4.20 V (1035) | 4.12 V | +1.9% | **1015** |
-
-Both boards read high, the R8 more so. New constant = old × (meter / firmware
-read). Landed as the new default in `src/Kconfig.battery` (V4) and
-`samples/meshtastic/boards/heltec_wifi_lora32_v4_r8_esp32s3_procpu.conf` (R8);
-`tests/battery`'s hardcoded `CAL_PERMILLE` and its external-power test's pin
-value (840 → 870, to keep clear of the 4200 mV threshold at the new, lower
-scale factor) were updated to match.
-
-**N=1 per variant.** The divider resistors carry their own tolerance (typically
-±1%), so this is a real anchor pulling both variants toward truth, not a
-precision constant — a different R27/R28 pair on a different board could
-still land a percent or two off. Re-check against a meter on any board this
-matters for; don't assume these two numbers generalize to every unit.
-
-Also worth recording: unplugging USB from a board running on battery+USB both
-does NOT reset it (uptime kept climbing — confirms the earlier hardware notes
-that neither chip resets on CDC close) and produces a real, physical settling
-transient — both boards read >4.25 V for about a minute after USB was pulled,
-then relaxed down to the values above. That's Li-ion internal-resistance
-polarization relaxing once charge current stops, not a firmware artifact —
-don't take an ADC reading in the first ~60 s after a charge source is removed
-as ground truth.
+Carried patch 0001 (the `adc_esp32` GPIO-disconnect skip, see the correction
+above) was very likely only ever masking the `&adc1`/`&adc0` pin bug rather
+than protecting against a real "neighbouring RTC-IO pin" mechanism — hardware
+evidence suggests it may now be redundant, but this needs a longer soak and a
+plain-V4 confirmation (not just R8) before it's safe to remove.
