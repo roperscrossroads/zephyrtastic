@@ -37,8 +37,9 @@
 #define DIVIDER_OUTPUT_OHMS 100000
 
 /* Default CAL_PERMILLE (Kconfig default, no R8 override applies on
- * native_sim -- there is no board-specific defconfig for a host arch). */
-#define CAL_PERMILLE 1045
+ * native_sim -- there is no board-specific defconfig for a host arch).
+ * Measured against a real cell 2026-09-07, see src/Kconfig.battery. */
+#define CAL_PERMILLE 1030
 
 /* meshtastic_battery.c's own BATTERY_CACHE_MS. Not exposed via the header
  * (it is a read-path implementation detail, not part of the module's
@@ -120,8 +121,11 @@ ZTEST(meshtastic_battery, test_above_charge_termination_reads_external_power)
 {
 	/* Above OCV_max + 10 mV: nothing can rest there, so this is the port's
 	 * only "is something charging this" signal (see meshtastic_battery.c's
-	 * top-of-file comment on why that's the only signal available at all). */
-	const int pin_mv = 840;
+	 * top-of-file comment on why that's the only signal available at all).
+	 * 870, not 840: at the post-2026-09-07 CAL_PERMILLE (1030, down from
+	 * 1045), 840 clears the 4200 mV threshold by only ~40 mV -- exactly
+	 * MV_EPS, too tight to trust against the emulator's own noise. */
+	const int pin_mv = 870;
 
 	set_pin_mv_and_wait(pin_mv);
 
@@ -221,7 +225,7 @@ ZTEST(meshtastic_battery, test_device_metrics_reports_real_percent_on_battery)
 
 ZTEST(meshtastic_battery, test_device_metrics_reports_powered_sentinel_when_charging)
 {
-	const int pin_mv = 840; /* above charge-termination -- see the external_power test above */
+	const int pin_mv = 870; /* above charge-termination -- see the external_power test above */
 	meshtastic_DeviceMetrics m;
 
 	set_pin_mv_and_wait(pin_mv);

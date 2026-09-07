@@ -20,23 +20,36 @@ if MESHTASTIC_BATTERY
 
 config MESHTASTIC_BATTERY_CAL_PERMILLE
 	int "Battery ADC calibration factor (parts per 1000)"
-	default 1045
+	default 1030
 	help
 	  Empirical fudge applied AFTER the 4.9 divider ratio, in parts per 1000.
-	  1045 = upstream Meshtastic's ADC_MULTIPLIER for the V4 (`4.9 * 1.045`,
-	  from firmware/variants/esp32s3/heltec_v4/variant.h) with the 4.9 already
-	  factored out into the devicetree divider scale, leaving just the 1.045
-	  empirical term here. The V4-R8 uses upstream's 1035 (`4.9 * 1.035`) —
-	  set via that board's own defconfig, not this default.
 
-	  This is upstream's own tuning constant, not a compensation hack: an
-	  earlier version of this driver read the pin with a single sample after
-	  a long settle and needed CAL_PERMILLE≈1874 to correct the resulting
-	  under-read. That under-read was an artifact of the read strategy, not
-	  the hardware — upstream's espAdcRead() and MeshCore's getBattMilliVolts()
-	  both use a short (~10 ms) ADC_CTRL settle plus multi-sample averaging on
-	  this exact circuit, so this driver now does the same instead of carrying
-	  a large empirical correction for a self-inflicted problem.
+	  Measured against a real cell on rzr1 (V4) 2026-09-07: firmware read
+	  4.17 V at the (then-default) 1045, multimeter on the disconnected cell
+	  read 4.11 V — a +1.5% over-read. 1045 * (4110/4170) ≈ 1030, the default
+	  above. The V4-R8 needed a larger correction (see that board's own
+	  defconfig): rzr4 read 4.20 V at 1035, meter read 4.12 V, so 1035 *
+	  (4120/4200) ≈ 1015. N=1 per variant — the divider resistors carry their
+	  own tolerance, so treat this as a real anchor, not a precise constant;
+	  re-check against your own hardware and adjust further if it's off.
+
+	  Before this, the default (1045 V4 / 1035 R8) was upstream Meshtastic's
+	  own ADC_MULTIPLIER (`4.9 * 1.045` / `4.9 * 1.035`, from
+	  firmware/variants/esp32s3/heltec_v4/variant.h) with the 4.9 already
+	  factored out into the devicetree divider scale — copied across as a
+	  starting point, never independently verified against our own hardware
+	  until the 2026-09-07 measurement above. Upstream's own guidance: "if
+	  the calculated result shows a significant deviation from the actual
+	  battery level, adjust the coefficient" — this is that adjustment.
+
+	  Unrelated to the divider's own tolerance: an earlier version of this
+	  driver read the pin with a single sample after a long settle and needed
+	  CAL_PERMILLE≈1874 to correct the resulting under-read. That under-read
+	  was an artifact of the read strategy, not the hardware — upstream's
+	  espAdcRead() and MeshCore's getBattMilliVolts() both use a short
+	  (~10 ms) ADC_CTRL settle plus multi-sample averaging on this exact
+	  circuit, so this driver now does the same instead of carrying a large
+	  empirical correction for a self-inflicted problem.
 
 config MESHTASTIC_BATTERY_CUTOFF
 	bool "Power off when the cell is critically low"

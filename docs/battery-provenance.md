@@ -223,3 +223,37 @@ shutdown path specifically to cut brownout-corruption risk during the exact
 low-battery window this project's own docs already record as having cost two
 swollen cells), and it rate-limits the displayed percentage to ≤1%/min to
 smooth LoRa-TX voltage sag rather than showing every sample's jitter.
+
+## 2026-09-07: first real-cell calibration, both variants over-read by 1.5-2%
+
+The upstream `CAL_PERMILLE` values (1045 V4 / 1035 R8, §"Calibration & curve"
+above) had never been checked against an actual battery on our hardware —
+only against upstream's own source. First real cells on the bench (rzr1 for
+the V4, rzr4 for the R8) gave a direct multimeter cross-check:
+
+| Board | Variant | Firmware read (old CAL) | Multimeter (disconnected cell) | Error | New CAL_PERMILLE |
+|---|---|---|---|---|---|
+| rzr1 | V4 | 4.17 V (1045) | 4.11 V | +1.5% | **1030** |
+| rzr4 | V4-R8 | 4.20 V (1035) | 4.12 V | +1.9% | **1015** |
+
+Both boards read high, the R8 more so. New constant = old × (meter / firmware
+read). Landed as the new default in `src/Kconfig.battery` (V4) and
+`samples/meshtastic/boards/heltec_wifi_lora32_v4_r8_esp32s3_procpu.conf` (R8);
+`tests/battery`'s hardcoded `CAL_PERMILLE` and its external-power test's pin
+value (840 → 870, to keep clear of the 4200 mV threshold at the new, lower
+scale factor) were updated to match.
+
+**N=1 per variant.** The divider resistors carry their own tolerance (typically
+±1%), so this is a real anchor pulling both variants toward truth, not a
+precision constant — a different R27/R28 pair on a different board could
+still land a percent or two off. Re-check against a meter on any board this
+matters for; don't assume these two numbers generalize to every unit.
+
+Also worth recording: unplugging USB from a board running on battery+USB both
+does NOT reset it (uptime kept climbing — confirms the earlier hardware notes
+that neither chip resets on CDC close) and produces a real, physical settling
+transient — both boards read >4.25 V for about a minute after USB was pulled,
+then relaxed down to the values above. That's Li-ion internal-resistance
+polarization relaxing once charge current stops, not a firmware artifact —
+don't take an ADC reading in the first ~60 s after a charge source is removed
+as ground truth.
