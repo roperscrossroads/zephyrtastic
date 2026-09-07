@@ -56,7 +56,7 @@ at least one other source. High confidence.
 | Divider top resistor | **390 kΩ** | one `390K` on the `ADC_IN` net | — | ratio only | `full-ohms = 100000 + 390000` |
 | Divider bottom resistor | **100 kΩ** | `100K` on `ADC_IN` | — | ratio only | `output-ohms = 100000` |
 | Divider ratio | **4.9** (= 490/100) | 490k/100k | `× 4.9` (`weather_station.ino:129`) | `ADC_MULTIPLIER 4.9 * …` (`variant.h:9`) | `full/output = 4.9` |
-| ADC pin | **GPIO1 / ADC1 ch0** | divider → `ADC_IN` → SoC | `analogRead(1)` (`…GHTV3_Battery.ino:131`) | `BATTERY_PIN 1`, `ADC_CHANNEL_0` (`variant.h:6-7`) | `io-channels = <&adc1 0>` |
+| ADC pin | **GPIO1 / ADC1 ch0** | divider → `ADC_IN` → SoC | `analogRead(1)` (`…GHTV3_Battery.ino:131`) | `BATTERY_PIN 1`, `ADC_CHANNEL_0` (`variant.h:6-7`) | `io-channels = <&adc0 0>` (was `&adc1 0` — see correction below) |
 | ADC resolution | **12-bit** | — | `analogReadResolution(12)` (`…:168`) | 12-bit read | `zephyr,resolution = <12>` |
 | ADC_CTRL gate | **GPIO37, active-high** | net `ADC_Ctrl` on pin 37, gated via Q6 | ADC_CTRL-enable pattern (`weather_station.ino:78`) | `ADC_CTRL 37`, `ADC_CTRL_ENABLED HIGH` (`variant.h:4-5`) | `adc_ctrl` `enable-gpios = <&gpio1 5>` (=GPIO37) `ACTIVE_HIGH` |
 | Cell chemistry | **single-cell LiPo** | 1.25×2P LiPo connector, charge IC `U4` | — | `NUM_CELLS 1` (`Power.h:30`) | n/a |
@@ -65,6 +65,39 @@ at least one other source. High confidence.
 The `390K` + `100K` pair is the *only* such divider on the schematic, and it sits
 directly on the battery-sense `ADC_IN` net — so there is no ambiguity about which
 resistors form it.
+
+> **Correction, 2026-09-06: the S4 row above was wrong for seven weeks and this
+> table's own cross-check method could not catch it.** `io-channels = <&adc1 0>`
+> did NOT mean "GPIO1" — it meant Zephyr devicetree node `adc1`, which
+> `esp32s3_common.dtsi` defines as `unit = <2>` (hardware ADC2), channel 0 of
+> which is `ADC2_CHANNEL_0_GPIO_NUM` = **GPIO11**, not GPIO1
+> (`modules/hal/espressif/.../soc/esp32s3/include/soc/adc_channel.h`). GPIO11 is
+> this board's SPI MISO line to the SX1262 (`LORA_MISO 11` in both
+> `heltec_v4/variant.h` and `heltec_v4_r8/variant.h`, confirmed independently of
+> Zephyr) — so the divider was sampling the radio's MISO pad instead of the
+> battery. Found by cross-referencing upstream Zephyr commit `2662f84b83`
+> ("boards: heltec: fix battery voltage divider adc unit", 2026-08-28), which hit
+> and fixed the identical mistake on the in-tree `heltec_wifi_lora32_v3`,
+> `heltec_wireless_tracker` and `heltec_wireless_stick_lite_v3` boards — all
+> ESP32-S3, all with the same `&adc1` vs `&adc0` label/unit mismatch. Fixed here
+> in `boards/heltec/heltec_wifi_lora32_v4/heltec_wifi_lora32_v4-common.dtsi`
+> (shared by V4 and V4-R8).
+>
+> The lesson for this doc's own method: S1-S3 independently corroborate the
+> *board fact* (GPIO1 is the right pin) perfectly well — the bug was entirely in
+> S4's *encoding* of that fact, where a devicetree node label that reads like a
+> 1:1 name for the SoC's own "ADC1"/"ADC2" units is actually an unrelated index.
+> A `voltage-divider` binding pointed at the wrong pin still parses, builds and
+> boots — nothing here would have failed loudly. Carried patch 0001 (see
+> `zephyr/patches/0001-...`, the ADC-driver GPIO-disconnect workaround discovered
+> 2026-07-21) was very likely masking exactly this bug rather than fixing an
+> unrelated one: disconnecting GPIO11's digital buffer breaks all SPI reads from
+> the radio (both TX-done and RX-done status), which fully accounts for the
+> "both TX and RX dead" symptom that patch was written against, with no need for
+> the "neighbouring RTC-IO pin" mechanism that patch's own comment proposed.
+> **Not yet re-tested on hardware** — whether patch 0001 is now redundant (GPIO1
+> has no other function on this board) is an open question for the next bench
+> session, not a conclusion to act on without a real test.
 
 ## Calibration & curve — single upstream source ⚠️
 
