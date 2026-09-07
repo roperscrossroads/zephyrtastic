@@ -30,6 +30,7 @@
 #include <zephyr/ztest.h>
 
 #include "meshtastic_battery.h"
+#include "meshtastic_telemetry_internal.h"
 
 /* Real Heltec V4 divider: 390k upper / 100k lower -> full/output = 4.9. */
 #define DIVIDER_FULL_OHMS   490000
@@ -192,4 +193,65 @@ ZTEST(meshtastic_battery, test_cache_holds_then_refreshes)
 	zassert_within(mv, expected_b, MV_EPS,
 		       "read past the cache window returned %d, expected the fresh ~%d", mv,
 		       expected_b);
+}
+
+/*
+ * Upstream parity (PowerStatus.h / DeviceTelemetry.cpp): the wire-level
+ * battery_level field reports the "101 = powered" sentinel whenever there is
+ * no battery OR the pack is charging, and only reports a real 0-100 percent
+ * when a battery is present and NOT charging. collect_battery_divider() is
+ * the only thing standing between our real ADC reading and that field, so
+ * these three cases exercise it end to end -- not a reimplementation of the
+ * mapping, the actual meshtastic_collect_device_metrics() call.
+ */
+ZTEST(meshtastic_battery, test_device_metrics_reports_real_percent_on_battery)
+{
+	const int pin_mv = 742;
+	meshtastic_DeviceMetrics m;
+
+	set_pin_mv_and_wait(pin_mv);
+
+	zassert_ok(meshtastic_collect_device_metrics(&m), "collect must succeed");
+	zassert_true(m.has_battery_level, "a present, non-charging battery must report a level");
+	zassert_equal(m.battery_level, (uint32_t)meshtastic_battery_percent(),
+		      "battery_level must be the real percent, not the powered sentinel");
+	zassert_true(m.battery_level <= 100U, "a real percent must never reach the 101 sentinel");
+	zassert_true(m.has_voltage, "a present battery must report its voltage");
+}
+
+ZTEST(meshtastic_battery, test_device_metrics_reports_powered_sentinel_when_charging)
+{
+	const int pin_mv = 840; /* above charge-termination -- see the external_power test above */
+	meshtastic_DeviceMetrics m;
+
+	set_pin_mv_and_wait(pin_mv);
+	zassert_true(meshtastic_battery_external_power(), "test setup: must be in the charging range");
+
+	zassert_ok(meshtastic_collect_device_metrics(&m), "collect must succeed");
+	zassert_true(m.has_battery_level, "battery_level must be present, not omitted");
+	zassert_equal(m.battery_level, 101U,
+		      "a charging battery must report 101 (powered), got %u -- upstream reports "
+		      "the same sentinel for hasBattery && isCharging, not just !hasBattery",
+		      (unsigned int)m.battery_level);
+	zassert_true(m.has_voltage,
+		     "upstream still reports voltage while charging (hasBattery is true) -- "
+		     "only the percent is replaced by the sentinel, not the reading");
+}
+
+ZTEST(meshtastic_battery, test_device_metrics_reports_powered_sentinel_when_no_battery)
+{
+	const int pin_mv = 390; /* below the no-battery floor -- see the absent test above */
+	meshtastic_DeviceMetrics m;
+
+	set_pin_mv_and_wait(pin_mv);
+	zassert_false(meshtastic_battery_present(), "test setup: must read as no battery fitted");
+
+	zassert_ok(meshtastic_collect_device_metrics(&m), "collect must succeed");
+	zassert_true(m.has_battery_level, "battery_level must be present, not omitted");
+	zassert_equal(m.battery_level, 101U,
+		      "no battery fitted must report 101 (powered), got %u",
+		      (unsigned int)m.battery_level);
+	zassert_false(m.has_voltage,
+		      "with no battery fitted, voltage must stay unset -- not a phantom reading "
+		      "of whatever the floating/USB-only divider happens to read");
 }
