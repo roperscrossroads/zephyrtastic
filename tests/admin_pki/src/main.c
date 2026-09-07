@@ -39,6 +39,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
 #include "meshtastic_admin_client.h"
+#include "meshtastic_phoneapi.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_pki.h"
 #include "meshtastic_reliable.h"
@@ -144,6 +145,18 @@ static const struct device *const lora_dev = DEVICE_GET(mock_lora);
 /* ---- Test fixture --------------------------------------------------------- */
 
 static uint8_t peer_pubkey[MESHTASTIC_PKI_KEY_LEN];
+
+/* A registered PhoneAPI transport so LOCAL admin replies (which go straight to
+ * meshtastic_phoneapi_on_packet(), never onto the mock LoRa device — see
+ * admin_emit_reply()'s !admin_cur.remote branch) have somewhere to land. Local
+ * admin requests need no PKC/passkey at all (meshtastic_admin_handle_local()
+ * is the phone's trusted entry point), so this is the simplest way to test
+ * any getter or app-originated op — dramatically less setup than inject_pkc_admin(). */
+#define PHONE_Q_SIZE 4U
+static struct meshtastic_phoneapi_frame phone_q_storage[PHONE_Q_SIZE];
+static struct meshtastic_phoneapi phone_api;
+static meshtastic_ToRadio phone_to_scratch;
+static meshtastic_FromRadio phone_from_scratch;
 
 static void inject_rx_frame(const uint8_t *wire, uint32_t wire_len)
 {
@@ -361,6 +374,91 @@ static size_t encode_admin_remove_by_nodenum(uint32_t target, const uint8_t *pas
 	return os.bytes_written;
 }
 
+static size_t encode_admin_get_device_metadata_request(uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_get_device_metadata_request_tag;
+	am.payload_variant.get_device_metadata_request = true;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+static size_t encode_admin_get_device_connection_status_request(uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_get_device_connection_status_request_tag;
+	am.payload_variant.get_device_connection_status_request = true;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+static size_t encode_admin_get_module_config(uint32_t module_type, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_get_module_config_request_tag;
+	am.payload_variant.get_module_config_request = (meshtastic_AdminMessage_ModuleConfigType)module_type;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+static size_t encode_admin_set_module_config_mqtt(bool enabled, const char *address, uint8_t *buf,
+						  size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_module_config_tag;
+	am.payload_variant.set_module_config.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+	am.payload_variant.set_module_config.payload_variant.mqtt.enabled = enabled;
+	strncpy(am.payload_variant.set_module_config.payload_variant.mqtt.address, address,
+		sizeof(am.payload_variant.set_module_config.payload_variant.mqtt.address) - 1U);
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+static size_t encode_admin_remove_ignored_node(uint32_t target, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_remove_ignored_node_tag;
+	am.payload_variant.remove_ignored_node = target;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+static size_t encode_admin_reboot_seconds(int32_t seconds, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_reboot_seconds_tag;
+	am.payload_variant.reboot_seconds = seconds;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+/* factory_reset_device is int32 (not bool, unlike factory_reset_config's
+ * sibling declaration two lines away in admin.proto -- easy to get wrong by
+ * copy-paste, which is exactly why this has its own encoder rather than
+ * reusing encode_admin_bool_variant(). */
+static size_t encode_admin_factory_reset_device(uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_factory_reset_device_tag;
+	am.payload_variant.factory_reset_device = 1;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
 /* Build a genuine PKC-encrypted ADMIN_APP wire frame "from PEER to us" and feed
  * it through the LoRa RX path. Uses the ECDH-symmetry trick described up top. */
 static void inject_pkc_admin(const uint8_t *admin_bytes, size_t admin_len, uint32_t id)
@@ -413,6 +511,10 @@ static void *admin_pki_setup(void)
 
 	gen_x25519_pubkey(peer_pubkey);
 	seed_peer_pubkey(peer_pubkey);
+
+	meshtastic_phoneapi_init(&phone_api, "test", phone_q_storage, PHONE_Q_SIZE, NULL, NULL,
+				 NULL, NULL, &phone_to_scratch, &phone_from_scratch);
+	meshtastic_phoneapi_register(&phone_api);
 	return NULL;
 }
 
@@ -421,6 +523,51 @@ static void admin_pki_before(void *fixture)
 	ARG_UNUSED(fixture);
 	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 	mock_lora.send_count = 0U;
+	meshtastic_phoneapi_reset(&phone_api);
+}
+
+/* Send an AdminMessage as if the locally-connected phone sent it (no PKC, no
+ * passkey — meshtastic_admin_handle_local() trusts its caller unconditionally
+ * unless the node is_managed), then pop and decode whatever admin_emit_reply()
+ * queued back. Returns false if no reply was queued (a getter that failed, or
+ * an op that intentionally emits no AdminMessage response). */
+static bool send_local_admin_and_pop_reply(const uint8_t *admin_bytes, size_t admin_len,
+					   meshtastic_AdminMessage *resp)
+{
+	meshtastic_MeshPacket pkt = meshtastic_MeshPacket_init_zero;
+	struct meshtastic_phoneapi_frame frame;
+	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+	pb_istream_t is;
+
+	pkt.from = TEST_NODE_ID;
+	pkt.id = 0x0AD00001U;
+	pkt.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	pkt.decoded.portnum = meshtastic_PortNum_ADMIN_APP;
+	memcpy(pkt.decoded.payload.bytes, admin_bytes, admin_len);
+	pkt.decoded.payload.size = (pb_size_t)admin_len;
+
+	zassert_true(meshtastic_admin_handle_local(&pkt), "admin_handle_local must consume it");
+
+	/* Skip anything already queued that ISN'T our reply -- a caller that just
+	 * seeded a peer via inject_rx_frame()/seed_named_peer() also queues that
+	 * peer's NodeInfo to the phone (the router forwards RX traffic there too),
+	 * ahead of the reply this function is actually looking for. */
+	while (meshtastic_phoneapi_pop_frame(&phone_api, &frame)) {
+		from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+		is = pb_istream_from_buffer(frame.data, frame.len);
+		zassert_true(pb_decode(&is, meshtastic_FromRadio_fields, &from),
+			     "FromRadio decode failed");
+		if (from.which_payload_variant != meshtastic_FromRadio_packet_tag ||
+		    from.packet.decoded.portnum != meshtastic_PortNum_ADMIN_APP) {
+			continue;
+		}
+		is = pb_istream_from_buffer(from.packet.decoded.payload.bytes,
+					    from.packet.decoded.payload.size);
+		zassert_true(pb_decode(&is, meshtastic_AdminMessage_fields, resp),
+			     "AdminMessage decode failed");
+		return true;
+	}
+	return false;
 }
 
 ZTEST_SUITE(admin_pki, NULL, admin_pki_setup, admin_pki_before, NULL, NULL);
@@ -1727,3 +1874,155 @@ ZTEST(admin_pki, test_admin_client_get_then_set_roundtrip)
 	meshtastic_reliable_reset();
 }
 #endif /* CONFIG_MESHTASTIC_ADMIN_CLIENT */
+
+/* ---- agents-dnr4.6: tests for previously-untested-but-implemented admin ops */
+
+ZTEST(admin_pki, test_get_device_metadata_returns_real_metadata)
+{
+	uint8_t buf[64];
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	size_t len = encode_admin_get_device_metadata_request(buf, sizeof(buf));
+
+	zassert_true(send_local_admin_and_pop_reply(buf, len, &resp),
+		     "get_device_metadata must reply");
+	zassert_equal(resp.which_payload_variant,
+		      meshtastic_AdminMessage_get_device_metadata_response_tag,
+		      "wrong response variant");
+	zassert_true(strlen(resp.payload_variant.get_device_metadata_response.firmware_version) > 0,
+		     "firmware_version must not be empty");
+	zassert_true(resp.payload_variant.get_device_metadata_response.hasPKC,
+		     "this suite has a real PKI key -- hasPKC must reflect it");
+}
+
+ZTEST(admin_pki, test_get_device_connection_status_returns_response)
+{
+	uint8_t buf[64];
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	size_t len = encode_admin_get_device_connection_status_request(buf, sizeof(buf));
+
+	zassert_true(send_local_admin_and_pop_reply(buf, len, &resp),
+		     "get_device_connection_status must reply");
+	zassert_equal(resp.which_payload_variant,
+		      meshtastic_AdminMessage_get_device_connection_status_response_tag,
+		      "wrong response variant");
+	/* native_sim builds this suite with neither CONFIG_WIFI nor a WiFi iface,
+	 * so has_wifi/has_bluetooth report whatever this Kconfig actually enables
+	 * -- the real assertion is that the getter round-trips at all, not a
+	 * specific transport's state. */
+}
+
+/* Real NVS persistence for ModuleConfig, not just RAM -- §2 of the audit
+ * flagged this as untested (the round-trip existed, the durability claim
+ * didn't). Mirrors test_lora_config_survives_real_reboot's flush/reload
+ * pattern exactly. */
+ZTEST(admin_pki, test_set_module_config_mqtt_roundtrips_and_survives_real_reboot)
+{
+	uint8_t buf[128];
+	size_t len;
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	meshtastic_ModuleConfig got = meshtastic_ModuleConfig_init_zero;
+
+	len = encode_admin_set_module_config_mqtt(true, "mqtt.example.org", buf, sizeof(buf));
+	zassert_false(send_local_admin_and_pop_reply(buf, len, &resp),
+		     "set_module_config emits no AdminMessage response, only a ROUTING ack");
+	zassert_ok(settings_save_subtree("meshtastic"), "mqtt flush failed");
+
+	/* Change it again, unflushed -- a real reboot must not see this either. */
+	len = encode_admin_set_module_config_mqtt(false, "unflushed.example.org", buf, sizeof(buf));
+	zassert_false(send_local_admin_and_pop_reply(buf, len, &resp), "unexpected response");
+
+	zassert_ok(settings_load_subtree("meshtastic"), "settings reload failed");
+	zassert_ok(meshtastic_config_store_get_module(meshtastic_ModuleConfig_mqtt_tag, &got),
+		   "mqtt module reread failed");
+	zassert_true(got.payload_variant.mqtt.enabled,
+		     "enabled must survive at its FLUSHED value (true), not the unflushed edit");
+	zassert_mem_equal(got.payload_variant.mqtt.address, "mqtt.example.org",
+			  strlen("mqtt.example.org"),
+			  "address must survive a real reboot at its FLUSHED value");
+
+	/* Also prove the getter path reflects the same persisted value an app
+	 * would see over the admin channel, not just the config-store internals. */
+	len = encode_admin_get_module_config(0U /* MQTT_CONFIG */, buf, sizeof(buf));
+	zassert_true(send_local_admin_and_pop_reply(buf, len, &resp), "get_module_config must reply");
+	zassert_equal(resp.which_payload_variant,
+		      meshtastic_AdminMessage_get_module_config_response_tag,
+		      "wrong response variant");
+	zassert_true(resp.payload_variant.get_module_config_response.payload_variant.mqtt.enabled,
+		     "get_module_config must reflect the persisted value");
+}
+
+ZTEST(admin_pki, test_remove_ignored_node_unignores)
+{
+	const uint32_t target = 0x0FB00003U;
+	uint8_t key[MESHTASTIC_PKI_KEY_LEN];
+	uint8_t buf[32];
+	size_t len;
+
+	memset(key, 0x22U, sizeof(key));
+	seed_named_peer(target, "Ignored", key);
+
+	zassert_ok(meshtastic_nodedb_set_ignored(target, true), "seed: ignore failed");
+	zassert_true(meshtastic_nodedb_is_ignored(target), "seed: must read as ignored");
+
+	len = encode_admin_remove_ignored_node(target, buf, sizeof(buf));
+	{
+		meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+
+		zassert_false(send_local_admin_and_pop_reply(buf, len, &resp),
+			     "remove_ignored_node emits no AdminMessage response");
+	}
+	zassert_false(meshtastic_nodedb_is_ignored(target),
+		      "remove_ignored_node must clear the ignored flag");
+}
+
+ZTEST(admin_pki, test_reboot_seconds_cancel_on_negative)
+{
+	uint8_t buf[32];
+	size_t len;
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+
+	len = encode_admin_reboot_seconds(30, buf, sizeof(buf));
+	zassert_false(send_local_admin_and_pop_reply(buf, len, &resp), "unexpected response");
+	zassert_true(meshtastic_admin_reboot_scheduled(), "a positive value must schedule a reboot");
+
+	len = encode_admin_reboot_seconds(-1, buf, sizeof(buf));
+	zassert_false(send_local_admin_and_pop_reply(buf, len, &resp), "unexpected response");
+	zassert_false(meshtastic_admin_reboot_scheduled(),
+		      "a negative value must cancel the pending reboot");
+}
+
+/* factory_reset_device clears the whole NodeDB (meshtastic_nodedb_reset) as
+ * well as config -- factory_reset_config touches config only and leaves peers
+ * alone. That's the safe, clearly-observable discriminator to test: unlike
+ * the security identity (shared, mutating it risks corrupting every later
+ * test in this suite if restoration goes wrong), a seeded peer is this test's
+ * own disposable fixture. Only factory_reset_config had a test before this
+ * (agents-dnr4.3's stray-commit regression test). */
+ZTEST(admin_pki, test_factory_reset_device_also_clears_the_nodedb)
+{
+	const uint32_t peer = 0x0FB00004U;
+	uint8_t key[MESHTASTIC_PKI_KEY_LEN];
+	uint8_t buf[32];
+	size_t len;
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	struct meshtastic_nodedb_node snap;
+
+	memset(key, 0x11U, sizeof(key));
+	seed_named_peer(peer, "Doomed", key);
+	zassert_ok(meshtastic_nodedb_get(peer, &snap), "seed: peer must be present");
+
+	len = encode_admin_factory_reset_device(buf, sizeof(buf));
+	zassert_false(send_local_admin_and_pop_reply(buf, len, &resp),
+		     "factory_reset_device emits no AdminMessage response, only a delayed reboot");
+	k_sleep(K_MSEC(50));
+	meshtastic_admin_cancel_reboot(); /* don't actually reboot the test binary */
+
+	zassert_equal(meshtastic_nodedb_get(peer, &snap), -ENOENT,
+		      "factory_reset_device must clear the NodeDB too, not just config -- "
+		      "contrast with factory_reset_config, which leaves peers alone");
+
+	/* nodedb_reset() just wiped PEER_NODE_ID's pinned key too (it's not a
+	 * favorite) -- restore it, since every PKC test after this one in the
+	 * suite depends on PEER's identity still being pinned. */
+	seed_peer_pubkey(peer_pubkey);
+}
