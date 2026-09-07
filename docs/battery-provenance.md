@@ -186,3 +186,40 @@ under the old wrong pin, and the `battery-adc-v2` branch's custom
 the same gap depending on how it calls the ADC API directly. **Whoever revives
 `battery-adc-v2` needs to check this first**, before assuming the pin fix alone
 unblocks it.
+
+**Third finding: carried patch 0001 (the `adc_esp32` GPIO-disconnect skip) now
+looks genuinely redundant.** Built **0.3.23** — 0.3.22's config, but with
+`zephyr/patches/0001-adc-esp32-skip-disruptive-gpio-disconnect.patch` reverse-
+applied, i.e. the original disruptive `gpio_pin_configure_dt(GPIO_DISCONNECTED)`
+call restored in `drivers/adc/adc_esp32.c`. If patch 0001 was ever protecting
+against a real "neighbouring RTC-IO pin" mechanism (as its own comment
+theorizes) rather than just masking the wrong-pin bug, this build should have
+broken the radio the moment `adc_channel_setup()` ran. It didn't: `tx: 12 ok, 0
+failed`, `rx: 24 decoded, 0 decode failures`, `radio wedge-resets 0`, `SPI BUSY
+streak 0`, sustained over several minutes on rzr4. (One single `rx armed: NO`
+snapshot appeared mid-test and cleared itself 15s later on a re-check — a
+normal CAD/TX-cycle timing artifact, not a wedge; confirmed by tx/rx counts
+climbing normally across it.) This is real hardware evidence that patch 0001's
+"neighbouring pin" theory was never the actual mechanism — the disruptive
+disconnect call was always landing on whatever pin `io-channels` pointed
+at, and now that it correctly points at GPIO1 (unused for anything else on
+this board), disconnecting it costs nothing. **Not yet long enough to call
+proven** (minutes, not hours) — before actually deleting patch 0001, let this
+soak longer and confirm on a plain V4 too, not just the R8. rzr4 was left
+running 0.3.23 (fix + sensor test + patch 0001 reverted) rather than reverted
+back, specifically to keep gathering evidence on this question.
+
+**Independent cross-check, 2026-09-07:** a maintained community fork,
+[`Amoulier/meshtastic-heltec-v4-firmware`](https://github.com/Amoulier/meshtastic-heltec-v4-firmware)
+(stock Meshtastic/PlatformIO, C++, not Zephyr — explicitly does not build for
+the R8) confirms the same hardware facts independently: `BATTERY_PIN 1`,
+`ADC_CHANNEL 0`, `ADC_CTRL 37` in its own `variant.h`. It reads via ESP-IDF's
+native `adc_oneshot`/`ADC_UNIT_1`/`ADC_CHANNEL_0` directly, so it cannot hit
+our `&adc0`-vs-`&adc1` bug at all — that's a Zephyr devicetree-label trap with
+no ESP-IDF equivalent. Two things worth stealing when `battery-adc-v2` is
+revived: it gates NVS/preference writes on a healthy recent battery reading or
+an active USB host (skips the optional NodeDB save at its critical-voltage
+shutdown path specifically to cut brownout-corruption risk during the exact
+low-battery window this project's own docs already record as having cost two
+swollen cells), and it rate-limits the displayed percentage to ≤1%/min to
+smooth LoRa-TX voltage sag rather than showing every sample's jitter.
