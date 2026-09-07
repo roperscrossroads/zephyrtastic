@@ -76,6 +76,9 @@ struct meshtastic_rf_path {
 	uint32_t cad_clear, cad_busy, cad_timeout, cad_error;
 	uint32_t agc_ok, agc_fail, agc_skipped, agc_patch_fail;
 	uint32_t busy_streak;
+	/* Cumulative wedge-recovery firings this boot -- durable, unlike busy_streak
+	 * which resets itself the instant a recovery fires. */
+	uint32_t wedge_resets;
 
 	/* Receive activity: the chip's latched preamble/header flags right now
 	 * (UNKNOWN when the driver cannot report them), and the counters behind

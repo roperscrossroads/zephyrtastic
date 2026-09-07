@@ -214,6 +214,7 @@ int meshtastic_rf_path_get(struct meshtastic_rf_path *out)
 	out->agc_skipped = meshtastic_radio_agc_reset_skipped_count();
 	out->agc_patch_fail = meshtastic_radio_agc_patch_fail_count();
 	out->busy_streak = meshtastic_radio_busy_timeout_streak();
+	out->wedge_resets = meshtastic_radio_wedge_reset_count();
 
 	/* --- receive activity ------------------------------------------ */
 	{

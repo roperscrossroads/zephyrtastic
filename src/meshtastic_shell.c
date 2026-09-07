@@ -2088,6 +2088,11 @@ static int cmd_rf_path(const struct shell *sh, size_t argc, char **argv)
 	}
 	shell_print(sh, "  [%s] SPI BUSY streak  %u", (p.busy_streak == 0U) ? "ok" : "!!",
 		    p.busy_streak);
+	/* Cumulative, unlike the streak above: a wedge clears the streak the
+	 * instant it resets the radio, so this is the only durable evidence a
+	 * wedge ever fired this boot. */
+	shell_print(sh, "  [%s] radio wedge-resets  %u", (p.wedge_resets == 0U) ? "ok" : "!!",
+		    p.wedge_resets);
 
 	return 0;
 }

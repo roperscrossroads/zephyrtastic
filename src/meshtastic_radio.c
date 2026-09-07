@@ -851,6 +851,7 @@ extern uint32_t sx126x_agc_reset_ok_count_get(void);
 extern uint32_t sx126x_agc_reset_fail_count_get(void);
 extern uint32_t sx126x_agc_reset_skipped_count_get(void);
 extern uint32_t sx126x_agc_patch_fail_count_get(void);
+extern uint32_t sx126x_wedge_reset_count_get(void);
 extern void sx126x_cad_agc_stats_reset(void);
 
 /*
@@ -923,6 +924,14 @@ uint32_t meshtastic_radio_agc_reset_skipped_count(void)
 uint32_t meshtastic_radio_agc_patch_fail_count(void)
 {
 	return sx126x_agc_patch_fail_count_get();
+}
+
+/* Cumulative wedge-recovery firings this boot; see sx126x.c. Unlike the live
+ * BUSY streak (meshtastic_radio_busy_timeout_streak(), below) this does not
+ * reset itself the instant a recovery fires, so it survives to be read. */
+uint32_t meshtastic_radio_wedge_reset_count(void)
+{
+	return sx126x_wedge_reset_count_get();
 }
 
 void meshtastic_radio_cad_agc_stats_reset(void)
