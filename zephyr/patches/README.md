@@ -583,33 +583,14 @@ the same reason 0020 is: a predicate that a success can clear is the wrong
 predicate for a per-command wedge — this just finishes identifying which
 success.
 
-### 0022-sx126x-oplog-record-the-opcodes-that-reach-the-wire.patch
+### 0022 — REMOVED 2026-09-07 (was: sx126x-oplog-record-the-opcodes-that-reach-the-wire.patch)
 
-**Diagnostic, temporary.** Instrumentation for bead `agents-3raz`. Not a fix,
-not upstreamable as-is, and should be removed when that bead closes.
-
-**Why:** at a `SET_TX` post-wait timeout, `sx126x_last_issued_opcode` reads
-`0x84` (SET_SLEEP) on *every* occurrence — but `sx126x_hal_write_cmd()` sets it
-to the command in flight (`0x83`) via `spi_transfer()`, two statements earlier,
-on the same thread, holding the driver mutex. That cannot happen as the code is
-written.
-
-This was confirmed under JTAG rather than inferred from a log. At the failure:
-`state = SLEEP`, `last_issued = 0x84`, BUSY high, DIO1 callback NULL, inside
-`sx126x_lora_send_async()` at the SET_TX post-wait, mutex held exactly once by
-the transmitting thread. A concurrent writer, the AGC-reset work item and
-`PM_DEVICE` were each ruled out by inspection — the mutex excludes the first two
-and the PM action handler only touches RF GPIOs.
-
-Since static reading did not explain it, this records ground truth instead: a
-16-entry ring of every opcode that actually reaches `spi_transfer()`, with a
-cycle stamp, dumped **only** when a BUSY wait times out. Silent on a healthy
-radio. `irq_lock()` around the ring write because `spi_transfer()` is reachable
-from ISR context.
-
-Read the dump as the ordered list of what genuinely went out on the wire in the
-window before the failure — which is exactly the thing the contradictory
-`last_issued` value makes impossible to reason about from source.
+Was diagnostic-only instrumentation for bead `agents-3raz`, explicitly not
+upstreamable and flagged in its own entry to be removed once that bead closed.
+It did its job: the 16-entry opcode ring it added is what proved 0024's root
+cause (below) from ground truth instead of static reading. Removed now that
+0024 is bench-proven and the bead is closing — kept here, historical, so a
+future "why does patch numbering skip 0022" doesn't need to re-derive it.
 
 ### 0023-sx126x-extract-the-busy-timeout-accounting-so-it-can-be-tested.patch
 
@@ -627,3 +608,45 @@ Covered by `main/tests/sx126x_busy` — nine cases, including both historical
 failures written so they fail if reintroduced. The suite was **mutation-tested**
 rather than merely written: putting bug 0021 back (dropping the phase from the
 key) fails 3 of 9; putting 0020 back (any success clears the table) fails all 9.
+
+### 0024-sx126x-no-busy-post-wait-after-set-tx.patch
+
+**The root-cause fix for `agents-3raz`.** After `SET_TX` the radio is
+transmitting; completion is signalled by DIO1/TX_DONE, not by BUSY. Waiting on
+BUSY here overlaps the exact window TX_DONE arrives in, and the TX-done work
+handler calls `sx126x_set_sleep()` from the system workqueue, unlocked, while
+the transmit thread is still inside this wait. A sleeping SX126x holds BUSY
+HIGH, so a wait started before that handler runs can never see BUSY drop — it
+burns the full 1000 ms and reports a failure for a frame that had already gone
+out successfully. Every "failed transmit" on the affected boards was a success
+reported as a failure.
+
+Proven from patch 0022's opcode log (now removed, its job done): `SetTx`
+issued, then `GetIrqStatus`/`ClearIrqStatus`/`SetSleep` 58 ms later from the
+workqueue, then this wait expiring at 1000 ms.
+
+Dropping the wait is safe: every command does a PRE wait on BUSY before its own
+transfer, so the chip is always confirmed ready before the next one is issued.
+The handler cannot take the driver mutex instead — `sx126x_lora_send()` waits
+for TX_DONE with the mutex released precisely so the handler can deliver it, so
+locking the handler would deadlock the transmit it is completing.
+
+**Bench-proven**, not just simulated: rzr1/rzr2 ran 8.5h+/7.5h+ with zero
+wedge/timeout events after this flash, against unpatched (rzr3) and
+recovery-only (rzr4) controls that kept wedging at their baseline rate
+throughout the same window.
+
+### 0025-sx126x-expose-cumulative-wedge-reset-counter.patch
+
+**Observability, not a fix.** Adds `sx126x_wedge_reset_count`, a cumulative
+counter of how many times the wedge-recovery in `sx126x_lora_config()` has
+fired this boot. Deliberately not the same signal as the existing live BUSY
+streak: the streak resets itself the instant a recovery fires, so by the time
+anything reads it the evidence is gone. This is the durable "has this ever
+happened, and how many times" fact the streak can't answer.
+
+Same treatment as the existing CAD/AGC counters: reset together via
+`sx126x_cad_agc_stats_reset()`, plumbed through
+`meshtastic_radio_wedge_reset_count()` (guarded by `CONFIG_LORA_SX126X`, a
+0-returning fallback otherwise) into `struct meshtastic_rf_path.wedge_resets`,
+printed as a new `HEALTH` row in `meshtastic rf`.

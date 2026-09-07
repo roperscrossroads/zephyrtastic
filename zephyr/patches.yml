@@ -716,7 +716,7 @@ patches:
     email: adam.r.roper@gmail.com
     date: "2026-09-04"
     upstreamable: true
-    description: |
+    comments: |
       sx126x: key the BUSY-timeout count on the WAIT, not just the opcode.
 
       Patch 0020 made the count per-opcode because a success on any opcode
@@ -745,37 +745,6 @@ patches:
       Still does not address WHAT wedges SET_TX after a SET_SLEEP (bead
       agents-3raz) -- only that the recovery can now observe it.
 
-  - path: 0022-sx126x-oplog-record-the-opcodes-that-reach-the-wire.patch
-    sha256sum: 01fe6c45f09c0c1208d1787fbd5582adff55b9b611888f9649ce25e746617f31
-    module: zephyr
-    author: Adam Roper
-    email: adam.r.roper@gmail.com
-    date: "2026-09-05"
-    upstreamable: false
-    description: |
-      sx126x: record the opcodes that actually reach the wire (DIAGNOSTIC).
-
-      Temporary instrumentation for bead agents-3raz, not a fix and not
-      upstreamable as-is. Remove once the bead is closed.
-
-      At a SET_TX post-wait timeout, sx126x_last_issued_opcode reads 0x84
-      (SET_SLEEP) on every single occurrence -- but sx126x_hal_write_cmd()
-      sets it to the command in flight (0x83) via spi_transfer() two
-      statements earlier, on the same thread, holding the driver mutex.
-      That is impossible as the code is written.
-
-      Confirmed under JTAG rather than inferred from a log: at the failure,
-      state = SLEEP, last_issued = 0x84, BUSY high, dio1 callback NULL,
-      inside sx126x_lora_send_async() at the SET_TX post-wait, with the
-      mutex held exactly once by the transmitting thread. Concurrency, the
-      AGC-reset work item and PM_DEVICE were each ruled out by inspection.
-
-      Static reading has not explained it, so this records ground truth: a
-      16-entry ring of every opcode that reaches spi_transfer(), with a
-      cycle stamp, dumped only when a BUSY wait times out. Silent on a
-      healthy radio. irq_lock around the ring write because spi_transfer()
-      is reachable from ISR context.
-
   - path: 0023-sx126x-extract-the-busy-timeout-accounting-so-it-can-be-tested.patch
     sha256sum: e9e89d46f38a995a0521f4413db2306ca89635d7a67e3743f4ec4a262f96c26d
     module: zephyr
@@ -783,7 +752,7 @@ patches:
     email: adam.r.roper@gmail.com
     date: "2026-09-05"
     upstreamable: true
-    description: |
+    comments: |
       sx126x: move the BUSY-timeout accounting into a header so it can be tested.
 
       Behaviour-preserving. The predicate that decides when the driver resets a
@@ -800,3 +769,62 @@ patches:
       failures. Mutation-tested rather than merely written -- reintroducing
       0021 (dropping the phase from the key) fails 3 of 9, and reintroducing
       0020 (any success clears the table) fails all 9.
+
+  - path: 0024-sx126x-no-busy-post-wait-after-set-tx.patch
+    sha256sum: 1b72788dfe1237490bce3396f2fa1429eb03f5a26579a8620ae548808e23692d
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-06"
+    upstreamable: true
+    comments: |
+      sx126x: don't BUSY-wait after SET_TX (agents-3raz, root cause).
+
+      After SetTx the radio is transmitting; completion is signalled by
+      DIO1/TX_DONE, not by BUSY. Waiting on BUSY here overlaps the exact
+      window TX_DONE arrives in, and the TX-done work handler calls
+      sx126x_set_sleep() from the system workqueue, unlocked, while the
+      transmit thread is still inside this wait. A sleeping SX126x holds
+      BUSY HIGH, so a wait started before that handler runs can never see
+      BUSY drop -- it burns the full 1000 ms and reports a failure for a
+      frame that had already gone out successfully.
+
+      Proven from the driver's own opcode log (carried patch 0022, now
+      removed): SetTx issued, then GetIrqStatus/ClearIrqStatus/SetSleep
+      58 ms later from the workqueue, then this wait expiring at 1000 ms.
+      Every "failed transmit" on the affected boards was a success
+      reported as a failure.
+
+      Dropping the wait is safe: every command does a PRE wait on BUSY
+      before its own transfer, so the chip is always confirmed ready
+      before the next one is issued. The handler cannot take the driver
+      mutex instead -- sx126x_lora_send() waits for TX_DONE with the
+      mutex released precisely so the handler can deliver it, so locking
+      the handler would deadlock the transmit it is completing.
+
+      Bench-proven: rzr1/rzr2 ran 8.5h+/7.5h+ with zero wedge/timeout
+      events after this flash, against unpatched/recovery-only controls
+      (rzr3/rzr4) that kept wedging at their baseline rate throughout the
+      same window. See main/docs/HANDOFF-09-06-sx126x-root-cause-and-fix.md
+      (tooling repo) for the full soak record.
+
+  - path: 0025-sx126x-expose-cumulative-wedge-reset-counter.patch
+    sha256sum: 16181336aeed219488c1a9d6f96c8130aee6d10047cb3e91b7a2b88059fed661
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-09-06"
+    upstreamable: true
+    comments: |
+      sx126x: expose a cumulative wedge-recovery counter.
+
+      sx126x_wedge_reset_count is deliberately NOT the same signal as the
+      existing live BUSY streak: the streak resets itself the instant a
+      recovery fires, so by the time anything reads it the evidence is
+      already gone. This is the durable "has this ever happened, and how
+      many times" fact the streak cannot answer. Same treatment as the
+      existing CAD/AGC counters -- reset together via
+      sx126x_cad_agc_stats_reset(), plumbed through
+      meshtastic_radio_wedge_reset_count() into
+      struct meshtastic_rf_path.wedge_resets, printed as a new HEALTH row
+      in `meshtastic rf`.

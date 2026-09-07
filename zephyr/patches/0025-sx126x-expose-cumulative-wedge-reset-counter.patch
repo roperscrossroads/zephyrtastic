@@ -1,0 +1,44 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -810,6 +810,12 @@
+ static uint32_t sx126x_agc_reset_fail_count;
+ static uint32_t sx126x_agc_reset_skipped_count;
+ static uint32_t sx126x_agc_patch_fail_count;
++/* Cumulative count of the wedge-recovery below actually firing this boot.
++ * Deliberately NOT the same thing as the live BUSY streak: the streak resets
++ * itself the instant a recovery fires (see sx126x_lora_config()), so by the
++ * time anything reads it the evidence is already gone. This is the durable
++ * "has this ever happened, how many times" fact the streak cannot answer. */
++static uint32_t sx126x_wedge_reset_count;
+ 
+ uint32_t sx126x_cad_clear_count_get(void)
+ {
+@@ -851,6 +857,11 @@
+ 	return sx126x_agc_patch_fail_count;
+ }
+ 
++uint32_t sx126x_wedge_reset_count_get(void)
++{
++	return sx126x_wedge_reset_count;
++}
++
+ void sx126x_cad_agc_stats_reset(void)
+ {
+ 	sx126x_cad_clear_count = 0U;
+@@ -861,6 +872,7 @@
+ 	sx126x_agc_reset_fail_count = 0U;
+ 	sx126x_agc_reset_skipped_count = 0U;
+ 	sx126x_agc_patch_fail_count = 0U;
++	sx126x_wedge_reset_count = 0U;
+ }
+ 
+ /*
+@@ -1237,6 +1249,7 @@
+ 			sx126x_hal_busy_timeout_streak());
+ 		(void)sx126x_chip_init(dev);
+ 		sx126x_hal_busy_timeout_streak_reset();
++		sx126x_wedge_reset_count++;
+ 	}
+ 
+ 	ret = sx126x_ensure_ready(dev);

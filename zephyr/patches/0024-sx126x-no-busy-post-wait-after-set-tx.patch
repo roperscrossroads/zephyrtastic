@@ -1,0 +1,53 @@
+diff --git a/drivers/lora/native/sx126x/sx126x_hal_common.c b/drivers/lora/native/sx126x/sx126x_hal_common.c
+index ff7808f..3536b02 100644
+--- a/drivers/lora/native/sx126x/sx126x_hal_common.c
++++ b/drivers/lora/native/sx126x/sx126x_hal_common.c
+@@ -290,14 +290,41 @@ int sx126x_hal_write_cmd(const struct device *dev, uint8_t opcode,
+ 		return ret;
+ 	}
+ 
+-	if (opcode != SX126X_CMD_SET_SLEEP) {
+-		ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, opcode, true);
+-	} else {
+-		/*
+-		 * The chip needs time to fully enter sleep mode before the
+-		 * next NSS falling edge can wake it up reliably.
+-		 */
++	/*
++	 * Two commands must NOT be followed by a BUSY wait.
++	 *
++	 * SET_SLEEP: a sleeping SX126x holds BUSY HIGH until an NSS-edge wake, so
++	 * waiting for it to drop would always time out. It needs a settle delay
++	 * instead, before the next NSS edge can wake it reliably.
++	 *
++	 * SET_TX (agents-3raz): after SetTx the radio is transmitting, and
++	 * completion is signalled by DIO1/TX_DONE -- not by BUSY. Waiting on BUSY
++	 * here overlaps the exact window in which TX_DONE arrives, and the TX-done
++	 * work handler calls sx126x_set_sleep(). Once the chip is asleep BUSY is
++	 * held HIGH, so this wait could never finish: it burned the full 1000 ms
++	 * and then reported a failure for a frame that had ALREADY gone out.
++	 *
++	 * Measured on the bench from the driver's own opcode log -- SetTx issued,
++	 * then GetIrqStatus / ClearIrqStatus / SetSleep 58 ms later from the
++	 * workqueue, then this wait expiring at 1000 ms:
++	 *
++	 *     op=0x83 issued  1046257 us ago
++	 *     op=0x12 issued   988230 us ago
++	 *     op=0x02 issued   988185 us ago
++	 *     op=0x84 issued   988142 us ago
++	 *     op=0x83 TIMEOUT       1 us ago
++	 *
++	 * Dropping the wait is safe: every command does a PRE wait on BUSY before
++	 * its own transfer, so the chip is always confirmed ready before the next
++	 * one is issued. And the handler cannot simply take the driver mutex
++	 * instead -- sx126x_lora_send() waits for TX_DONE with the mutex released
++	 * precisely so the handler can deliver it, so locking the handler would
++	 * deadlock the transmit it is completing.
++	 */
++	if (opcode == SX126X_CMD_SET_SLEEP) {
+ 		k_busy_wait(500);
++	} else if (opcode != SX126X_CMD_SET_TX) {
++		ret = sx126x_hal_wait_busy(dev, SX126X_BUSY_DEFAULT_TIMEOUT, opcode, true);
+ 	}
+ 
+ 	return ret;
