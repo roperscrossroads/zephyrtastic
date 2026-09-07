@@ -195,6 +195,7 @@ rsource "Kconfig.reboot_trace"
 rsource "Kconfig.logring"
 rsource "Kconfig.phonelog"
 rsource "Kconfig.power"
+rsource "Kconfig.battery"
 
 menu "LoRa transmit defer"
 

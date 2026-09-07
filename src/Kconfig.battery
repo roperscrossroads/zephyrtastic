@@ -1,0 +1,154 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_BATTERY
+	bool "Battery voltage / charge from the vbatt voltage-divider"
+	default n
+	select ADC
+	help
+	  Read the board's battery voltage-divider (the `vbatt` DT node, ADC1 ch0 /
+	  GPIO1 on the Heltec V4) and expose voltage + estimated charge via
+	  meshtastic_battery_millivolts() / _percent(). Selects the ADC subsystem;
+	  the SoC ADC driver auto-enables from the enabled adc node.
+
+	  The devicetree channel MUST be &adc0 (hardware ADC1, GPIO1) -- &adc1 is
+	  hardware ADC2, GPIO11, this board's SX1262 SPI MISO line, and setting it
+	  up breaks the radio outright. The read strategy (settle time + sample
+	  averaging) mirrors upstream Meshtastic's espAdcRead(), which reads this
+	  identical circuit successfully on real hardware today.
+
+if MESHTASTIC_BATTERY
+
+config MESHTASTIC_BATTERY_CAL_PERMILLE
+	int "Battery ADC calibration factor (parts per 1000)"
+	default 1045
+	help
+	  Empirical fudge applied AFTER the 4.9 divider ratio, in parts per 1000.
+	  1045 = upstream Meshtastic's ADC_MULTIPLIER for the V4 (`4.9 * 1.045`,
+	  from firmware/variants/esp32s3/heltec_v4/variant.h) with the 4.9 already
+	  factored out into the devicetree divider scale, leaving just the 1.045
+	  empirical term here. The V4-R8 uses upstream's 1035 (`4.9 * 1.035`) —
+	  set via that board's own defconfig, not this default.
+
+	  This is upstream's own tuning constant, not a compensation hack: an
+	  earlier version of this driver read the pin with a single sample after
+	  a long settle and needed CAL_PERMILLE≈1874 to correct the resulting
+	  under-read. That under-read was an artifact of the read strategy, not
+	  the hardware — upstream's espAdcRead() and MeshCore's getBattMilliVolts()
+	  both use a short (~10 ms) ADC_CTRL settle plus multi-sample averaging on
+	  this exact circuit, so this driver now does the same instead of carrying
+	  a large empirical correction for a self-inflicted problem.
+
+config MESHTASTIC_BATTERY_CUTOFF
+	bool "Power off when the cell is critically low"
+	depends on HAS_POWEROFF
+	select POWEROFF
+	default y
+	help
+	  Sample the pack periodically and, after several consecutive readings
+	  below the cutoff voltage, call sys_poweroff().
+
+	  This is the port's only over-discharge protection, and it is the reason
+	  the battery read matters beyond cosmetics. Upstream Meshtastic protects
+	  these boards the same way and by the same means — a voltage trigger into
+	  deep sleep (firmware/src/Power.cpp:1061) — because neither Heltec V4
+	  variant routes a charger status or VBUS pin to a GPIO, so voltage is the
+	  only signal available. A build with MESHTASTIC_BATTERY enabled but this
+	  disabled will happily run a cell down until something else stops it;
+	  two bench cells swelled that way before this existed.
+
+	  On the ESP32-S3 sys_poweroff() lands in esp_deep_sleep_start() with no
+	  wake source armed, so the node stays off until reset or a power cycle.
+
+if MESHTASTIC_BATTERY_CUTOFF
+
+config MESHTASTIC_BATTERY_CUTOFF_MV
+	int "Cutoff voltage in millivolts"
+	default 3200
+	range 2800 3600
+	help
+	  Upstream cuts off at 3100 mV (its OCV curve's last point). The default
+	  here is deliberately 100 mV more conservative: a 1S LiPo below ~3.3 V
+	  resting holds very little usable energy, so the runtime given up is
+	  negligible against the margin gained — which matters when a pack's
+	  protection circuit is unknown or absent. Set 3100 for strict parity.
+
+config MESHTASTIC_BATTERY_CUTOFF_COUNT
+	int "Consecutive low readings required before powering off"
+	default 10
+	range 1 60
+	help
+	  Matches upstream's low_voltage_counter threshold. Guards against acting
+	  on the voltage sag from a TX burst or WiFi association rather than a
+	  genuinely flat pack. With the default poll interval this is ~5 minutes
+	  of sustained low voltage.
+
+config MESHTASTIC_BATTERY_CUTOFF_POLL_SEC
+	int "Seconds between battery checks"
+	default 30
+	range 15 600
+	help
+	  Must stay comfortably above the read cache window inside
+	  meshtastic_battery.c (BATTERY_CACHE_MS, 5 s), or consecutive "readings"
+	  would be the same cached sample counted repeatedly rather than
+	  independent measurements — which would let the cutoff counter reach its
+	  threshold without the pack ever being re-measured.
+
+	  The lower bound is 3x that window rather than merely above it, so jitter
+	  in the work queue cannot land a poll inside the cache. A BUILD_ASSERT in
+	  meshtastic_battery.c enforces the relationship, so if either value moves
+	  the build fails rather than the cutoff quietly weakening.
+
+config MESHTASTIC_BATTERY_CUTOFF_START_DELAY_SEC
+	int "Seconds to wait after boot before the first check"
+	default 60
+	range 0 3600
+	help
+	  Radio and WiFi bring-up inrush sags the rail, and the ADC is set up
+	  lazily on first read, so the first seconds after boot are the worst
+	  time to judge the pack.
+
+config MESHTASTIC_BATTERY_CUTOFF_FLUSH_MS
+	int "Milliseconds to let logs drain before powering off"
+	default 500
+	range 0 5000
+	help
+	  sys_poweroff() locks interrupts and never returns, so the reason for the
+	  shutdown is lost unless it has left the SoC first. LOG_PANIC() drains the
+	  backends synchronously; this delay covers the netlog's UDP transmit,
+	  which completes asynchronously afterwards.
+
+endif # MESHTASTIC_BATTERY_CUTOFF
+
+config MESHTASTIC_BATTERY_FLOAT_WARN
+	bool "Warn when the cell is held at full charge"
+	depends on MESHTASTIC_BATTERY_CUTOFF
+	default y
+	help
+	  The second way these packs die is the opposite of over-discharge: sitting
+	  at ~4.2 V on a board that never sleeps, where electrolyte decomposition
+	  roughly doubles per 10 degrees C. Firmware cannot prevent it (the charge
+	  IC is autonomous, with no enable line to the SoC), so this only reports
+	  it — one log line per day while the condition holds, nothing on the
+	  display or in telemetry. The actual fix is to not leave a cell connected
+	  to a node that lives on USB.
+
+	  Rides on the cutoff monitor's poll, hence the dependency.
+
+if MESHTASTIC_BATTERY_FLOAT_WARN
+
+config MESHTASTIC_BATTERY_FLOAT_WARN_MV
+	int "Voltage at or above which the pack counts as held full"
+	default 4150
+	range 3900 4300
+
+config MESHTASTIC_BATTERY_FLOAT_WARN_HOURS
+	int "Hours at that voltage before warning"
+	default 24
+	range 1 720
+	help
+	  Measured against uptime, not wall-clock history, so a node that reboots
+	  more often than this never warns.
+
+endif # MESHTASTIC_BATTERY_FLOAT_WARN
+
+endif # MESHTASTIC_BATTERY

@@ -34,6 +34,7 @@
 #include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/lora/sx126x.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/adc/adc.h>
 
 / {
 	aliases {
@@ -159,6 +160,24 @@
 
 &adc0 {
 	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/*
+	 * VBAT divider channel (see the vbatt voltage-divider node above). Upstream
+	 * reads GPIO1/ADC1_CH0 at 2.5 dB attenuation -- heltec_v4 variant.h line 8
+	 * DEFINES `ADC_ATTENUATION ADC_ATTEN_DB_2_5` ("lower dB for high resistance
+	 * voltage divider"), which OVERRIDES Power.cpp:100's ADC_ATTEN_DB_12 default.
+	 * 2.5 dB maps to Zephyr ADC_GAIN_4_5 and keeps the ~0.86 V divided node
+	 * mid-scale. The esp32 ADC driver requires ADC_REF_INTERNAL.
+	 */
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_4_5";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
 };
 
 &uart0 {

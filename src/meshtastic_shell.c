@@ -35,6 +35,9 @@
 #include "meshtastic_admin.h"
 #include "meshtastic_admin_client.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_BATTERY)
+#include "meshtastic_battery.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 #include <zephyr/bluetooth/addr.h>
 
@@ -663,6 +666,22 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "node: 0x%08x", status.node_id);
 	shell_print(sh, "initialized: %s", status.initialized ? "yes" : "no");
 	shell_print(sh, "ble connected: %s", status.ble_connected ? "yes" : "no");
+#if defined(CONFIG_MESHTASTIC_BATTERY)
+	{
+		int bmv = meshtastic_battery_millivolts();
+
+		if (bmv < 0) {
+			shell_print(sh, "battery: n/a");
+		} else if (!meshtastic_battery_present()) {
+			shell_print(sh, "battery: none fitted (%d mV on the divider)", bmv);
+		} else {
+			shell_print(sh, "battery: %d mV (%d%%)%s%s", bmv,
+				    meshtastic_battery_percent(),
+				    meshtastic_battery_external_power() ? " charging" : "",
+				    meshtastic_battery_is_critical() ? " CRITICAL" : "");
+		}
+	}
+#endif
 	shell_print(sh, "tx: %u ok, %u failed", status.tx_packets, status.tx_failures);
 	shell_print(sh, "rx: %u decoded, %u duplicates, %u decode failures", status.rx_packets,
 		    status.duplicate_packets, status.decode_failures);
