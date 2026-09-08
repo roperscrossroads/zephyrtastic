@@ -111,6 +111,7 @@ uint8_t meshtastic_sched_tier_for(uint32_t portnum)
 	case MESHTASTIC_PORT_TELEMETRY:
 	case MESHTASTIC_PORT_NODE_STATUS:  /* reference: priority BACKGROUND */
 	case MESHTASTIC_PORT_NEIGHBORINFO: /* reference: priority BACKGROUND */
+	case MESHTASTIC_PORT_MESH_BEACON:  /* reference: priority BACKGROUND */
 	case MESHTASTIC_PORT_HEALTH:
 		/* MESHTASTIC_PORT_HEALTH must land here, not the NORMAL default: an
 		 * unmapped port is exempt from the airtime gate entirely (see

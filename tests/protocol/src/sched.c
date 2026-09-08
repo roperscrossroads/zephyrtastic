@@ -47,6 +47,7 @@ ZTEST(sched, test_tier_mapping)
 	zassert_equal(meshtastic_sched_tier_for(MESHTASTIC_PORT_NODEINFO), MT_SCHED_TIER_BG);
 	zassert_equal(meshtastic_sched_tier_for(MESHTASTIC_PORT_NODE_STATUS), MT_SCHED_TIER_BG);
 	zassert_equal(meshtastic_sched_tier_for(MESHTASTIC_PORT_NEIGHBORINFO), MT_SCHED_TIER_BG);
+	zassert_equal(meshtastic_sched_tier_for(MESHTASTIC_PORT_MESH_BEACON), MT_SCHED_TIER_BG);
 	zassert_equal(meshtastic_sched_tier_for(MESHTASTIC_PORT_TEXT_MESSAGE), MT_SCHED_TIER_NORMAL);
 	/* Unknown portnum falls back to NORMAL, never dropped as background. */
 	zassert_equal(meshtastic_sched_tier_for(12345U), MT_SCHED_TIER_NORMAL);

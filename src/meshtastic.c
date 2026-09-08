@@ -755,10 +755,14 @@ static int mt_ws_build_wire_locked(uint8_t *wire, uint32_t *pkt_len,
 	if (mesh->id == 0U) {
 		mesh->id = meshtastic_allocate_packet_id();
 	}
-	if (mesh->hop_limit == 0U) {
+	/* 0 means "the node default" -- unless the sender asked for a literal zero-hop
+	 * frame (mt_ws.tx_zero_hop): then hop_limit stays 0 so no receiver relays it,
+	 * and hop_start stays whatever the sender set (0, or 1 for the reference's
+	 * legacy override that pre-2.7.20 receivers need). */
+	if (mesh->hop_limit == 0U && !mt_ws.tx_zero_hop) {
 		mesh->hop_limit = mt.hop_limit;
 	}
-	if (mesh->hop_start == 0U) {
+	if (mesh->hop_start == 0U && !mt_ws.tx_zero_hop) {
 		mesh->hop_start = mesh->hop_limit;
 	}
 
@@ -983,7 +987,9 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 	ret = meshtastic_packet_to_mesh_pb(packet, &mt_ws.tx_mesh);
 	if (ret == 0) {
 		mt_ws.tx_mesh.channel = send_index;
+		mt_ws.tx_zero_hop = packet->zero_hop;
 		ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
+		mt_ws.tx_zero_hop = false;
 	}
 	k_mutex_unlock(&mt_ws.lock);
 	if (ret < 0) {
@@ -1025,6 +1031,7 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 	mt_ws.tx_mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
 	mt_ws.tx_mesh.to = to_norm;
 	mt_ws.tx_mesh.channel = send_index;
+	mt_ws.tx_zero_hop = false;
 	ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
 	k_mutex_unlock(&mt_ws.lock);
 	if (ret < 0) {

@@ -128,6 +128,11 @@ struct meshtastic_workspace {
 	 * off the (right-sized) app-thread send stacks. Guarded by @ref lock alongside the
 	 * pb_buf/enc_buf scratch the build already serialises on. */
 	meshtastic_MeshPacket tx_mesh;
+	/* Set by a sender that means hop_limit 0 literally (a zero-hop frame heard by
+	 * direct neighbours and relayed by nobody -- the reference's beacon), so the
+	 * wire build does not fill 0 with the node default. Guarded by @ref lock; every
+	 * staging path resets it. */
+	bool tx_zero_hop;
 };
 
 extern struct meshtastic_context mt;

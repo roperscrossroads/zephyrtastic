@@ -112,6 +112,8 @@ enum meshtastic_portnum {
 	MESHTASTIC_PORT_ADMIN = 6,
 	/** Node status string. */
 	MESHTASTIC_PORT_NODE_STATUS = 36,
+	/** MeshBeacon: a zero-hop "join my mesh" announcement (text + channel offer). */
+	MESHTASTIC_PORT_MESH_BEACON = 37,
 	/** Sensor telemetry. */
 	MESHTASTIC_PORT_TELEMETRY = 67,
 	/** Traceroute (RouteDiscovery) path mapping. */
@@ -237,6 +239,13 @@ struct meshtastic_packet {
 	bool pki_encrypted;
 	/** Application payload asks peers to respond in kind. */
 	bool want_response;
+	/**
+	 * Send as a literal zero-hop frame: hop_limit stays 0 (heard by direct
+	 * neighbours, relayed by nobody) instead of being filled with the node
+	 * default, and hop_start stays as set (0, or 1 for receivers that predate
+	 * hop_start 0 being accepted). What the reference's MeshBeacon sends.
+	 */
+	bool zero_hop;
 	/**
 	 * The decoded payload carried a @c Data.bitfield.
 	 *
