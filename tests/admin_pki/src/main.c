@@ -74,6 +74,13 @@ struct mock_lora_state {
 	uint32_t send_count;
 	uint8_t last_tx[MESHTASTIC_PKT_MAX];
 	uint32_t last_tx_len;
+	/* The last few frames, newest at (ring_head - 1): a reply and the NodeInfo
+	 * request the same inbound frame triggers leave the queue in whichever
+	 * order the queue chooses, so "the last frame" is not enough to find one. */
+#define MOCK_TX_RING 4U
+	uint8_t ring[MOCK_TX_RING][MESHTASTIC_PKT_MAX];
+	uint32_t ring_len[MOCK_TX_RING];
+	uint32_t ring_head;
 };
 
 static struct mock_lora_state mock_lora;
@@ -103,8 +110,13 @@ static int mock_lora_send(const struct device *dev, uint8_t *data, uint32_t data
 	ARG_UNUSED(dev);
 	k_mutex_lock(&mock_lora.lock, K_FOREVER);
 	if (data_len <= sizeof(mock_lora.last_tx)) {
+		uint32_t slot = mock_lora.ring_head % MOCK_TX_RING;
+
 		memcpy(mock_lora.last_tx, data, data_len);
 		mock_lora.last_tx_len = data_len;
+		memcpy(mock_lora.ring[slot], data, data_len);
+		mock_lora.ring_len[slot] = data_len;
+		mock_lora.ring_head++;
 	}
 	mock_lora.send_count++;
 	k_mutex_unlock(&mock_lora.lock);
@@ -2390,6 +2402,458 @@ ZTEST(admin_pki, test_set_module_config_neighbor_info_applies_live_without_reboo
 	zassert_false(s.enabled, "disabled live");
 }
 #endif /* CONFIG_MESHTASTIC_NEIGHBORINFO */
+
+/* ---- agents-dnr4.13: manual key verification, both roles ----------------------- */
+
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+#include "meshtastic_keyverify.h"
+
+#define KV_PEER 0x0B00C0DEU
+
+static void kv_sha256(const uint8_t *in, size_t len, uint8_t out[32])
+{
+	size_t olen = 0;
+
+	zassert_equal(psa_hash_compute(PSA_ALG_SHA_256, in, len, out, 32, &olen), PSA_SUCCESS, "");
+	zassert_equal(olen, 32U, "");
+}
+
+/* The reference's H1 = SHA256(number || nonce || initiator || responder || PK_i || PK_r),
+ * little-endian integers, and hash2 = SHA256(nonce || H1). */
+static void kv_hashes(uint32_t number, uint64_t nonce, uint32_t initiator, uint32_t responder,
+		      const uint8_t *pk_i, const uint8_t *pk_r, uint8_t h1[32], uint8_t h2[32])
+{
+	uint8_t buf[84];
+	uint8_t buf2[40];
+
+	sys_put_le32(number, buf);
+	sys_put_le64(nonce, buf + 4);
+	sys_put_le32(initiator, buf + 12);
+	sys_put_le32(responder, buf + 16);
+	memcpy(buf + 20, pk_i, 32);
+	memcpy(buf + 52, pk_r, 32);
+	kv_sha256(buf, sizeof(buf), h1);
+	sys_put_le64(nonce, buf2);
+	memcpy(buf2 + 8, h1, 32);
+	kv_sha256(buf2, sizeof(buf2), h2);
+}
+
+static void kv_code(const uint8_t h1[32], char out[10])
+{
+	for (int i = 0; i < 4; i++) {
+		out[i] = (char)((h1[i] >> 2) + 48);
+	}
+	out[4] = ' ';
+	for (int i = 5; i < 9; i++) {
+		out[i] = (char)((h1[i] >> 2) + 48);
+	}
+	out[9] = '\0';
+}
+
+static size_t kv_encode(uint64_t nonce, const uint8_t *hash1, const uint8_t *hash2, uint8_t *buf,
+			size_t cap)
+{
+	meshtastic_KeyVerification m = meshtastic_KeyVerification_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	m.nonce = nonce;
+	if (hash1 != NULL) {
+		m.hash1.size = 32;
+		memcpy(m.hash1.bytes, hash1, 32);
+	}
+	if (hash2 != NULL) {
+		m.hash2.size = 32;
+		memcpy(m.hash2.bytes, hash2, 32);
+	}
+	zassert_true(pb_encode(&os, meshtastic_KeyVerification_fields, &m), "kv encode failed");
+	return os.bytes_written;
+}
+
+/* A KeyVerification from KV_PEER to us on the primary channel (the bootstrap
+ * envelope). */
+static void kv_inject_channel(uint32_t id, uint64_t nonce, const uint8_t *hash1,
+			      const uint8_t *hash2, bool want_response)
+{
+	uint8_t payload[128];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct meshtastic_packet pkt = {
+		.from = KV_PEER,
+		.to = TEST_NODE_ID,
+		.id = id,
+		.portnum = MESHTASTIC_PORT_KEY_VERIFICATION,
+		.want_response = want_response,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.channel_index = meshtastic_channels_primary_index(),
+		/* The destination is our own node, whose key the NodeDB holds, so
+		 * without this the builder would PKC-encrypt the frame under OUR
+		 * key pair and the receiver, trying KV_PEER's shared secret, would
+		 * drop it before any log line. no_pkc is the same flag the module
+		 * uses for its own bootstrap reply. */
+		.no_pkc = true,
+	};
+
+	pkt.payload = payload;
+	pkt.payload_len = kv_encode(nonce, hash1, hash2, payload, sizeof(payload));
+	zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "build failed");
+	inject_rx_frame(wire, wire_len);
+	k_sleep(K_MSEC(50));
+}
+
+/* The same, PKC-encrypted "from" KV_PEER via the ECDH-symmetry trick (see
+ * inject_pkc_admin): the node decrypts a packet from KV_PEER with the same
+ * shared key our own encrypt-to-KV_PEER produces. */
+static void kv_inject_pkc(uint32_t id, uint64_t nonce, const uint8_t *hash1, const uint8_t *hash2,
+			  bool want_response)
+{
+	meshtastic_Data data = meshtastic_Data_init_zero;
+	uint8_t plain[MESHTASTIC_MAX_PAYLOAD_LEN];
+	uint8_t enc[MESHTASTIC_MAX_PAYLOAD_LEN + MESHTASTIC_PKI_OVERHEAD];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	struct meshtastic_wire_header *whdr = (struct meshtastic_wire_header *)wire;
+	pb_ostream_t os;
+	size_t enc_len = 0;
+
+	data.portnum = (meshtastic_PortNum)MESHTASTIC_PORT_KEY_VERIFICATION;
+	data.want_response = want_response;
+	data.payload.size = (pb_size_t)kv_encode(nonce, hash1, hash2, data.payload.bytes,
+						  sizeof(data.payload.bytes));
+	os = pb_ostream_from_buffer(plain, sizeof(plain));
+	zassert_true(pb_encode(&os, meshtastic_Data_fields, &data), "Data encode failed");
+	zassert_ok(meshtastic_pki_encrypt(KV_PEER, KV_PEER, id, plain, os.bytes_written, enc,
+					  sizeof(enc), &enc_len),
+		   "PKC encrypt failed");
+	whdr->dest = sys_cpu_to_le32(TEST_NODE_ID);
+	whdr->src = sys_cpu_to_le32(KV_PEER);
+	whdr->id = sys_cpu_to_le32(id);
+	whdr->flags = 3U | (3U << MESHTASTIC_FLAGS_HOP_START_SHIFT);
+	whdr->channel = 0x00U;
+	whdr->next_hop = 0U;
+	whdr->relay_node = 0U;
+	memcpy(wire + MESHTASTIC_HDR_LEN, enc, enc_len);
+	inject_rx_frame(wire, MESHTASTIC_HDR_LEN + (uint32_t)enc_len);
+	k_sleep(K_MSEC(50));
+}
+
+/* The next ClientNotification the phone would see, skipping other frames. */
+static bool kv_pop_notification(meshtastic_ClientNotification *cn)
+{
+	struct meshtastic_phoneapi_frame frame;
+	meshtastic_FromRadio from;
+
+	while (meshtastic_phoneapi_pop_frame(&phone_api, &frame)) {
+		pb_istream_t is = pb_istream_from_buffer(frame.data, frame.len);
+
+		from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+		zassert_true(pb_decode(&is, meshtastic_FromRadio_fields, &from), "FromRadio decode");
+		if (from.which_payload_variant == meshtastic_FromRadio_clientNotification_tag) {
+			*cn = from.clientNotification;
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Decode the last frame the node transmitted as a KeyVerification; reports
+ * whether it went PKC (channel byte 0x00). Only a channel-encrypted frame can
+ * be decoded here. */
+static bool kv_last_tx(meshtastic_KeyVerification *out, bool *pkc, uint32_t *to)
+{
+	const struct meshtastic_wire_header *h = (const struct meshtastic_wire_header *)mock_lora.last_tx;
+	struct meshtastic_packet decoded;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	pb_istream_t is;
+
+	*pkc = (h->channel == 0x00U);
+	*to = sys_le32_to_cpu(h->dest);
+	if (*pkc) {
+		return false;
+	}
+	if (meshtastic_decode_wire_packet(mock_lora.last_tx, mock_lora.last_tx_len, 0, 0, &decoded,
+					  payload, sizeof(payload)) != 0) {
+		return false;
+	}
+	*out = (meshtastic_KeyVerification)meshtastic_KeyVerification_init_zero;
+	is = pb_istream_from_buffer(decoded.payload, decoded.payload_len);
+	return decoded.portnum == MESHTASTIC_PORT_KEY_VERIFICATION &&
+	       pb_decode(&is, meshtastic_KeyVerification_fields, out);
+}
+
+/* Any of the mock's recent frames a channel-encrypted port-12 message carrying
+ * this nonce? (A PKC frame cannot be a bootstrap reply and is skipped.) */
+static bool kv_find_tx(uint64_t nonce, meshtastic_KeyVerification *out)
+{
+	uint32_t n = MIN(mock_lora.ring_head, MOCK_TX_RING);
+
+	for (uint32_t i = 1U; i <= n; i++) {
+		uint32_t slot = (mock_lora.ring_head - i) % MOCK_TX_RING;
+		const struct meshtastic_wire_header *h =
+			(const struct meshtastic_wire_header *)mock_lora.ring[slot];
+		struct meshtastic_packet decoded;
+		uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+		pb_istream_t is;
+
+		if (h->channel == 0x00U ||
+		    meshtastic_decode_wire_packet(mock_lora.ring[slot], mock_lora.ring_len[slot], 0,
+						  0, &decoded, payload, sizeof(payload)) != 0 ||
+		    decoded.portnum != MESHTASTIC_PORT_KEY_VERIFICATION) {
+			continue;
+		}
+		*out = (meshtastic_KeyVerification)meshtastic_KeyVerification_init_zero;
+		is = pb_istream_from_buffer(decoded.payload, decoded.payload_len);
+		if (pb_decode(&is, meshtastic_KeyVerification_fields, out) && out->nonce == nonce) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void kv_fresh(void)
+{
+	meshtastic_keyverify_reset();
+	(void)meshtastic_nodedb_forget(KV_PEER);
+	meshtastic_phoneapi_reset(&phone_api);
+	mock_lora.send_count = 0U;
+}
+
+ZTEST(admin_pki, test_keyverify_responder_bootstrap_handshake)
+{
+	uint8_t peer_pub[32];
+	uint8_t our_pub[32];
+	uint8_t h1[32], h2[32], bad[32];
+	char code[10];
+	meshtastic_KeyVerification m2;
+	meshtastic_ClientNotification cn;
+	struct meshtastic_keyverify_status st;
+	struct meshtastic_nodedb_node node;
+	const uint64_t nonce = 0x1122334455667788ULL;
+	bool pkc;
+	uint32_t to;
+
+	kv_fresh();
+	gen_x25519_pubkey(peer_pub);
+	zassert_equal(meshtastic_pki_get_public_key(our_pub), 32U, "");
+	zassert_not_equal(meshtastic_nodedb_get(KV_PEER, &node), 0, "bootstrap: the peer is unknown");
+
+	/* M1, channel-encrypted, carrying the peer's key in hash1. */
+	kv_inject_channel(0x4B000001U, nonce, peer_pub, NULL, true);
+	zassert_equal(mock_lora.send_count, 1U, "M2 went out");
+	zassert_true(kv_last_tx(&m2, &pkc, &to), "M2 is channel-encrypted (the peer lacks our key)");
+	zassert_false(pkc, "");
+	zassert_equal(to, KV_PEER, "");
+	zassert_equal(m2.nonce, nonce, "same nonce");
+	zassert_equal(m2.hash1.size, 32U, "");
+	zassert_mem_equal(m2.hash1.bytes, our_pub, 32, "M2 carries OUR key for the peer to bootstrap");
+	zassert_equal(m2.hash2.size, 32U, "");
+
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_RECEIVER_AWAITING_HASH1, "");
+	zassert_true(st.security_number >= 1U && st.security_number <= 999999U, "6-digit number");
+	zassert_true(kv_pop_notification(&cn), "the phone is told the number to show");
+	zassert_equal(cn.which_payload_variant,
+		      meshtastic_ClientNotification_key_verification_number_inform_tag, "");
+	zassert_equal(cn.payload_variant.key_verification_number_inform.security_number,
+		      st.security_number, "");
+	zassert_equal(cn.payload_variant.key_verification_number_inform.nonce, nonce, "");
+
+	/* The peer (this test) is told the number out of band and reproduces H1. */
+	kv_hashes(st.security_number, nonce, KV_PEER, TEST_NODE_ID, peer_pub, our_pub, h1, h2);
+	zassert_mem_equal(m2.hash2.bytes, h2, 32, "hash2 = SHA256(nonce || H1) as the reference");
+
+	/* A wrong H1 (wrong number) is ignored; a channel-encrypted M3 too. */
+	memcpy(bad, h1, 32);
+	bad[0] ^= 0xFFU;
+	kv_inject_pkc(0x4B000002U, nonce, bad, NULL, true);
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_RECEIVER_AWAITING_HASH1, "wrong H1: no advance");
+	kv_inject_channel(0x4B000003U, nonce, h1, NULL, true);
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_RECEIVER_AWAITING_HASH1,
+		      "a channel-encrypted M3 proves nothing: no advance");
+
+	/* M3, PKC (the pending key makes the node able to decrypt it). */
+	kv_inject_pkc(0x4B000004U, nonce, h1, NULL, true);
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_RECEIVER_AWAITING_USER, "H1 matched");
+	kv_code(h1, code);
+	zassert_str_equal(st.code, code, "the 8-character code the user compares");
+	zassert_true(kv_pop_notification(&cn), "final prompt");
+	zassert_equal(cn.which_payload_variant, meshtastic_ClientNotification_key_verification_final_tag,
+		      "");
+	zassert_false(cn.payload_variant.key_verification_final.isSender, "");
+	zassert_str_equal(cn.payload_variant.key_verification_final.verification_characters, code, "");
+
+	/* Accept: the pending key is committed, flagged verified, and our NodeInfo
+	 * goes to the peer. */
+	mock_lora.send_count = 0U;
+	zassert_ok(meshtastic_keyverify_accept(nonce), "");
+	zassert_ok(meshtastic_nodedb_get(KV_PEER, &node), "the peer is in the NodeDB now");
+	zassert_true(node.is_key_manually_verified, "flagged verified");
+	zassert_equal(node.public_key_len, 32U, "");
+	zassert_mem_equal(node.public_key, peer_pub, 32, "with the key learned in the handshake");
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_IDLE, "");
+	zassert_true(mock_lora.send_count >= 1U, "our NodeInfo went to the peer");
+	kv_fresh();
+}
+
+ZTEST(admin_pki, test_keyverify_initiator_handshake_with_a_known_peer)
+{
+	uint8_t peer_pub[32];
+	uint8_t our_pub[32];
+	uint8_t h1[32], h2[32];
+	char code[10];
+	meshtastic_KeyVerification m;
+	meshtastic_ClientNotification cn;
+	struct meshtastic_keyverify_status st;
+	struct meshtastic_nodedb_node node;
+	const uint32_t number = 424242U;
+	bool pkc;
+	uint32_t to;
+
+	kv_fresh();
+	gen_x25519_pubkey(peer_pub);
+	zassert_equal(meshtastic_pki_get_public_key(our_pub), 32U, "");
+	/* Known peer: its key came in a NodeInfo. */
+	{
+		meshtastic_User user = meshtastic_User_init_zero;
+		uint8_t buf[128];
+		pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+		struct meshtastic_packet ni = {
+			.from = KV_PEER,
+			.to = MESHTASTIC_NODE_BROADCAST,
+			.portnum = MESHTASTIC_PORT_NODEINFO,
+			.channel_index = meshtastic_channels_primary_index(),
+		};
+
+		user.public_key.size = 32;
+		memcpy(user.public_key.bytes, peer_pub, 32);
+		zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "");
+		ni.payload = buf;
+		ni.payload_len = os.bytes_written;
+		meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+	}
+	mock_lora.send_count = 0U;
+
+	zassert_ok(meshtastic_keyverify_start(KV_PEER), "");
+	zassert_equal(meshtastic_keyverify_start(KV_PEER), -EBUSY, "one session at a time");
+	k_sleep(K_MSEC(50));
+	zassert_equal(mock_lora.send_count, 1U, "M1 went out");
+	(void)kv_last_tx(&m, &pkc, &to);
+	zassert_true(pkc, "the peer's key is known: M1 is PKC");
+	zassert_equal(to, KV_PEER, "");
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_SENDER_HAS_INITIATED, "");
+	zassert_not_equal(st.nonce, 0ULL, "a fresh nonce");
+
+	/* The peer (this test) answers M2: its number, its key, hash2. */
+	kv_hashes(number, st.nonce, TEST_NODE_ID, KV_PEER, our_pub, peer_pub, h1, h2);
+	kv_inject_pkc(0x4B000011U, st.nonce, peer_pub, h2, true);
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_SENDER_AWAITING_NUMBER, "");
+	zassert_true(kv_pop_notification(&cn), "the phone is asked for the number");
+	zassert_equal(cn.which_payload_variant,
+		      meshtastic_ClientNotification_key_verification_number_request_tag, "");
+
+	/* A wrong number does not reproduce hash2: nothing leaves the node. */
+	mock_lora.send_count = 0U;
+	zassert_equal(meshtastic_keyverify_provide_number(st.nonce, number + 1U), -EACCES, "");
+	zassert_equal(meshtastic_keyverify_provide_number(st.nonce + 1U, number), -EINVAL, "stale nonce");
+	zassert_equal(mock_lora.send_count, 0U, "nothing sent on a wrong number");
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_SENDER_AWAITING_NUMBER, "still waiting");
+
+	/* The right number: M3 (H1) goes out PKC, the final prompt shows the code. */
+	zassert_ok(meshtastic_keyverify_provide_number(st.nonce, number), "");
+	k_sleep(K_MSEC(50));
+	zassert_equal(mock_lora.send_count, 1U, "M3 went out");
+	(void)kv_last_tx(&m, &pkc, &to);
+	zassert_true(pkc, "M3 is PKC: proves we hold our private key");
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_SENDER_AWAITING_USER, "");
+	kv_code(h1, code);
+	zassert_str_equal(st.code, code, "same code the peer derives");
+	zassert_true(kv_pop_notification(&cn), "");
+	zassert_equal(cn.which_payload_variant, meshtastic_ClientNotification_key_verification_final_tag,
+		      "");
+	zassert_true(cn.payload_variant.key_verification_final.isSender, "");
+
+	zassert_ok(meshtastic_keyverify_accept(st.nonce), "");
+	zassert_ok(meshtastic_nodedb_get(KV_PEER, &node), "");
+	zassert_true(node.is_key_manually_verified, "flagged verified");
+	zassert_mem_equal(node.public_key, peer_pub, 32, "the known key, kept");
+	kv_fresh();
+}
+
+ZTEST(admin_pki, test_keyverify_admin_path_timeout_and_cooldown)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	struct meshtastic_keyverify_status st;
+	uint8_t peer_pub[32];
+	uint8_t buf[256];
+	pb_ostream_t os;
+
+	kv_fresh();
+	gen_x25519_pubkey(peer_pub);
+
+	/* The app initiates over admin (local only). */
+	am.which_payload_variant = meshtastic_AdminMessage_key_verification_tag;
+	am.payload_variant.key_verification.message_type =
+		meshtastic_KeyVerificationAdmin_MessageType_INITIATE_VERIFICATION;
+	am.payload_variant.key_verification.remote_nodenum = KV_PEER;
+	os = pb_ostream_from_buffer(buf, sizeof(buf));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "");
+	zassert_equal(send_local_admin_and_pop_routing(buf, os.bytes_written),
+		      meshtastic_Routing_Error_NONE, "");
+	k_sleep(K_MSEC(50));
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_SENDER_HAS_INITIATED, "admin started it");
+	zassert_true(mock_lora.send_count >= 1U, "M1 (bootstrap, channel-encrypted) went out");
+
+	/* DO_NOT_VERIFY drops it. */
+	am.payload_variant.key_verification.message_type =
+		meshtastic_KeyVerificationAdmin_MessageType_DO_NOT_VERIFY;
+	os = pb_ostream_from_buffer(buf, sizeof(buf));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "");
+	zassert_equal(send_local_admin_and_pop_routing(buf, os.bytes_written),
+		      meshtastic_Routing_Error_NONE, "");
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_IDLE, "rejected");
+
+	/* Idle timeout: 60 s with no progress. */
+	zassert_ok(meshtastic_keyverify_start(KV_PEER), "");
+	k_sleep(K_SECONDS(61));
+	meshtastic_keyverify_status(&st);
+	zassert_equal(st.state, MESHTASTIC_KEYVERIFY_IDLE, "timed out");
+
+	/* Remote cooldown: a session opened by a peer, then ended, blocks another
+	 * remote request for a minute.
+	 * A request is judged answered by a port-12 reply carrying THAT request's
+	 * nonce among the mock's recent frames, not by a TX count or the last frame:
+	 * the first frame from a never-heard peer also triggers a NodeInfo request
+	 * (whether it does depends on the request throttle's state left by earlier
+	 * tests), and the queue is free to put it on the air after the reply. Two
+	 * back-to-back originated frames also need more than the inject helper's
+	 * 50 ms to both reach the mock, hence the settle after each inject. */
+	{
+		meshtastic_KeyVerification m2;
+
+		kv_inject_channel(0x4B000021U, 0x99ULL, peer_pub, NULL, true);
+		k_sleep(K_MSEC(600));
+		zassert_true(kv_find_tx(0x99ULL, &m2), "first request answered");
+		meshtastic_keyverify_reject();
+		kv_inject_channel(0x4B000022U, 0x9AULL, peer_pub, NULL, true);
+		k_sleep(K_MSEC(600));
+		zassert_false(kv_find_tx(0x9AULL, &m2), "inside the cooldown: not answered");
+		k_sleep(K_SECONDS(61));
+		kv_inject_channel(0x4B000023U, 0x9BULL, peer_pub, NULL, true);
+		k_sleep(K_MSEC(600));
+		zassert_true(kv_find_tx(0x9BULL, &m2), "after the cooldown: answered");
+	}
+	kv_fresh();
+}
+#endif /* CONFIG_MESHTASTIC_KEYVERIFY */
 
 /* ---- agents-dnr4.17: external_notification applies live; buzzer/ringtone refused ---- */
 

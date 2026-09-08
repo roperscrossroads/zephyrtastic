@@ -61,6 +61,9 @@
 #if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
 #include "meshtastic_extnotify.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+#include "meshtastic_keyverify.h"
+#endif
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
@@ -986,6 +989,51 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
 		}
 		break;
+	case meshtastic_AdminMessage_key_verification_tag: {
+		/* Reference KeyVerificationModule::handleAdminMessageForModule: the
+		 * app drives the handshake, LOCAL only (mp.from == 0 there). */
+		if (admin_cur.remote) {
+			LOG_WRN("admin: key_verification from the mesh refused");
+			ack_err = meshtastic_Routing_Error_NOT_AUTHORIZED;
+			break;
+		}
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+		const meshtastic_KeyVerificationAdmin *kva = &admin_req.payload_variant.key_verification;
+
+		switch (kva->message_type) {
+		case meshtastic_KeyVerificationAdmin_MessageType_INITIATE_VERIFICATION:
+			ret = meshtastic_keyverify_start(kva->remote_nodenum);
+			break;
+		case meshtastic_KeyVerificationAdmin_MessageType_PROVIDE_SECURITY_NUMBER:
+			ret = kva->has_security_number
+				      ? meshtastic_keyverify_provide_number(kva->nonce,
+									    kva->security_number)
+				      : -EINVAL;
+			break;
+		case meshtastic_KeyVerificationAdmin_MessageType_DO_VERIFY:
+			ret = meshtastic_keyverify_accept(kva->nonce);
+			break;
+		case meshtastic_KeyVerificationAdmin_MessageType_DO_NOT_VERIFY:
+			meshtastic_keyverify_reject();
+			ret = 0;
+			break;
+		default:
+			ret = -EINVAL;
+			break;
+		}
+		/* The reference answers HANDLED whatever the module decided; a wrong
+		 * number or a stale nonce shows up as a state that did not advance,
+		 * never as a routing error. Log it and ACK. */
+		if (ret < 0) {
+			LOG_WRN("admin: key_verification type %u -> %d", (unsigned int)kva->message_type,
+				ret);
+		}
+#else
+		LOG_WRN("admin: key_verification refused: not built into this image");
+		ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+#endif
+		break;
+	}
 	case meshtastic_AdminMessage_set_ringtone_message_tag:
 		/* A ringtone plays on a buzzer; no board this port supports has one, so
 		 * the write is refused rather than stored for nothing (agents-dnr4.17). */

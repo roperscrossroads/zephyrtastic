@@ -1,0 +1,18 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_KEYVERIFY
+	bool "Meshtastic manual key verification (security-number handshake)"
+	default y
+	depends on MESHTASTIC_PKI && MESHTASTIC_NODEDB
+	help
+	  The reference KeyVerificationModule: a two-party handshake on
+	  KEY_VERIFICATION_APP (port 12) that lets a user confirm, out of band,
+	  that a peer holds the private key for the public key we have for it --
+	  MitM-resistant -- and, in the bootstrap case, learn a peer's key from
+	  the handshake itself. Driven from the app over AdminMessage
+	  key_verification (INITIATE / PROVIDE_SECURITY_NUMBER / DO_VERIFY /
+	  DO_NOT_VERIFY) or from the shell; prompts reach the app as
+	  ClientNotification (number to show, number to enter, final code).
+	  On accept the peer's key is committed to the NodeDB with the
+	  "key manually verified" flag, which persists.

@@ -86,6 +86,9 @@ int meshtastic_traffic_init(void);
 #if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
 int meshtastic_extnotify_init(void);
 #endif
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+int meshtastic_keyverify_init(void);
+#endif
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
 int meshtastic_message_init(void);
 #endif
@@ -662,6 +665,13 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 
 #if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
 	ret = meshtastic_extnotify_init();
+	if (ret < 0) {
+		return ret;
+	}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+	ret = meshtastic_keyverify_init();
 	if (ret < 0) {
 		return ret;
 	}

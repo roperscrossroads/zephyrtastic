@@ -79,6 +79,9 @@
 #if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
 #include "meshtastic_extnotify.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+#include "meshtastic_keyverify.h"
+#endif
 #include "meshtastic_preset.h"
 #include "meshtastic_region_presets.h"
 #include "meshtastic_powermon.h"
@@ -3606,6 +3609,153 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_notify_cmds,
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_EXTNOTIFY */
 
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+/* `meshtastic keyverify` (agents-dnr4.13): the bench's stand-in for the app's
+ * key-verification prompts. */
+static const char *kv_state_name(enum meshtastic_keyverify_state s)
+{
+	switch (s) {
+	case MESHTASTIC_KEYVERIFY_IDLE: return "idle";
+	case MESHTASTIC_KEYVERIFY_SENDER_HAS_INITIATED: return "sent request, awaiting reply";
+	case MESHTASTIC_KEYVERIFY_SENDER_AWAITING_NUMBER: return "awaiting the peer's security number";
+	case MESHTASTIC_KEYVERIFY_SENDER_AWAITING_USER: return "awaiting your accept (compare codes)";
+	case MESHTASTIC_KEYVERIFY_RECEIVER_AWAITING_USER: return "awaiting your accept (compare codes)";
+	case MESHTASTIC_KEYVERIFY_RECEIVER_AWAITING_HASH1: return "showing security number, awaiting the peer";
+	default: return "?";
+	}
+}
+
+static int cmd_keyverify_show(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_keyverify_status st;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_keyverify_status(&st);
+	shell_print(sh, "keyverify: %s", kv_state_name(st.state));
+	if (st.state != MESHTASTIC_KEYVERIFY_IDLE) {
+		shell_print(sh, "  peer 0x%08x nonce %llu", st.remote_node, (unsigned long long)st.nonce);
+	}
+	if (st.state == MESHTASTIC_KEYVERIFY_RECEIVER_AWAITING_HASH1) {
+		shell_print(sh, "  SECURITY NUMBER to read out to the peer: %03u %03u",
+			    st.security_number / 1000U, st.security_number % 1000U);
+	}
+	if (st.code[0] != '\0') {
+		shell_print(sh, "  verification code: %s (must match the peer's)", st.code);
+	}
+	return 0;
+}
+
+static int cmd_keyverify_start(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long node;
+	char *end;
+	int ret;
+
+	if (argc != 2U) {
+		shell_error(sh, "usage: meshtastic keyverify start <node-hex>");
+		return -EINVAL;
+	}
+	node = strtoul(argv[1], &end, 16);
+	if (*end != '\0' || node == 0UL || node > UINT32_MAX) {
+		shell_error(sh, "invalid node id: %s", argv[1]);
+		return -EINVAL;
+	}
+	ret = meshtastic_keyverify_start((uint32_t)node);
+	if (ret == -EBUSY) {
+		shell_error(sh, "a session is already open (keyverify reject to drop it)");
+		return ret;
+	}
+	if (ret < 0) {
+		shell_error(sh, "start failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "request sent; ask the peer for the security number it shows, then "
+			"`meshtastic keyverify number <n>`");
+	return 0;
+}
+
+static int cmd_keyverify_number(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_keyverify_status st;
+	unsigned long n;
+	char *end;
+	int ret;
+
+	if (argc != 2U) {
+		shell_error(sh, "usage: meshtastic keyverify number <6 digits>");
+		return -EINVAL;
+	}
+	n = strtoul(argv[1], &end, 10);
+	if (*end != '\0' || n == 0UL || n > 999999UL) {
+		shell_error(sh, "invalid security number: %s", argv[1]);
+		return -EINVAL;
+	}
+	meshtastic_keyverify_status(&st);
+	ret = meshtastic_keyverify_provide_number(st.nonce, (uint32_t)n);
+	if (ret == -EACCES) {
+		shell_error(sh, "that number does not match the peer's reply: retype it, or "
+				"suspect a man in the middle");
+		return ret;
+	}
+	if (ret < 0) {
+		shell_error(sh, "not expecting a number now (%d)", ret);
+		return ret;
+	}
+	meshtastic_keyverify_status(&st);
+	shell_print(sh, "verification code: %s -- if the peer shows the same, `meshtastic keyverify "
+			"accept`",
+		    st.code);
+	return 0;
+}
+
+static int cmd_keyverify_accept(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_keyverify_status st;
+	int ret;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_keyverify_status(&st);
+	ret = meshtastic_keyverify_accept(st.nonce);
+	if (ret < 0) {
+		shell_error(sh, "nothing to accept (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "peer 0x%08x marked key-verified", st.remote_node);
+	return 0;
+}
+
+static int cmd_keyverify_reject(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_keyverify_reject();
+	shell_print(sh, "session dropped; nothing learned was kept");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_keyverify_cmds,
+			       SHELL_CMD_ARG(start, NULL,
+					     SHELL_HELP("Start verifying a peer's key.",
+							"<node-hex>"),
+					     cmd_keyverify_start, 2, 0),
+			       SHELL_CMD_ARG(number, NULL,
+					     SHELL_HELP("Enter the security number the peer shows.",
+							"<6 digits>"),
+					     cmd_keyverify_number, 2, 0),
+			       SHELL_CMD(accept, NULL,
+					 SHELL_HELP("The codes match: commit the key as verified.",
+						    NULL),
+					 cmd_keyverify_accept),
+			       SHELL_CMD(reject, NULL, SHELL_HELP("Drop the session.", NULL),
+					 cmd_keyverify_reject),
+			       SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_KEYVERIFY */
+
 static int cmd_sched_show(const struct shell *sh, size_t argc, char **argv)
 {
 	struct meshtastic_sched_config c;
@@ -6366,6 +6516,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_MESHTASTIC_NODEINFO)
 	SHELL_CMD(nodeinfo, &meshtastic_nodeinfo_cmds, SHELL_HELP("NodeInfo commands.", NULL),
 		  NULL),
+#endif
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+	SHELL_CMD(keyverify, &meshtastic_keyverify_cmds,
+		  SHELL_HELP("Manual key verification (security-number handshake): status, "
+			     "start, number, accept, reject.",
+			     NULL),
+		  cmd_keyverify_show),
 #endif
 #if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
 	SHELL_CMD(notify, &meshtastic_notify_cmds,

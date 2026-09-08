@@ -76,6 +76,11 @@ tests:
   meshtastic.variants.no_extnotify.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_EXTNOTIFY=n
+  # Key verification (MESHTASTIC_KEYVERIFY, default y) has NO scenario here on
+  # purpose: it depends on MESHTASTIC_PKI, which this baseline does not carry, so
+  # it is never built in this sweep and cannot be subtracted from it. Both arms
+  # live in tests/admin_pki instead -- the only suite with the PKI it needs --
+  # where `meshtastic.admin_pki.no_keyverify` is the =n arm.
   meshtastic.variants.no_nodedb.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_NODEDB=n

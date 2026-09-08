@@ -17,3 +17,9 @@ tests:
   meshtastic.admin_pki.meshbeacon.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_MESHBEACON=y
+
+  # Key verification absent: the admin case and the shell carry an #if on it,
+  # and this is the only suite with the PKI it depends on.
+  meshtastic.admin_pki.no_keyverify.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_KEYVERIFY=n
