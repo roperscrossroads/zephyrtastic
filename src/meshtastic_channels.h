@@ -176,6 +176,17 @@ const char *meshtastic_channels_get_name(uint8_t index);
 bool meshtastic_channels_is_default(uint8_t index);
 
 /**
+ * @brief Is slot @p index a "well-known" channel (reference
+ *        Channels::isWellKnownChannel): a default-family key (no PSK, or the
+ *        one-byte shorthand for the built-in keys) under ANY preset's display
+ *        name -- not only the active preset's, unlike is_default().
+ *
+ * These are the public channels anyone can decrypt; traffic management shapes
+ * position traffic only there.
+ */
+bool meshtastic_channels_is_well_known(uint8_t index);
+
+/**
  * @brief Pick the channel index to use when sending a packet.
  *
  * Resolution order:

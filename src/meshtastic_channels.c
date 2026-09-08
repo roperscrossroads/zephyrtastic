@@ -364,6 +364,48 @@ bool meshtastic_channels_is_default(uint8_t index)
 	       memcmp(key.bytes, meshtastic_default_psk, key.len) == 0;
 }
 
+bool meshtastic_channels_is_well_known(uint8_t index)
+{
+	const meshtastic_Channel *ch = meshtastic_channels_get(index);
+	const char *name;
+
+	if (ch == NULL || ch->role == meshtastic_Channel_Role_DISABLED || !ch->has_settings) {
+		return false;
+	}
+
+	/* The reference tests the STORED psk for "absent or one-byte shorthand" --
+	 * every built-in key index. This port may store the expanded 16 bytes
+	 * (meshtastic_init copies the caller's key verbatim), so test the key
+	 * itself: no crypto, or the default-key family, which is the default PSK
+	 * with its last byte 0x01..0x0A (the shorthands 1 and simple1..simple9). */
+	if (ch->settings.psk.size > 1U) {
+		struct meshtastic_channel_key key;
+
+		if (meshtastic_channels_get_key(index, &key) < 0) {
+			return false;
+		}
+		if (key.len != 0U &&
+		    (key.len != sizeof(meshtastic_default_psk) ||
+		     memcmp(key.bytes, meshtastic_default_psk, sizeof(meshtastic_default_psk) - 1U) !=
+			     0 ||
+		     key.bytes[sizeof(meshtastic_default_psk) - 1U] < 0x01U ||
+		     key.bytes[sizeof(meshtastic_default_psk) - 1U] > 0x0AU)) {
+			return false;
+		}
+	}
+
+	name = meshtastic_channels_get_name(index);
+	for (int p = 0; p <= (int)_meshtastic_Config_LoRaConfig_ModemPreset_MAX; p++) {
+		const char *preset_name = meshtastic_preset_display_name(
+			(meshtastic_Config_LoRaConfig_ModemPreset)p, true);
+
+		if (preset_name != NULL && strcmp(name, preset_name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 const char *meshtastic_channels_get_name(uint8_t index)
 {
 	const meshtastic_Channel *ch;

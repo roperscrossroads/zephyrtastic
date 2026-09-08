@@ -55,6 +55,9 @@
 #if defined(CONFIG_MESHTASTIC_MESHBEACON)
 #include "meshtastic_meshbeacon.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_TRAFFIC)
+#include "meshtastic_traffic.h"
+#endif
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
@@ -413,6 +416,21 @@ int meshtastic_admin_prepare_module_config_write(meshtastic_ModuleConfig *module
 		return -ENOTSUP;
 #endif
 	}
+
+#if defined(CONFIG_MESHTASTIC_TRAFFIC)
+	if (module->which_payload_variant == meshtastic_ModuleConfig_traffic_management_tag) {
+		/* The one feature this port cannot honour (NodeInfo direct response)
+		 * is refused, not stored-and-ignored (agents-dnr4.20). */
+		int ret = meshtastic_traffic_validate(&module->payload_variant.traffic_management);
+
+		if (ret < 0) {
+			LOG_WRN("admin: traffic_management refused (%d): nodeinfo direct "
+				"response is not supported on this port",
+				ret);
+		}
+		return ret;
+	}
+#endif
 
 	if (module->which_payload_variant != meshtastic_ModuleConfig_mqtt_tag) {
 		return 0;
@@ -909,6 +927,12 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 				 * is invalidated instead (agents-dnr4.25). */
 #if defined(CONFIG_MESHTASTIC_MESHBEACON)
 				meshtastic_meshbeacon_config_changed();
+#endif
+			} else if (which == meshtastic_ModuleConfig_traffic_management_tag) {
+				/* The reference reboots; this port's gate reads the section
+				 * per packet, so there is nothing to restart (agents-dnr4.20). */
+#if defined(CONFIG_MESHTASTIC_TRAFFIC)
+				meshtastic_traffic_config_changed();
 #endif
 			} else {
 				/* Every other module reads its section at init (the MQTT

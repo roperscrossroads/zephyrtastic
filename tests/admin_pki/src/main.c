@@ -47,6 +47,9 @@
 #if defined(CONFIG_MESHTASTIC_MESHBEACON)
 #include "meshtastic_meshbeacon.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_TRAFFIC)
+#include "meshtastic_traffic.h"
+#endif
 #include "meshtastic_preset.h"
 #include "meshtastic_admin_client.h"
 #include "meshtastic_phoneapi.h"
@@ -2384,6 +2387,54 @@ ZTEST(admin_pki, test_set_module_config_neighbor_info_applies_live_without_reboo
 	zassert_false(s.enabled, "disabled live");
 }
 #endif /* CONFIG_MESHTASTIC_NEIGHBORINFO */
+
+/* ---- agents-dnr4.20: ModuleConfig.traffic_management applies live; direct response refused */
+
+#if defined(CONFIG_MESHTASTIC_TRAFFIC)
+static size_t encode_admin_set_module_config_traffic(uint32_t dedup, uint32_t direct_hops,
+						     uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+	meshtastic_ModuleConfig *mc = &am.payload_variant.set_module_config;
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_module_config_tag;
+	mc->which_payload_variant = meshtastic_ModuleConfig_traffic_management_tag;
+	mc->payload_variant.traffic_management.position_min_interval_secs = dedup;
+	mc->payload_variant.traffic_management.nodeinfo_direct_response_max_hops = direct_hops;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+ZTEST(admin_pki, test_set_module_config_traffic_applies_live_and_refuses_direct_response)
+{
+	struct meshtastic_traffic_settings s;
+	uint8_t buf[256];
+	size_t len;
+	bool rebooting = true;
+
+	len = encode_admin_set_module_config_traffic(1234U, 0U, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing_ex(buf, len, &rebooting),
+		      meshtastic_Routing_Error_NONE, "set must ACK clean");
+	zassert_false(rebooting, "read per packet: no reboot");
+	meshtastic_traffic_settings(&s);
+	zassert_equal(s.position_min_interval_secs, 1234U, "the gate sees it immediately");
+
+	/* Enabling the NodeInfo direct response is refused, and the previous
+	 * section is untouched. */
+	len = encode_admin_set_module_config_traffic(99U, 3U, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len),
+		      meshtastic_Routing_Error_BAD_REQUEST,
+		      "direct response is not supported: NAK, not store-and-ignore");
+	meshtastic_traffic_settings(&s);
+	zassert_equal(s.position_min_interval_secs, 1234U, "refused set left the store alone");
+
+	/* Restore the compiled default so later tests see the seed value. */
+	len = encode_admin_set_module_config_traffic(CONFIG_MESHTASTIC_TRAFFIC_POSITION_MIN_INTERVAL_SEC,
+						     0U, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE, "");
+}
+#endif /* CONFIG_MESHTASTIC_TRAFFIC */
 
 /* ---- agents-dnr4.25: ModuleConfig.mesh_beacon is sanitised on write, no reboot */
 

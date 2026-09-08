@@ -624,6 +624,14 @@ static void seed_module_defaults(void)
 		init_module_entry(i);
 	}
 
+#if defined(CONFIG_MESHTASTIC_TRAFFIC)
+	/* Reference installTrafficManagementDefaults: position dedup ships enabled
+	 * (5 h); everything that reshapes relayed traffic stays opt-in (0). */
+	idx = index_for_module_tag(meshtastic_ModuleConfig_traffic_management_tag);
+	store.modules[idx].payload_variant.traffic_management.position_min_interval_secs =
+		CONFIG_MESHTASTIC_TRAFFIC_POSITION_MIN_INTERVAL_SEC;
+#endif
+
 	idx = index_for_module_tag(meshtastic_ModuleConfig_mqtt_tag);
 	store.modules[idx].payload_variant.mqtt.enabled = IS_ENABLED(CONFIG_MESHTASTIC_MQTT);
 #if defined(CONFIG_MESHTASTIC_MQTT)

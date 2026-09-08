@@ -1,0 +1,14 @@
+common:
+  tags:
+    - meshtastic
+    - traffic
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # Position dedup (window, well-known-channel gate, role caps), the per-node
+  # rate limit, the unknown-packet filter, and the refusal of the one feature
+  # this port does not have. Windows run in virtual time.
+  meshtastic.traffic.native_sim: {}

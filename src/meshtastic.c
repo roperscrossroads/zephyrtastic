@@ -80,6 +80,9 @@ int meshtastic_neighborinfo_init(void);
 #if defined(CONFIG_MESHTASTIC_MESHBEACON)
 int meshtastic_meshbeacon_init(void);
 #endif
+#if defined(CONFIG_MESHTASTIC_TRAFFIC)
+int meshtastic_traffic_init(void);
+#endif
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
 int meshtastic_message_init(void);
 #endif
@@ -641,6 +644,13 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 
 #if defined(CONFIG_MESHTASTIC_MESHBEACON)
 	ret = meshtastic_meshbeacon_init();
+	if (ret < 0) {
+		return ret;
+	}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_TRAFFIC)
+	ret = meshtastic_traffic_init();
 	if (ret < 0) {
 		return ret;
 	}

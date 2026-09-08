@@ -28,6 +28,9 @@
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
+#if defined(CONFIG_MESHTASTIC_TRAFFIC)
+#include "meshtastic_traffic.h"
+#endif
 #include "meshtastic_sched.h"
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
@@ -938,6 +941,17 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 	if (pkt == NULL) {
 		return;
 	}
+
+#if defined(CONFIG_MESHTASTIC_TRAFFIC)
+	/* Traffic management (reference: TrafficManagementModule runs first in
+	 * callModules(); STOP consumes the packet -- no delivery, no rebroadcast).
+	 * Runs for decoded AND undecodable frames: the unknown-packet filter is
+	 * about the latter. */
+	if (meshtastic_traffic_inspect(pkt, decoded ? decoded_mesh : NULL, decoded) ==
+	    MESHTASTIC_TRAFFIC_DROP) {
+		return;
+	}
+#endif
 
 	if (decoded) {
 		LOG_INF("RX from 0x%08x to 0x%08x port=%u len=%zu ch_idx=%u", pkt->from,

@@ -1,0 +1,58 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_TRAFFIC
+	bool "Meshtastic traffic management (packet inspection / airtime shaping)"
+	default y
+	help
+	  The reference TrafficManagementModule's airtime-saving inspection of
+	  every received frame, driven by ModuleConfig.traffic_management:
+	    - position dedup: a peer's position broadcast on a well-known
+	      channel that has not moved (same grid cell at the channel's
+	      precision) within position_min_interval_secs is dropped -- not
+	      relayed, not delivered;
+	    - per-node rate limiting: more than rate_limit_max_packets from one
+	      node inside rate_limit_window_secs are dropped (ROUTING and ADMIN
+	      exempt);
+	    - unknown-packet filtering: a node whose undecodable frames exceed
+	      unknown_packet_threshold in a 5-minute window stops being relayed.
+	  Each is "non-zero implies enabled". Applies live, no reboot.
+
+	  NOT supported, and refused at write time rather than ignored: the
+	  reference's NodeInfo direct response (nodeinfo_direct_response_max_hops
+	  != 0), which answers a NodeInfo request on another node's behalf from
+	  a cache and gates that on key provenance (XEdDSA-signed or manually
+	  verified keys) this port does not have yet. Also not mirrored: the
+	  precision clamp the reference applies to a RELAYED position -- this
+	  port relays the wire bytes unchanged.
+
+if MESHTASTIC_TRAFFIC
+
+config MESHTASTIC_TRAFFIC_TABLE_SIZE
+	int "Per-node traffic state table size"
+	default 32
+	range 4 256
+	help
+	  Nodes tracked at once (position fingerprint + rate and unknown-packet
+	  windows, ~32 bytes each). The least recently heard node is replaced
+	  when full. The reference sizes this 250-2048 by platform; a small
+	  LoRa-only fleet needs far fewer.
+
+config MESHTASTIC_TRAFFIC_POSITION_MIN_INTERVAL_SEC
+	int "First-boot default for position_min_interval_secs"
+	default 18000
+	range 0 604800
+	help
+	  Seeded into ModuleConfig.traffic_management on a fresh node (the
+	  reference ships dedup enabled at 5 h). 0 seeds dedup disabled. A stored
+	  value of 0 disables dedup at runtime.
+
+config MESHTASTIC_TRAFFIC_POSITION_PRECISION_BITS
+	int "Grid precision for dedup when the channel sets none"
+	default 19
+	range 1 32
+	help
+	  The reference default_traffic_mgmt_position_precision_bits (~90 m
+	  cells). A channel's own position_precision wins when it is set.
+
+endif # MESHTASTIC_TRAFFIC
