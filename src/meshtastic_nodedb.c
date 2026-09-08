@@ -56,7 +56,7 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
  * The unused-here bits are still defined, so nobody claims one for something
  * else and reintroduces exactly the divergence this comment records.
  */
-#define NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT 0 /* not yet implemented */
+#define NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT 0 /* key verification (dnr4.13) */
 #define NODEINFO_BITFIELD_IS_MUTED_BIT                 1 /* not yet implemented */
 #define NODEINFO_BITFIELD_VIA_MQTT_BIT                 2
 #define NODEINFO_BITFIELD_IS_FAVORITE_BIT              3
@@ -1193,6 +1193,8 @@ static void fill_snapshot(const struct nodedb_entry *entry, struct meshtastic_no
 	out->has_hops_away = node->has_hops_away;
 	out->hops_away = node->hops_away;
 	out->is_favorite = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_FAVORITE_BIT);
+	out->is_key_manually_verified =
+		IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT);
 	out->is_ignored = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_IGNORED_BIT);
 
 	out->has_user = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_HAS_USER_BIT);
@@ -1627,6 +1629,44 @@ static int nodedb_set_bit(uint32_t node_num, int bit, bool value)
 int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite)
 {
 	return nodedb_set_bit(node_num, NODEINFO_BITFIELD_IS_FAVORITE_BIT, favorite);
+}
+
+int meshtastic_nodedb_set_key_verified(uint32_t node_num, bool verified)
+{
+	return nodedb_set_bit(node_num, NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT, verified);
+}
+
+int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
+				    const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
+{
+	struct nodedb_entry *entry;
+	meshtastic_NodeInfoLite *node;
+
+	if (key == NULL) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = find_entry_locked(node_num);
+	if (entry == NULL) {
+		k_mutex_unlock(&nodedb_lock);
+		return -ENOENT;
+	}
+	node = &entry->node;
+	node->public_key.size = MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN;
+	memcpy(node->public_key.bytes, key, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	if (node_num != meshtastic_get_node_id()) {
+		warm_upsert_locked(node_num, node->public_key.bytes, (uint8_t)node->role);
+		nodekeys_schedule_save();
+	}
+#endif
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST)
+	mtrec_reconcile = true;
+	mtrec_schedule_save();
+#endif
+	k_mutex_unlock(&nodedb_lock);
+	return 0;
 }
 
 bool meshtastic_nodedb_is_from_or_to_favorite(uint32_t from, uint32_t to)

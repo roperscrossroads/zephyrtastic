@@ -237,12 +237,47 @@ void meshtastic_pki_nonce_build(uint8_t nonce[MESHTASTIC_PKI_NONCE_LEN], uint32_
 	/* nonce[12] stays 0 */
 }
 
+static uint32_t pending_node;
+static uint8_t pending_key[PKI_KEY_LEN];
+
+void meshtastic_pki_set_pending_key(uint32_t node, const uint8_t key[MESHTASTIC_PKI_KEY_LEN])
+{
+	if (node == 0U || key == NULL) {
+		return;
+	}
+	pending_node = node;
+	memcpy(pending_key, key, PKI_KEY_LEN);
+}
+
+bool meshtastic_pki_get_pending_key(uint32_t node, uint8_t out[MESHTASTIC_PKI_KEY_LEN])
+{
+	if (node == 0U || pending_node != node) {
+		return false;
+	}
+	if (out != NULL) {
+		memcpy(out, pending_key, PKI_KEY_LEN);
+	}
+	return true;
+}
+
+void meshtastic_pki_clear_pending_key(void)
+{
+	pending_node = 0U;
+	memset(pending_key, 0, sizeof(pending_key));
+}
+
 static int pki_peer_pub(uint32_t node, uint8_t out[PKI_KEY_LEN])
 {
 	/* Hot NodeDB first, then the warm key tier, so PKC keeps working for a
-	 * peer whose full record has aged out of the hot store.
+	 * peer whose full record has aged out of the hot store. Last, a key
+	 * pending manual verification (one session, cleared on its end).
 	 */
-	return meshtastic_nodedb_copy_pubkey(node, out);
+	int ret = meshtastic_nodedb_copy_pubkey(node, out);
+
+	if (ret < 0 && meshtastic_pki_get_pending_key(node, out)) {
+		return 0;
+	}
+	return ret;
 }
 
 int meshtastic_pki_decrypt(uint32_t from, uint32_t id, const uint8_t *enc, size_t enc_len,

@@ -766,8 +766,11 @@ int meshtastic_build_wire_from_mesh(const meshtastic_MeshPacket *mesh, uint8_t *
 
 		meshtastic_config_store_get_owner_flags(&is_licensed, &is_unmessagable);
 
+		/* tx_no_pkc: the sender asked for channel encryption on purpose (a
+		 * key-verification bootstrap message carrying the very key the peer
+		 * lacks) -- the ONE case a unicast may go out on the channel. */
 		if (mesh->to != MESHTASTIC_NODE_BROADCAST && mesh->to != 0U &&
-		    meshtastic_pki_have_key() && !is_licensed &&
+		    meshtastic_pki_have_key() && !is_licensed && !mt_ws.tx_no_pkc &&
 		    mesh->decoded.portnum != meshtastic_PortNum_TRACEROUTE_APP &&
 		    mesh->decoded.portnum != meshtastic_PortNum_NODEINFO_APP &&
 		    mesh->decoded.portnum != meshtastic_PortNum_ROUTING_APP &&
@@ -850,7 +853,20 @@ int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t
 	}
 	mesh.channel = meshtastic_channels_resolve_send_index(packet->to, packet->channel_index,
 							      packet->channel);
-	return meshtastic_build_wire_from_mesh(&mesh, out, out_len);
+	/* The struct's two send-path flags (a literal zero-hop frame; channel encryption
+	 * for a unicast on purpose) ride the workspace exactly as meshtastic_send_packet()
+	 * threads them, and the mesh-native builder below fills mt_ws scratch, so hold the
+	 * lock across both. Without this a struct built here silently lost both flags: a
+	 * key-verification bootstrap frame addressed to a node whose key we hold came out
+	 * PKC-encrypted after all. */
+	k_mutex_lock(&mt_ws.lock, K_FOREVER);
+	mt_ws.tx_zero_hop = packet->zero_hop;
+	mt_ws.tx_no_pkc = packet->no_pkc;
+	ret = meshtastic_build_wire_from_mesh(&mesh, out, out_len);
+	mt_ws.tx_zero_hop = false;
+	mt_ws.tx_no_pkc = false;
+	k_mutex_unlock(&mt_ws.lock);
+	return ret;
 }
 
 int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)

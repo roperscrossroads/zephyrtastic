@@ -410,6 +410,37 @@ int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 	return 0;
 }
 
+static meshtastic_FromRadio cn_scratch;
+
+int meshtastic_phoneapi_enqueue_client_notification(const meshtastic_ClientNotification *cn)
+{
+	struct meshtastic_phoneapi *transports[MESHTASTIC_PHONEAPI_MAX_TRANSPORTS];
+	meshtastic_FromRadio *from = &cn_scratch;
+	uint8_t count;
+	int sent = 0;
+
+	if (cn == NULL) {
+		return 0;
+	}
+
+	k_mutex_lock(&phoneapi_lock, K_FOREVER);
+	count = phoneapi.count;
+	memcpy(transports, phoneapi.transports, count * sizeof(transports[0]));
+	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+	from->id = meshtastic_next_fromradio_id();
+	from->which_payload_variant = meshtastic_FromRadio_clientNotification_tag;
+	from->clientNotification = *cn;
+	k_mutex_unlock(&phoneapi_lock);
+
+	for (uint8_t i = 0; i < count; i++) {
+		if (meshtastic_phoneapi_enqueue_fromradio(transports[i], from) == 0) {
+			sent++;
+		}
+	}
+	return sent;
+}
+
+
 void meshtastic_phoneapi_enqueue_queue_status(struct meshtastic_phoneapi *api, int res,
 					      uint32_t mesh_packet_id)
 {

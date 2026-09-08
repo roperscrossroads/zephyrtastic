@@ -31,6 +31,18 @@
  */
 int meshtastic_pki_init(void);
 
+/**
+ * @brief A peer public key learned mid-handshake but not yet trusted (reference
+ *        CryptoEngine::setPendingPublicKey). One slot; consulted by the encrypt/
+ *        decrypt peer-key lookup AFTER the NodeDB, so a key-verification
+ *        follow-on packet can be PKC-encrypted before the user has accepted the
+ *        key. Cleared on accept (after the NodeDB commit), reject or timeout, so
+ *        an unverified key is never usable for longer than one session.
+ */
+void meshtastic_pki_set_pending_key(uint32_t node, const uint8_t key[MESHTASTIC_PKI_KEY_LEN]);
+bool meshtastic_pki_get_pending_key(uint32_t node, uint8_t out[MESHTASTIC_PKI_KEY_LEN]);
+void meshtastic_pki_clear_pending_key(void);
+
 /** True once a keypair is loaded (and, if generated, persisted) — safe to
  *  advertise the public key and to do PKC. */
 bool meshtastic_pki_have_key(void);

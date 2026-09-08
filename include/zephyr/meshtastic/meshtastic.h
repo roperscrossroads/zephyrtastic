@@ -114,6 +114,8 @@ enum meshtastic_portnum {
 	MESHTASTIC_PORT_DETECTION_SENSOR = 10,
 	/** Critical alert text (a text payload for notifications). */
 	MESHTASTIC_PORT_ALERT = 11,
+	/** Manual key verification handshake (security number). */
+	MESHTASTIC_PORT_KEY_VERIFICATION = 12,
 	/** Node status string. */
 	MESHTASTIC_PORT_NODE_STATUS = 36,
 	/** MeshBeacon: a zero-hop "join my mesh" announcement (text + channel offer). */
@@ -250,6 +252,14 @@ struct meshtastic_packet {
 	 * hop_start 0 being accepted). What the reference's MeshBeacon sends.
 	 */
 	bool zero_hop;
+	/**
+	 * Send this unicast channel-encrypted even though PKC is the policy for a
+	 * DM. Normally a DM to a peer whose key we lack is REFUSED rather than
+	 * downgraded; the one legitimate exception is a handshake whose payload
+	 * carries the public key the peer is about to learn (key verification's
+	 * bootstrap messages). Never set this on user traffic.
+	 */
+	bool no_pkc;
 	/**
 	 * The decoded payload carried a @c Data.bitfield.
 	 *

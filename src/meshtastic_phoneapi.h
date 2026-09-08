@@ -142,6 +142,15 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 					  struct meshtastic_phoneapi_frame *frame);
 int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 					  const meshtastic_FromRadio *from);
+/**
+ * @brief Fan a ClientNotification out to every registered transport as a
+ *        FromRadio.clientNotification (the reference's sendClientNotification).
+ *        A prompt the user must act on (a key-verification number, a final
+ *        code) ranks like a packet, not like a log line. Returns the number of
+ *        transports it reached.
+ */
+int meshtastic_phoneapi_enqueue_client_notification(const meshtastic_ClientNotification *cn);
+
 void meshtastic_phoneapi_enqueue_my_info(struct meshtastic_phoneapi *api, uint32_t request_id);
 void meshtastic_phoneapi_enqueue_rebooted(struct meshtastic_phoneapi *api);
 void meshtastic_phoneapi_enqueue_phone_config(struct meshtastic_phoneapi *api, uint32_t request_id);
@@ -163,6 +172,7 @@ void meshtastic_phoneapi_handle_toradio(struct meshtastic_phoneapi *api, const u
  * @return number of transports the record was queued on (0 if none attached).
  */
 int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, uint32_t *dropped);
+
 #endif
 /*
  * @param decoded_mesh Optional fully decoded MeshPacket for this frame. When non-NULL it
@@ -178,6 +188,11 @@ static inline void meshtastic_phoneapi_on_packet(const struct meshtastic_packet 
 {
 	ARG_UNUSED(packet);
 	ARG_UNUSED(decoded_mesh);
+}
+static inline int meshtastic_phoneapi_enqueue_client_notification(const meshtastic_ClientNotification *cn)
+{
+	ARG_UNUSED(cn);
+	return 0;
 }
 #endif
 

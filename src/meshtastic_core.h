@@ -133,6 +133,10 @@ struct meshtastic_workspace {
 	 * wire build does not fill 0 with the node default. Guarded by @ref lock; every
 	 * staging path resets it. */
 	bool tx_zero_hop;
+	/* The sender opted out of PKC for this unicast (meshtastic_packet.no_pkc):
+	 * the wire build encrypts on the channel instead of refusing. Reset by
+	 * every staging path. */
+	bool tx_no_pkc;
 };
 
 extern struct meshtastic_context mt;

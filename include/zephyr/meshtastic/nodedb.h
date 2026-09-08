@@ -41,6 +41,9 @@ struct meshtastic_nodedb_node {
 
 	bool is_favorite;
 	bool is_ignored;
+	/* The user confirmed possession of exactly public_key out of band
+	 * (key verification, agents-dnr4.13). Reference bitfield bit 0. */
+	bool is_key_manually_verified;
 
 	bool has_user;
 	char long_name[MESHTASTIC_NODEDB_LONG_NAME_LEN];
@@ -172,6 +175,22 @@ void meshtastic_nodedb_note_route_success(uint32_t dest);
  * @retval -ENOTSUP NodeDB support is not enabled.
  */
 int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite);
+
+/**
+ * @brief Record that the user verified @p node_num's key out of band (or clear
+ *        it). Persists with the record. -ENOENT for an unknown node.
+ */
+int meshtastic_nodedb_set_key_verified(uint32_t node_num, bool verified);
+
+/**
+ * @brief Commit a peer's 32-byte public key learned during key verification
+ *        (reference NodeDB::commitRemoteKey). Overwrites a pinned key: the user
+ *        has just confirmed possession of THIS key, the strongest provenance.
+ *        Mirrors into the warm tier + NVS like a key learned from NodeInfo.
+ *        -ENOENT for an unknown node.
+ */
+int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
+				    const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
 
 /**
  * @brief True if either end of a packet is a favorited node.

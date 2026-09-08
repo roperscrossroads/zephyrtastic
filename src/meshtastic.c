@@ -1019,8 +1019,10 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 	if (ret == 0) {
 		mt_ws.tx_mesh.channel = send_index;
 		mt_ws.tx_zero_hop = packet->zero_hop;
+		mt_ws.tx_no_pkc = packet->no_pkc;
 		ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
 		mt_ws.tx_zero_hop = false;
+		mt_ws.tx_no_pkc = false;
 	}
 	k_mutex_unlock(&mt_ws.lock);
 	if (ret < 0) {
@@ -1063,6 +1065,7 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 	mt_ws.tx_mesh.to = to_norm;
 	mt_ws.tx_mesh.channel = send_index;
 	mt_ws.tx_zero_hop = false;
+	mt_ws.tx_no_pkc = false;
 	ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
 	k_mutex_unlock(&mt_ws.lock);
 	if (ret < 0) {
