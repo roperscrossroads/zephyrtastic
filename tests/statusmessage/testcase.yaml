@@ -1,0 +1,30 @@
+common:
+  tags:
+    - meshtastic
+    - statusmessage
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # The cadence and the peer cache. START_DELAY/INTERVAL are the Kconfig minima
+  # that keep the tests short; native_sim runs them in virtual time.
+  meshtastic.statusmessage.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_STATUSMESSAGE_START_DELAY_SEC=2
+      - CONFIG_MESHTASTIC_STATUSMESSAGE_INTERVAL_SEC=60
+
+  # Same tests against the smallest cache the Kconfig allows above one, which
+  # is the only way the eviction boundary is reachable without 9 peers.
+  meshtastic.statusmessage.small_cache.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_STATUSMESSAGE_START_DELAY_SEC=2
+      - CONFIG_MESHTASTIC_STATUSMESSAGE_INTERVAL_SEC=60
+      - CONFIG_MESHTASTIC_STATUSMESSAGE_CACHE_SIZE=2
+
+  # Fleet class 5's shape: a status can be set and sent on request, never
+  # unprompted.
+  meshtastic.statusmessage.no_auto_send.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_STATUSMESSAGE_AUTO_SEND=n

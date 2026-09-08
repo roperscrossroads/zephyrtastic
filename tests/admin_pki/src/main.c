@@ -38,6 +38,9 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_mqtt_config.h"
+#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
+#include "meshtastic_statusmessage.h"
+#endif
 #include "meshtastic_preset.h"
 #include "meshtastic_admin_client.h"
 #include "meshtastic_phoneapi.h"
@@ -1978,8 +1981,9 @@ static size_t encode_admin_set_module_config_mqtt_full(
  * answered with (NONE for a clean ACK), skipping unrelated frames queued ahead.
  * Also cancels the reboot every set_module_config schedules, so the suite does
  * not restart under a later test. */
-static meshtastic_Routing_Error send_local_admin_and_pop_routing(const uint8_t *admin_bytes,
-								 size_t admin_len)
+static meshtastic_Routing_Error send_local_admin_and_pop_routing_ex(const uint8_t *admin_bytes,
+								    size_t admin_len,
+								    bool *reboot_was_scheduled)
 {
 	meshtastic_MeshPacket pkt = meshtastic_MeshPacket_init_zero;
 	struct meshtastic_phoneapi_frame frame;
@@ -1996,6 +2000,9 @@ static meshtastic_Routing_Error send_local_admin_and_pop_routing(const uint8_t *
 	pkt.decoded.payload.size = (pb_size_t)admin_len;
 
 	zassert_true(meshtastic_admin_handle_local(&pkt), "admin_handle_local must consume it");
+	if (reboot_was_scheduled != NULL) {
+		*reboot_was_scheduled = meshtastic_admin_reboot_scheduled();
+	}
 	meshtastic_admin_cancel_reboot();
 
 	while (meshtastic_phoneapi_pop_frame(&phone_api, &frame)) {
@@ -2016,6 +2023,12 @@ static meshtastic_Routing_Error send_local_admin_and_pop_routing(const uint8_t *
 	}
 	zassert_unreachable("a want_ack setter must be answered with a ROUTING frame");
 	return meshtastic_Routing_Error_NONE;
+}
+
+static meshtastic_Routing_Error send_local_admin_and_pop_routing(const uint8_t *admin_bytes,
+								 size_t admin_len)
+{
+	return send_local_admin_and_pop_routing_ex(admin_bytes, admin_len, NULL);
 }
 
 static void read_stored_mqtt(meshtastic_ModuleConfig_MQTTConfig *out)
@@ -2269,6 +2282,57 @@ ZTEST(admin_pki, test_set_module_config_mqtt_tls_refused_without_transport)
 	zassert_str_equal(stored.address, "keep.lan", "refused set must not touch the store");
 	zassert_false(stored.tls_enabled, "refused set must not touch the store");
 }
+
+/* ---- agents-dnr4.26: ModuleConfig.statusmessage applies live, no reboot ----- */
+
+#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
+static size_t encode_admin_set_module_config_status(const char *status, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+	meshtastic_ModuleConfig *mc = &am.payload_variant.set_module_config;
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_module_config_tag;
+	mc->which_payload_variant = meshtastic_ModuleConfig_statusmessage_tag;
+	strncpy(mc->payload_variant.statusmessage.node_status, status,
+		sizeof(mc->payload_variant.statusmessage.node_status) - 1U);
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+ZTEST(admin_pki, test_set_module_config_statusmessage_applies_live_without_reboot)
+{
+	meshtastic_ModuleConfig_MQTTConfig mqtt = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+	char status[80];
+	uint8_t buf[256];
+	size_t len;
+	bool rebooting = true;
+
+	/* Reference AdminModule: shouldReboot = false for this section alone
+	 * among the module configs -- the module re-reads it live. */
+	len = encode_admin_set_module_config_status("on call", buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing_ex(buf, len, &rebooting),
+		      meshtastic_Routing_Error_NONE, "set must ACK clean");
+	zassert_false(rebooting, "a statusmessage set must NOT schedule a reboot");
+	zassert_equal(meshtastic_statusmessage_get(status, sizeof(status)), strlen("on call"),
+		      "the module sees the new status immediately");
+	zassert_str_equal(status, "on call", "");
+
+	/* Contrast: a section nobody applies live still reboots. */
+	mqtt.enabled = false;
+	strcpy(mqtt.address, "contrast.lan");
+	len = encode_admin_set_module_config_mqtt_full(&mqtt, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing_ex(buf, len, &rebooting),
+		      meshtastic_Routing_Error_NONE, "mqtt set must ACK clean");
+	zassert_true(rebooting, "an mqtt set still schedules the reboot it needs");
+
+	/* Clear it so the announce this armed cannot fire into a later test. */
+	len = encode_admin_set_module_config_status("", buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE,
+		      "clear must ACK clean");
+	zassert_equal(meshtastic_statusmessage_get(status, sizeof(status)), 0U, "cleared live");
+}
+#endif /* CONFIG_MESHTASTIC_STATUSMESSAGE */
 
 ZTEST(admin_pki, test_remove_ignored_node_unignores)
 {

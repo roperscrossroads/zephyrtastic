@@ -46,6 +46,9 @@
 #endif
 #include "meshtastic_config_store.h"
 #include "meshtastic_mqtt_config.h"
+#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
+#include "meshtastic_statusmessage.h"
+#endif
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
@@ -862,10 +865,22 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 			LOG_WRN("admin: set_module_config failed (%d)", ret);
 			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
 		} else {
-			/* No module re-applies its section live: the MQTT bridge reads
-			 * ModuleConfig.mqtt once at init (agents-dnr4.8), the rest not at
-			 * all yet. Effect requires a reboot. */
-			reboot_pending = true;
+			pb_size_t which =
+				admin_req.payload_variant.set_module_config.which_payload_variant;
+
+			if (which == meshtastic_ModuleConfig_statusmessage_tag) {
+				/* Reference: shouldReboot = false for this section. The
+				 * module re-arms its announce from the change instead
+				 * (agents-dnr4.26). */
+#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
+				meshtastic_statusmessage_config_changed();
+#endif
+			} else {
+				/* Every other module reads its section at init (the MQTT
+				 * bridge, agents-dnr4.8) or not at all yet: effect requires
+				 * a reboot. */
+				reboot_pending = true;
+			}
 		}
 		break;
 	case meshtastic_AdminMessage_set_channel_tag:

@@ -28,6 +28,12 @@ tests:
   meshtastic.variants.no_nodeinfo_auto_send.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_NODEINFO_AUTO_SEND=n
+  # The status message's beacon off: the module is present, decodes and caches
+  # peers' statuses, answers `status send`, but announces nothing unprompted.
+  # Its =n arm drops the k_work_delayable and the announce function entirely.
+  meshtastic.variants.no_statusmessage_auto_send.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_STATUSMESSAGE_AUTO_SEND=n
 
   # --- whole modules absent ----------------------------------------------
   # MESHTASTIC_GNSS selects MESHTASTIC_POSITION, so a position-less node is only
@@ -43,6 +49,11 @@ tests:
   meshtastic.variants.no_nodeinfo.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_NODEINFO=n
+  # The status module absent: the admin set path and the shell both carry an
+  # #if on it, so this is the arm where a stray reference would fail to link.
+  meshtastic.variants.no_statusmessage.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_STATUSMESSAGE=n
   meshtastic.variants.no_nodedb.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_NODEDB=n

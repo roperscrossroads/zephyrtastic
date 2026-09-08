@@ -1,0 +1,63 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_STATUSMESSAGE
+	bool "Meshtastic node status message"
+	default y
+	help
+	  The reference StatusMessageModule: an away-message for a node. The
+	  string in ModuleConfig.statusmessage.node_status (set from a Meshtastic
+	  client over the admin channel, or `meshtastic status set` on the
+	  shell) is broadcast on NODE_STATUS_APP (port 36) so peers and their
+	  apps can show it next to the node; statuses heard from peers are kept
+	  in a small RAM cache. Changing the status takes effect live -- the
+	  reference does not reboot for this section and neither does this
+	  port -- the next announce is re-armed from the change.
+
+if MESHTASTIC_STATUSMESSAGE
+
+config MESHTASTIC_STATUSMESSAGE_AUTO_SEND
+	bool "Automatically broadcast the status"
+	default y
+	help
+	  Announce the status unprompted: once START_DELAY_SEC after boot (or
+	  after the status changes), then every INTERVAL_SEC while one is set.
+	  With this off the status is only sent on request (`meshtastic status
+	  send`) -- the shape fleet class 5 (the listener) wants.
+
+config MESHTASTIC_STATUSMESSAGE_START_DELAY_SEC
+	int "Delay before the first status broadcast in seconds"
+	default 120
+	range 1 3600
+	depends on MESHTASTIC_STATUSMESSAGE_AUTO_SEND
+	help
+	  Time from boot -- and from a status change -- to the announce. The
+	  reference uses 2 minutes after boot. Re-arming from a change (which
+	  the reference does not do: a status set at runtime there waits for
+	  the running 12 h timer, its own TODO) means a user editing the text
+	  in an app produces one announce when they stop, not one per keystroke.
+
+config MESHTASTIC_STATUSMESSAGE_INTERVAL_SEC
+	int "Status broadcast interval in seconds"
+	default 43200
+	range 60 604800
+	depends on MESHTASTIC_STATUSMESSAGE_AUTO_SEND
+	help
+	  Interval between repeats while a status is set. The reference repeats
+	  every 12 hours (43200 s). A status is low-value, slow-changing
+	  context, not telemetry; keep this long. The floor exists for the sim
+	  suite, which runs the cadence in virtual time.
+
+config MESHTASTIC_STATUSMESSAGE_CACHE_SIZE
+	int "Peer status cache size"
+	default 8
+	range 1 64
+	help
+	  Number of peers whose most recent status is kept in RAM (80 bytes of
+	  text each, plus bookkeeping). The least recently heard peer is evicted
+	  when full. Read by the shell (`meshtastic status peers`) and by
+	  applications through meshtastic_statusmessage_peer_get(); the phone
+	  app decodes port 36 itself from the forwarded packet and needs
+	  nothing from this cache.
+
+endif # MESHTASTIC_STATUSMESSAGE

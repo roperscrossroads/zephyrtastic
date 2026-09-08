@@ -71,6 +71,9 @@ int meshtastic_metrics_init(void);
 #if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS)
 int meshtastic_environment_init(void);
 #endif
+#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
+int meshtastic_statusmessage_init(void);
+#endif
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
 int meshtastic_message_init(void);
 #endif
@@ -609,6 +612,15 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
 	ret = meshtastic_message_init();
+	if (ret < 0) {
+		return ret;
+	}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
+	/* After the config store is seeded/loaded (above): init reads the
+	 * persisted status to arm its first announce. */
+	ret = meshtastic_statusmessage_init();
 	if (ret < 0) {
 		return ret;
 	}
