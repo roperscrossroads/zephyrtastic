@@ -99,6 +99,7 @@ if(CONFIG_MESHTASTIC)
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN
     meshtastic_admin.c
+    meshtastic_mqtt_config.c
     meshtastic_admin_session.c
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN_CLIENT meshtastic_admin_client.c)

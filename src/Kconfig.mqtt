@@ -16,6 +16,15 @@ menuconfig MESHTASTIC_MQTT
 
 if MESHTASTIC_MQTT
 
+# Broker / credentials / root topic / encryption / map-report interval+precision
+# are FIRST-BOOT DEFAULTS, not the runtime authority. The config store is seeded
+# from them once, and from then on ModuleConfig.mqtt (set_module_config over the
+# admin channel, persisted in NVS) is what the bridge connects with; these values
+# are only consulted again for a field the section leaves empty (address, root)
+# or unset (map interval/precision). See meshtastic_mqtt_config.h. The
+# capability ceilings — whether TLS and map reporting are COMPILED IN at all —
+# stay Kconfig (MESHTASTIC_MQTT_TLS, MESHTASTIC_MQTT_MAP_REPORT).
+
 config MESHTASTIC_MQTT_BROKER_HOST
 	string "MQTT broker hostname"
 	default "mqtt.meshtastic.org"
@@ -44,6 +53,12 @@ config MESHTASTIC_MQTT_TLS
 	bool "Connect to the MQTT broker over TLS"
 	depends on MQTT_LIB_TLS && NET_SOCKETS_SOCKOPT_TLS && TLS_CREDENTIALS
 	help
+	  Compile the TLS transport in. Whether a given connection USES it is
+	  ModuleConfig.mqtt.tls_enabled (seeded off; set over the admin channel).
+	  Without this option a section asking for TLS is refused at set time and,
+	  if one is already stored, the bridge does not start — never a plaintext
+	  downgrade.
+
 	  Use a TLS-secured transport (typically port 8883). The CA trust anchor
 	  is registered from meshtastic_mqtt_ca_cert.h under the sec tag below,
 	  and the broker certificate is verified against MESHTASTIC_MQTT_TLS_HOSTNAME

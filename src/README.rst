@@ -64,9 +64,16 @@ MQTT gateway
 Enable :kconfig:option:`CONFIG_MESHTASTIC_MQTT` on a board with IPv4
 networking to bridge mesh packets to a Meshtastic-compatible MQTT broker. Once
 connected, use an MQTT client to subscribe to the configured root topic and
-confirm that packets heard on LoRa are published. Defaults target the public
-broker; configure the root topic with
-:kconfig:option:`CONFIG_MESHTASTIC_MQTT_ROOT`.
+confirm that packets heard on LoRa are published. The build's Kconfig defaults
+(:kconfig:option:`CONFIG_MESHTASTIC_MQTT_BROKER_HOST`,
+:kconfig:option:`CONFIG_MESHTASTIC_MQTT_ROOT`, credentials, ...) seed the node
+on first boot and target the public broker; from then on the broker, port,
+credentials, root topic, TLS and map-report settings come from the persisted
+``ModuleConfig.mqtt`` section, set from a Meshtastic client over the admin
+channel (``set_module_config``) and applied at the next boot. Whether a TLS
+transport or map reporting is compiled in at all remains a Kconfig decision
+(:kconfig:option:`CONFIG_MESHTASTIC_MQTT_TLS`,
+:kconfig:option:`CONFIG_MESHTASTIC_MQTT_MAP_REPORT`).
 
 See the official `Meshtastic MQTT integration documentation
 <https://meshtastic.org/docs/software/integrations/mqtt/>`_ for public broker

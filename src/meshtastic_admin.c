@@ -45,6 +45,7 @@
 #include "meshtastic_position.h"
 #endif
 #include "meshtastic_config_store.h"
+#include "meshtastic_mqtt_config.h"
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
@@ -367,6 +368,61 @@ static bool handle_get_config(uint32_t config_type)
 	return true;
 }
 
+void meshtastic_admin_redact_module_config_for_mesh(meshtastic_ModuleConfig *module)
+{
+	if (module == NULL) {
+		return;
+	}
+
+	if (module->which_payload_variant == meshtastic_ModuleConfig_mqtt_tag) {
+		char *pw = module->payload_variant.mqtt.password;
+
+		strncpy(pw, MESHTASTIC_MQTT_SECRET_RESERVED,
+			sizeof(module->payload_variant.mqtt.password) - 1U);
+		pw[sizeof(module->payload_variant.mqtt.password) - 1U] = '\0';
+	}
+}
+
+int meshtastic_admin_prepare_module_config_write(meshtastic_ModuleConfig *module)
+{
+	if (module == NULL) {
+		return -EINVAL;
+	}
+
+	if (module->which_payload_variant != meshtastic_ModuleConfig_mqtt_tag) {
+		return 0;
+	}
+
+	meshtastic_ModuleConfig_MQTTConfig *mqtt = &module->payload_variant.mqtt;
+	int ret = meshtastic_mqtt_config_validate(mqtt);
+
+	if (ret < 0) {
+		LOG_WRN("admin: mqtt config refused (%d): tls_enabled without a TLS transport",
+			ret);
+		return ret;
+	}
+
+	if (strncmp(mqtt->password, MESHTASTIC_MQTT_SECRET_RESERVED, sizeof(mqtt->password)) ==
+	    0) {
+		meshtastic_ModuleConfig cur = meshtastic_ModuleConfig_init_zero;
+
+		if (meshtastic_config_store_get_module(meshtastic_ModuleConfig_mqtt_tag, &cur) ==
+		    0) {
+			memcpy(mqtt->password, cur.payload_variant.mqtt.password,
+			       sizeof(mqtt->password));
+		}
+	}
+
+	if (mqtt->enabled && !IS_ENABLED(CONFIG_MESHTASTIC_MQTT)) {
+		/* Stored anyway — the section is opaque to this image and a later one
+		 * with the bridge picks it up — but say so, since "enabled" will do
+		 * nothing here. The reference refuses outright (MESHTASTIC_EXCLUDE_MQTT). */
+		LOG_WRN("admin: mqtt.enabled set but this image has no MQTT bridge");
+	}
+
+	return 0;
+}
+
 static bool handle_get_module_config(uint32_t module_type)
 {
 	pb_size_t tag = (pb_size_t)(module_type + 1U);
@@ -378,6 +434,13 @@ static bool handle_get_module_config(uint32_t module_type)
 		    tag, &admin_resp.payload_variant.get_module_config_response) < 0) {
 		LOG_WRN("admin: get_module unknown type %u", (unsigned int)module_type);
 		return false;
+	}
+	/* Reference keys this on req.from != 0; this port stamps our own node id on
+	 * a phone-originated packet, so the dispatch context's remote flag is the
+	 * honest discriminator. */
+	if (admin_cur.remote) {
+		meshtastic_admin_redact_module_config_for_mesh(
+			&admin_resp.payload_variant.get_module_config_response);
 	}
 	admin_emit_reply(&admin_resp);
 	return true;
@@ -789,13 +852,19 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		}
 		break;
 	case meshtastic_AdminMessage_set_module_config_tag:
-		ret = meshtastic_config_store_set_module(
+		ret = meshtastic_admin_prepare_module_config_write(
 			&admin_req.payload_variant.set_module_config);
+		if (ret == 0) {
+			ret = meshtastic_config_store_set_module(
+				&admin_req.payload_variant.set_module_config);
+		}
 		if (ret < 0) {
 			LOG_WRN("admin: set_module_config failed (%d)", ret);
 			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
 		} else {
-			/* No module runs its config live; effect requires a reboot. */
+			/* No module re-applies its section live: the MQTT bridge reads
+			 * ModuleConfig.mqtt once at init (agents-dnr4.8), the rest not at
+			 * all yet. Effect requires a reboot. */
 			reboot_pending = true;
 		}
 		break;

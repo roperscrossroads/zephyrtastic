@@ -37,6 +37,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_mqtt_config.h"
 #include "meshtastic_preset.h"
 #include "meshtastic_admin_client.h"
 #include "meshtastic_phoneapi.h"
@@ -1949,6 +1950,324 @@ ZTEST(admin_pki, test_set_module_config_mqtt_roundtrips_and_survives_real_reboot
 		      "wrong response variant");
 	zassert_true(resp.payload_variant.get_module_config_response.payload_variant.mqtt.enabled,
 		     "get_module_config must reflect the persisted value");
+}
+
+/* ---- agents-dnr4.8: ModuleConfig.mqtt is wired to the MQTT bridge -----------
+ *
+ * The bridge itself needs a network stack and is not compiled here (the variants
+ * sweep builds it; nothing runs it in sim). What IS testable without a socket is
+ * the whole mapping between the persisted section and what the bridge would
+ * connect with — meshtastic_mqtt_config.c is pure for exactly that reason — plus
+ * the two admin-side rules that guard the credential: redaction on the way out
+ * over the mesh, and "sekrit" meaning keep-what-you-have on the way in. */
+
+static size_t encode_admin_set_module_config_mqtt_full(
+	const meshtastic_ModuleConfig_MQTTConfig *mqtt, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_module_config_tag;
+	am.payload_variant.set_module_config.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+	am.payload_variant.set_module_config.payload_variant.mqtt = *mqtt;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+/* Send a local admin op with want_ack and return the ROUTING error the node
+ * answered with (NONE for a clean ACK), skipping unrelated frames queued ahead.
+ * Also cancels the reboot every set_module_config schedules, so the suite does
+ * not restart under a later test. */
+static meshtastic_Routing_Error send_local_admin_and_pop_routing(const uint8_t *admin_bytes,
+								 size_t admin_len)
+{
+	meshtastic_MeshPacket pkt = meshtastic_MeshPacket_init_zero;
+	struct meshtastic_phoneapi_frame frame;
+	meshtastic_FromRadio from;
+	meshtastic_Routing routing;
+	pb_istream_t is;
+
+	pkt.from = TEST_NODE_ID;
+	pkt.id = 0x0AD00002U;
+	pkt.want_ack = true;
+	pkt.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	pkt.decoded.portnum = meshtastic_PortNum_ADMIN_APP;
+	memcpy(pkt.decoded.payload.bytes, admin_bytes, admin_len);
+	pkt.decoded.payload.size = (pb_size_t)admin_len;
+
+	zassert_true(meshtastic_admin_handle_local(&pkt), "admin_handle_local must consume it");
+	meshtastic_admin_cancel_reboot();
+
+	while (meshtastic_phoneapi_pop_frame(&phone_api, &frame)) {
+		from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+		is = pb_istream_from_buffer(frame.data, frame.len);
+		zassert_true(pb_decode(&is, meshtastic_FromRadio_fields, &from),
+			     "FromRadio decode failed");
+		if (from.which_payload_variant != meshtastic_FromRadio_packet_tag ||
+		    from.packet.decoded.portnum != meshtastic_PortNum_ROUTING_APP) {
+			continue;
+		}
+		routing = (meshtastic_Routing)meshtastic_Routing_init_zero;
+		is = pb_istream_from_buffer(from.packet.decoded.payload.bytes,
+					    from.packet.decoded.payload.size);
+		zassert_true(pb_decode(&is, meshtastic_Routing_fields, &routing),
+			     "Routing decode failed");
+		return routing.error_reason;
+	}
+	zassert_unreachable("a want_ack setter must be answered with a ROUTING frame");
+	return meshtastic_Routing_Error_NONE;
+}
+
+static void read_stored_mqtt(meshtastic_ModuleConfig_MQTTConfig *out)
+{
+	meshtastic_ModuleConfig got = meshtastic_ModuleConfig_init_zero;
+
+	zassert_ok(meshtastic_config_store_get_module(meshtastic_ModuleConfig_mqtt_tag, &got),
+		   "mqtt module read failed");
+	*out = got.payload_variant.mqtt;
+}
+
+ZTEST(admin_pki, test_mqtt_settings_resolve_empty_address_uses_build_defaults)
+{
+	meshtastic_ModuleConfig_MQTTConfig cfg = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+	struct meshtastic_mqtt_settings s;
+	struct meshtastic_mqtt_settings z;
+
+	cfg.enabled = true;
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+
+	zassert_true(s.enabled, "enabled passes through");
+	zassert_false(s.address_is_custom, "an empty address is the build default, not custom");
+	zassert_str_equal(s.host, MESHTASTIC_MQTT_FALLBACK_HOST, "host falls back to Kconfig");
+	zassert_equal(s.port, MESHTASTIC_MQTT_FALLBACK_PORT, "port falls back to Kconfig");
+	zassert_str_equal(s.username, MESHTASTIC_MQTT_FALLBACK_USERNAME, "username fallback");
+	zassert_str_equal(s.password, MESHTASTIC_MQTT_FALLBACK_PASSWORD, "password fallback");
+	zassert_str_equal(s.root, MESHTASTIC_MQTT_FALLBACK_ROOT, "root falls back to Kconfig");
+	zassert_equal(s.default_broker,
+		      strcmp(MESHTASTIC_MQTT_FALLBACK_HOST, MESHTASTIC_MQTT_DEFAULT_BROKER) == 0,
+		      "default_broker reflects whether the fallback IS the public broker");
+	zassert_equal(s.map_publish_interval_secs,
+		      MAX(MESHTASTIC_MQTT_FALLBACK_MAP_INTERVAL_SEC,
+			  MESHTASTIC_MQTT_MAP_INTERVAL_MIN_SEC),
+		      "map interval falls back to Kconfig");
+	zassert_equal(s.map_position_precision, MESHTASTIC_MQTT_FALLBACK_MAP_PRECISION,
+		      "map precision falls back to Kconfig");
+
+	/* A NULL section is the all-zero section: same fallbacks, just disabled. */
+	meshtastic_mqtt_settings_resolve(NULL, &z);
+	zassert_false(z.enabled, "NULL section resolves disabled");
+	zassert_str_equal(z.host, s.host, "NULL section takes the same host fallback");
+	zassert_equal(z.port, s.port, "NULL section takes the same port fallback");
+}
+
+ZTEST(admin_pki, test_mqtt_settings_resolve_custom_address_honours_creds_and_port)
+{
+	meshtastic_ModuleConfig_MQTTConfig cfg = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+	struct meshtastic_mqtt_settings s;
+
+	cfg.enabled = true;
+	strcpy(cfg.address, "broker.lan:8884");
+	strcpy(cfg.username, "anon");
+	/* password deliberately left empty: a custom broker's creds are taken AS
+	 * GIVEN (reference PubSubConfig), never back-filled from Kconfig. */
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_true(s.address_is_custom, "a non-empty address is custom");
+	zassert_str_equal(s.host, "broker.lan", "host is the part before the colon");
+	zassert_equal(s.port, 8884U, "port is the part after the colon");
+	zassert_str_equal(s.username, "anon", "custom-broker username is honoured");
+	zassert_str_equal(s.password, "", "custom-broker EMPTY password is honoured, not defaulted");
+	zassert_false(s.default_broker, "broker.lan is not the public broker");
+	zassert_str_equal(s.tls_hostname, "broker.lan", "SNI names the custom host");
+
+	/* No port in the address: 1883, or 8883 once TLS is asked for. */
+	strcpy(cfg.address, "broker.lan");
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_equal(s.port, MESHTASTIC_MQTT_PORT_PLAIN, "plain default port");
+	cfg.tls_enabled = true;
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_equal(s.port, MESHTASTIC_MQTT_PORT_TLS, "TLS default port");
+	zassert_true(s.tls_enabled, "tls_enabled passes through");
+
+	/* A junk port suffix keeps the default (reference: toInt() out of range). */
+	strcpy(cfg.address, "broker.lan:99999");
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_equal(s.port, MESHTASTIC_MQTT_PORT_TLS, "out-of-range port is ignored");
+	zassert_str_equal(s.host, "broker.lan", "host still split off a bad port");
+	strcpy(cfg.address, "broker.lan:");
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_equal(s.port, MESHTASTIC_MQTT_PORT_TLS, "empty port is ignored");
+	strcpy(cfg.address, "broker.lan:12x");
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_equal(s.port, MESHTASTIC_MQTT_PORT_TLS, "non-numeric port is ignored");
+
+	/* The public broker named explicitly is still "the default broker" for the
+	 * gates keyed on it (portnum skip list, OK_TO_MQTT consent). */
+	cfg.tls_enabled = false;
+	strcpy(cfg.address, MESHTASTIC_MQTT_DEFAULT_BROKER);
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_true(s.address_is_custom, "explicit address is custom");
+	zassert_true(s.default_broker, "...but it IS the public broker");
+
+	strcpy(cfg.root, "msh/US");
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_str_equal(s.root, "msh/US", "a set root wins over the Kconfig root");
+}
+
+ZTEST(admin_pki, test_mqtt_settings_resolve_map_report_clamps_like_upstream)
+{
+	meshtastic_ModuleConfig_MQTTConfig cfg = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+	struct meshtastic_mqtt_settings s;
+
+	cfg.map_reporting_enabled = true;
+	cfg.has_map_report_settings = true;
+	cfg.map_report_settings.publish_interval_secs = 10U;
+	cfg.map_report_settings.position_precision = 3U;
+	cfg.map_report_settings.should_report_location = true;
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_true(s.map_reporting_enabled, "map flag passes through");
+	zassert_true(s.map_should_report_location, "location opt-in passes through");
+	zassert_equal(s.map_publish_interval_secs, MESHTASTIC_MQTT_MAP_INTERVAL_MIN_SEC,
+		      "interval below the floor is raised to it");
+	zassert_equal(s.map_position_precision, MESHTASTIC_MQTT_FALLBACK_MAP_PRECISION,
+		      "precision outside 12..15 falls back (reference clamps to default)");
+
+	cfg.map_report_settings.publish_interval_secs = 3600U;
+	cfg.map_report_settings.position_precision = 15U;
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_equal(s.map_publish_interval_secs, 3600U, "in-range interval kept");
+	zassert_equal(s.map_position_precision, 15U, "in-range precision kept");
+
+	/* No sub-message at all: interval/precision fall back, and the location
+	 * opt-in inherits the build's own map-report opt-in (what the store seeds). */
+	cfg.has_map_report_settings = false;
+	meshtastic_mqtt_settings_resolve(&cfg, &s);
+	zassert_equal(s.map_publish_interval_secs,
+		      MAX(MESHTASTIC_MQTT_FALLBACK_MAP_INTERVAL_SEC,
+			  MESHTASTIC_MQTT_MAP_INTERVAL_MIN_SEC),
+		      "absent sub-message: interval fallback");
+	zassert_equal(s.map_should_report_location, IS_ENABLED(CONFIG_MESHTASTIC_MQTT_MAP_REPORT),
+		      "absent sub-message: location opt-in follows the build");
+}
+
+ZTEST(admin_pki, test_mqtt_config_validate_refuses_tls_without_transport)
+{
+	meshtastic_ModuleConfig_MQTTConfig cfg = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+
+	zassert_equal(meshtastic_mqtt_config_validate(NULL), -EINVAL, "NULL section");
+	zassert_ok(meshtastic_mqtt_config_validate(&cfg), "a plaintext section is always fine");
+
+	cfg.tls_enabled = true;
+	if (IS_ENABLED(CONFIG_MESHTASTIC_MQTT_TLS)) {
+		zassert_ok(meshtastic_mqtt_config_validate(&cfg), "TLS compiled in: accepted");
+	} else {
+		zassert_equal(meshtastic_mqtt_config_validate(&cfg), -ENOTSUP,
+			      "no TLS transport in this image: refused, never downgraded");
+	}
+}
+
+ZTEST(admin_pki, test_module_config_password_is_redacted_for_mesh_not_for_phone)
+{
+	meshtastic_ModuleConfig m = meshtastic_ModuleConfig_init_zero;
+	meshtastic_ModuleConfig_MQTTConfig cfg = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	uint8_t buf[256];
+	size_t len;
+
+	/* The substitution the remote get path applies (reference secretReserved). */
+	m.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+	strcpy(m.payload_variant.mqtt.address, "broker.lan");
+	strcpy(m.payload_variant.mqtt.password, "hunter2");
+	meshtastic_admin_redact_module_config_for_mesh(&m);
+	zassert_str_equal(m.payload_variant.mqtt.password, MESHTASTIC_MQTT_SECRET_RESERVED,
+			  "mesh-bound mqtt password is replaced by the reserved word");
+	zassert_str_equal(m.payload_variant.mqtt.address, "broker.lan",
+			  "nothing but the password is touched");
+
+	/* A section with no secret passes through untouched. */
+	m = (meshtastic_ModuleConfig)meshtastic_ModuleConfig_init_zero;
+	m.which_payload_variant = meshtastic_ModuleConfig_serial_tag;
+	m.payload_variant.serial.enabled = true;
+	meshtastic_admin_redact_module_config_for_mesh(&m);
+	zassert_true(m.payload_variant.serial.enabled, "serial section untouched");
+
+	/* The LOCAL path — the app that edits the credential — sees the real value
+	 * end to end: set it, then get it back over the PhoneAPI. */
+	cfg.enabled = true;
+	strcpy(cfg.address, "broker.lan");
+	strcpy(cfg.password, "hunter2");
+	len = encode_admin_set_module_config_mqtt_full(&cfg, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE,
+		      "set must ACK clean");
+	len = encode_admin_get_module_config(0U /* MQTT_CONFIG */, buf, sizeof(buf));
+	zassert_true(send_local_admin_and_pop_reply(buf, len, &resp), "get_module_config must reply");
+	zassert_str_equal(resp.payload_variant.get_module_config_response.payload_variant.mqtt.password,
+			  "hunter2", "the phone gets the real password, not the reserved word");
+}
+
+ZTEST(admin_pki, test_set_module_config_mqtt_sekrit_keeps_stored_password)
+{
+	meshtastic_ModuleConfig_MQTTConfig cfg = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+	meshtastic_ModuleConfig_MQTTConfig stored;
+	uint8_t buf[256];
+	size_t len;
+
+	cfg.enabled = true;
+	strcpy(cfg.address, "broker.lan");
+	strcpy(cfg.password, "hunter2");
+	len = encode_admin_set_module_config_mqtt_full(&cfg, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE,
+		      "initial set must ACK clean");
+
+	/* An app round-tripping a redacted get writes "sekrit" back with its edits:
+	 * the edit lands, the credential it never saw survives (reference writeSecret). */
+	strcpy(cfg.address, "other.lan:8884");
+	strcpy(cfg.password, MESHTASTIC_MQTT_SECRET_RESERVED);
+	len = encode_admin_set_module_config_mqtt_full(&cfg, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE,
+		      "sekrit set must ACK clean");
+	read_stored_mqtt(&stored);
+	zassert_str_equal(stored.address, "other.lan:8884", "the non-secret edit landed");
+	zassert_str_equal(stored.password, "hunter2", "sekrit means keep the stored password");
+
+	/* A real new password does replace it. */
+	strcpy(cfg.password, "newpass");
+	len = encode_admin_set_module_config_mqtt_full(&cfg, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE,
+		      "new-password set must ACK clean");
+	read_stored_mqtt(&stored);
+	zassert_str_equal(stored.password, "newpass", "a real password replaces the stored one");
+}
+
+ZTEST(admin_pki, test_set_module_config_mqtt_tls_refused_without_transport)
+{
+	meshtastic_ModuleConfig_MQTTConfig cfg = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+	meshtastic_ModuleConfig_MQTTConfig stored;
+	uint8_t buf[256];
+	size_t len;
+
+	if (IS_ENABLED(CONFIG_MESHTASTIC_MQTT_TLS)) {
+		ztest_test_skip();
+		return;
+	}
+
+	cfg.enabled = true;
+	strcpy(cfg.address, "keep.lan");
+	len = encode_admin_set_module_config_mqtt_full(&cfg, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE,
+		      "plaintext set must ACK clean");
+
+	/* Reference MQTT::isValidConfig: "tls_enabled unsupported on this node" is a
+	 * refusal, and a refusal must leave the previous section intact — silently
+	 * storing it would have the bridge connect in plaintext to a broker the
+	 * operator asked to reach over TLS. */
+	strcpy(cfg.address, "tls.lan");
+	cfg.tls_enabled = true;
+	len = encode_admin_set_module_config_mqtt_full(&cfg, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len),
+		      meshtastic_Routing_Error_BAD_REQUEST, "TLS on a no-TLS image must NAK");
+	read_stored_mqtt(&stored);
+	zassert_str_equal(stored.address, "keep.lan", "refused set must not touch the store");
+	zassert_false(stored.tls_enabled, "refused set must not touch the store");
 }
 
 ZTEST(admin_pki, test_remove_ignored_node_unignores)

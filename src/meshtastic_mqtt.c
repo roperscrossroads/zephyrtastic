@@ -41,6 +41,8 @@
 #include "meshtastic_core.h"
 #include "meshtastic_position.h"
 #include "meshtastic_mqtt.h"
+#include "meshtastic_mqtt_config.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_router.h"
 #include "meshtastic/config.pb.h"
@@ -48,7 +50,6 @@
 
 LOG_MODULE_REGISTER(meshtastic_mqtt, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-#define MQTT_DEFAULT_BROKER            "mqtt.meshtastic.org"
 #define CRYPT_TOPIC_SUFFIX             "/2/e/"
 #define MAP_TOPIC_SUFFIX               "/2/map/"
 #define MQTT_NET_WAIT_MS               2000
@@ -75,6 +76,9 @@ static struct {
 	char sub_topic[128];
 	char crypt_prefix[64];
 	char map_topic[80];
+	/* ModuleConfig.mqtt resolved once at init (agents-dnr4.8). A set_module_config
+	 * schedules a reboot; nothing re-reads this live. */
+	struct meshtastic_mqtt_settings cfg;
 	int64_t last_map_report_ms;
 	int64_t last_map_no_position_ms;
 	struct k_mutex lock;
@@ -251,7 +255,7 @@ static void mqtt_node_id_str(char *buf, size_t len)
 
 static bool mqtt_is_default_broker(void)
 {
-	return strcmp(CONFIG_MESHTASTIC_MQTT_BROKER_HOST, MQTT_DEFAULT_BROKER) == 0;
+	return mqtt_ctx.cfg.default_broker;
 }
 
 /* True when the configured broker is a literal RFC1918 / loopback address.
@@ -267,7 +271,7 @@ static bool mqtt_broker_is_private(void)
 	struct in_addr addr;
 	uint32_t host_order;
 
-	if (net_addr_pton(AF_INET, CONFIG_MESHTASTIC_MQTT_BROKER_HOST, &addr) < 0) {
+	if (net_addr_pton(AF_INET, mqtt_ctx.cfg.host, &addr) < 0) {
 		return false; /* not a literal IPv4 address — treat as public */
 	}
 
@@ -550,7 +554,7 @@ static bool mqtt_has_default_channel(void)
 
 static uint32_t mqtt_map_position_precision(void)
 {
-	uint32_t precision = CONFIG_MESHTASTIC_MQTT_MAP_REPORT_POSITION_PRECISION;
+	uint32_t precision = mqtt_ctx.cfg.map_position_precision;
 
 	if (precision < 12U || precision > 15U) {
 		precision = 14U;
@@ -616,10 +620,12 @@ static void mqtt_perhaps_report_to_map(void)
 	const char *channel_id = meshtastic_runtime_channel_name();
 	size_t env_len = 0U;
 	int64_t now = k_uptime_get();
-	int64_t interval_ms =
-		(int64_t)CONFIG_MESHTASTIC_MQTT_MAP_REPORT_INTERVAL_SEC * MSEC_PER_SEC;
+	int64_t interval_ms = (int64_t)mqtt_ctx.cfg.map_publish_interval_secs * MSEC_PER_SEC;
 
-	if (!mqtt_ctx.connected || channel_id == NULL) {
+	/* Reference (MQTT.cpp perhapsReportToMap): both the module flag and the
+	 * location opt-in gate the whole report, not just the coordinates. */
+	if (!mqtt_ctx.cfg.map_reporting_enabled || !mqtt_ctx.cfg.map_should_report_location ||
+	    !mqtt_ctx.connected || channel_id == NULL) {
 		return;
 	}
 
@@ -716,6 +722,11 @@ static void mqtt_queue_uplink(const struct meshtastic_packet *packet, const uint
 	if ((packet == NULL && rx_mesh == NULL) || wire == NULL || wire_len == 0U) {
 		return;
 	}
+	/* Bridge disabled by module config (or never started): nothing drains the
+	 * queue, so do not fill it. */
+	if (!mqtt_ctx.started) {
+		return;
+	}
 
 	/* C3 Phase 7: read the gate/consent fields from the decoded MeshPacket when the RX
 	 * path supplied one, else the flat struct (TX path / public inject). Byte-identical —
@@ -774,7 +785,7 @@ static void mqtt_queue_uplink(const struct meshtastic_packet *packet, const uint
 
 	meshtastic_MeshPacket built = meshtastic_MeshPacket_init_zero;
 	const meshtastic_MeshPacket *uplink;
-	if (IS_ENABLED(CONFIG_MESHTASTIC_MQTT_ENCRYPTION_ENABLED)) {
+	if (mqtt_ctx.cfg.encryption_enabled) {
 		/* Publish the ciphertext exactly as heard/sent — built from the wire, not the
 		 * decoded form. */
 		ret = mqtt_mesh_from_wire(wire, wire_len, &built);
@@ -885,7 +896,7 @@ static void mqtt_handle_publish(const uint8_t *payload, size_t len, const char *
 		return;
 	}
 
-	if (IS_ENABLED(CONFIG_MESHTASTIC_MQTT_ENCRYPTION_ENABLED) &&
+	if (mqtt_ctx.cfg.encryption_enabled &&
 	    env.packet->which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
 		LOG_DBG("Ignoring decoded MQTT packet while encryption is enabled");
 		pb_release(meshtastic_ServiceEnvelope_fields, &env);
@@ -958,7 +969,7 @@ static void mqtt_evt_handler(struct mqtt_client *client, const struct mqtt_evt *
 		mqtt_ctx.connected = true;
 		mqtt_ctx.drop_warned = false; /* broker back: warn afresh next episode */
 		mqtt_backoff_step = 0U;       /* connected: next outage starts at 1 s */
-		LOG_INF("MQTT connected to %s", CONFIG_MESHTASTIC_MQTT_BROKER_HOST);
+		LOG_INF("MQTT connected to %s", mqtt_ctx.cfg.host);
 		mqtt_prepare_fds();
 		mqtt_drain_queue(MQTT_PUBLISH_BUDGET_ON_CONNECT);
 		mqtt_work_notify();
@@ -989,9 +1000,9 @@ static int mqtt_resolve_broker(void)
 	char port_str[8];
 	int rc;
 
-	snprintk(port_str, sizeof(port_str), "%d", CONFIG_MESHTASTIC_MQTT_BROKER_PORT);
+	snprintk(port_str, sizeof(port_str), "%u", (unsigned int)mqtt_ctx.cfg.port);
 
-	rc = zsock_getaddrinfo(CONFIG_MESHTASTIC_MQTT_BROKER_HOST, port_str, &hints, &result);
+	rc = zsock_getaddrinfo(mqtt_ctx.cfg.host, port_str, &hints, &result);
 	if (rc != 0) {
 		if (result != NULL) {
 			zsock_freeaddrinfo(result);
@@ -1017,8 +1028,7 @@ static int mqtt_resolve_broker(void)
 	memcpy(&mqtt_ctx.broker, result->ai_addr, result->ai_addrlen);
 	zsock_freeaddrinfo(result);
 
-	LOG_DBG("MQTT broker %s:%d resolved", CONFIG_MESHTASTIC_MQTT_BROKER_HOST,
-		CONFIG_MESHTASTIC_MQTT_BROKER_PORT);
+	LOG_DBG("MQTT broker %s:%u resolved", mqtt_ctx.cfg.host, (unsigned int)mqtt_ctx.cfg.port);
 	return 0;
 }
 
@@ -1040,7 +1050,7 @@ static void mqtt_tls_configure(void)
 	tls->cipher_list = NULL;
 	tls->sec_tag_list = NULL;
 	tls->sec_tag_count = 0;
-	tls->hostname = CONFIG_MESHTASTIC_MQTT_TLS_HOSTNAME;
+	tls->hostname = mqtt_ctx.cfg.tls_hostname;
 }
 #else /* proper verification against the embedded CA */
 static const sec_tag_t mqtt_sec_tags[] = {
@@ -1071,7 +1081,7 @@ static void mqtt_tls_configure(void)
 	tls->cipher_list = NULL;
 	tls->sec_tag_list = mqtt_sec_tags;
 	tls->sec_tag_count = ARRAY_SIZE(mqtt_sec_tags);
-	tls->hostname = CONFIG_MESHTASTIC_MQTT_TLS_HOSTNAME;
+	tls->hostname = mqtt_ctx.cfg.tls_hostname;
 }
 #endif /* CONFIG_MESHTASTIC_MQTT_TLS_NO_VERIFY */
 #endif /* CONFIG_MESHTASTIC_MQTT_TLS */
@@ -1084,19 +1094,29 @@ static void mqtt_client_configure(void)
 	mqtt_ctx.client.evt_cb = mqtt_evt_handler;
 	mqtt_ctx.client.client_id.utf8 = mqtt_ctx.client_id;
 	mqtt_ctx.client.client_id.size = strlen((char *)mqtt_ctx.client_id);
-	mqtt_ctx.username.utf8 = (uint8_t *)CONFIG_MESHTASTIC_MQTT_USERNAME;
-	mqtt_ctx.username.size = strlen(CONFIG_MESHTASTIC_MQTT_USERNAME);
-	mqtt_ctx.password.utf8 = (uint8_t *)CONFIG_MESHTASTIC_MQTT_PASSWORD;
-	mqtt_ctx.password.size = strlen(CONFIG_MESHTASTIC_MQTT_PASSWORD);
-	mqtt_ctx.client.user_name = &mqtt_ctx.username;
-	mqtt_ctx.client.password = &mqtt_ctx.password;
+	mqtt_ctx.username.utf8 = (uint8_t *)mqtt_ctx.cfg.username;
+	mqtt_ctx.username.size = strlen(mqtt_ctx.cfg.username);
+	mqtt_ctx.password.utf8 = (uint8_t *)mqtt_ctx.cfg.password;
+	mqtt_ctx.password.size = strlen(mqtt_ctx.cfg.password);
+	/* An anonymous custom broker: the MQTT CONNECT must omit the fields, not send
+	 * empty ones (a NULL pointer is how Zephyr's client expresses "absent"). */
+	mqtt_ctx.client.user_name = (mqtt_ctx.username.size != 0U) ? &mqtt_ctx.username : NULL;
+	mqtt_ctx.client.password = (mqtt_ctx.password.size != 0U) ? &mqtt_ctx.password : NULL;
 	mqtt_ctx.client.protocol_version = MQTT_VERSION_3_1_1;
 	mqtt_ctx.client.rx_buf = mqtt_ctx.rx_buf;
 	mqtt_ctx.client.rx_buf_size = sizeof(mqtt_ctx.rx_buf);
 	mqtt_ctx.client.tx_buf = mqtt_ctx.tx_buf;
 	mqtt_ctx.client.tx_buf_size = sizeof(mqtt_ctx.tx_buf);
+	/* Kconfig decides whether a TLS transport is COMPILED IN (the ceiling);
+	 * ModuleConfig.mqtt.tls_enabled decides whether this connection USES it.
+	 * A section that asks for TLS on a build without it never gets here —
+	 * meshtastic_mqtt_init() refuses to start rather than downgrade. */
 #if defined(CONFIG_MESHTASTIC_MQTT_TLS)
-	mqtt_tls_configure();
+	if (mqtt_ctx.cfg.tls_enabled) {
+		mqtt_tls_configure();
+	} else {
+		mqtt_ctx.client.transport.type = MQTT_TRANSPORT_NON_SECURE;
+	}
 #else
 	mqtt_ctx.client.transport.type = MQTT_TRANSPORT_NON_SECURE;
 #endif
@@ -1256,9 +1276,8 @@ static void mqtt_thread_fn(void *p1, void *p2, void *p3)
 				continue;
 			}
 
-			LOG_DBG("Connecting to MQTT broker %s:%d",
-				CONFIG_MESHTASTIC_MQTT_BROKER_HOST,
-				CONFIG_MESHTASTIC_MQTT_BROKER_PORT);
+			LOG_DBG("Connecting to MQTT broker %s:%u", mqtt_ctx.cfg.host,
+				(unsigned int)mqtt_ctx.cfg.port);
 			ret = mqtt_resolve_broker();
 			if (ret == 0) {
 				ret = mqtt_try_connect();
@@ -1382,6 +1401,51 @@ int meshtastic_mqtt_init(void)
 		return 0;
 	}
 
+	/* ModuleConfig.mqtt is the runtime authority (agents-dnr4.8). The store is
+	 * seeded from this build's Kconfig on first boot and thereafter carries
+	 * whatever the admin channel wrote, so the Kconfig values are only ever the
+	 * fallback for a field left empty. Resolved once, here; a later
+	 * set_module_config schedules a reboot rather than re-applying live. */
+	{
+		meshtastic_ModuleConfig mod = meshtastic_ModuleConfig_init_zero;
+
+		if (meshtastic_config_store_get_module(meshtastic_ModuleConfig_mqtt_tag, &mod) ==
+		    0) {
+			meshtastic_mqtt_settings_resolve(&mod.payload_variant.mqtt, &mqtt_ctx.cfg);
+		} else {
+			/* Cannot happen (the store holds every module tag), but a store
+			 * that answers nothing must not silently disable a bridge the
+			 * build asked for: fall back to the pure Kconfig behaviour. */
+			LOG_WRN("MQTT module config unreadable; using build defaults");
+			meshtastic_mqtt_settings_resolve(NULL, &mqtt_ctx.cfg);
+			mqtt_ctx.cfg.enabled = true;
+		}
+	}
+
+	if (!mqtt_ctx.cfg.enabled) {
+		LOG_INF("MQTT bridge disabled by module config");
+		return 0;
+	}
+	if (mqtt_ctx.cfg.proxy_to_client) {
+		/* The reference proxies through the phone (MqttClientProxyMessage over
+		 * the PhoneAPI) and makes no direct connection. The proxy transport is
+		 * not implemented here (parity mqtt #9); honour the half that matters
+		 * for safety — no direct connection — rather than ignore the flag. */
+		LOG_WRN("MQTT proxy_to_client_enabled set: no direct broker connection "
+			"(phone proxy transport not implemented)");
+		return 0;
+	}
+	if (mqtt_ctx.cfg.tls_enabled && !IS_ENABLED(CONFIG_MESHTASTIC_MQTT_TLS)) {
+		/* The admin path refuses this at set time; a store written by an image
+		 * that had TLS can still carry it. Never downgrade to plaintext. */
+		LOG_ERR("MQTT config requires TLS but this image has no TLS transport; "
+			"bridge not started");
+		return 0;
+	}
+	if (mqtt_ctx.cfg.map_reporting_enabled && !IS_ENABLED(CONFIG_MESHTASTIC_MQTT_MAP_REPORT)) {
+		LOG_WRN("MQTT map_reporting_enabled set but map reporting is not compiled in");
+	}
+
 	k_mutex_init(&mqtt_ctx.lock);
 
 	/* Wake eventfd for the thread's blocking poll (queued work / net loss).
@@ -1398,8 +1462,7 @@ int meshtastic_mqtt_init(void)
 	net_mgmt_add_event_callback(&mqtt_net_mgmt_cb);
 	mqtt_net_has_ipv4 = mqtt_network_is_ready();
 
-	strncpy(mqtt_ctx.crypt_prefix, CONFIG_MESHTASTIC_MQTT_ROOT,
-		sizeof(mqtt_ctx.crypt_prefix) - 1U);
+	strncpy(mqtt_ctx.crypt_prefix, mqtt_ctx.cfg.root, sizeof(mqtt_ctx.crypt_prefix) - 1U);
 	mqtt_ctx.crypt_prefix[sizeof(mqtt_ctx.crypt_prefix) - 1U] = '\0';
 
 	mqtt_node_id_str((char *)mqtt_ctx.client_id, sizeof(mqtt_ctx.client_id));
@@ -1410,7 +1473,7 @@ int meshtastic_mqtt_init(void)
 		return ret;
 	}
 
-	if (IS_ENABLED(CONFIG_MESHTASTIC_MQTT_MAP_REPORT)) {
+	if (IS_ENABLED(CONFIG_MESHTASTIC_MQTT_MAP_REPORT) && mqtt_ctx.cfg.map_reporting_enabled) {
 		ret = mqtt_build_map_topic(mqtt_ctx.map_topic, sizeof(mqtt_ctx.map_topic));
 		if (ret < 0 || ret >= (int)sizeof(mqtt_ctx.map_topic)) {
 			LOG_ERR("MQTT map topic setup failed (%d)", ret);
@@ -1423,9 +1486,9 @@ int meshtastic_mqtt_init(void)
 	k_thread_name_set(&mqtt_thread, "meshtastic_mqtt");
 	mqtt_ctx.started = true;
 
-	LOG_INF("Meshtastic MQTT bridge started (broker %s:%d root %s)",
-		CONFIG_MESHTASTIC_MQTT_BROKER_HOST, CONFIG_MESHTASTIC_MQTT_BROKER_PORT,
-		mqtt_ctx.crypt_prefix);
+	LOG_INF("Meshtastic MQTT bridge started (broker %s:%u%s root %s%s)", mqtt_ctx.cfg.host,
+		(unsigned int)mqtt_ctx.cfg.port, mqtt_ctx.cfg.tls_enabled ? " tls" : "",
+		mqtt_ctx.crypt_prefix, mqtt_ctx.cfg.address_is_custom ? "" : " [build default]");
 
 	return 0;
 }

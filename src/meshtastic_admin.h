@@ -10,6 +10,7 @@
 #include <stdbool.h>
 
 #include "meshtastic/mesh.pb.h"
+#include "meshtastic/module_config.pb.h"
 
 struct meshtastic_packet;
 
@@ -75,5 +76,29 @@ bool meshtastic_admin_reboot_scheduled(void);
 
 /** Cancel a scheduled config-change reboot (used by tests to avoid rebooting). */
 void meshtastic_admin_cancel_reboot(void);
+
+/**
+ * @brief Strip secrets from a module section before it leaves over the mesh.
+ *
+ * Reference (AdminModule.cpp, secretReserved): a get_module_config answered to a
+ * REMOTE requester carries "sekrit" in place of ModuleConfig.mqtt.password. The
+ * locally connected app (PhoneAPI) still sees the real value — it is the one that
+ * displays and edits it. Applied by the remote get path; public so the sim suite
+ * can prove the substitution without decrypting a PKC reply.
+ */
+void meshtastic_admin_redact_module_config_for_mesh(meshtastic_ModuleConfig *module);
+
+/**
+ * @brief Validate and normalise a set_module_config section before it is stored.
+ *
+ * mqtt: a password equal to "sekrit" means "keep the stored one" (the reference's
+ * writeSecret), so an app that round-trips a redacted get does not wipe the
+ * credential; and a section asking for TLS on a build with no TLS transport is
+ * refused rather than silently downgraded (reference MQTT::isValidConfig).
+ * Other sections pass through unchanged.
+ *
+ * @return 0 to store; -ENOTSUP / -EINVAL to refuse (the caller NAKs BAD_REQUEST).
+ */
+int meshtastic_admin_prepare_module_config_write(meshtastic_ModuleConfig *module);
 
 #endif /* MESHTASTIC_ADMIN_H_ */
