@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package meshtastic;
+
+import "meshtastic/channel.proto";
+import "meshtastic/config.proto";
+
+option csharp_namespace = "Meshtastic.Protobufs";
+option go_package = "github.com/meshtastic/go/generated";
+option java_outer_classname = "MeshBeaconProtos";
+option java_package = "org.meshtastic.proto";
+option swift_prefix = "";
+
+/*
+ * The MESH_BEACON_APP payload: a short "here is my mesh, join me" announcement.
+ * Reconstructed field-for-field from the reference firmware's generated
+ * mesh_beacon.pb.h (the upstream protobufs checkout is not vendored here).
+ */
+message MeshBeacon {
+  /*
+   * Human-readable beacon message. Max 100 bytes enforced by firmware on send.
+   */
+  string message = 1;
+
+  /*
+   * Optional channel (name + PSK) being advertised to listening clients.
+   * The PSK is included deliberately: this is a public join-invitation.
+   */
+  optional ChannelSettings offer_channel = 2;
+
+  /*
+   * Optional region being advertised alongside offer_preset.
+   */
+  Config.LoRaConfig.RegionCode offer_region = 3;
+
+  /*
+   * Optional modem preset being advertised.
+   */
+  optional Config.LoRaConfig.ModemPreset offer_preset = 4;
+}

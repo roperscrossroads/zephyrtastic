@@ -1,0 +1,17 @@
+common:
+  tags:
+    - meshtastic
+    - meshbeacon
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # Content, cadence, the legacy split, target resolution, the listener and the
+  # write-time sanitiser. Delay and interval floor lowered so the cadence runs
+  # in virtual time.
+  meshtastic.meshbeacon.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_MESHBEACON_START_DELAY_SEC=2
+      - CONFIG_MESHTASTIC_MESHBEACON_MIN_INTERVAL_SEC=60

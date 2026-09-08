@@ -10,3 +10,10 @@ common:
     - native_sim/native/64
 tests:
   meshtastic.admin_pki.native_sim: {}
+
+  # The mesh beacon is off by default (partial vs. the reference): the default
+  # image above proves a mesh_beacon write is NAKed; this opt-in image proves
+  # the write-time sanitiser and the no-reboot apply when it IS built.
+  meshtastic.admin_pki.meshbeacon.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_MESHBEACON=y

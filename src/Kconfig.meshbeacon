@@ -1,0 +1,49 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_MESHBEACON
+	bool "Meshtastic mesh beacon (partial vs. the reference; unsupported by default)"
+	default n
+	help
+	  The reference MeshBeacon modules: a zero-hop "here is my mesh, join
+	  me" announcement on MESH_BEACON_APP (port 37) -- a short text and/or
+	  an offered channel (name + PSK), region and modem preset -- and the
+	  listener that caches an offer heard for a client app to act on (never
+	  applied automatically). Both halves are off until their flag is set
+	  in ModuleConfig.mesh_beacon.flags (LISTEN / BROADCAST). Compiles in
+	  the MeshBeacon protobuf.
+
+	  OFF BY DEFAULT, deliberately: this port broadcasts on the RUNNING
+	  radio config only (the primary channel, or any channel-table slot a
+	  target names), whereas the reference switches the radio around each
+	  transmission whose target names another modem preset or region --
+	  the feature that gives the beacon its targets at all. Rather than
+	  ship a module that accepts a config and then does part of it, the
+	  module stays out of a default image and the admin path answers a
+	  mesh_beacon write with a NAK, exactly as the reference does for an
+	  excluded module. Opt in for a bench that wants the supported subset.
+	  The gate for flipping this default: the multi-preset arc delivering a
+	  hold/restore radio switch (docs/MULTI-PRESET-OPERATION.md).
+
+if MESHTASTIC_MESHBEACON
+
+config MESHTASTIC_MESHBEACON_START_DELAY_SEC
+	int "Delay before the first beacon after boot or a config change"
+	default 60
+	range 1 3600
+	help
+	  The reference staggers periodic modules a few tens of seconds after
+	  boot. A change to the section re-arms from here, so an app user's
+	  edits coalesce into one beacon.
+
+config MESHTASTIC_MESHBEACON_MIN_INTERVAL_SEC
+	int "Smallest broadcast interval, in seconds"
+	default 3600
+	range 60 604800
+	help
+	  broadcast_interval_secs below this is raised to it, and 0 means this
+	  value (reference default_mesh_beacon_min_broadcast_interval_secs, 1 h:
+	  a beacon is an invitation, not a heartbeat). The sim suite lowers it
+	  to run the cadence in virtual time.
+
+endif # MESHTASTIC_MESHBEACON

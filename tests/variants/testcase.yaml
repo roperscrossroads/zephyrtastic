@@ -59,6 +59,13 @@ tests:
   meshtastic.variants.no_neighborinfo.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_NEIGHBORINFO=n
+  # Mesh beacon absent. It is default-N (partial vs. the reference, so
+  # unsupported by default) and the baseline turns it ON, so this is still a
+  # subtraction -- and the =n arm also drops mesh_beacon.proto from the nanopb
+  # build, where a stray reference to its types would fail to compile.
+  meshtastic.variants.no_meshbeacon.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_MESHBEACON=n
   meshtastic.variants.no_nodedb.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_NODEDB=n

@@ -52,6 +52,9 @@
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 #include "meshtastic_neighborinfo.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_MESHBEACON)
+#include "meshtastic_meshbeacon.h"
+#endif
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
@@ -393,6 +396,22 @@ int meshtastic_admin_prepare_module_config_write(meshtastic_ModuleConfig *module
 {
 	if (module == NULL) {
 		return -EINVAL;
+	}
+
+	if (module->which_payload_variant == meshtastic_ModuleConfig_mesh_beacon_tag) {
+#if defined(CONFIG_MESHTASTIC_MESHBEACON)
+		/* Reference AdminModule: the section is sanitised on write (text
+		 * cap, interval floor, unknown region/preset cleared). */
+		meshtastic_meshbeacon_sanitise(&module->payload_variant.mesh_beacon);
+		return 0;
+#else
+		/* Reference MESHTASTIC_EXCLUDE_BEACON: an excluded module's write
+		 * is refused (the app gets a NAK), never stored as if it worked.
+		 * The module is off by default here because it is partial against
+		 * the reference -- see Kconfig.meshbeacon. */
+		LOG_WRN("admin: mesh_beacon config refused: module not built into this image");
+		return -ENOTSUP;
+#endif
 	}
 
 	if (module->which_payload_variant != meshtastic_ModuleConfig_mqtt_tag) {
@@ -884,6 +903,12 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 				 * so re-arming is the whole effect (agents-dnr4.19). */
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 				meshtastic_neighborinfo_config_changed();
+#endif
+			} else if (which == meshtastic_ModuleConfig_mesh_beacon_tag) {
+				/* Reference: shouldReboot = false; the broadcaster's cache
+				 * is invalidated instead (agents-dnr4.25). */
+#if defined(CONFIG_MESHTASTIC_MESHBEACON)
+				meshtastic_meshbeacon_config_changed();
 #endif
 			} else {
 				/* Every other module reads its section at init (the MQTT

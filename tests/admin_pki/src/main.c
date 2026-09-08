@@ -44,6 +44,9 @@
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 #include "meshtastic_neighborinfo.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_MESHBEACON)
+#include "meshtastic_meshbeacon.h"
+#endif
 #include "meshtastic_preset.h"
 #include "meshtastic_admin_client.h"
 #include "meshtastic_phoneapi.h"
@@ -2381,6 +2384,80 @@ ZTEST(admin_pki, test_set_module_config_neighbor_info_applies_live_without_reboo
 	zassert_false(s.enabled, "disabled live");
 }
 #endif /* CONFIG_MESHTASTIC_NEIGHBORINFO */
+
+/* ---- agents-dnr4.25: ModuleConfig.mesh_beacon is sanitised on write, no reboot */
+
+#if defined(CONFIG_MESHTASTIC_MESHBEACON)
+ZTEST(admin_pki, test_set_module_config_mesh_beacon_is_sanitised_and_applies_live)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	meshtastic_ModuleConfig_MeshBeaconConfig *bc =
+		&am.payload_variant.set_module_config.payload_variant.mesh_beacon;
+	meshtastic_ModuleConfig got = meshtastic_ModuleConfig_init_zero;
+	uint8_t buf[512];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	bool rebooting = true;
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_module_config_tag;
+	am.payload_variant.set_module_config.which_payload_variant =
+		meshtastic_ModuleConfig_mesh_beacon_tag;
+	bc->flags = MESHTASTIC_MESHBEACON_FLAG_LISTEN;
+	bc->broadcast_interval_secs = 10U; /* below the floor */
+	bc->broadcast_offer_region = (meshtastic_Config_LoRaConfig_RegionCode)250; /* unknown */
+	strcpy(bc->broadcast_message, "welcome");
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+
+	zassert_equal(send_local_admin_and_pop_routing_ex(buf, os.bytes_written, &rebooting),
+		      meshtastic_Routing_Error_NONE, "set must ACK clean");
+	zassert_false(rebooting, "reference: shouldReboot = false for mesh_beacon");
+
+	zassert_ok(meshtastic_config_store_get_module(meshtastic_ModuleConfig_mesh_beacon_tag, &got),
+		   "");
+	zassert_equal(got.payload_variant.mesh_beacon.broadcast_interval_secs,
+		      CONFIG_MESHTASTIC_MESHBEACON_MIN_INTERVAL_SEC,
+		      "the stored interval was floored on write (reference)");
+	zassert_equal(got.payload_variant.mesh_beacon.broadcast_offer_region,
+		      meshtastic_Config_LoRaConfig_RegionCode_UNSET,
+		      "an unknown offer region was cleared on write (reference)");
+	zassert_str_equal(got.payload_variant.mesh_beacon.broadcast_message, "welcome", "");
+
+	/* Back to off so nothing is armed for a later test. */
+	bc->flags = 0U;
+	os = pb_ostream_from_buffer(buf, sizeof(buf));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "");
+	zassert_equal(send_local_admin_and_pop_routing(buf, os.bytes_written),
+		      meshtastic_Routing_Error_NONE, "");
+}
+#else /* !CONFIG_MESHTASTIC_MESHBEACON -- the default image */
+
+/* Reference MESHTASTIC_EXCLUDE_BEACON: a write to an excluded module is NAKed,
+ * not stored. The module is off by default here (partial vs. the reference),
+ * so the default image must tell the app so rather than accept the section. */
+ZTEST(admin_pki, test_set_module_config_mesh_beacon_is_refused_when_not_built)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	meshtastic_ModuleConfig got = meshtastic_ModuleConfig_init_zero;
+	uint8_t buf[512];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_module_config_tag;
+	am.payload_variant.set_module_config.which_payload_variant =
+		meshtastic_ModuleConfig_mesh_beacon_tag;
+	am.payload_variant.set_module_config.payload_variant.mesh_beacon.flags = 1U;
+	strcpy(am.payload_variant.set_module_config.payload_variant.mesh_beacon.broadcast_message,
+	       "welcome");
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+
+	zassert_equal(send_local_admin_and_pop_routing(buf, os.bytes_written),
+		      meshtastic_Routing_Error_BAD_REQUEST,
+		      "mesh_beacon not built: the write must be NAKed, as the reference does");
+	zassert_ok(meshtastic_config_store_get_module(meshtastic_ModuleConfig_mesh_beacon_tag, &got),
+		   "");
+	zassert_equal(got.payload_variant.mesh_beacon.broadcast_message[0], '\0',
+		      "and nothing was stored");
+}
+
+#endif /* CONFIG_MESHTASTIC_MESHBEACON */
 
 ZTEST(admin_pki, test_remove_ignored_node_unignores)
 {
