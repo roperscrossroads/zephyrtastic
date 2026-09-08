@@ -338,6 +338,32 @@ bool meshtastic_channels_decrypt_for_hash(uint8_t index, uint8_t wire_hash)
 	return channel_hashes[index] == wire_hash;
 }
 
+bool meshtastic_channels_is_default(uint8_t index)
+{
+	const meshtastic_Channel *ch = meshtastic_channels_get(index);
+	struct meshtastic_channel_key key;
+
+	if (ch == NULL || ch->role == meshtastic_Channel_Role_DISABLED) {
+		return false;
+	}
+
+	/* The name an unnamed channel takes on THIS preset -- the one the hash and
+	 * the frequency slot are derived from (see meshtastic_channels_get_name). */
+	if (strcmp(meshtastic_channels_get_name(index),
+		   meshtastic_preset_display_name(mt.modem_preset, mt.use_preset)) != 0) {
+		return false;
+	}
+
+	/* get_key expands the 1-byte "default" index to the 16-byte default PSK,
+	 * so both spellings of the default key land here. */
+	if (meshtastic_channels_get_key(index, &key) < 0) {
+		return false;
+	}
+
+	return key.len == sizeof(meshtastic_default_psk) &&
+	       memcmp(key.bytes, meshtastic_default_psk, key.len) == 0;
+}
+
 const char *meshtastic_channels_get_name(uint8_t index)
 {
 	const meshtastic_Channel *ch;

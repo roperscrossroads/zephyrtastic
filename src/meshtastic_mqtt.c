@@ -529,27 +529,13 @@ static meshtastic_Config_LoRaConfig_RegionCode mqtt_lora_region(void)
 	return meshtastic_Config_LoRaConfig_RegionCode_UNSET;
 }
 
+/* Reference channels.isDefaultChannel(primary). Used to compare the name to the
+ * literal "LongFast"; the reference compares to the active PRESET's name, which
+ * is what an unnamed channel is actually called on the air -- now shared with
+ * NeighborInfo's gate in meshtastic_channels_is_default(). */
 static bool mqtt_has_default_channel(void)
 {
-	const meshtastic_Channel *ch;
-	struct meshtastic_channel_key key;
-
-	ch = meshtastic_channels_get(meshtastic_channels_primary_index());
-	if (ch == NULL || ch->role == meshtastic_Channel_Role_DISABLED) {
-		return false;
-	}
-
-	if (strcmp(meshtastic_channels_get_name(meshtastic_channels_primary_index()),
-		   MESHTASTIC_CHANNEL_LONGFAST) != 0) {
-		return false;
-	}
-
-	if (meshtastic_channels_primary_key(&key) < 0) {
-		return false;
-	}
-
-	return (key.len == sizeof(meshtastic_default_psk)) &&
-	       (memcmp(key.bytes, meshtastic_default_psk, key.len) == 0);
+	return meshtastic_channels_is_default(meshtastic_channels_primary_index());
 }
 
 static uint32_t mqtt_map_position_precision(void)

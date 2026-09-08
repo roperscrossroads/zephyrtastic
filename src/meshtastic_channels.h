@@ -160,6 +160,22 @@ bool meshtastic_channels_decrypt_for_hash(uint8_t index, uint8_t wire_hash);
 const char *meshtastic_channels_get_name(uint8_t index);
 
 /**
+ * @brief Is slot @p index "the default channel" in the reference's sense
+ *        (Channels::isDefaultChannel): the default PSK, under the name the
+ *        active modem preset derives for an unnamed channel (LongFast on
+ *        LONG_FAST, ShortTurbo on SHORT_TURBO, ...)?
+ *
+ * The public channel, in other words. Several modules refuse to put certain
+ * traffic on it (MQTT's portnum skip list, NeighborInfo's LoRa gate). Note the
+ * comparison is against the PRESET's name, not the literal "LongFast": a node
+ * on ShortTurbo with an unnamed, default-keyed channel is on ITS default
+ * channel.
+ *
+ * @return false for a disabled/missing slot, a custom name, or a custom key.
+ */
+bool meshtastic_channels_is_default(uint8_t index);
+
+/**
  * @brief Pick the channel index to use when sending a packet.
  *
  * Resolution order:
