@@ -116,6 +116,8 @@ enum meshtastic_portnum {
 	MESHTASTIC_PORT_TELEMETRY = 67,
 	/** Traceroute (RouteDiscovery) path mapping. */
 	MESHTASTIC_PORT_TRACEROUTE = 70,
+	/** NeighborInfo: a node's directly-heard neighbors and their SNR. */
+	MESHTASTIC_PORT_NEIGHBORINFO = 71,
 	/** Private / application-defined. */
 	MESHTASTIC_PORT_PRIVATE = 256,
 	/**

@@ -49,6 +49,9 @@
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 #include "meshtastic_statusmessage.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
+#include "meshtastic_neighborinfo.h"
+#endif
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
@@ -874,6 +877,13 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 				 * (agents-dnr4.26). */
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 				meshtastic_statusmessage_config_changed();
+#endif
+			} else if (which == meshtastic_ModuleConfig_neighbor_info_tag) {
+				/* The reference reboots here; this port's module reads
+				 * enabled/interval/transmit from the store at every cycle,
+				 * so re-arming is the whole effect (agents-dnr4.19). */
+#if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
+				meshtastic_neighborinfo_config_changed();
 #endif
 			} else {
 				/* Every other module reads its section at init (the MQTT

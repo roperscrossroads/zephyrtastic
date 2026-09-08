@@ -1,0 +1,58 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_NEIGHBORINFO
+	bool "Meshtastic neighbor info"
+	default y
+	help
+	  The reference NeighborInfoModule: keeps a table of the nodes heard
+	  DIRECTLY (a packet whose hop_limit still equals its hop_start), with
+	  the SNR each was last heard at, and periodically broadcasts it as a
+	  NeighborInfo on NEIGHBORINFO_APP (port 71) so the mesh -- and a phone
+	  app or MQTT consumer -- can draw real topology instead of inferring
+	  it from traceroutes. Off by default at runtime: the switch is
+	  ModuleConfig.neighbor_info.enabled, set over the admin channel or
+	  `meshtastic neighbors enable`; there is no AUTO_SEND Kconfig here
+	  because the section's own `enabled` IS that switch. Also answers a
+	  unicast want_response request with its table.
+
+if MESHTASTIC_NEIGHBORINFO
+
+config MESHTASTIC_NEIGHBORINFO_INTERVAL_SEC
+	int "Default broadcast interval in seconds"
+	default 21600
+	range 60 604800
+	help
+	  Used when ModuleConfig.neighbor_info.update_interval is 0 (unset) or
+	  below MIN_INTERVAL_SEC. The reference default is 6 hours.
+
+config MESHTASTIC_NEIGHBORINFO_MIN_INTERVAL_SEC
+	int "Smallest broadcast interval a stored config may ask for"
+	default 14400
+	range 60 604800
+	help
+	  A stored update_interval below this is replaced by INTERVAL_SEC, as
+	  the reference does at set time (min_neighbor_info_broadcast_secs, 4 h)
+	  -- here in the module's own resolver so every writer is clamped, not
+	  only the admin path. The sim suite lowers it to run the cadence in
+	  virtual time.
+
+config MESHTASTIC_NEIGHBORINFO_TABLE_SIZE
+	int "Neighbor table size"
+	default 10
+	range 2 32
+	help
+	  Direct neighbors tracked in RAM. A NeighborInfo carries at most 10
+	  (the protobuf's bound); a larger table only changes which ones are
+	  forgotten when a busy mesh has more than fit. When full, the least
+	  recently heard neighbor is replaced.
+
+config MESHTASTIC_NEIGHBORINFO_REPLY_SUPPRESS_SEC
+	int "Minimum seconds between answered want_response requests"
+	default 180
+	range 1 86400
+	help
+	  The reference answers a NeighborInfo request at most once per three
+	  minutes, whoever asks.
+
+endif # MESHTASTIC_NEIGHBORINFO

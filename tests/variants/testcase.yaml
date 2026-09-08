@@ -54,6 +54,11 @@ tests:
   meshtastic.variants.no_statusmessage.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_STATUSMESSAGE=n
+  # Neighbor info absent: same shape (admin + shell carry an #if on it). No
+  # AUTO_SEND scenario -- the runtime `enabled` field is that switch.
+  meshtastic.variants.no_neighborinfo.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NEIGHBORINFO=n
   meshtastic.variants.no_nodedb.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_NODEDB=n

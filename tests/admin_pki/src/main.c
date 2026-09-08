@@ -41,6 +41,9 @@
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 #include "meshtastic_statusmessage.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
+#include "meshtastic_neighborinfo.h"
+#endif
 #include "meshtastic_preset.h"
 #include "meshtastic_admin_client.h"
 #include "meshtastic_phoneapi.h"
@@ -2333,6 +2336,51 @@ ZTEST(admin_pki, test_set_module_config_statusmessage_applies_live_without_reboo
 	zassert_equal(meshtastic_statusmessage_get(status, sizeof(status)), 0U, "cleared live");
 }
 #endif /* CONFIG_MESHTASTIC_STATUSMESSAGE */
+
+/* ---- agents-dnr4.19: ModuleConfig.neighbor_info applies live, no reboot ---- */
+
+#if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
+static size_t encode_admin_set_module_config_neighbor(bool enabled, uint32_t interval, bool lora,
+						      uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+	meshtastic_ModuleConfig *mc = &am.payload_variant.set_module_config;
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_module_config_tag;
+	mc->which_payload_variant = meshtastic_ModuleConfig_neighbor_info_tag;
+	mc->payload_variant.neighbor_info.enabled = enabled;
+	mc->payload_variant.neighbor_info.update_interval = interval;
+	mc->payload_variant.neighbor_info.transmit_over_lora = lora;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+ZTEST(admin_pki, test_set_module_config_neighbor_info_applies_live_without_reboot)
+{
+	struct meshtastic_neighborinfo_settings s;
+	uint8_t buf[256];
+	size_t len;
+	bool rebooting = true;
+
+	len = encode_admin_set_module_config_neighbor(true, 0U, false, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing_ex(buf, len, &rebooting),
+		      meshtastic_Routing_Error_NONE, "set must ACK clean");
+	zassert_false(rebooting, "a neighbor_info set must NOT schedule a reboot");
+	meshtastic_neighborinfo_settings(&s);
+	zassert_true(s.enabled, "the module sees it immediately");
+	zassert_false(s.transmit_over_lora, "");
+	zassert_equal(s.interval_secs, CONFIG_MESHTASTIC_NEIGHBORINFO_INTERVAL_SEC,
+		      "0 resolves to the compiled default");
+
+	/* Disable again so its cycle cannot fire into a later test. */
+	len = encode_admin_set_module_config_neighbor(false, 0U, false, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE,
+		      "disable must ACK clean");
+	meshtastic_neighborinfo_settings(&s);
+	zassert_false(s.enabled, "disabled live");
+}
+#endif /* CONFIG_MESHTASTIC_NEIGHBORINFO */
 
 ZTEST(admin_pki, test_remove_ignored_node_unignores)
 {

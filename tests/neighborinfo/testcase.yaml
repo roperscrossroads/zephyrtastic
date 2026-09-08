@@ -1,0 +1,25 @@
+common:
+  tags:
+    - meshtastic
+    - neighborinfo
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # Cadence, the LoRa gate, expiry and the reply throttle. The interval floor
+  # is lowered to the Kconfig minimum so the cadence runs in virtual time;
+  # INTERVAL is what a stored 0 resolves to.
+  meshtastic.neighborinfo.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NEIGHBORINFO_MIN_INTERVAL_SEC=60
+      - CONFIG_MESHTASTIC_NEIGHBORINFO_INTERVAL_SEC=60
+
+  # The smallest table the Kconfig allows: the only way the replace-oldest
+  # boundary is reachable without 11 peers.
+  meshtastic.neighborinfo.small_table.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NEIGHBORINFO_MIN_INTERVAL_SEC=60
+      - CONFIG_MESHTASTIC_NEIGHBORINFO_INTERVAL_SEC=60
+      - CONFIG_MESHTASTIC_NEIGHBORINFO_TABLE_SIZE=2
