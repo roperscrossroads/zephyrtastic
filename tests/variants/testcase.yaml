@@ -94,6 +94,45 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_GNSS_TIME_DEBUG=y
 
+  # The MQTT bridge is default-N and depends on a network stack the baseline does
+  # not carry, so until 2026-09-07 NO twister config had ever compiled
+  # meshtastic_mqtt.c -- 1425 lines, under -Werror, never. The first attempt found
+  # a defined-but-unused static (mqtt_queue_publish with MAP_REPORT=n, which is
+  # ITS default) that every bench image had been compiling without -Werror.
+  # native_sim's loopback interface satisfies NETWORKING without a TAP device.
+  # Boot is a build/link check only here: meshtastic_init() starts the bridge
+  # only when the app asks for WiFi, which the sweep harness does not.
+  meshtastic.variants.mqtt.native_sim:
+    extra_configs:
+      - CONFIG_NETWORKING=y
+      - CONFIG_NET_IPV4=y
+      - CONFIG_NET_TCP=y
+      - CONFIG_NET_UDP=y
+      - CONFIG_NET_SOCKETS=y
+      - CONFIG_DNS_RESOLVER=y
+      - CONFIG_MQTT_LIB=y
+      - CONFIG_NET_LOOPBACK=y
+      - CONFIG_NET_MGMT=y
+      - CONFIG_NET_MGMT_EVENT=y
+      - CONFIG_MESHTASTIC_MQTT=y
+  # MAP_REPORT is default-N inside an already default-N module: the arm nobody
+  # builds, squared. It carries the map-report encoder and the deferred publish
+  # queue the scenario above fences out.
+  meshtastic.variants.mqtt_map_report.native_sim:
+    extra_configs:
+      - CONFIG_NETWORKING=y
+      - CONFIG_NET_IPV4=y
+      - CONFIG_NET_TCP=y
+      - CONFIG_NET_UDP=y
+      - CONFIG_NET_SOCKETS=y
+      - CONFIG_DNS_RESOLVER=y
+      - CONFIG_MQTT_LIB=y
+      - CONFIG_NET_LOOPBACK=y
+      - CONFIG_NET_MGMT=y
+      - CONFIG_NET_MGMT_EVENT=y
+      - CONFIG_MESHTASTIC_MQTT=y
+      - CONFIG_MESHTASTIC_MQTT_MAP_REPORT=y
+
   # The floor: the radio and the router, and as little else as the Kconfig
   # allows. Catches a module that has quietly become load-bearing for the core.
   meshtastic.variants.minimal.native_sim:

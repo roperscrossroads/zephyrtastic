@@ -402,6 +402,11 @@ static void mqtt_drop_oldest_locked(void)
 	mqtt_ctx.queue_count--;
 }
 
+#if IS_ENABLED(CONFIG_MESHTASTIC_MQTT_MAP_REPORT)
+/* Only the map report defers a ready-made publish this way (the uplink path has
+ * its own encode queue), so this rides the same compile gate. Left unfenced it is
+ * defined-but-unused with MAP_REPORT=n — which is the default, and which twister's
+ * -Werror refuses. The first MQTT build the variants sweep ever did found it. */
 static void mqtt_queue_publish(const char *topic, const uint8_t *payload, size_t len)
 {
 	struct mqtt_pub_entry entry;
@@ -433,6 +438,7 @@ static void mqtt_queue_publish(const char *topic, const uint8_t *payload, size_t
 	k_mutex_unlock(&mqtt_ctx.lock);
 	mqtt_work_notify();
 }
+#endif /* CONFIG_MESHTASTIC_MQTT_MAP_REPORT */
 
 static int mqtt_do_publish(const char *topic, const uint8_t *payload, size_t len)
 {
