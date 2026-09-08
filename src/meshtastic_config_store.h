@@ -110,6 +110,13 @@ int meshtastic_config_store_set_node_info_interval(uint32_t secs);
 /** Set the node owner (long/short name, licensed/unmessagable flags). Persists. */
 int meshtastic_config_store_set_owner(const meshtastic_User *user);
 
+/* The canned-message list: the reference CannedMessageModuleConfig.messages
+ * (200 chars + NUL, '|'-separated), edited by the app over the admin channel.
+ * Persisted under its own settings key, like the reference's own file. */
+#define MESHTASTIC_CANNED_MESSAGES_LEN 201U
+size_t meshtastic_config_store_get_canned_messages(char *buf, size_t cap);
+int meshtastic_config_store_set_canned_messages(const char *messages);
+
 /** Read the stored owner flags (either pointer may be NULL). */
 void meshtastic_config_store_get_owner_flags(bool *is_licensed, bool *is_unmessagable);
 

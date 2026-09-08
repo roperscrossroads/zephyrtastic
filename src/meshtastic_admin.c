@@ -590,11 +590,19 @@ static bool handle_get_ringtone(void)
 	return true;
 }
 
+/* The canned-message LIST is stored (agents-dnr4.18): the reference keeps it in
+ * the module's own file and serves it here (handleGetCannedMessageModuleMessages).
+ * The on-device module that would SEND from it needs an input device this port
+ * has no subsystem for, so the list is all there is -- which is also all the
+ * reference does on input-less hardware. */
 static bool handle_get_canned_messages(void)
 {
 	admin_resp = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
 	admin_resp.which_payload_variant =
 		meshtastic_AdminMessage_get_canned_message_module_messages_response_tag;
+	(void)meshtastic_config_store_get_canned_messages(
+		admin_resp.payload_variant.get_canned_message_module_messages_response,
+		sizeof(admin_resp.payload_variant.get_canned_message_module_messages_response));
 	admin_emit_reply(&admin_resp);
 	return true;
 }
@@ -949,6 +957,20 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		if (ret < 0) {
 			LOG_WRN("admin: set_channel failed (%d)", ret);
 			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+		}
+		break;
+	case meshtastic_AdminMessage_set_canned_message_module_messages_tag:
+		/* Reference handleSetCannedMessageModuleMessages: an empty string is a
+		 * no-op (it never clears), a non-empty one replaces the stored list.
+		 * No reboot: nothing on this node consumes the list at runtime. */
+		if (admin_req.payload_variant.set_canned_message_module_messages[0] != '\0') {
+			ret = meshtastic_config_store_set_canned_messages(
+				admin_req.payload_variant.set_canned_message_module_messages);
+			if (ret < 0) {
+				LOG_WRN("admin: set_canned_message_module_messages failed (%d)",
+					ret);
+				ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+			}
 		}
 		break;
 	case meshtastic_AdminMessage_set_owner_tag:

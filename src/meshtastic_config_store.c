@@ -46,6 +46,14 @@ struct store_owner_record {
 	uint8_t is_unmessagable;
 } __packed;
 
+/* The canned-message list (reference CannedMessageModuleConfig.messages, its own
+ * file upstream, its own settings key here): one '|'-separated string the app
+ * edits over set_/get_canned_message_module_messages (agents-dnr4.18). */
+struct store_canned_record {
+	uint8_t version;
+	char messages[MESHTASTIC_CANNED_MESSAGES_LEN];
+} __packed;
+
 /* Size of an owner record written before the licensed/unmessagable flags were
  * appended — used to accept older blobs without the trailing flags. */
 #define STORE_OWNER_RECORD_V1_LEN offsetof(struct store_owner_record, is_licensed)
@@ -127,6 +135,7 @@ static struct {
 	char short_name[OWNER_SHORT_NAME_LEN];
 	bool is_licensed;
 	bool is_unmessagable;
+	char canned_messages[MESHTASTIC_CANNED_MESSAGES_LEN];
 	meshtastic_Channel channels[MESHTASTIC_MAX_CHANNELS];
 	meshtastic_Config configs[ARRAY_SIZE(config_names)];
 	meshtastic_ModuleConfig modules[ARRAY_SIZE(module_names)];
@@ -1525,6 +1534,61 @@ static int setting_set_owner(const void *buf, size_t len)
 	return 0;
 }
 
+static int setting_get_canned(void *buf, size_t buf_len)
+{
+	struct store_canned_record rec = {.version = STORE_RECORD_VERSION};
+
+	if (buf_len < sizeof(rec)) {
+		return -ENOMEM;
+	}
+
+	store_lock();
+	copy_string(rec.messages, sizeof(rec.messages), store.canned_messages);
+	store_unlock();
+
+	memcpy(buf, &rec, sizeof(rec));
+	return sizeof(rec);
+}
+
+static int setting_set_canned(const void *buf, size_t len)
+{
+	const struct store_canned_record *rec = buf;
+
+	if (len < 2U || rec->version != STORE_RECORD_VERSION) {
+		return -EINVAL;
+	}
+
+	store_lock();
+	copy_fixed_string(store.canned_messages, sizeof(store.canned_messages), rec->messages,
+			  MIN(len - 1U, sizeof(rec->messages)));
+	store_unlock();
+
+	return 0;
+}
+
+size_t meshtastic_config_store_get_canned_messages(char *buf, size_t cap)
+{
+	if (buf == NULL || cap == 0U) {
+		return 0U;
+	}
+	store_lock();
+	copy_string(buf, cap, store.canned_messages);
+	store_unlock();
+	return strlen(buf);
+}
+
+int meshtastic_config_store_set_canned_messages(const char *messages)
+{
+	if (messages == NULL) {
+		return -EINVAL;
+	}
+	store_lock();
+	copy_string(store.canned_messages, sizeof(store.canned_messages), messages);
+	store_unlock();
+	store_schedule_save();
+	return 0;
+}
+
 int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_len)
 {
 	uint8_t index;
@@ -1537,6 +1601,10 @@ int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_l
 
 	if (strcmp(key, "owner") == 0) {
 		return setting_get_owner(buf, buf_len);
+	}
+
+	if (strcmp(key, "canned") == 0) {
+		return setting_get_canned(buf, buf_len);
 	}
 
 	if (strcmp(key, "position_fixed") == 0) {
@@ -1623,6 +1691,10 @@ int meshtastic_config_store_setting_set(const char *key, const void *buf, size_t
 
 	if (strcmp(key, "owner") == 0) {
 		return setting_set_owner(buf, len);
+	}
+
+	if (strcmp(key, "canned") == 0) {
+		return setting_set_canned(buf, len);
 	}
 
 	if (strcmp(key, "position_fixed") == 0) {
@@ -1748,6 +1820,11 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 	}
 
 	ret = export_one(export_func, "owner");
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = export_one(export_func, "canned");
 	if (ret < 0) {
 		return ret;
 	}

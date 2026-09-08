@@ -2388,6 +2388,62 @@ ZTEST(admin_pki, test_set_module_config_neighbor_info_applies_live_without_reboo
 }
 #endif /* CONFIG_MESHTASTIC_NEIGHBORINFO */
 
+/* ---- agents-dnr4.18: the canned-message list is stored, served and survives a reboot */
+
+static size_t encode_admin_canned(bool set, const char *messages, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	if (set) {
+		am.which_payload_variant =
+			meshtastic_AdminMessage_set_canned_message_module_messages_tag;
+		strncpy(am.payload_variant.set_canned_message_module_messages, messages,
+			sizeof(am.payload_variant.set_canned_message_module_messages) - 1U);
+	} else {
+		am.which_payload_variant =
+			meshtastic_AdminMessage_get_canned_message_module_messages_request_tag;
+		am.payload_variant.get_canned_message_module_messages_request = true;
+	}
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+ZTEST(admin_pki, test_canned_messages_round_trip_and_survive_a_real_reboot)
+{
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	char stored[MESHTASTIC_CANNED_MESSAGES_LEN];
+	uint8_t buf[512];
+	size_t len;
+
+	len = encode_admin_canned(false, NULL, buf, sizeof(buf));
+	zassert_true(send_local_admin_and_pop_reply(buf, len, &resp), "get must reply");
+	zassert_equal(resp.which_payload_variant,
+		      meshtastic_AdminMessage_get_canned_message_module_messages_response_tag, "");
+	zassert_equal(resp.payload_variant.get_canned_message_module_messages_response[0], '\0',
+		      "nothing stored yet: the empty string (reference)");
+
+	len = encode_admin_canned(true, "On my way|Yes|No|Where are you?", buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE,
+		      "set must ACK clean");
+	zassert_ok(settings_save_subtree("meshtastic"), "flush failed");
+
+	/* Reference: an empty set never clears the list. */
+	len = encode_admin_canned(true, "", buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE, "");
+	zassert_equal(meshtastic_config_store_get_canned_messages(stored, sizeof(stored)),
+		      strlen("On my way|Yes|No|Where are you?"), "an empty set is a no-op");
+
+	/* A real reboot: reload from NVS. */
+	zassert_ok(meshtastic_config_store_set_canned_messages("unflushed"), "");
+	zassert_ok(settings_load_subtree("meshtastic"), "settings reload failed");
+	len = encode_admin_canned(false, NULL, buf, sizeof(buf));
+	zassert_true(send_local_admin_and_pop_reply(buf, len, &resp), "get must reply");
+	zassert_str_equal(resp.payload_variant.get_canned_message_module_messages_response,
+			  "On my way|Yes|No|Where are you?",
+			  "the FLUSHED list comes back, not the unflushed edit");
+}
+
 /* ---- agents-dnr4.20: ModuleConfig.traffic_management applies live; direct response refused */
 
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
