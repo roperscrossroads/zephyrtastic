@@ -1,0 +1,33 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_EXTNOTIFY
+	bool "Meshtastic external notification (board LED)"
+	default y
+	depends on GPIO
+	help
+	  The reference ExternalNotificationModule's generic output role: on an
+	  incoming text (TEXT_MESSAGE_APP, ALERT_APP, DETECTION_SENSOR_APP) from
+	  another node, drive the board's led0 for output_ms, or toggle it every
+	  output_ms for nag_timeout seconds; alert_message fires on any
+	  non-muted message, alert_bell on one carrying an ASCII BEL (0x07).
+	  Driven by ModuleConfig.external_notification, applied live.
+
+	  What this port cannot drive is refused at write time rather than
+	  stored and ignored: a raw pin number in `output` (0 = the board LED is
+	  the only meaning here), vibra and buzzer outputs and their alert
+	  flags, PWM/I2S ringtone playback (set_ringtone is refused too). A
+	  board with no led0 alias refuses `enabled`.
+
+if MESHTASTIC_EXTNOTIFY
+
+config MESHTASTIC_EXTNOTIFY_SEED_ENABLED
+	bool "First-boot default: enabled"
+	default n
+	help
+	  The reference ships the module enabled on boards that define a
+	  notification output. Off here by default: a bench node blinking on
+	  every text is a surprise, not a feature. The rest of the seed matches
+	  the reference (active-high, alert on message, 1000 ms, 60 s nag).
+
+endif # MESHTASTIC_EXTNOTIFY

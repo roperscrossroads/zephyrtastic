@@ -50,6 +50,9 @@
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 #include "meshtastic_traffic.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
+#include "meshtastic_extnotify.h"
+#endif
 #include "meshtastic_preset.h"
 #include "meshtastic_admin_client.h"
 #include "meshtastic_phoneapi.h"
@@ -2387,6 +2390,66 @@ ZTEST(admin_pki, test_set_module_config_neighbor_info_applies_live_without_reboo
 	zassert_false(s.enabled, "disabled live");
 }
 #endif /* CONFIG_MESHTASTIC_NEIGHBORINFO */
+
+/* ---- agents-dnr4.17: external_notification applies live; buzzer/ringtone refused ---- */
+
+#if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
+static size_t encode_admin_set_extnotify(bool enabled, bool buzzer, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+	meshtastic_ModuleConfig_ExternalNotificationConfig *c =
+		&am.payload_variant.set_module_config.payload_variant.external_notification;
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_module_config_tag;
+	am.payload_variant.set_module_config.which_payload_variant =
+		meshtastic_ModuleConfig_external_notification_tag;
+	c->enabled = enabled;
+	c->active = true;
+	c->alert_message = true;
+	c->output_ms = 500U;
+	c->alert_message_buzzer = buzzer;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+ZTEST(admin_pki, test_set_module_config_extnotify_applies_live_and_refuses_buzzer)
+{
+	struct meshtastic_extnotify_settings s;
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	uint8_t buf[512];
+	pb_ostream_t os;
+	size_t len;
+	bool rebooting = true;
+
+	len = encode_admin_set_extnotify(true, false, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing_ex(buf, len, &rebooting),
+		      meshtastic_Routing_Error_NONE, "LED-only config: accepted");
+	zassert_false(rebooting, "applied live");
+	meshtastic_extnotify_settings(&s);
+	zassert_true(s.enabled, "");
+	zassert_equal(s.output_ms, 500U, "");
+
+	len = encode_admin_set_extnotify(true, true, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_BAD_REQUEST,
+		      "a buzzer alert on a board with no buzzer: NAK, not store-and-ignore");
+	meshtastic_extnotify_settings(&s);
+	zassert_equal(s.output_ms, 500U, "the refused set left the store alone");
+
+	/* A ringtone plays on a buzzer: refused the same way. */
+	am.which_payload_variant = meshtastic_AdminMessage_set_ringtone_message_tag;
+	strcpy(am.payload_variant.set_ringtone_message, "a:d=8,o=5,b=125:4e6,4e6");
+	os = pb_ostream_from_buffer(buf, sizeof(buf));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "");
+	zassert_equal(send_local_admin_and_pop_routing(buf, os.bytes_written),
+		      meshtastic_Routing_Error_BAD_REQUEST, "set_ringtone: no buzzer, NAK");
+
+	/* Back off so no cycle outlives this test. */
+	len = encode_admin_set_extnotify(false, false, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE, "");
+	zassert_false(meshtastic_extnotify_nagging(), "disabling stops any cycle");
+}
+#endif /* CONFIG_MESHTASTIC_EXTNOTIFY */
 
 /* ---- agents-dnr4.18: the canned-message list is stored, served and survives a reboot */
 

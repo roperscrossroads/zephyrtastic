@@ -71,6 +71,11 @@ tests:
   meshtastic.variants.no_traffic.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_TRAFFIC=n
+  # External notification absent: the admin set path, the metadata bit, the
+  # config-store seed and the shell each carry an #if on it.
+  meshtastic.variants.no_extnotify.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_EXTNOTIFY=n
   meshtastic.variants.no_nodedb.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_NODEDB=n

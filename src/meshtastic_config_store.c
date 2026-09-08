@@ -633,6 +633,19 @@ static void seed_module_defaults(void)
 		init_module_entry(i);
 	}
 
+#if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
+	/* Reference NodeDB defaults for a board with a notification output:
+	 * active-high, alert on message, 1 s pulses, 60 s nag. Enabled is a
+	 * Kconfig choice (off by default here). */
+	idx = index_for_module_tag(meshtastic_ModuleConfig_external_notification_tag);
+	store.modules[idx].payload_variant.external_notification.enabled =
+		IS_ENABLED(CONFIG_MESHTASTIC_EXTNOTIFY_SEED_ENABLED);
+	store.modules[idx].payload_variant.external_notification.active = true;
+	store.modules[idx].payload_variant.external_notification.alert_message = true;
+	store.modules[idx].payload_variant.external_notification.output_ms = 1000U;
+	store.modules[idx].payload_variant.external_notification.nag_timeout = 60U;
+#endif
+
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 	/* Reference installTrafficManagementDefaults: position dedup ships enabled
 	 * (5 h); everything that reshapes relayed traffic stays opt-in (0). */

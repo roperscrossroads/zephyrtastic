@@ -58,6 +58,9 @@
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 #include "meshtastic_traffic.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
+#include "meshtastic_extnotify.h"
+#endif
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
@@ -431,6 +434,25 @@ int meshtastic_admin_prepare_module_config_write(meshtastic_ModuleConfig *module
 		return ret;
 	}
 #endif
+
+	if (module->which_payload_variant == meshtastic_ModuleConfig_external_notification_tag) {
+#if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
+		/* Buzzer/vibra/PWM/raw pins are refused, not stored-and-ignored
+		 * (agents-dnr4.17). */
+		int ret = meshtastic_extnotify_validate(&module->payload_variant.external_notification);
+
+		if (ret < 0) {
+			LOG_WRN("admin: external_notification refused (%d): only the board LED "
+				"is supported on this port",
+				ret);
+		}
+		return ret;
+#else
+		LOG_WRN("admin: external_notification config refused: module not built into "
+			"this image");
+		return -ENOTSUP;
+#endif
+	}
 
 	if (module->which_payload_variant != meshtastic_ModuleConfig_mqtt_tag) {
 		return 0;
@@ -936,6 +958,11 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 #if defined(CONFIG_MESHTASTIC_MESHBEACON)
 				meshtastic_meshbeacon_config_changed();
 #endif
+			} else if (which == meshtastic_ModuleConfig_external_notification_tag) {
+				/* Read per event; a disable stops a running cycle (agents-dnr4.17). */
+#if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
+				meshtastic_extnotify_config_changed();
+#endif
 			} else if (which == meshtastic_ModuleConfig_traffic_management_tag) {
 				/* The reference reboots; this port's gate reads the section
 				 * per packet, so there is nothing to restart (agents-dnr4.20). */
@@ -958,6 +985,12 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 			LOG_WRN("admin: set_channel failed (%d)", ret);
 			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
 		}
+		break;
+	case meshtastic_AdminMessage_set_ringtone_message_tag:
+		/* A ringtone plays on a buzzer; no board this port supports has one, so
+		 * the write is refused rather than stored for nothing (agents-dnr4.17). */
+		LOG_WRN("admin: set_ringtone refused: no buzzer on this port");
+		ack_err = meshtastic_Routing_Error_BAD_REQUEST;
 		break;
 	case meshtastic_AdminMessage_set_canned_message_module_messages_tag:
 		/* Reference handleSetCannedMessageModuleMessages: an empty string is a

@@ -110,6 +110,10 @@ enum meshtastic_portnum {
 	MESHTASTIC_PORT_ROUTING = 5,
 	/** AdminMessage config read/write (ADMIN_APP). */
 	MESHTASTIC_PORT_ADMIN = 6,
+	/** Detection sensor state text (a text payload for notifications). */
+	MESHTASTIC_PORT_DETECTION_SENSOR = 10,
+	/** Critical alert text (a text payload for notifications). */
+	MESHTASTIC_PORT_ALERT = 11,
 	/** Node status string. */
 	MESHTASTIC_PORT_NODE_STATUS = 36,
 	/** MeshBeacon: a zero-hop "join my mesh" announcement (text + channel offer). */

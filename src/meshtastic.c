@@ -83,6 +83,9 @@ int meshtastic_meshbeacon_init(void);
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 int meshtastic_traffic_init(void);
 #endif
+#if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
+int meshtastic_extnotify_init(void);
+#endif
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
 int meshtastic_message_init(void);
 #endif
@@ -359,7 +362,8 @@ void meshtastic_fill_device_metadata(meshtastic_DeviceMetadata *md)
 		/* No handler in the port — always excluded. Note MESHTASTIC_SERIAL is
 		 * the PhoneAPI transport, not the on-mesh Serial module. */
 		meshtastic_ExcludedModules_SERIAL_CONFIG |
-		meshtastic_ExcludedModules_EXTNOTIF_CONFIG |
+		(IS_ENABLED(CONFIG_MESHTASTIC_EXTNOTIFY) ? 0U
+							: meshtastic_ExcludedModules_EXTNOTIF_CONFIG) |
 		meshtastic_ExcludedModules_STOREFORWARD_CONFIG |
 		meshtastic_ExcludedModules_RANGETEST_CONFIG |
 		meshtastic_ExcludedModules_CANNEDMSG_CONFIG |
@@ -651,6 +655,13 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 	ret = meshtastic_traffic_init();
+	if (ret < 0) {
+		return ret;
+	}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
+	ret = meshtastic_extnotify_init();
 	if (ret < 0) {
 		return ret;
 	}

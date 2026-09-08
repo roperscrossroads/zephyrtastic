@@ -1,0 +1,13 @@
+common:
+  tags:
+    - meshtastic
+    - extnotify
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # The LED notifier: pulse, nag cycle, bell-only, channel mute, polarity, the
+  # exemptions, stop, and the refusal of outputs this port cannot drive.
+  meshtastic.extnotify.native_sim: {}
