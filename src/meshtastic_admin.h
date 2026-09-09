@@ -74,6 +74,11 @@ bool meshtastic_admin_is_managed(void);
  */
 bool meshtastic_admin_reboot_scheduled(void);
 
+#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
+/** @brief A deferred enter-DFU (admin enter_dfu_mode_request) is pending. */
+bool meshtastic_admin_dfu_scheduled(void);
+#endif
+
 /** Cancel a scheduled config-change reboot (used by tests to avoid rebooting). */
 void meshtastic_admin_cancel_reboot(void);
 

@@ -2855,6 +2855,28 @@ ZTEST(admin_pki, test_keyverify_admin_path_timeout_and_cooldown)
 }
 #endif /* CONFIG_MESHTASTIC_KEYVERIFY */
 
+/* ---- agents-dnr4.12: enter_dfu_mode_request ---- */
+
+/* native_sim has no bootloader to enter (like the ESP32-S3, where the ROM
+ * download mode needs a GPIO0 strap). The request is refused with a NAK, not
+ * dropped in silence: the phone must learn nothing happened. The nRF52 arm --
+ * the deferred hand-off to meshtastic_dfu_enter() -- only builds on that SoC
+ * and is compile-checked on the XIAO image. */
+ZTEST(admin_pki, test_enter_dfu_mode_is_refused_where_there_is_no_bootloader_path)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	uint8_t buf[32];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+
+	am.which_payload_variant = meshtastic_AdminMessage_enter_dfu_mode_request_tag;
+	am.payload_variant.enter_dfu_mode_request = true;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "");
+	zassert_equal(send_local_admin_and_pop_routing(buf, os.bytes_written),
+		      IS_ENABLED(CONFIG_MESHTASTIC_DFU_TRIGGER) ? meshtastic_Routing_Error_NONE
+							       : meshtastic_Routing_Error_BAD_REQUEST,
+		      "no software DFU path here: NAK");
+}
+
 /* ---- agents-dnr4.9: ModuleConfig.serial -- no SerialModule on this port ---- */
 
 static size_t encode_admin_set_serial(bool enabled, uint8_t *buf, size_t cap)

@@ -46,6 +46,9 @@
 #endif
 #include "meshtastic_config_store.h"
 #include "meshtastic_telemetry_internal.h"
+#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
+#include "meshtastic_dfu_trigger.h"
+#endif
 #include "meshtastic_mqtt_config.h"
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 #include "meshtastic_statusmessage.h"
@@ -192,6 +195,28 @@ static void admin_reset_reboot_work_fn(struct k_work *work)
 	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_ADMIN, "post-reset");
 	sys_reboot(SYS_REBOOT_COLD);
 }
+
+#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
+/* DFU work: flush like the reboot path, then hand the board to its bootloader.
+ * One second is enough for the ACK to leave over BLE or the serial link. */
+#define ADMIN_DFU_SECONDS 1
+
+static void admin_dfu_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	meshtastic_settings_flush();
+#endif
+	meshtastic_dfu_enter(false);
+}
+static K_WORK_DELAYABLE_DEFINE(admin_dfu_work, admin_dfu_work_fn);
+
+bool meshtastic_admin_dfu_scheduled(void)
+{
+	return k_work_delayable_is_pending(&admin_dfu_work);
+}
+#endif /* CONFIG_MESHTASTIC_DFU_TRIGGER */
 
 #if defined(CONFIG_POWEROFF)
 /* Shutdown work: flush like the reboot path, then power off. On the ESP32-S3
@@ -1319,11 +1344,28 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		break;
 	}
 
-	/* DFU: the ESP32-S3 ROM download mode needs a GPIO0 strap at hardware reset,
-	 * so there is no software path to enter it (unlike nRF52/RP2040/STM32). The
-	 * port's real update route is OTA via mcumgr. Log and drop, don't fake it. */
+	/* DFU (agents-dnr4.12). On the nRF52 kits the bootloader is one retained
+	 * register and a reset away (meshtastic_dfu_trigger.c: the GPREGRET magic
+	 * the Adafruit bootloader honours), which is what the reference's
+	 * enterDfuMode() does on ARCH_NRF52 -- UF2 mode, drive plus serial DFU. The
+	 * reference resets at once; here the entry is deferred a moment so the
+	 * routing ACK leaves first and the phone sees "accepted" rather than a
+	 * dropped link. As in the reference, a remote admin may ask too: on this
+	 * bench every node sits on a USB host, and a node that does not is the
+	 * operator's call, not this code's.
+	 *
+	 * The ESP32-S3 ROM download mode needs a GPIO0 strap at hardware reset, so
+	 * there is no software path there: the request is REFUSED (NAK), not
+	 * silently dropped, so the phone learns it did nothing. */
 	case meshtastic_AdminMessage_enter_dfu_mode_request_tag:
-		LOG_WRN("admin: enter_dfu_mode unsupported on this platform (use OTA) — ignored");
+#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
+		LOG_WRN("admin: entering the bootloader (DFU) in %d s", ADMIN_DFU_SECONDS);
+		k_work_reschedule(&admin_dfu_work, K_SECONDS(ADMIN_DFU_SECONDS));
+#else
+		LOG_WRN("admin: enter_dfu_mode refused: no software path into a bootloader "
+			"on this platform (flash over USB)");
+		ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+#endif
 		break;
 
 	default:
