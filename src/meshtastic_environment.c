@@ -297,6 +297,10 @@ MESHTASTIC_MODULE_DEFINE(environment_telemetry, MESHTASTIC_PORT_TELEMETRY, 0, NU
 static K_THREAD_STACK_DEFINE(env_stack, 2048);
 static struct k_thread env_thread;
 
+/* Cadence from ModuleConfig.telemetry (agents-dnr4.10): re-resolved at every
+ * deadline, and a config write wakes the sleep early
+ * (meshtastic_telemetry_config_changed) so a new interval or a disable applies
+ * now. A sleep that was cut short returns non-zero and is not a deadline. */
 static void env_thread_fn(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
@@ -304,8 +308,20 @@ static void env_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	while (true) {
-		k_sleep(K_SECONDS(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_INTERVAL_SEC));
-		(void)meshtastic_send_environment(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
+		struct meshtastic_telemetry_settings s;
+
+		meshtastic_telemetry_settings(&s);
+		if (!s.environment_enabled) {
+			k_sleep(K_SECONDS(3600));
+			continue;
+		}
+		if (k_sleep(K_SECONDS(MAX(s.environment_interval_sec, 1U))) != 0) {
+			continue;
+		}
+		meshtastic_telemetry_settings(&s);
+		if (s.environment_enabled) {
+			(void)meshtastic_send_environment(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
+		}
 	}
 }
 #endif
@@ -322,6 +338,7 @@ int meshtastic_environment_init(void)
 	k_thread_create(&env_thread, env_stack, K_THREAD_STACK_SIZEOF(env_stack), env_thread_fn,
 			NULL, NULL, NULL, CONFIG_MESHTASTIC_THREAD_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(&env_thread, "meshtastic_env");
+	meshtastic_telemetry_cadence_watch(&env_thread);
 #endif
 #else
 	LOG_WRN("CONFIG_MESHTASTIC_ENVIRONMENT_METRICS enabled but no "

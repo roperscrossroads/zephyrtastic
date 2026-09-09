@@ -1,0 +1,16 @@
+# The telemetry broadcast thread against ModuleConfig.telemetry, on the sim
+# radio in simulated time: the deadline follows the stored interval, a write
+# re-arms it without a reboot, a disable stops it, and a record that nobody
+# ever wrote follows the build's seed after a load (agents-dnr4.10).
+common:
+  tags:
+    - meshtastic
+    - telemetry
+    - lora_sim
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.telemetry_cadence.native_sim: {}

@@ -625,6 +625,21 @@ static void seed_config_defaults(const struct meshtastic_config *cfg)
 #endif
 }
 
+/* The two telemetry broadcast flags follow the build's AUTO_SEND choices
+ * (agents-dnr4.10). The reference ships both OFF (stock 2.7 broadcasts no
+ * device metrics until the user enables them); this port's Kconfig default is
+ * ON, and that is the one documented divergence -- flip the Kconfig for
+ * parity. Intervals stay 0 and coalesce to the role-aware default at read. */
+static void seed_telemetry_flags(void)
+{
+	int idx = index_for_module_tag(meshtastic_ModuleConfig_telemetry_tag);
+
+	store.modules[idx].payload_variant.telemetry.device_telemetry_enabled =
+		IS_ENABLED(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND);
+	store.modules[idx].payload_variant.telemetry.environment_measurement_enabled =
+		IS_ENABLED(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND);
+}
+
 static void seed_module_defaults(void)
 {
 	int idx;
@@ -653,6 +668,8 @@ static void seed_module_defaults(void)
 	store.modules[idx].payload_variant.traffic_management.position_min_interval_secs =
 		CONFIG_MESHTASTIC_TRAFFIC_POSITION_MIN_INTERVAL_SEC;
 #endif
+
+	seed_telemetry_flags();
 
 	idx = index_for_module_tag(meshtastic_ModuleConfig_mqtt_tag);
 	store.modules[idx].payload_variant.mqtt.enabled = IS_ENABLED(CONFIG_MESHTASTIC_MQTT);
@@ -771,6 +788,17 @@ int meshtastic_config_store_apply_core(void)
 	int ret;
 
 	store_lock();
+
+	/* Runs right after the settings load. Every save persists EVERY module
+	 * record, so a node flashed from a build that never read the telemetry
+	 * flags carries them as zeros -- and a naive gate on them would silence
+	 * device metrics across the fleet at the next flash. A section whose
+	 * write-stamp is unset was never configured by anyone (only an admin or
+	 * cluster write stamps it), so its flags follow the build's seed. */
+	if (meshtastic_hlc_stamp_is_unset(
+		    &store.module_stamps[index_for_module_tag(meshtastic_ModuleConfig_telemetry_tag)])) {
+		seed_telemetry_flags();
+	}
 
 	mt.long_name = store.long_name;
 	mt.short_name = store.short_name;

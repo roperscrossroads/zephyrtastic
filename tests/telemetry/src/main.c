@@ -42,6 +42,8 @@
 #include <zephyr/meshtastic/nodedb.h>
 
 #include "meshtastic_clock.h"
+#include "meshtastic_channels.h"
+#include "meshtastic_config_store.h"
 
 /* Mirrors LOCAL_STATS_ONLINE_SEC in meshtastic_metrics.c -- upstream's
  * NUM_ONLINE_SECS. Duplicated rather than exported: the constant is a policy
@@ -276,4 +278,160 @@ ZTEST(local_stats, test_push_burst_stays_bounded)
 
 	zassert_equal(meshtastic_phoneapi_pending_count(&api), Q_SIZE,
 		      "the queue is bounded; a stalled phone cannot make it grow");
+}
+
+/* ------------------------------------------------------------------ */
+/* Cadence: ModuleConfig.telemetry resolved (agents-dnr4.10)           */
+/* ------------------------------------------------------------------ */
+
+/* The stack is still never initialised here; the resolver reads the config
+ * store and the channel table, and both stand on their own. The suite seeds
+ * the store the way meshtastic_init() would and puts the channel table on the
+ * default channel, because the default-channel coercion is one of the rules. */
+static void cadence_before(void *fixture)
+{
+	static const struct meshtastic_config cfg = {
+		.node_id = 0x0A0A0A0AU,
+		.psk = meshtastic_default_psk,
+		.psk_len = sizeof(meshtastic_default_psk),
+		.channel_name = MESHTASTIC_CHANNEL_LONGFAST,
+	};
+
+	ARG_UNUSED(fixture);
+	zassert_ok(meshtastic_channels_init_defaults(), "channel defaults");
+	zassert_ok(meshtastic_config_store_seed(&cfg), "store seed");
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	mt.modem.spread_factor = 11U; /* LongFast: SF11 / 250 kHz */
+	mt.modem.bandwidth_hz = 250000U;
+}
+
+ZTEST_SUITE(telemetry_cadence, NULL, NULL, cadence_before, NULL, NULL);
+
+static void store_telemetry(uint32_t device_iv, bool device_en, uint32_t env_iv, bool env_en)
+{
+	meshtastic_ModuleConfig mod = meshtastic_ModuleConfig_init_zero;
+
+	mod.which_payload_variant = meshtastic_ModuleConfig_telemetry_tag;
+	mod.payload_variant.telemetry.device_update_interval = device_iv;
+	mod.payload_variant.telemetry.device_telemetry_enabled = device_en;
+	mod.payload_variant.telemetry.environment_update_interval = env_iv;
+	mod.payload_variant.telemetry.environment_measurement_enabled = env_en;
+	zassert_ok(meshtastic_config_store_set_module(&mod), "store write");
+}
+
+/* Rename the primary channel: no longer "the default channel", so the
+ * minimum-coercion rule must not apply. */
+static void leave_the_default_channel(void)
+{
+	meshtastic_Channel ch = *meshtastic_channels_get(meshtastic_channels_primary_index());
+
+	strcpy(ch.settings.name, "bench");
+	zassert_ok(meshtastic_channels_set_slot(meshtastic_channels_primary_index(), &ch), "");
+}
+
+ZTEST(telemetry_cadence, test_seed_follows_the_build)
+{
+	struct meshtastic_telemetry_settings s;
+
+	meshtastic_telemetry_settings(&s);
+	zassert_equal(s.device_enabled, IS_ENABLED(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND),
+		      "device flag seeded from AUTO_SEND");
+	zassert_equal(s.device_interval_sec, CONFIG_MESHTASTIC_DEVICE_METRICS_INTERVAL_SEC,
+		      "zero interval coalesces to the Kconfig default");
+	zassert_false(s.environment_enabled, "no environment module in this build");
+}
+
+ZTEST(telemetry_cadence, test_zero_interval_is_role_aware)
+{
+	struct meshtastic_telemetry_settings s;
+
+	store_telemetry(0U, true, 0U, false);
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+	meshtastic_telemetry_settings(&s);
+	zassert_equal(s.device_interval_sec, 12U * 3600U, "router default is ONE_DAY / 2");
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER_LATE);
+	meshtastic_telemetry_settings(&s);
+	zassert_equal(s.device_interval_sec, 12U * 3600U, "router_late too");
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	meshtastic_telemetry_settings(&s);
+	zassert_equal(s.device_interval_sec, CONFIG_MESHTASTIC_DEVICE_METRICS_INTERVAL_SEC, "");
+}
+
+ZTEST(telemetry_cadence, test_default_channel_coerces_a_short_interval)
+{
+	struct meshtastic_telemetry_settings s;
+
+	/* Reference NodeDB::init: on a default channel, below the role-aware
+	 * minimum -> the minimum (30 min; 12 h for a router). */
+	store_telemetry(600U, true, 600U, true);
+	meshtastic_telemetry_settings(&s);
+	zassert_equal(s.device_interval_sec, 30U * 60U, "600 s -> 1800 s on LongFast");
+	zassert_equal(s.environment_interval_sec, 30U * 60U, "same rule for environment");
+
+	store_telemetry(7200U, true, 0U, false);
+	meshtastic_telemetry_settings(&s);
+	zassert_equal(s.device_interval_sec, 7200U, "above the minimum is kept");
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+	store_telemetry(3600U, true, 0U, false);
+	meshtastic_telemetry_settings(&s);
+	zassert_equal(s.device_interval_sec, 12U * 3600U, "router minimum is 12 h");
+}
+
+ZTEST(telemetry_cadence, test_custom_channel_keeps_a_short_interval)
+{
+	struct meshtastic_telemetry_settings s;
+
+	leave_the_default_channel();
+	store_telemetry(600U, true, 0U, false);
+	meshtastic_telemetry_settings(&s);
+	zassert_equal(s.device_interval_sec, 600U, "no coercion off the default channel");
+}
+
+ZTEST(telemetry_cadence, test_scaling_matches_the_reference_coefficient)
+{
+	/* Reference congestionScalingCoefficient: 2^SF / (BW_kHz * 100) per online
+	 * node past 40. LongFast (SF11/250k) -> 0.08192; the reference's own
+	 * example table is for a 30 min base, this one for 3600 s. */
+	zassert_equal(meshtastic_telemetry_scaled_interval_sec(3600U, 0U), 3600U, "");
+	zassert_equal(meshtastic_telemetry_scaled_interval_sec(3600U, 40U), 3600U,
+		      "no scaling up to 40 nodes");
+	zassert_equal(meshtastic_telemetry_scaled_interval_sec(3600U, 41U), 3894U,
+		      "41 nodes: x1.08192");
+	zassert_equal(meshtastic_telemetry_scaled_interval_sec(3600U, 60U), 9498U,
+		      "60 nodes: x2.6384");
+
+	/* ShortTurbo (SF7/500k) scales far less: 0.00256 per node. */
+	mt.modem.spread_factor = 7U;
+	mt.modem.bandwidth_hz = 500000U;
+	zassert_equal(meshtastic_telemetry_scaled_interval_sec(3600U, 60U), 3784U, "");
+
+	/* Routers, sensors and trackers are never scaled. */
+	mt.modem.spread_factor = 11U;
+	mt.modem.bandwidth_hz = 250000U;
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+	zassert_equal(meshtastic_telemetry_scaled_interval_sec(3600U, 60U), 3600U, "router");
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_TRACKER);
+	zassert_equal(meshtastic_telemetry_scaled_interval_sec(3600U, 60U), 3600U, "tracker");
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+
+	/* Capped at the reference's MAX_INTERVAL (INT32_MAX ms). */
+	zassert_equal(meshtastic_telemetry_scaled_interval_sec(UINT32_MAX, 0U),
+		      (uint32_t)INT32_MAX / 1000U, "cap without scaling");
+	zassert_equal(meshtastic_telemetry_scaled_interval_sec(2000000U, 200U),
+		      (uint32_t)INT32_MAX / 1000U, "cap with scaling");
+}
+
+ZTEST(telemetry_cadence, test_flags_gate_each_sender)
+{
+	struct meshtastic_telemetry_settings s;
+
+	store_telemetry(0U, false, 0U, true);
+	meshtastic_telemetry_settings(&s);
+	zassert_false(s.device_enabled, "device off");
+	zassert_true(s.environment_enabled, "environment on");
+	store_telemetry(0U, true, 0U, false);
+	meshtastic_telemetry_settings(&s);
+	zassert_true(s.device_enabled, "");
+	zassert_false(s.environment_enabled, "");
 }

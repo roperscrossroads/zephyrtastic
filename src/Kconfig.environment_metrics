@@ -20,6 +20,13 @@ config MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND
 	help
 	  Send environment metrics periodically after meshtastic_init().
 
+	  This is the first-boot seed for ModuleConfig.telemetry's
+	  environment_measurement_enabled: the phone can turn the
+	  broadcast on or off afterwards. The reference ships it OFF (stock
+	  2.7 broadcasts no environment metrics until the user enables them);
+	  this port defaults to ON so a bench node announces itself without
+	  a phone. Set =n for parity with stock.
+
 config MESHTASTIC_ENVIRONMENT_METRICS_INTERVAL_SEC
 	int "Environment metrics send interval in seconds"
 	default 3600

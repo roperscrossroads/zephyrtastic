@@ -71,6 +71,56 @@ uint32_t meshtastic_local_stats_node_age_sec(const struct meshtastic_nodedb_node
 #endif
 #endif
 
+/* ---- cadence: ModuleConfig.telemetry resolved (meshtastic_telemetry_cadence.c) ---- */
+
+#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS) || defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS)
+/**
+ * @brief The stored telemetry section resolved into what the broadcasters do.
+ *
+ * Intervals are the reference's rules applied in order: a configured value
+ * below the role-aware minimum is coerced up when a default channel is
+ * present, zero coalesces to the role-aware default (the Kconfig interval, or
+ * 12 h for a router), the result is scaled by the online-node count past 40
+ * (routers, sensors and trackers exempt) and capped at INT32_MAX ms.
+ */
+struct meshtastic_telemetry_settings {
+	bool device_enabled;              /**< TelemetryConfig.device_telemetry_enabled */
+	uint32_t device_interval_sec;     /**< resolved device_update_interval */
+	bool environment_enabled;         /**< TelemetryConfig.environment_measurement_enabled */
+	uint32_t environment_interval_sec; /**< resolved environment_update_interval */
+	uint32_t online_nodes;            /**< the count the scaling used */
+};
+
+void meshtastic_telemetry_settings(struct meshtastic_telemetry_settings *out);
+
+/**
+ * @brief Reference Default::getConfiguredOrDefaultMsScaled's scaling, in seconds.
+ *
+ * Exposed for the tests: the coefficient depends on the modem the radio is on
+ * (2^SF / (BW_kHz * 100) per online node past 40) and on the role.
+ */
+uint32_t meshtastic_telemetry_scaled_interval_sec(uint32_t base_sec, uint32_t online_nodes);
+
+/** @brief Online nodes as LocalStats counts them (0 without LocalStats). */
+uint32_t meshtastic_telemetry_online_nodes(void);
+
+/** @brief Wake a registered broadcast thread whenever the section changes. */
+void meshtastic_telemetry_cadence_watch(struct k_thread *thread);
+
+/** @brief Bumped on every change; a thread compares it to know a sleep was cut short. */
+uint32_t meshtastic_telemetry_cadence_generation(void);
+
+/**
+ * @brief The admin path's hook: ModuleConfig.telemetry was written.
+ *
+ * Re-resolves, logs the new cadence and wakes the broadcast threads so the
+ * change applies without a reboot (the reference reboots for this section;
+ * here the threads read the store at every deadline, so there is nothing to
+ * restart).
+ */
+void meshtastic_telemetry_config_changed(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

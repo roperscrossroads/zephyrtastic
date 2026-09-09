@@ -238,7 +238,7 @@ uint32_t meshtastic_local_stats_node_age_sec(const struct meshtastic_nodedb_node
 }
 #endif /* CONFIG_MESHTASTIC_NODEDB */
 
-static void collect_node_counts(meshtastic_LocalStats *stats)
+static void count_nodes(uint32_t *total_out, uint32_t *online_out)
 {
 #if defined(CONFIG_MESHTASTIC_NODEDB)
 	size_t total = meshtastic_nodedb_count();
@@ -255,11 +255,31 @@ static void collect_node_counts(meshtastic_LocalStats *stats)
 		}
 	}
 
-	stats->num_total_nodes = (uint32_t)total;
-	stats->num_online_nodes = online;
+	*total_out = (uint32_t)total;
+	*online_out = online;
 #else
-	ARG_UNUSED(stats);
+	*total_out = 0U;
+	*online_out = 0U;
 #endif
+}
+
+/* The telemetry cadence scales by this (reference numOnlineNodes); the same
+ * count LocalStats reports, so the two never disagree about "online". */
+uint32_t meshtastic_telemetry_online_nodes(void)
+{
+	uint32_t total, online;
+
+	count_nodes(&total, &online);
+	return online;
+}
+
+static void collect_node_counts(meshtastic_LocalStats *stats)
+{
+	uint32_t total, online;
+
+	count_nodes(&total, &online);
+	stats->num_total_nodes = total;
+	stats->num_online_nodes = online;
 }
 
 static void collect_heap(meshtastic_LocalStats *stats)
@@ -600,12 +620,40 @@ static struct k_thread telemetry_thread;
  * Kconfig.device_metrics). So each sender now carries its own deadline.
  */
 struct telemetry_job {
-	uint32_t interval_sec;
-	uint32_t due_sec; /* uptime second at which this sender is next due */
+	/* Resolve "should this fire, and how often" from the store (or Kconfig for
+	 * the phone push). Read at every pass: a ModuleConfig.telemetry write
+	 * takes effect at the next deadline without a reboot (agents-dnr4.10). */
+	bool (*resolve)(uint32_t *interval_sec);
 	void (*fire)(void);
+	uint32_t last_sec; /* uptime second this sender last fired (or was enabled) */
+	bool enabled;      /* as of the last resolve: an off->on edge restarts the clock */
 };
 
+/* Resolve a job and keep its clock honest: while disabled the clock is held at
+ * now, and the moment it turns on it is restarted, so enabling fires one full
+ * interval later rather than at once (the thread may have slept for an hour
+ * with the job off, and "last fired an hour ago" must not count). */
+static bool job_resolve(struct telemetry_job *job, uint32_t now, uint32_t *interval_sec)
+{
+	bool on = job->resolve(interval_sec);
+
+	if (!on || !job->enabled) {
+		job->last_sec = now;
+	}
+	job->enabled = on;
+	return on;
+}
+
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND)
+static bool resolve_device_metrics(uint32_t *interval_sec)
+{
+	struct meshtastic_telemetry_settings s;
+
+	meshtastic_telemetry_settings(&s);
+	*interval_sec = s.device_interval_sec;
+	return s.device_enabled;
+}
+
 static void fire_device_metrics(void)
 {
 	(void)meshtastic_send_device_metrics(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
@@ -614,6 +662,15 @@ static void fire_device_metrics(void)
 
 #if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                              \
 	defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND)
+static bool resolve_environment(uint32_t *interval_sec)
+{
+	struct meshtastic_telemetry_settings s;
+
+	meshtastic_telemetry_settings(&s);
+	*interval_sec = s.environment_interval_sec;
+	return s.environment_enabled;
+}
+
 static void fire_environment(void)
 {
 	(void)meshtastic_send_environment(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
@@ -621,27 +678,35 @@ static void fire_environment(void)
 #endif
 
 #if defined(CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE)
+/* Reference sendStatsToPhoneIntervalMs is a constant, not a config field. */
+static bool resolve_local_stats(uint32_t *interval_sec)
+{
+	*interval_sec = CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE_SEC;
+	return true;
+}
+
 static void fire_local_stats(void)
 {
 	(void)meshtastic_send_local_stats_to_phone();
 }
 #endif
 
+/* Never sleep longer than this even with nothing due: the role or the
+ * online-node count can move the resolved interval without any config write. */
+#define TELEMETRY_MAX_SLEEP_SEC 3600U
+
 static void telemetry_thread_fn(void *p1, void *p2, void *p3)
 {
 	static struct telemetry_job jobs[] = {
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND)
-		{ .interval_sec = CONFIG_MESHTASTIC_DEVICE_METRICS_INTERVAL_SEC,
-		  .fire = fire_device_metrics },
+		{ .resolve = resolve_device_metrics, .fire = fire_device_metrics },
 #endif
 #if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                              \
 	defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND)
-		{ .interval_sec = CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_INTERVAL_SEC,
-		  .fire = fire_environment },
+		{ .resolve = resolve_environment, .fire = fire_environment },
 #endif
 #if defined(CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE)
-		{ .interval_sec = CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE_SEC,
-		  .fire = fire_local_stats },
+		{ .resolve = resolve_local_stats, .fire = fire_local_stats },
 #endif
 	};
 	uint32_t now = (uint32_t)k_uptime_seconds();
@@ -651,31 +716,41 @@ static void telemetry_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	for (size_t i = 0; i < ARRAY_SIZE(jobs); i++) {
-		jobs[i].due_sec = now + jobs[i].interval_sec;
+		jobs[i].last_sec = now;
+		jobs[i].enabled = true; /* a job that starts disabled is caught by job_resolve */
 	}
 
 	while (true) {
-		uint32_t sleep_sec = UINT32_MAX;
+		uint32_t sleep_sec = TELEMETRY_MAX_SLEEP_SEC;
 
 		now = (uint32_t)k_uptime_seconds();
 		for (size_t i = 0; i < ARRAY_SIZE(jobs); i++) {
-			uint32_t remaining =
-				(jobs[i].due_sec > now) ? (jobs[i].due_sec - now) : 0U;
+			uint32_t interval, due, remaining;
 
+			if (!job_resolve(&jobs[i], now, &interval)) {
+				continue;
+			}
+			due = jobs[i].last_sec + interval;
+			remaining = (due > now) ? (due - now) : 0U;
 			sleep_sec = MIN(sleep_sec, remaining);
 		}
 
 		/* Never a zero sleep: a job that is already overdue is fired below,
-		 * and a rounding-down of sub-second remainder must not spin. */
+		 * and a rounding-down of sub-second remainder must not spin. A config
+		 * write wakes this early (meshtastic_telemetry_config_changed); the
+		 * deadlines are simply re-resolved on the next pass. */
 		k_sleep(K_SECONDS(MAX(sleep_sec, 1U)));
 
 		now = (uint32_t)k_uptime_seconds();
 		for (size_t i = 0; i < ARRAY_SIZE(jobs); i++) {
-			if (now >= jobs[i].due_sec) {
+			uint32_t interval;
+
+			if (job_resolve(&jobs[i], now, &interval) &&
+			    now >= jobs[i].last_sec + interval) {
 				jobs[i].fire();
 				/* Next deadline measured from NOW, not from the missed
-				 * one — a slow send must not queue up a catch-up burst. */
-				jobs[i].due_sec = now + jobs[i].interval_sec;
+				 * one -- a slow send must not queue up a catch-up burst. */
+				jobs[i].last_sec = now;
 			}
 		}
 	}
@@ -702,6 +777,7 @@ int meshtastic_metrics_init(void)
 			telemetry_thread_fn, NULL, NULL, NULL, CONFIG_MESHTASTIC_THREAD_PRIORITY, 0,
 			K_NO_WAIT);
 	k_thread_name_set(&telemetry_thread, "meshtastic_telemetry");
+	meshtastic_telemetry_cadence_watch(&telemetry_thread);
 #endif
 
 	return 0;

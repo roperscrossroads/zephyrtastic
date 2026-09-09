@@ -2744,10 +2744,32 @@ static int cmd_metrics_localstats(const struct shell *sh, size_t argc, char **ar
 }
 #endif /* CONFIG_MESHTASTIC_LOCAL_STATS */
 
+/* The resolved broadcast cadence: what ModuleConfig.telemetry, the role, the
+ * default-channel coercion and the online-node scaling add up to right now. */
+static int cmd_metrics_cadence(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_telemetry_settings s;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_telemetry_settings(&s);
+	shell_print(sh, "device      : %s, every %u s", s.device_enabled ? "on" : "off",
+		    s.device_interval_sec);
+	shell_print(sh, "environment : %s, every %u s", s.environment_enabled ? "on" : "off",
+		    s.environment_interval_sec);
+	shell_print(sh, "scaled by   : %u online nodes", s.online_nodes);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_metrics_cmds,
 			       SHELL_CMD(send, NULL,
 					 SHELL_HELP("Send device metrics.", "[dest|broadcast]"),
 					 cmd_metrics_send),
+			       SHELL_CMD(cadence, NULL,
+					 SHELL_HELP("Show the resolved telemetry broadcast "
+						    "cadence (ModuleConfig.telemetry).", NULL),
+					 cmd_metrics_cadence),
 #if defined(CONFIG_MESHTASTIC_LOCAL_STATS)
 			       SHELL_CMD(localstats, NULL,
 					 SHELL_HELP("Show LocalStats (mesh counters). "

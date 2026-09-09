@@ -45,6 +45,7 @@
 #include "meshtastic_position.h"
 #endif
 #include "meshtastic_config_store.h"
+#include "meshtastic_telemetry_internal.h"
 #include "meshtastic_mqtt_config.h"
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 #include "meshtastic_statusmessage.h"
@@ -971,6 +972,13 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 				 * per packet, so there is nothing to restart (agents-dnr4.20). */
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 				meshtastic_traffic_config_changed();
+#endif
+			} else if (which == meshtastic_ModuleConfig_telemetry_tag) {
+				/* The reference reboots; here the broadcast threads resolve
+				 * the section at every deadline and are woken to re-resolve
+				 * now (agents-dnr4.10). */
+#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS) || defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS)
+				meshtastic_telemetry_config_changed();
 #endif
 			} else {
 				/* Every other module reads its section at init (the MQTT
