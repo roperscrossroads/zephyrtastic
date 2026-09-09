@@ -458,6 +458,21 @@ int meshtastic_admin_prepare_module_config_write(meshtastic_ModuleConfig *module
 #endif
 	}
 
+	if (module->which_payload_variant == meshtastic_ModuleConfig_serial_tag) {
+		/* This port has no SerialModule (the reference's port-64 SERIAL_APP
+		 * bridge with its PROTO/TEXTMSG/NMEA/CALTOPO modes on a second UART);
+		 * meshtastic_serial.c is the PhoneAPI-over-UART transport, the
+		 * reference's SerialConsole, which this section does not govern. A
+		 * write that would turn the module on is refused rather than stored
+		 * as if it worked; a disabled section is inert and accepted
+		 * (agents-dnr4.9; the module itself is parked on agents-dnr4.27). */
+		if (module->payload_variant.serial.enabled) {
+			LOG_WRN("admin: serial module config refused: no SerialModule on this port");
+			return -ENOTSUP;
+		}
+		return 0;
+	}
+
 	if (module->which_payload_variant != meshtastic_ModuleConfig_mqtt_tag) {
 		return 0;
 	}

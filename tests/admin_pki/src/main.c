@@ -2855,6 +2855,46 @@ ZTEST(admin_pki, test_keyverify_admin_path_timeout_and_cooldown)
 }
 #endif /* CONFIG_MESHTASTIC_KEYVERIFY */
 
+/* ---- agents-dnr4.9: ModuleConfig.serial -- no SerialModule on this port ---- */
+
+static size_t encode_admin_set_serial(bool enabled, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+	meshtastic_ModuleConfig_SerialConfig *c =
+		&am.payload_variant.set_module_config.payload_variant.serial;
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_module_config_tag;
+	am.payload_variant.set_module_config.which_payload_variant =
+		meshtastic_ModuleConfig_serial_tag;
+	c->enabled = enabled;
+	c->mode = meshtastic_ModuleConfig_SerialConfig_Serial_Mode_TEXTMSG;
+	c->baud = meshtastic_ModuleConfig_SerialConfig_Serial_Baud_BAUD_115200;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+/* meshtastic_serial.c is the PhoneAPI-over-UART transport (the reference's
+ * SerialConsole), not the reference's SerialModule this section configures. A
+ * write that would turn that module on is refused, not stored as if it worked;
+ * a disabled section is inert and accepted. */
+ZTEST(admin_pki, test_set_module_config_serial_enabled_is_refused)
+{
+	meshtastic_ModuleConfig mod = meshtastic_ModuleConfig_init_zero;
+	uint8_t buf[256];
+	size_t len;
+
+	len = encode_admin_set_serial(true, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_BAD_REQUEST,
+		      "serial.enabled on a port with no SerialModule: NAK");
+	zassert_ok(meshtastic_config_store_get_module(meshtastic_ModuleConfig_serial_tag, &mod), "");
+	zassert_false(mod.payload_variant.serial.enabled, "the refused set left the store alone");
+
+	len = encode_admin_set_serial(false, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE,
+		      "a disabled section is inert and accepted");
+}
+
 /* ---- agents-dnr4.17: external_notification applies live; buzzer/ringtone refused ---- */
 
 #if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
