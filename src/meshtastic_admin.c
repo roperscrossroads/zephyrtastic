@@ -73,6 +73,9 @@
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_router.h"
 #include "meshtastic_settings.h"
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include "meshtastic_backup.h"
+#endif
 
 #include "meshtastic/admin.pb.h"
 
@@ -1343,6 +1346,48 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 #endif
 		break;
 	}
+
+	/* Preferences backup/restore (agents-dnr4.14; meshtastic_backup.c). The
+	 * reference offers FLASH and SD; SD is "not implemented yet" there too,
+	 * and here every board's only storage is the settings flash. A restore
+	 * reboots after the ACK, as the reference does; the reboot work flushes
+	 * the restored store first. */
+	case meshtastic_AdminMessage_backup_preferences_tag:
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+		if (admin_req.payload_variant.backup_preferences !=
+			    meshtastic_AdminMessage_BackupLocation_FLASH ||
+		    meshtastic_backup_save() < 0) {
+			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+		}
+#else
+		ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+#endif
+		break;
+	case meshtastic_AdminMessage_restore_preferences_tag:
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+		if (admin_req.payload_variant.restore_preferences !=
+			    meshtastic_AdminMessage_BackupLocation_FLASH ||
+		    meshtastic_backup_restore() < 0) {
+			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+		} else {
+			LOG_INF("admin: preferences restored; reboot in %d s", ADMIN_REBOOT_SECONDS);
+			k_work_reschedule(&admin_reboot_work, K_SECONDS(ADMIN_REBOOT_SECONDS));
+		}
+#else
+		ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+#endif
+		break;
+	case meshtastic_AdminMessage_remove_backup_preferences_tag:
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+		if (admin_req.payload_variant.remove_backup_preferences !=
+			    meshtastic_AdminMessage_BackupLocation_FLASH ||
+		    meshtastic_backup_remove() < 0) {
+			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+		}
+#else
+		ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+#endif
+		break;
 
 	/* DFU (agents-dnr4.12). On the nRF52 kits the bootloader is one retained
 	 * register and a reset away (meshtastic_dfu_trigger.c: the GPREGRET magic

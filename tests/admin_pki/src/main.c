@@ -36,6 +36,8 @@
 #include "meshtastic_admin_session.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
+#include "meshtastic_backup.h"
+#include "meshtastic_hlc.h"
 #include "meshtastic_core.h"
 #include "meshtastic_mqtt_config.h"
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
@@ -2854,6 +2856,192 @@ ZTEST(admin_pki, test_keyverify_admin_path_timeout_and_cooldown)
 	kv_fresh();
 }
 #endif /* CONFIG_MESHTASTIC_KEYVERIFY */
+
+/* ---- agents-dnr4.14: backup / restore / remove preferences ---- */
+
+static size_t encode_admin_backup_op(pb_size_t tag, meshtastic_AdminMessage_BackupLocation where,
+				     uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = tag;
+	/* The three variants share one enum field position in the union. */
+	am.payload_variant.backup_preferences = where;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+/* The send helper samples "did this schedule a reboot" and then cancels it so
+ * the test binary never actually reboots; the flag is the observable. */
+static meshtastic_Routing_Error backup_op_ex(pb_size_t tag,
+					     meshtastic_AdminMessage_BackupLocation where,
+					     bool *rebooting)
+{
+	uint8_t buf[32];
+	size_t len = encode_admin_backup_op(tag, where, buf, sizeof(buf));
+
+	return send_local_admin_and_pop_routing_ex(buf, len, rebooting);
+}
+
+static meshtastic_Routing_Error backup_op(pb_size_t tag, meshtastic_AdminMessage_BackupLocation where)
+{
+	return backup_op_ex(tag, where, NULL);
+}
+
+static void set_lora_hops(uint8_t hops)
+{
+	meshtastic_Config lora = meshtastic_Config_init_zero;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &lora), "");
+	lora.payload_variant.lora.hop_limit = hops;
+	zassert_ok(meshtastic_config_store_set_config(&lora), "");
+}
+
+static uint8_t get_lora_hops(void)
+{
+	meshtastic_Config lora = meshtastic_Config_init_zero;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &lora), "");
+	return (uint8_t)lora.payload_variant.lora.hop_limit;
+}
+
+static void set_neighborinfo_interval(uint32_t secs)
+{
+	meshtastic_ModuleConfig mod = meshtastic_ModuleConfig_init_zero;
+
+	mod.which_payload_variant = meshtastic_ModuleConfig_neighbor_info_tag;
+	mod.payload_variant.neighbor_info.update_interval = secs;
+	zassert_ok(meshtastic_config_store_set_module(&mod), "");
+}
+
+static uint32_t get_neighborinfo_interval(void)
+{
+	meshtastic_ModuleConfig mod = meshtastic_ModuleConfig_init_zero;
+
+	zassert_ok(meshtastic_config_store_get_module(meshtastic_ModuleConfig_neighbor_info_tag,
+						       &mod), "");
+	return mod.payload_variant.neighbor_info.update_interval;
+}
+
+/* Backup, change a config section AND a module section, restore: both come
+ * back, a reboot is scheduled (the reference reboots after a restore), and the
+ * restored sections carry FRESH write-stamps -- a restore is a local write the
+ * cluster must adopt, not be out-voted on by the stamps it already holds. */
+ZTEST(admin_pki, test_backup_then_restore_brings_config_and_modules_back)
+{
+	struct meshtastic_hlc_stamp before, after;
+	uint8_t hops0 = get_lora_hops();
+	uint32_t ni0 = get_neighborinfo_interval();
+	bool rebooting = false;
+
+	set_lora_hops(5U);
+	set_neighborinfo_interval(1234U);
+	zassert_equal(backup_op(meshtastic_AdminMessage_backup_preferences_tag,
+				meshtastic_AdminMessage_BackupLocation_FLASH),
+		      meshtastic_Routing_Error_NONE, "backup accepted");
+	zassert_true(meshtastic_backup_exists(NULL), "backup present");
+
+	set_lora_hops(2U);
+	set_neighborinfo_interval(999U);
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_lora_tag, &before), "");
+
+	zassert_equal(backup_op_ex(meshtastic_AdminMessage_restore_preferences_tag,
+				   meshtastic_AdminMessage_BackupLocation_FLASH, &rebooting),
+		      meshtastic_Routing_Error_NONE, "restore accepted");
+	zassert_true(rebooting, "a restore reboots, as the reference does");
+
+	zassert_equal(get_lora_hops(), 5U, "config section restored");
+	zassert_equal(get_neighborinfo_interval(), 1234U, "module section restored");
+	zassert_ok(meshtastic_config_store_get_config_stamp(meshtastic_Config_lora_tag, &after), "");
+	zassert_true(meshtastic_hlc_newer(&after, &before), "restored section is a fresh local write");
+
+	/* Leave the suite as it was found. */
+	set_lora_hops(hops0);
+	set_neighborinfo_interval(ni0);
+	zassert_equal(backup_op(meshtastic_AdminMessage_remove_backup_preferences_tag,
+				meshtastic_AdminMessage_BackupLocation_FLASH),
+		      meshtastic_Routing_Error_NONE, "");
+}
+
+/* The backup lives in the settings flash, so it survives a real reboot of the
+ * live store (the suite's save/load round trip through NVS) untouched. */
+ZTEST(admin_pki, test_backup_survives_a_real_reboot_of_the_live_store)
+{
+	uint8_t hops0 = get_lora_hops();
+
+	set_lora_hops(6U);
+	zassert_equal(backup_op(meshtastic_AdminMessage_backup_preferences_tag,
+				meshtastic_AdminMessage_BackupLocation_FLASH),
+		      meshtastic_Routing_Error_NONE, "");
+	set_lora_hops(3U);
+	zassert_ok(settings_save_subtree("meshtastic"), "flush the CHANGED live store");
+	zassert_ok(settings_load_subtree("meshtastic"), "reboot");
+	zassert_equal(get_lora_hops(), 3U, "the live store came back at its flushed value");
+
+	zassert_equal(backup_op(meshtastic_AdminMessage_restore_preferences_tag,
+				meshtastic_AdminMessage_BackupLocation_FLASH),
+		      meshtastic_Routing_Error_NONE, "");
+	zassert_equal(get_lora_hops(), 6U, "the backup outlived the reboot");
+
+	set_lora_hops(hops0);
+	zassert_ok(settings_save_subtree("meshtastic"), "");
+	zassert_equal(backup_op(meshtastic_AdminMessage_remove_backup_preferences_tag,
+				meshtastic_AdminMessage_BackupLocation_FLASH),
+		      meshtastic_Routing_Error_NONE, "");
+}
+
+/* No backup -> a restore is refused (the reference: "Can't restore, no backup
+ * file" -> BAD_REQUEST); SD is refused for every operation (unimplemented in
+ * the reference too, and no such storage here); a remove with nothing there
+ * is fine. */
+ZTEST(admin_pki, test_restore_without_a_backup_and_sd_are_refused)
+{
+	bool rebooting = true;
+
+	zassert_equal(backup_op(meshtastic_AdminMessage_remove_backup_preferences_tag,
+				meshtastic_AdminMessage_BackupLocation_FLASH),
+		      meshtastic_Routing_Error_NONE, "remove of nothing is not an error");
+	zassert_false(meshtastic_backup_exists(NULL), "");
+	zassert_equal(backup_op_ex(meshtastic_AdminMessage_restore_preferences_tag,
+				   meshtastic_AdminMessage_BackupLocation_FLASH, &rebooting),
+		      meshtastic_Routing_Error_BAD_REQUEST, "nothing to restore: NAK");
+	zassert_false(rebooting, "a refused restore does not reboot");
+	zassert_equal(backup_op(meshtastic_AdminMessage_backup_preferences_tag,
+				meshtastic_AdminMessage_BackupLocation_SD),
+		      meshtastic_Routing_Error_BAD_REQUEST, "no SD card: NAK");
+	zassert_equal(backup_op(meshtastic_AdminMessage_restore_preferences_tag,
+				meshtastic_AdminMessage_BackupLocation_SD),
+		      meshtastic_Routing_Error_BAD_REQUEST, "");
+}
+
+/* The BLE host loads its bonds with a plain settings_load(), which visits
+ * every subtree -- the backup's included. That must never apply a backup as a
+ * side effect: only an explicit restore does. */
+ZTEST(admin_pki, test_a_full_settings_load_never_applies_the_backup)
+{
+	uint32_t ni0 = get_neighborinfo_interval();
+
+	/* A section whose LIVE record is absent from flash is the only clean
+	 * observable: a full load visits both subtrees, and any live record would
+	 * simply reload over whatever a leaking backup had applied, in whichever
+	 * order the backend chose to hand them back. */
+	set_neighborinfo_interval(1234U);
+	zassert_equal(backup_op(meshtastic_AdminMessage_backup_preferences_tag,
+				meshtastic_AdminMessage_BackupLocation_FLASH),
+		      meshtastic_Routing_Error_NONE, "");
+	set_neighborinfo_interval(777U);
+	(void)settings_delete("meshtastic/module/neighbor_info");
+	zassert_ok(settings_load(), "a full load, as the BLE host does");
+	zassert_equal(get_neighborinfo_interval(), 777U,
+		      "the backup's 1234 must not have been applied by a plain load");
+
+	set_neighborinfo_interval(ni0);
+	zassert_ok(settings_save_subtree("meshtastic"), "");
+	zassert_equal(backup_op(meshtastic_AdminMessage_remove_backup_preferences_tag,
+				meshtastic_AdminMessage_BackupLocation_FLASH),
+		      meshtastic_Routing_Error_NONE, "");
+}
 
 /* ---- agents-dnr4.12: enter_dfu_mode_request ---- */
 

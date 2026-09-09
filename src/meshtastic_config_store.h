@@ -71,6 +71,15 @@ int meshtastic_config_store_get_config_stamp(pb_size_t tag, struct meshtastic_hl
 int meshtastic_config_store_get_module_stamp(pb_size_t tag, struct meshtastic_hlc_stamp *out);
 
 /**
+ * @brief Stamp every config and module section as a fresh local write.
+ *
+ * For a restore from backup (agents-dnr4.14): the records come back with the
+ * content of the day they were taken, and the cluster must see them as the
+ * newest word on each section, not be out-voted by the stamps it holds.
+ */
+void meshtastic_config_store_stamp_all_local(void);
+
+/**
  * @brief Merge a peer's config section under last-writer-wins.
  *
  * Applies @p config only if @p stamp is strictly newer than the stamp already

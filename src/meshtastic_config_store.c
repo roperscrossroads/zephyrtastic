@@ -1205,6 +1205,18 @@ int meshtastic_config_store_set_module(const meshtastic_ModuleConfig *module)
 	return 0;
 }
 
+void meshtastic_config_store_stamp_all_local(void)
+{
+	store_lock();
+	for (size_t i = 0; i < ARRAY_SIZE(config_names); i++) {
+		stamp_local(&store.config_stamps[i]);
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(module_names); i++) {
+		stamp_local(&store.module_stamps[i]);
+	}
+	store_unlock();
+}
+
 int meshtastic_config_store_get_config_stamp(pb_size_t tag, struct meshtastic_hlc_stamp *out)
 {
 	int idx = index_for_config_tag(tag);
