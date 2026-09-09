@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_LOCKDOWN_ANY_SOC
+	bool "Allow lockdown on SoCs other than nRF52"
+	default n
+	depends on MESHTASTIC_SETTINGS && MESHTASTIC_PHONEAPI
+	help
+	  The reference excludes ESP32 (its flash encryption is the SoC-level tool
+	  there). Enable to build the feature elsewhere anyway; the at-rest protection
+	  is then only as good as the SoC's protection of its own flash.
+
+menuconfig MESHTASTIC_LOCKDOWN
+	bool "Lockdown mode: passphrase-gated, encrypted-at-rest preferences"
+	default n
+	depends on MESHTASTIC_SETTINGS
+	depends on MESHTASTIC_PHONEAPI
+	depends on SOC_SERIES_NRF52 || MESHTASTIC_LOCKDOWN_ANY_SOC || ARCH_POSIX
+	select HWINFO
+	select MBEDTLS
+	select PSA_WANT_KEY_TYPE_AES
+	select PSA_WANT_ALG_GCM
+	select PSA_WANT_ALG_SHA_256
+	select PSA_WANT_ALG_HMAC
+	select PSA_WANT_KEY_TYPE_HMAC
+	select PSA_WANT_ALG_PBKDF2_HMAC
+	select PSA_WANT_GENERATE_RANDOM
+	help
+	  The reference's lockdown_auth (AdminMessage.lockdown_auth, FromRadio.lockdown_status):
+	  once a passphrase is provisioned the preference records are stored encrypted
+	  (AES-128-GCM under a random DEK that a passphrase-derived KEK wraps), a
+	  device-bound unlock token lets the node boot unlocked for N boots / until an
+	  epoch / per-session cap, a locked boot keeps the radio silent, and a phone
+	  must present the passphrase on each connection before it sees the config
+	  or may administer the node. A build with this on but never provisioned
+	  behaves exactly like stock. Design: docs/LOCKDOWN-DESIGN.md (workspace).
+
+	  The reference limits it to nRF52 (its crypto and APPROTECT are nRF-bound);
+	  here the crypto is PSA and the device id comes from hwinfo, so the gate is
+	  a policy choice: MESHTASTIC_LOCKDOWN_ANY_SOC lifts it.
+
+if MESHTASTIC_LOCKDOWN
+
+config MESHTASTIC_LOCKDOWN_PBKDF2_ITERATIONS
+	int "PBKDF2-HMAC-SHA256 iterations for the passphrase KEK"
+	default 10000
+	range 1000 200000
+	help
+	  The reference derives its KEK with a single SHA-256 over device id and
+	  passphrase; this port uses PBKDF2 so a dumped flash costs an attacker this
+	  many hashes per guess. On-flash only, never on the air. ~1 s per 10 000 on
+	  a Cortex-M4 at unlock time.
+
+config MESHTASTIC_LOCKDOWN_DEFAULT_BOOTS
+	int "Unlock token boot budget when the client sends 0"
+	default 50
+	range 1 255
+	help
+	  Reference TOKEN_DEFAULT_BOOTS.
+
+config MESHTASTIC_LOCKDOWN_SESSION_DEFAULT_SECONDS
+	int "Per-boot unlocked-session cap when the client sends 0 (0 = none)"
+	default 0
+	help
+	  Reference MESHTASTIC_LOCKDOWN_SESSION_DEFAULT_SECONDS.
+
+endif # MESHTASTIC_LOCKDOWN

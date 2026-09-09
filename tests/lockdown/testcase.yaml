@@ -1,0 +1,14 @@
+# Lockdown storage core (agents-dnr4.15 phase 1): the reference EncryptedStorage's
+# rules over settings records and PSA -- token boots/epoch/rollback/tamper, the
+# backoff curve across simulated reboots, sealed records bound to their name.
+common:
+  tags:
+    - meshtastic
+    - lockdown
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.lockdown.native_sim: {}
