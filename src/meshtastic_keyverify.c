@@ -204,7 +204,7 @@ int meshtastic_keyverify_start(uint32_t remote_node)
 		return -EINVAL;
 	}
 	if (meshtastic_pki_get_public_key(our_pk) != KV_HASH_LEN) {
-		return -ENOKEY;
+		return -EACCES;
 	}
 
 	k_mutex_lock(&kv_lock, K_FOREVER);
@@ -263,7 +263,7 @@ int meshtastic_keyverify_provide_number(uint64_t nonce, uint32_t number)
 		LOG_WRN("KeyVerify: no key for 0x%08x, aborting", kv.remote);
 		reset_session_locked();
 		k_mutex_unlock(&kv_lock);
-		return -ENOKEY;
+		return -EACCES;
 	}
 
 	if (compute_hash1(number, kv.nonce, meshtastic_get_node_id(), kv.remote, our_pk, peer_pk,
@@ -335,7 +335,7 @@ int meshtastic_keyverify_accept(uint64_t nonce)
 	} else if (meshtastic_pki_get_pending_key(remote, pending)) {
 		ret = meshtastic_nodedb_commit_pubkey(remote, pending);
 	} else {
-		ret = -ENOKEY;
+		ret = -EACCES;
 	}
 	if (ret == 0) {
 		ret = meshtastic_nodedb_set_key_verified(remote, true);
