@@ -527,6 +527,14 @@ static void nodekeys_do_persist(void)
 {
 	int ret;
 
+	/* Lockdown (phase 2): on a locked boot RAM holds nothing because the sealed
+	 * records could not be opened -- pruning "what RAM does not hold" would
+	 * delete every persisted key. Bench 2026-09-10: it did. Leave the flag set
+	 * so the prune runs after the unlock reload has put the records back. */
+	if (!meshtastic_lockdown_store_ready()) {
+		return;
+	}
+
 	if (nodekeys_reconcile) {
 		struct warm_reconcile_ctx ctx = {.count = 0U, .overflow = false};
 		char name[SETTINGS_MAX_NAME_LEN + 1];
@@ -911,6 +919,10 @@ static int mtrec_reconcile_cb(const char *key, size_t len, settings_read_cb read
 static void mtrec_do_persist(void)
 {
 	int ret;
+
+	if (!meshtastic_lockdown_store_ready()) {
+		return; /* as nodekeys_do_persist: never prune against placeholders */
+	}
 
 	if (mtrec_reconcile) {
 		struct mtrec_reconcile_ctx ctx = {.count = 0U, .overflow = false};

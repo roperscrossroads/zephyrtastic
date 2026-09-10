@@ -31,6 +31,9 @@
 #include "meshtastic_lockdown.h"
 #include "meshtastic_pki.h"
 
+/* Declared privately by meshtastic.c: the NodeDB's boot, which a staged boot must repeat. */
+int meshtastic_nodedb_init(void);
+
 /* meshtastic_router.h drags the wire header in; the injector is all this needs. */
 void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, const uint8_t *wire,
 				      size_t wire_len, bool decoded);
@@ -147,9 +150,12 @@ static void stage_boot(void)
 		mt.radio_rx_armed = false;
 	}
 	zassert_ok(settings_load_subtree("meshtastic"), "");
-	(void)settings_load_subtree("mtnode");
-	(void)settings_load_subtree("mtrec");
 	(void)meshtastic_config_store_apply_core();
+	/* The NodeDB's own boot: wipes RAM, loads its subtrees, schedules the
+	 * prune-and-persist that on a locked boot must not run against an empty
+	 * RAM (bench 2026-09-10: it deleted every persisted record). Let it fire. */
+	zassert_ok(meshtastic_nodedb_init(), "");
+	k_sleep(K_SECONDS(3));
 }
 
 static void *suite_setup(void)
@@ -324,21 +330,33 @@ ZTEST(lockdown_store, test_nodedb_records_are_sealed_and_come_back_after_unlock)
 	struct raw r;
 	char name[40];
 
+	struct meshtastic_nodedb_node node;
+	char rec_name[40];
+
 	seed_peer(PEER_ID, pub);
 	{
 		uint8_t got[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
 
 		zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_ID, got), "peer learned");
 	}
+	/* The bench's exact symptom: a manually verified peer (key verification's
+	 * accept) whose bit lives only in the persisted record. */
+	zassert_ok(meshtastic_nodedb_set_key_verified(PEER_ID, true), "");
 	flush_all();
 	zassert_ok(meshtastic_lockdown_provision(PP, PPLEN, 0U, 0U, 0U), "");
 	wait_idle();
 	(void)snprintk(name, sizeof(name), "mtnode/%08x", PEER_ID);
+	(void)snprintk(rec_name, sizeof(rec_name), "mtrec/%08x", PEER_ID);
 	zassert_true(raw_read(name, &r), "warm key persisted");
+	zassert_true(meshtastic_lockdown_is_sealed(r.buf, r.len), "and sealed");
+	zassert_true(raw_read(rec_name, &r), "node record persisted");
 	zassert_true(meshtastic_lockdown_is_sealed(r.buf, r.len), "and sealed");
 
 	meshtastic_lockdown_lock_now();
-	stage_boot();
+	stage_boot(); /* a locked boot: NodeDB init ran with nothing to load; its prune must wait */
+	zassert_equal(meshtastic_nodedb_get(PEER_ID, &node), -ENOENT, "placeholders: no peer");
+	zassert_true(raw_read(name, &r), "the sealed key record survived the locked boot's prune");
+	zassert_true(raw_read(rec_name, &r), "the sealed node record survived the locked boot's prune");
 	zassert_ok(meshtastic_lockdown_unlock(PP, PPLEN, 0U, 0U, 0U), "");
 	wait_idle();
 	{
@@ -348,6 +366,13 @@ ZTEST(lockdown_store, test_nodedb_records_are_sealed_and_come_back_after_unlock)
 			   "the peer key is back after the reload");
 		zassert_mem_equal(got, pub, 32, "");
 	}
+	zassert_ok(meshtastic_nodedb_get(PEER_ID, &node), "the record is back after the reload");
+	zassert_true(node.is_key_manually_verified, "with its verified bit");
+	/* And the prune that was held back now runs against the reloaded RAM
+	 * without touching the records. */
+	k_sleep(K_SECONDS(3));
+	zassert_true(raw_read(name, &r), "key record still there after the deferred prune");
+	zassert_true(raw_read(rec_name, &r), "node record still there after the deferred prune");
 }
 
 ZTEST(lockdown_store, test_disable_writes_everything_back_in_the_clear)
