@@ -15,6 +15,7 @@
  */
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
@@ -54,7 +55,7 @@ static const char BACKOFF_LABEL[] = "backoff-auth";
 static const char SEAL_LABEL[] = "menc-auth";
 
 /* Record layouts (all little-endian). */
-#define DEK_REC_LEN     (4U + LD_NONCE_LEN + LD_KEY_LEN + LD_TAG_LEN)            /* 48 */
+#define DEK_REC_LEN     (4U + 4U + LD_NONCE_LEN + LD_KEY_LEN + LD_TAG_LEN)       /* 52: magic, iters, nonce, ct, tag */
 #define TOKEN_META_LEN  (1U + 4U + 4U + 4U)                                       /* boots, until, session, mono */
 #define TOKEN_REC_LEN   (4U + LD_NONCE_LEN + LD_KEY_LEN + TOKEN_META_LEN + LD_TAG_LEN) /* 61 */
 #define MONO_REC_LEN    (4U + LD_NONCE_LEN + LD_TAG_LEN)                          /* 32 */
@@ -79,7 +80,22 @@ static struct {
 	int64_t session_started_ms;
 	uint32_t backoff_remaining_s;
 	int64_t last_fail_ms; /* uptime of the last wrong passphrase this boot, 0 = none */
+	/* phase 2: the store wrap's own state */
+	bool needs_reload;   /* this boot loaded placeholders; a reload is owed at unlock */
+	bool reload_pending; /* an unlock happened, the workqueue reload has not run yet */
+	bool rewrite_pending; /* a seal-all (provision) or unseal-all (disable) is queued */
+	bool sealing_off;    /* the disable's plaintext rewrite is running */
+	bool disable_done;
 } ld = {.lock_reason = "not_provisioned"};
+
+/* A raw record as it sits in NVS: the largest wrapped plaintext plus the seal. */
+#define LD_RAW_MAX (256U + MESHTASTIC_LOCKDOWN_SEAL_OVERHEAD)
+
+static void (*reload_hook)(void);
+static void reload_work_fn(struct k_work *work);
+static void rewrite_work_fn(struct k_work *work);
+static K_WORK_DEFINE(reload_work, reload_work_fn);
+static K_WORK_DEFINE(rewrite_work, rewrite_work_fn);
 
 /* ---- small helpers ------------------------------------------------------------ */
 
@@ -218,8 +234,11 @@ static int derive_ekek(void)
 	return 0;
 }
 
-/* KEK = PBKDF2-HMAC-SHA256(passphrase, salt = device id || domain). */
-static int derive_kek(const uint8_t *passphrase, size_t len)
+/* KEK = PBKDF2-HMAC-SHA256(passphrase, salt = device id || domain), `iters`
+ * rounds. The count travels in the DEK record (phase 2): a build with a
+ * different Kconfig default still unlocks a device provisioned under the old
+ * one, and the record's AAD covers it so it cannot be lowered from outside. */
+static int derive_kek(const uint8_t *passphrase, size_t len, uint32_t iters)
 {
 	psa_key_derivation_operation_t op = PSA_KEY_DERIVATION_OPERATION_INIT;
 	uint8_t id[LD_DEVID_MAX];
@@ -237,8 +256,7 @@ static int derive_kek(const uint8_t *passphrase, size_t len)
 
 	st = psa_key_derivation_setup(&op, PSA_ALG_PBKDF2_HMAC(PSA_ALG_SHA_256));
 	if (st == PSA_SUCCESS) {
-		st = psa_key_derivation_input_integer(&op, PSA_KEY_DERIVATION_INPUT_COST,
-						      CONFIG_MESHTASTIC_LOCKDOWN_PBKDF2_ITERATIONS);
+		st = psa_key_derivation_input_integer(&op, PSA_KEY_DERIVATION_INPUT_COST, iters);
 	}
 	if (st == PSA_SUCCESS) {
 		st = psa_key_derivation_input_bytes(&op, PSA_KEY_DERIVATION_INPUT_SALT, salt,
@@ -265,20 +283,30 @@ static int derive_kek(const uint8_t *passphrase, size_t len)
 
 /* ---- artifacts ----------------------------------------------------------------- */
 
-/* mtlock/dek: MDEK | nonce | GCM(KEK, DEK) | tag, AAD = label. */
-static int write_dek(void)
+/* mtlock/dek: MDEK | iters | nonce | GCM(KEK, DEK) | tag, AAD = label || iters. */
+static size_t dek_aad(uint32_t iters, uint8_t *aad)
+{
+	memcpy(aad, DEK_LABEL, sizeof(DEK_LABEL) - 1U);
+	sys_put_le32(iters, aad + sizeof(DEK_LABEL) - 1U);
+	return sizeof(DEK_LABEL) - 1U + 4U;
+}
+
+static int write_dek(uint32_t iters)
 {
 	uint8_t rec[DEK_REC_LEN];
-	size_t out_len;
+	uint8_t aad[sizeof(DEK_LABEL) + 4U];
+	size_t aad_len, out_len;
 	int ret;
 
 	sys_put_le32(LD_MAGIC_DEK, rec);
-	ret = random_bytes(rec + 4, LD_NONCE_LEN);
+	sys_put_le32(iters, rec + 4);
+	ret = random_bytes(rec + 8, LD_NONCE_LEN);
 	if (ret < 0) {
 		return ret;
 	}
-	ret = aead(true, ld.kek, rec + 4, (const uint8_t *)DEK_LABEL, sizeof(DEK_LABEL) - 1U,
-		   ld.dek, LD_KEY_LEN, rec + 4 + LD_NONCE_LEN, LD_KEY_LEN + LD_TAG_LEN, &out_len);
+	aad_len = dek_aad(iters, aad);
+	ret = aead(true, ld.kek, rec + 8, aad, aad_len, ld.dek, LD_KEY_LEN, rec + 8 + LD_NONCE_LEN,
+		   LD_KEY_LEN + LD_TAG_LEN, &out_len);
 	if (ret < 0) {
 		return ret;
 	}
@@ -287,19 +315,33 @@ static int write_dek(void)
 	return ret;
 }
 
+/* The iteration count the device was provisioned with (0 = no record). */
+static uint32_t dek_iters(void)
+{
+	uint8_t rec[DEK_REC_LEN];
+	size_t len = rec_read(LD_KEY_DEK, rec, sizeof(rec), NULL);
+
+	if (len != DEK_REC_LEN || sys_get_le32(rec) != LD_MAGIC_DEK) {
+		return 0U;
+	}
+	return sys_get_le32(rec + 4);
+}
+
 /* Unwrap the DEK with the KEK in RAM: the passphrase check. */
 static int load_dek(void)
 {
 	uint8_t rec[DEK_REC_LEN];
-	size_t len, out_len;
+	uint8_t aad[sizeof(DEK_LABEL) + 4U];
+	size_t len, aad_len, out_len;
 	int ret;
 
 	len = rec_read(LD_KEY_DEK, rec, sizeof(rec), NULL);
 	if (len != DEK_REC_LEN || sys_get_le32(rec) != LD_MAGIC_DEK) {
 		return -ENOENT;
 	}
-	ret = aead(false, ld.kek, rec + 4, (const uint8_t *)DEK_LABEL, sizeof(DEK_LABEL) - 1U,
-		   rec + 4 + LD_NONCE_LEN, LD_KEY_LEN + LD_TAG_LEN, ld.dek, LD_KEY_LEN, &out_len);
+	aad_len = dek_aad(sys_get_le32(rec + 4), aad);
+	ret = aead(false, ld.kek, rec + 8, aad, aad_len, rec + 8 + LD_NONCE_LEN,
+		   LD_KEY_LEN + LD_TAG_LEN, ld.dek, LD_KEY_LEN, &out_len);
 	if (ret < 0 || out_len != LD_KEY_LEN) {
 		zero(ld.dek, sizeof(ld.dek));
 		return -EACCES;
@@ -616,6 +658,9 @@ void meshtastic_lockdown_init(void)
 	if (consume_token()) {
 		return;
 	}
+	/* The loads that follow this init keep their defaults: a reload is owed
+	 * the moment a passphrase arrives. */
+	ld.needs_reload = true;
 	LOG_WRN("Lockdown: device LOCKED (%s)", ld.lock_reason);
 }
 
@@ -680,12 +725,12 @@ int meshtastic_lockdown_provision(const uint8_t *passphrase, size_t len, uint8_t
 	if (ret < 0) {
 		return ret;
 	}
-	ret = derive_kek(passphrase, len);
+	ret = derive_kek(passphrase, len, CONFIG_MESHTASTIC_LOCKDOWN_PBKDF2_ITERATIONS);
 	if (ret < 0) {
 		zero(ld.dek, sizeof(ld.dek));
 		return ret;
 	}
-	ret = write_dek();
+	ret = write_dek(CONFIG_MESHTASTIC_LOCKDOWN_PBKDF2_ITERATIONS);
 	zero(ld.kek, sizeof(ld.kek));
 	ld.kek_ok = false;
 	if (ret < 0) {
@@ -707,6 +752,11 @@ int meshtastic_lockdown_provision(const uint8_t *passphrase, size_t len, uint8_t
 	ld.lock_reason = "ok";
 	LOG_INF("Lockdown: provisioned (%u boots, epoch %u, session %u s)", boots, valid_until,
 		session_s);
+	/* Everything already on flash is plaintext: seal it now rather than at
+	 * whichever save happens next (the reference's migrateFile, eagerly). */
+	ld.sealing_off = false;
+	ld.rewrite_pending = true;
+	k_work_submit(&rewrite_work);
 	return 0;
 }
 
@@ -767,7 +817,7 @@ int meshtastic_lockdown_unlock(const uint8_t *passphrase, size_t len, uint8_t bo
 	}
 	ld.backoff_remaining_s = 0U;
 
-	ret = derive_kek(passphrase, len);
+	ret = derive_kek(passphrase, len, dek_iters());
 	if (ret < 0) {
 		return ret;
 	}
@@ -800,6 +850,13 @@ int meshtastic_lockdown_unlock(const uint8_t *passphrase, size_t len, uint8_t bo
 	meshtastic_lockdown_set_session(session_s);
 	ld.lock_reason = "ok";
 	LOG_INF("Lockdown: unlocked with passphrase");
+	if (ld.needs_reload) {
+		/* The stack re-reads the store on the workqueue; until it has, the
+		 * store is not ready (a save would write placeholders over the
+		 * real records, sealed). */
+		ld.reload_pending = true;
+		k_work_submit(&reload_work);
+	}
 	return 0;
 }
 
@@ -943,4 +1000,302 @@ uint8_t meshtastic_lockdown_consume_session_boot(void)
 	ld.boots_remaining = new_boots;
 	meshtastic_lockdown_set_session(ld.session_max_ms / 1000U);
 	return new_boots;
+}
+
+/* ---- phase 2: the store wrap ------------------------------------------------------ */
+
+bool meshtastic_lockdown_locked(void)
+{
+	return ld.provisioned && !ld.dek_ok;
+}
+
+bool meshtastic_lockdown_store_ready(void)
+{
+	if (!ld.provisioned) {
+		return true;
+	}
+	return ld.dek_ok && !ld.reload_pending;
+}
+
+/* Seal `val` for `name` and hand the result to `write`, or refuse. The seal
+ * scratch is the largest wrapped record plus the overhead, on this stack. */
+static int wrap_write(int (*write)(const char *name, const void *val, size_t val_len),
+		      const char *name, const void *val, size_t len)
+{
+	uint8_t sealed[LD_RAW_MAX];
+	int n;
+
+	if (!ld.provisioned || ld.sealing_off) {
+		return write(name, val, len);
+	}
+	if (!meshtastic_lockdown_store_ready()) {
+		/* Locked, or unlocked-but-not-reloaded: whatever is in RAM is a
+		 * placeholder and must not go over the encrypted store. */
+		return -EACCES;
+	}
+	n = meshtastic_lockdown_seal(name, val, len, sealed, sizeof(sealed));
+	if (n < 0) {
+		return n;
+	}
+	return write(name, sealed, (size_t)n);
+}
+
+int meshtastic_lockdown_export(int (*export_func)(const char *name, const void *val,
+						  size_t val_len),
+			       const char *name, const void *val, size_t len)
+{
+	return wrap_write(export_func, name, val, len);
+}
+
+int meshtastic_lockdown_save_one(const char *name, const void *val, size_t len)
+{
+	return wrap_write(settings_save_one, name, val, len);
+}
+
+ssize_t meshtastic_lockdown_read(const char *name, size_t len, settings_read_cb read_cb,
+				 void *cb_arg, void *buf, size_t cap)
+{
+	uint8_t raw[LD_RAW_MAX];
+	ssize_t got;
+	int n;
+
+	if (len > sizeof(raw)) {
+		return -EMSGSIZE;
+	}
+	got = read_cb(cb_arg, raw, len);
+	if (got < 0) {
+		return got;
+	}
+	if ((size_t)got != len) {
+		return -EIO;
+	}
+	if (!meshtastic_lockdown_is_sealed(raw, len)) {
+		/* Plaintext. On an active device that is a pre-provisioning
+		 * leftover, accepted and re-sealed at its next save. */
+		if (len > cap) {
+			return -EMSGSIZE;
+		}
+		memcpy(buf, raw, len);
+		return (ssize_t)len;
+	}
+	if (!ld.provisioned) {
+		/* A sealed record on a stock device: an artifact removal that never
+		 * rewrote the store. Unreadable, and says so. */
+		return -EBADMSG;
+	}
+	if (!ld.dek_ok) {
+		return -EACCES; /* locked boot: the caller keeps its default */
+	}
+	n = meshtastic_lockdown_open(name, raw, len, buf, cap);
+	zero(raw, sizeof(raw));
+	return n < 0 ? (ssize_t)n : (ssize_t)n;
+}
+
+/* ---- phase 2: the deferred reload ------------------------------------------------- */
+
+void meshtastic_lockdown_set_reload_hook(void (*hook)(void))
+{
+	reload_hook = hook;
+}
+
+static void reload_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (reload_hook != NULL) {
+		reload_hook();
+	}
+	ld.reload_pending = false;
+	ld.needs_reload = false;
+	LOG_INF("Lockdown: store reloaded after unlock");
+}
+
+/* ---- phase 2: seal-all / unseal-all ------------------------------------------------ */
+
+/* Subtrees whose owner re-emits every record through its export callback: a
+ * settings_save_subtree() rewrites them under the current sealing mode. */
+static const char *const export_subtrees[] = {"meshtastic", "mtnode", "mtrec"};
+/* Subtrees written record-by-record with settings_save_one(): rewritten here
+ * name by name. */
+static const char *const direct_subtrees[] = {"mtclus", "mtbackup"};
+
+#define LD_REWRITE_NAME_LEN 32U
+static struct {
+	char names[CONFIG_MESHTASTIC_LOCKDOWN_REWRITE_MAX_NAMES][LD_REWRITE_NAME_LEN];
+	uint16_t count;
+	bool overflow;
+} rw_names;
+
+struct rw_collect_ctx {
+	const char *subtree;
+};
+
+static int rw_collect(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		      void *param)
+{
+	struct rw_collect_ctx *c = param;
+
+	ARG_UNUSED(len);
+	ARG_UNUSED(read_cb);
+	ARG_UNUSED(cb_arg);
+	if (rw_names.count >= ARRAY_SIZE(rw_names.names)) {
+		rw_names.overflow = true;
+		return 0;
+	}
+	(void)snprintf(rw_names.names[rw_names.count], LD_REWRITE_NAME_LEN, "%s/%s", c->subtree,
+		       key);
+	rw_names.count++;
+	return 0;
+}
+
+struct rw_raw {
+	uint8_t buf[LD_RAW_MAX];
+	size_t len;
+	bool found;
+};
+
+static int rw_read_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		      void *param)
+{
+	struct rw_raw *r = param;
+
+	ARG_UNUSED(key);
+	if (len <= sizeof(r->buf) && read_cb(cb_arg, r->buf, len) == (ssize_t)len) {
+		r->len = len;
+		r->found = true;
+	}
+	return 1;
+}
+
+/* One record: plaintext -> sealed (seal mode) or sealed -> plaintext (unseal). */
+static void rw_one(const char *name, bool seal)
+{
+	static struct rw_raw raw; /* 288 B + change, off the workqueue stack */
+	uint8_t out[LD_RAW_MAX];
+	int n;
+
+	raw.len = 0U;
+	raw.found = false;
+	(void)settings_load_subtree_direct(name, rw_read_cb, &raw);
+	if (!raw.found) {
+		return;
+	}
+	if (seal) {
+		if (meshtastic_lockdown_is_sealed(raw.buf, raw.len)) {
+			return;
+		}
+		n = meshtastic_lockdown_seal(name, raw.buf, raw.len, out, sizeof(out));
+	} else {
+		if (!meshtastic_lockdown_is_sealed(raw.buf, raw.len)) {
+			return;
+		}
+		n = meshtastic_lockdown_open(name, raw.buf, raw.len, out, sizeof(out));
+	}
+	if (n < 0) {
+		LOG_WRN("Lockdown: %s of '%s' failed (%d), record left as is",
+			seal ? "seal" : "open", name, n);
+		return;
+	}
+	if (settings_save_one(name, out, (size_t)n) < 0) {
+		LOG_WRN("Lockdown: rewriting '%s' failed", name);
+	}
+	zero(out, sizeof(out));
+	zero(raw.buf, sizeof(raw.buf));
+}
+
+static void rewrite_all(bool seal)
+{
+	for (size_t i = 0U; i < ARRAY_SIZE(export_subtrees); i++) {
+		int ret = settings_save_subtree(export_subtrees[i]);
+
+		if (ret < 0 && ret != -ENOENT) {
+			LOG_WRN("Lockdown: rewriting '%s' failed (%d)", export_subtrees[i], ret);
+		}
+	}
+	for (size_t i = 0U; i < ARRAY_SIZE(direct_subtrees); i++) {
+		struct rw_collect_ctx c = {.subtree = direct_subtrees[i]};
+
+		rw_names.count = 0U;
+		rw_names.overflow = false;
+		(void)settings_load_subtree_direct(direct_subtrees[i], rw_collect, &c);
+		for (uint16_t k = 0U; k < rw_names.count; k++) {
+			rw_one(rw_names.names[k], seal);
+		}
+		if (rw_names.overflow) {
+			LOG_WRN("Lockdown: '%s' has more than %u records; the rest are rewritten "
+				"at their next save",
+				direct_subtrees[i], (unsigned int)ARRAY_SIZE(rw_names.names));
+		}
+	}
+}
+
+static void rewrite_work_fn(struct k_work *work)
+{
+	bool seal = !ld.sealing_off;
+
+	ARG_UNUSED(work);
+	rewrite_all(seal);
+	if (!seal) {
+		/* The disable: with every wrapped record in the clear, the artifacts
+		 * go and the device is stock again. */
+		(void)meshtastic_lockdown_remove_artifacts();
+		ld.sealing_off = false;
+		ld.disable_done = true;
+		LOG_INF("Lockdown: disabled, store rewritten in the clear");
+	} else {
+		LOG_INF("Lockdown: store sealed");
+	}
+	ld.rewrite_pending = false;
+}
+
+bool meshtastic_lockdown_busy(void)
+{
+	return ld.reload_pending || ld.rewrite_pending;
+}
+
+bool meshtastic_lockdown_disable_done(void)
+{
+	return ld.disable_done;
+}
+
+int meshtastic_lockdown_disable(const uint8_t *passphrase, size_t len)
+{
+	int ret;
+
+	if (!ld.provisioned) {
+		return -ENOENT;
+	}
+	if (ld.rewrite_pending || ld.reload_pending) {
+		return -EBUSY;
+	}
+	/* The passphrase check is the unlock's, token and all: a disable from a
+	 * locked boot needs the reload first, so the plaintext rewrite has the
+	 * real records to write. The unlock queues it; this queues after. */
+	if (!ld.dek_ok || ld.needs_reload) {
+		ret = meshtastic_lockdown_unlock(passphrase, len, 0U, 0U, 0U);
+		if (ret < 0) {
+			return ret;
+		}
+	} else {
+		/* Already unlocked: still prove the passphrase before undoing it. */
+		ret = derive_kek(passphrase, len, dek_iters());
+		if (ret == 0) {
+			uint8_t keep[LD_KEY_LEN];
+
+			memcpy(keep, ld.dek, LD_KEY_LEN);
+			ret = load_dek();
+			memcpy(ld.dek, keep, LD_KEY_LEN);
+			zero(keep, sizeof(keep));
+		}
+		zero(ld.kek, sizeof(ld.kek));
+		ld.kek_ok = false;
+		if (ret < 0) {
+			return -EACCES;
+		}
+	}
+	ld.disable_done = false;
+	ld.sealing_off = true;
+	ld.rewrite_pending = true;
+	k_work_submit(&rewrite_work);
+	return 0;
 }

@@ -241,7 +241,15 @@ static void log_wire_tx(const uint8_t *pkt, uint32_t pkt_len)
 
 static int mt_radio_arm_rx(void)
 {
-	int ret = lora_recv_async(mt.lora_dev, mt_rx_cb, NULL);
+	int ret;
+
+	if (mt.radio_held) {
+		/* A locked boot: the chip stays asleep. Not an error, not counted;
+		 * the release arms it. */
+		mt.radio_rx_armed = false;
+		return 0;
+	}
+	ret = lora_recv_async(mt.lora_dev, mt_rx_cb, NULL);
 
 	if (ret < 0) {
 		mt.radio_rx_armed = false;
@@ -505,6 +513,10 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	 * reason: every transmit in the firmware funnels through here. */
 	if (!mt.tx_enabled) {
 		LOG_DBG("TX refused: tx_enabled is off (receive-only)");
+		return -EPERM;
+	}
+	if (mt.radio_held) {
+		LOG_DBG("TX refused: storage locked, radio held");
 		return -EPERM;
 	}
 
@@ -1269,6 +1281,34 @@ void meshtastic_radio_rx_activity_stats_reset(void)
 int meshtastic_radio_rx_activity_now(bool *preamble, bool *header)
 {
 	return mt_rx_activity_get(preamble, header);
+}
+
+/* Lockdown phase 2: the unlock reload has re-applied the real config; push it
+ * to the chip and let the radio go. The init's own sequence, minus the thread. */
+void meshtastic_radio_release(void)
+{
+	int ret;
+
+	if (!mt.radio_held) {
+		return;
+	}
+	mt.radio_held = false;
+	mt_lora_cfg.frequency = mt.frequency;
+	apply_modem_params();
+	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power, mt.licensed);
+	mt_lora_cfg.tx = false;
+#if defined(CONFIG_LORA_SX126X)
+	(void)sx126x_set_rx_boosted_gain(mt.lora_dev, mt.rx_boosted_gain);
+#endif
+	(void)k_sem_take(&mt_radio_sem, K_FOREVER);
+	ret = lora_config(mt.lora_dev, &mt_lora_cfg);
+	mt_record_effective(false, ret);
+	if (ret < 0) {
+		LOG_ERR("Radio release: lora_config failed (%d)", ret);
+	}
+	(void)mt_radio_arm_rx();
+	(void)k_sem_give(&mt_radio_sem);
+	LOG_INF("Radio released: storage unlocked");
 }
 
 int meshtastic_radio_init(void)

@@ -2,6 +2,7 @@
 #ifndef ZEPHYR_SUBSYS_MESHTASTIC_LOCKDOWN_H_
 #define ZEPHYR_SUBSYS_MESHTASTIC_LOCKDOWN_H_
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -75,6 +76,74 @@ int meshtastic_lockdown_remove_artifacts(void);
  * @brief Seal a record for storage under the DEK (name is authenticated).
  * @retval >=0 sealed length; -ENOTSUP inactive (store plaintext); -EACCES locked.
  */
+/* ---- phase 2: the record wrap over the settings store --------------------------
+ *
+ * Every persisted record of a wrapped subtree goes out through one of the two
+ * write helpers and comes back through the read helper. Inactive (no
+ * passphrase): plaintext, exactly as before. Active and unlocked: sealed on
+ * the way out, opened on the way in; a plaintext record found on an active
+ * device is accepted (a pre-provisioning leftover) and sealed at its next
+ * save. Active and locked, or unlocked but not yet reloaded: writes are
+ * refused (-EACCES) so nothing can go over the encrypted store, and sealed
+ * records cannot be opened (-EACCES) so the loader keeps its defaults -- the
+ * reference's locked-boot placeholders. Callers treat -EACCES as "skip
+ * quietly". With CONFIG_MESHTASTIC_LOCKDOWN=n these are plain passthroughs. */
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+#include <sys/types.h>
+#include <zephyr/settings/settings.h>
+
+/** The store may be read/written in the clear by this build right now. */
+bool meshtastic_lockdown_store_ready(void);
+/** Provisioned and the DEK is not in RAM: the boot is a locked boot. */
+bool meshtastic_lockdown_locked(void);
+
+int meshtastic_lockdown_export(int (*export_func)(const char *name, const void *val,
+						  size_t val_len),
+			       const char *name, const void *val, size_t len);
+int meshtastic_lockdown_save_one(const char *name, const void *val, size_t len);
+ssize_t meshtastic_lockdown_read(const char *name, size_t len, settings_read_cb read_cb,
+				 void *cb_arg, void *buf, size_t cap);
+
+/** The stack's reload after a deferred unlock (settings re-read, config
+ *  re-applied, radio released). Registered by meshtastic_init; runs on the
+ *  system workqueue, never on the transport thread that verified the passphrase. */
+void meshtastic_lockdown_set_reload_hook(void (*hook)(void));
+/** Verify the passphrase and, on the workqueue, rewrite every wrapped record
+ *  in the clear, remove the artifacts and leave the device stock. The caller
+ *  reboots afterwards, as the reference does. */
+int meshtastic_lockdown_disable(const uint8_t *passphrase, size_t len);
+/** The disable's plaintext rewrite finished (for callers that wait on it). */
+bool meshtastic_lockdown_disable_done(void);
+/** A reload or a seal/unseal rewrite is still queued on the workqueue. */
+bool meshtastic_lockdown_busy(void);
+#else
+#include <sys/types.h>
+#include <zephyr/settings/settings.h>
+
+static inline bool meshtastic_lockdown_store_ready(void) { return true; }
+static inline bool meshtastic_lockdown_locked(void) { return false; }
+static inline int meshtastic_lockdown_export(int (*export_func)(const char *name,
+							       const void *val, size_t val_len),
+					     const char *name, const void *val, size_t len)
+{
+	return export_func(name, val, len);
+}
+static inline int meshtastic_lockdown_save_one(const char *name, const void *val, size_t len)
+{
+	return settings_save_one(name, val, len);
+}
+static inline ssize_t meshtastic_lockdown_read(const char *name, size_t len,
+					       settings_read_cb read_cb, void *cb_arg, void *buf,
+					       size_t cap)
+{
+	(void)name;
+	if (len > cap) {
+		return -EMSGSIZE;
+	}
+	return read_cb(cb_arg, buf, len);
+}
+#endif
+
 int meshtastic_lockdown_seal(const char *name, const void *in, size_t len, void *out,
 			     size_t cap);
 

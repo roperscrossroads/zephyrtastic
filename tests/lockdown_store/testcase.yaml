@@ -1,0 +1,15 @@
+# Lockdown phase 2 (agents-dnr4.15): the record wrap over the settings store,
+# the locked boot that keeps its defaults and holds the radio, the deferred
+# reload at unlock, and the disable that writes everything back in the clear.
+# Stack + sim radio + real NVS.
+common:
+  tags:
+    - meshtastic
+    - lockdown
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.lockdown_store.native_sim: {}

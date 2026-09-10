@@ -108,6 +108,8 @@
 #include "meshtastic/config.pb.h"
 #include "zephyrtastic/cluster.pb.h"
 
+#include "meshtastic_lockdown.h"
+
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #endif
@@ -628,7 +630,7 @@ static void persist_entry(const struct meshtastic_cluster_entry *e)
 
 	memcpy(rec.payload, e->payload, e->payload_len);
 	rec_name(&e->key, name, sizeof(name));
-	if (settings_save_one(name, &rec, len) != 0) {
+	if (meshtastic_lockdown_save_one(name, &rec, len) != 0) {
 		LOG_WRN("cluster: persist of %s failed", name);
 	}
 }
@@ -678,7 +680,7 @@ static void persist_scope(uint8_t kind)
 		.cap = (uint16_t)CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES,
 	};
 
-	if (settings_save_one(CLUSTER_SCOPE_REC_NAME, &rec, sizeof(rec)) != 0) {
+	if (meshtastic_lockdown_save_one(CLUSTER_SCOPE_REC_NAME, &rec, sizeof(rec)) != 0) {
 		LOG_WRN("cluster: could not record the scope — it will not survive a reboot");
 	}
 }
@@ -760,8 +762,13 @@ static int cluster_settings_set(const char *key, size_t len, settings_read_cb re
 	 * out. */
 	if (strcmp(key, "scope") == 0) {
 		struct cluster_scope_rec srec;
+		ssize_t got = meshtastic_lockdown_read(CLUSTER_SCOPE_REC_NAME, len, read_cb, cb_arg,
+						       &srec, sizeof(srec));
 
-		if (len != sizeof(srec) || read_cb(cb_arg, &srec, len) != (ssize_t)len) {
+		if (got == -EACCES) {
+			return 0; /* sealed on a locked boot: claim nothing yet */
+		}
+		if (got != (ssize_t)sizeof(srec)) {
 			return -EINVAL;
 		}
 		if (!IS_ENABLED(CONFIG_MESHTASTIC_CLUSTER_SCOPE_AUTO)) {
@@ -791,11 +798,23 @@ static int cluster_settings_set(const char *key, size_t len, settings_read_cb re
 	if (sscanf(key, "%c%8x/%u", &layer, &node_id, &section) != 3) {
 		return -ENOENT;
 	}
-	if (len < offsetof(struct cluster_rec, payload) || len > sizeof(rec)) {
+	if (len < offsetof(struct cluster_rec, payload) ||
+	    len > sizeof(rec) + MESHTASTIC_LOCKDOWN_SEAL_OVERHEAD) {
 		return -EINVAL;
 	}
-	if (read_cb(cb_arg, &rec, len) != (ssize_t)len) {
-		return -EINVAL;
+	{
+		char full_name[48];
+		ssize_t got;
+
+		(void)snprintf(full_name, sizeof(full_name), "mtclus/%s", key);
+		got = meshtastic_lockdown_read(full_name, len, read_cb, cb_arg, &rec, sizeof(rec));
+		if (got == -EACCES) {
+			return 0; /* sealed on a locked boot: the entry stays out of the table */
+		}
+		if (got < (ssize_t)offsetof(struct cluster_rec, payload)) {
+			return -EINVAL;
+		}
+		len = (size_t)got;
 	}
 
 	k.layer = (layer == 'b') ? MESHTASTIC_CLUSTER_LAYER_BASE : MESHTASTIC_CLUSTER_LAYER_NODE;

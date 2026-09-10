@@ -9,6 +9,7 @@
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/printk.h>
 
+#include "meshtastic_lockdown.h"
 #include "meshtastic_backup.h"
 #include "meshtastic_clock.h"
 #include "meshtastic_config_store.h"
@@ -65,7 +66,7 @@ static int backup_copy_one(const char *name, const void *val, size_t val_len)
 	if (ret < 0) {
 		return ret;
 	}
-	return settings_save_one(key, val, val_len);
+	return meshtastic_lockdown_save_one(key, val, val_len);
 }
 
 static int backup_delete_one(const char *name, const void *val, size_t val_len)
@@ -101,7 +102,7 @@ int meshtastic_backup_save(void)
 		LOG_ERR("Backup: copying the config store failed (%d)", ret);
 		return ret;
 	}
-	ret = settings_save_one(BACKUP_SUBTREE "/" BACKUP_META_KEY, &meta, sizeof(meta));
+	ret = meshtastic_lockdown_save_one(BACKUP_SUBTREE "/" BACKUP_META_KEY, &meta, sizeof(meta));
 	if (ret < 0) {
 		LOG_ERR("Backup: writing the meta record failed (%d)", ret);
 		return ret;
@@ -121,7 +122,8 @@ static int backup_set_cb(const char *key, size_t len, settings_read_cb read_cb, 
 	}
 
 	if (strcmp(key, BACKUP_META_KEY) == 0) {
-		if (len == sizeof(st.meta) && read_cb(cb_arg, &st.meta, len) == (ssize_t)len) {
+		if (meshtastic_lockdown_read(BACKUP_SUBTREE "/" BACKUP_META_KEY, len, read_cb, cb_arg,
+					     &st.meta, sizeof(st.meta)) == (ssize_t)sizeof(st.meta)) {
 			st.saw_meta = true;
 		}
 		return 0;
@@ -131,17 +133,23 @@ static int backup_set_cb(const char *key, size_t len, settings_read_cb read_cb, 
 		return 0;
 	}
 
-	if (len > sizeof(buf)) {
+	if (len > sizeof(buf) + MESHTASTIC_LOCKDOWN_SEAL_OVERHEAD) {
 		LOG_WRN("Backup: oversized record '%s' (%zu bytes) skipped", key, len);
 		st.err = -EMSGSIZE;
 		return 0;
 	}
-	read = read_cb(cb_arg, buf, len);
-	if (read != (ssize_t)len) {
+	{
+		char full[64];
+
+		(void)full_name(full, sizeof(full), key);
+		read = meshtastic_lockdown_read(full, len, read_cb, cb_arg, buf, sizeof(buf));
+	}
+	if (read <= 0) {
 		LOG_WRN("Backup: reading '%s' failed (%d)", key, (int)read);
-		st.err = -EIO;
+		st.err = read == -EACCES ? -EACCES : -EIO;
 		return 0;
 	}
+	len = (size_t)read;
 	/* The config store's own load path: the same decode and version window a
 	 * boot-time load gets. */
 	ret = meshtastic_config_store_setting_set(key, buf, len);

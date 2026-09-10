@@ -116,6 +116,10 @@ struct meshtastic_context {
 	struct meshtastic_status status;
 	bool initialized;
 	bool radio_rx_armed;
+	/* Lockdown (agents-dnr4.15 phase 2): a locked boot holds the radio -- no RX
+	 * arm, no TX -- until the passphrase unlocks the store and the reload
+	 * releases it. Cleared by meshtastic_radio_release(). */
+	bool radio_held;
 };
 
 struct meshtastic_workspace {
@@ -467,6 +471,8 @@ struct meshtastic_settings_apply {
 	}
 
 int meshtastic_settings_apply_all(void);
+/* Lockdown phase 2: release a radio a locked boot held (meshtastic_radio.c). */
+void meshtastic_radio_release(void);
 
 /* Re-read the persisted PowerConfig and apply it to the PM subsystem
  * (is_power_saving -> light-sleep pm_policy lock). Called from the settings-apply

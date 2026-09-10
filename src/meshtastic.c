@@ -13,6 +13,7 @@
 #include <zephyr/drivers/hwinfo.h>
 #endif
 #include <zephyr/kernel.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
@@ -24,6 +25,7 @@
 #include <zephyr/meshtastic/nodeinfo.h>
 #include <zephyr/meshtastic/telemetry.h>
 
+#include "meshtastic_lockdown.h"
 #include "meshtastic_build.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
@@ -420,6 +422,44 @@ bool meshtastic_transport_prefer_wifi(void)
 #endif
 }
 
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+/* The reference's reloadFromDisk() after a deferred unlock, on the system
+ * workqueue: every wrapped subtree re-read now that the DEK is in RAM, the
+ * core config re-applied, the keypair re-read (a locked boot generated a
+ * throwaway one over the defaults and could not persist it), and the radio
+ * released. Modules read their sections from the store live, so they follow. */
+static void lockdown_reload(void)
+{
+	int ret;
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	ret = settings_load_subtree("meshtastic");
+	if (ret < 0) {
+		LOG_WRN("Lockdown reload: settings load failed (%d)", ret);
+	}
+#endif
+	ret = meshtastic_config_store_apply_core();
+	if (ret < 0) {
+		LOG_WRN("Lockdown reload: apply_core failed (%d)", ret);
+	}
+	(void)meshtastic_settings_apply_all();
+#if defined(CONFIG_MESHTASTIC_PKI)
+	(void)meshtastic_pki_init();
+#endif
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	(void)settings_load_subtree("mtnode");
+#endif
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+	(void)settings_load_subtree("mtrec");
+#endif
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+	(void)settings_load_subtree("mtclus/scope");
+	(void)settings_load_subtree("mtclus");
+#endif
+	meshtastic_radio_release();
+}
+#endif
+
 int meshtastic_init(const struct meshtastic_config *cfg)
 {
 	psa_status_t psa_st;
@@ -550,6 +590,20 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 		mt.status.initialized = false;
 		return ret;
 	}
+
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+	/* Before any subtree loads: the artifacts decide whether the loads that
+	 * follow read the real records or keep their defaults (a locked boot).
+	 * settings_subsys_init() is idempotent; meshtastic_settings_init() calls it
+	 * again harmlessly. */
+	(void)settings_subsys_init();
+	meshtastic_lockdown_init();
+	meshtastic_lockdown_set_reload_hook(lockdown_reload);
+	mt.radio_held = meshtastic_lockdown_locked();
+	if (mt.radio_held) {
+		LOG_WRN("Lockdown: locked boot -- defaults loaded, radio held until unlock");
+	}
+#endif
 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 	ret = meshtastic_settings_init();

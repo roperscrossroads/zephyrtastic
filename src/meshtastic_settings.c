@@ -10,6 +10,7 @@
 #include <zephyr/sys/util.h>
 
 #include "meshtastic_config_store.h"
+#include "meshtastic_lockdown.h"
 #include "meshtastic_settings.h"
 
 #include <zephyr/logging/log.h>
@@ -30,25 +31,27 @@ static int settings_get_cb(const char *key, char *val, int val_len_max)
 static int settings_set_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	uint8_t buf[MESHTASTIC_STORE_VALUE_MAX];
+	char full_name[SETTINGS_MAX_NAME_LEN + SETTINGS_EXTRA_LEN + 1];
 	ssize_t read;
 	int ret;
 
-	if (len > sizeof(buf)) {
+	if (len > sizeof(buf) + MESHTASTIC_LOCKDOWN_SEAL_OVERHEAD) {
 		LOG_WRN("Ignoring oversized Meshtastic setting '%s' (%zu bytes)", key, len);
 		return 0;
 	}
 
-	read = read_cb(cb_arg, buf, len);
+	/* The record is bound to its full name (lockdown seals under it). */
+	(void)snprintk(full_name, sizeof(full_name), MESHTASTIC_SETTINGS_SUBTREE "/%s", key);
+	read = meshtastic_lockdown_read(full_name, len, read_cb, cb_arg, buf, sizeof(buf));
+	if (read == -EACCES) {
+		LOG_DBG("Meshtastic setting '%s' sealed and the store is locked: default kept", key);
+		return 0;
+	}
 	if (read < 0) {
 		LOG_WRN("Reading Meshtastic setting '%s' failed (%d)", key, (int)read);
 		return 0;
 	}
-
-	if ((size_t)read != len) {
-		LOG_WRN("Ignoring short Meshtastic setting '%s' (%d/%zu bytes)", key, (int)read,
-			len);
-		return 0;
-	}
+	len = (size_t)read;
 
 	ret = meshtastic_config_store_setting_set(key, buf, len);
 	if (ret < 0) {
@@ -68,7 +71,7 @@ static int settings_export_prefixed(const char *name, const void *val, size_t va
 		return -EINVAL;
 	}
 
-	return active_export_func(full_name, val, val_len);
+	return meshtastic_lockdown_export(active_export_func, full_name, val, val_len);
 }
 
 static int settings_export_cb(int (*export_func)(const char *name, const void *val, size_t val_len))

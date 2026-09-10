@@ -50,6 +50,18 @@ config MESHTASTIC_LOCKDOWN_PBKDF2_ITERATIONS
 	  many hashes per guess. On-flash only, never on the air. ~1 s per 10 000 on
 	  a Cortex-M4 at unlock time.
 
+config MESHTASTIC_LOCKDOWN_REWRITE_MAX_NAMES
+	int "Records collected per direct-written subtree when sealing or unsealing the store"
+	default 96
+	range 16 512
+	help
+	  Provisioning seals every record already on flash and a disable writes
+	  them back in the clear. Subtrees whose owner exports through the
+	  settings callbacks are rewritten by settings_save_subtree(); the ones
+	  written record by record (the cluster document, the backup) are
+	  collected by name first, this many at a time, because a record cannot
+	  be rewritten from inside the backend's own walk. 32 B per name, static.
+
 config MESHTASTIC_LOCKDOWN_DEFAULT_BOOTS
 	int "Unlock token boot budget when the client sends 0"
 	default 50

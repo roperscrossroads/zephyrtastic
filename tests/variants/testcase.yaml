@@ -220,3 +220,20 @@ tests:
   meshtastic.variants.no_reboot_trace.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_REBOOT_TRACE=n
+
+  # Lockdown built into the all-on baseline. MESHTASTIC_LOCKDOWN is default-n, so
+  # its untested arm is =y: the record wrap in the settings, NodeDB, cluster and
+  # backup paths, the radio hold in the boot, the reload hook. Without this the
+  # feature compiles only in its own two suites, whose Kconfig is far from a
+  # fleet image's.
+  meshtastic.variants.lockdown.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS_NVS=y
+      - CONFIG_MESHTASTIC_LOCKDOWN=y
+      - CONFIG_HWINFO=y
+      - CONFIG_MBEDTLS=y

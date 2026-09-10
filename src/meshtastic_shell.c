@@ -81,6 +81,7 @@
 #endif
 #if defined(CONFIG_MESHTASTIC_KEYVERIFY)
 #include "meshtastic_keyverify.h"
+#include "meshtastic_lockdown.h"
 #endif
 #include "meshtastic_preset.h"
 #include "meshtastic_region_presets.h"
@@ -121,6 +122,12 @@ enum shell_work_op {
 	SHELL_WORK_KEYVERIFY_START,
 	SHELL_WORK_KEYVERIFY_NUMBER,
 	SHELL_WORK_KEYVERIFY_ACCEPT, /* ends with a NodeInfo send: same path */
+#endif
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+	/* PBKDF2 (~1 s on an M4) plus NVS writes: never on the shell thread. */
+	SHELL_WORK_LOCKDOWN_PROVISION,
+	SHELL_WORK_LOCKDOWN_UNLOCK,
+	SHELL_WORK_LOCKDOWN_DISABLE,
 #endif
 };
 
@@ -258,12 +265,50 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 			break;
 		}
 #endif
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+		case SHELL_WORK_LOCKDOWN_PROVISION:
+			ret = meshtastic_lockdown_provision(item.payload, item.payload_len,
+							    (uint8_t)item.dest, 0U, 0U);
+			if (ret == 0) {
+				shell_print(item.sh, "provisioned: sealing the store now; "
+					    "%u boots on the token",
+					    meshtastic_lockdown_boots_remaining());
+			} else if (ret == -EALREADY) {
+				shell_error(item.sh, "already provisioned (lockdown disable first)");
+			}
+			break;
+		case SHELL_WORK_LOCKDOWN_UNLOCK:
+			ret = meshtastic_lockdown_unlock(item.payload, item.payload_len,
+							 (uint8_t)item.dest, 0U, 0U);
+			if (ret == 0) {
+				shell_print(item.sh, "unlocked; the store reloads on the workqueue "
+					    "and the radio follows");
+			} else if (ret == -EACCES) {
+				shell_error(item.sh, "wrong passphrase (next attempt after a "
+					    "reboot and ~%u s)",
+					    meshtastic_lockdown_backoff_remaining());
+			} else if (ret == -EAGAIN) {
+				shell_error(item.sh, "backoff: ~%u s (and a reboot) still to wait",
+					    meshtastic_lockdown_backoff_remaining());
+			}
+			break;
+		case SHELL_WORK_LOCKDOWN_DISABLE:
+			ret = meshtastic_lockdown_disable(item.payload, item.payload_len);
+			if (ret == 0) {
+				shell_print(item.sh, "disabling: the store is rewritten in the clear "
+					    "on the workqueue; reboot when `lockdown` says inactive");
+			} else if (ret == -EACCES) {
+				shell_error(item.sh, "wrong passphrase");
+			}
+			break;
+#endif
 		default:
 			ret = -EINVAL;
 			break;
 		}
 
 		shell_report_result(item.sh, ret);
+		memset(item.payload, 0, sizeof(item.payload)); /* a passphrase may have been here */
 	}
 }
 
@@ -4970,6 +5015,114 @@ static int cmd_netlog(const struct shell *sh, size_t argc, char **argv)
 /* The admin backup/restore, from the console (agents-dnr4.14). A restore
  * leaves the restored config applied and a save queued; reboot to be sure
  * every consumer re-reads it, as the admin path does on its own. */
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+/* `meshtastic lockdown` (agents-dnr4.15 phase 2): the bench's stand-in for the
+ * app's lockdown_auth until phase 3 wires the PhoneAPI. The passphrase is a
+ * plain argument here -- the shell history and the console log see it -- so
+ * this is a bench tool, not the operator path. Phase 4 adds obscured input. */
+static int cmd_lockdown_status(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!meshtastic_lockdown_active()) {
+		shell_print(sh, "lockdown: inactive (no passphrase provisioned; stock behaviour)");
+		return 0;
+	}
+	shell_print(sh, "lockdown: active, %s (%s)",
+		    meshtastic_lockdown_unlocked() ? "UNLOCKED" : "LOCKED",
+		    meshtastic_lockdown_lock_reason());
+	shell_print(sh, "  store: %s%s", meshtastic_lockdown_store_ready() ? "ready" : "not writable",
+		    meshtastic_lockdown_busy() ? " (workqueue busy: reload or rewrite running)" : "");
+	shell_print(sh, "  radio: %s", mt.radio_held ? "HELD (locked boot)" : "running");
+	shell_print(sh, "  token: %u boots left, valid until epoch %u",
+		    meshtastic_lockdown_boots_remaining(), meshtastic_lockdown_valid_until());
+	if (meshtastic_lockdown_backoff_remaining() != 0U) {
+		shell_print(sh, "  backoff: ~%u s", meshtastic_lockdown_backoff_remaining());
+	}
+	return 0;
+}
+
+static int lockdown_enqueue(const struct shell *sh, enum shell_work_op op, const char *pass,
+			    const char *boots_arg)
+{
+	struct shell_work_item item = {0};
+	size_t n = strlen(pass);
+	int ret;
+
+	if (n == 0U || n > MESHTASTIC_LOCKDOWN_PASSPHRASE_MAX) {
+		shell_error(sh, "passphrase must be 1-%u bytes", MESHTASTIC_LOCKDOWN_PASSPHRASE_MAX);
+		return -EINVAL;
+	}
+	if (boots_arg != NULL) {
+		uint32_t boots;
+
+		ret = parse_u32(sh, boots_arg, &boots);
+		if (ret < 0 || boots > 255U) {
+			shell_error(sh, "boots must be 0-255 (0 = default)");
+			return -EINVAL;
+		}
+		item.dest = boots;
+	}
+	item.op = op;
+	memcpy(item.payload, pass, n);
+	item.payload_len = n;
+	ret = enqueue_shell_work(sh, &item);
+	memset(item.payload, 0, sizeof(item.payload));
+	return ret;
+}
+
+static int cmd_lockdown_provision(const struct shell *sh, size_t argc, char **argv)
+{
+	return lockdown_enqueue(sh, SHELL_WORK_LOCKDOWN_PROVISION, argv[1],
+				argc > 2 ? argv[2] : NULL);
+}
+
+static int cmd_lockdown_unlock(const struct shell *sh, size_t argc, char **argv)
+{
+	return lockdown_enqueue(sh, SHELL_WORK_LOCKDOWN_UNLOCK, argv[1], argc > 2 ? argv[2] : NULL);
+}
+
+static int cmd_lockdown_disable(const struct shell *sh, size_t argc, char **argv)
+{
+	return lockdown_enqueue(sh, SHELL_WORK_LOCKDOWN_DISABLE, argv[1], NULL);
+}
+
+static int cmd_lockdown_lock(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!meshtastic_lockdown_active()) {
+		shell_error(sh, "not provisioned");
+		return -ENOENT;
+	}
+	meshtastic_lockdown_lock_now();
+	shell_print(sh, "locked: token deleted, keys zeroed. The store in RAM stays until "
+			"reboot; reboot to boot locked (radio silent)");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_lockdown_cmds,
+			       SHELL_CMD_ARG(provision, NULL,
+					     SHELL_HELP("Provision a passphrase and seal the store.",
+							"<passphrase> [boots]"),
+					     cmd_lockdown_provision, 2, 1),
+			       SHELL_CMD_ARG(unlock, NULL,
+					     SHELL_HELP("Present the passphrase; issues a fresh token.",
+							"<passphrase> [boots]"),
+					     cmd_lockdown_unlock, 2, 1),
+			       SHELL_CMD(lock, NULL,
+					 SHELL_HELP("Lock now: delete the token, zero the keys.", NULL),
+					 cmd_lockdown_lock),
+			       SHELL_CMD_ARG(disable, NULL,
+					     SHELL_HELP("Verify the passphrase, rewrite the store in "
+							"the clear, remove the artifacts.",
+							"<passphrase>"),
+					     cmd_lockdown_disable, 2, 0),
+			       SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_LOCKDOWN */
+
 static int cmd_backup(const struct shell *sh, size_t argc, char **argv)
 {
 	struct meshtastic_backup_meta meta;
@@ -6668,6 +6821,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(dfu, NULL,
 		  SHELL_HELP("Reboot into the bootloader for reflashing.", "[serial]"),
 		  cmd_dfu),
+#endif
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+	SHELL_CMD(lockdown, &meshtastic_lockdown_cmds,
+		  SHELL_HELP("Lockdown mode: status, provision, unlock, lock, disable.", NULL),
+		  cmd_lockdown_status),
 #endif
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 	SHELL_CMD(backup, NULL,

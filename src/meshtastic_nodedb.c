@@ -17,6 +17,7 @@
 #include <pb_decode.h>
 #include <pb_encode.h>
 
+#include "meshtastic_lockdown.h"
 #include "meshtastic_ext_ram.h"
 
 #include <zephyr/meshtastic/meshtastic.h>
@@ -646,6 +647,7 @@ static void nodekeys_purge_foreign(void)
 static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	uint8_t buf[MTNODE_REC_LEN];
+	char full_name[SETTINGS_MAX_NAME_LEN + 1];
 	uint32_t node_num;
 	uint32_t last_seen;
 	uint8_t role;
@@ -653,17 +655,19 @@ static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, v
 	char *endptr;
 	ssize_t read;
 
-	/* Only the current 37 B format is accepted. A stale-format record (a pre-role
-	 * 36 B or key-only 32 B one) is ignored here and removed from NVS by the
-	 * one-shot CONFIG_MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS pass. */
-	if (len != MTNODE_REC_LEN) {
+	/* Only the current 37 B format is accepted (plus lockdown's seal when the
+	 * record is sealed). A stale-format record (a pre-role 36 B or key-only
+	 * 32 B one) is ignored here and removed from NVS by the one-shot
+	 * CONFIG_MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS pass. */
+	if (len != MTNODE_REC_LEN && len != MTNODE_REC_LEN + MESHTASTIC_LOCKDOWN_SEAL_OVERHEAD) {
 		LOG_WRN("Ignoring persisted node key '%s' with unexpected size %zu", key, len);
 		return 0;
 	}
 
-	read = read_cb(cb_arg, buf, MTNODE_REC_LEN);
+	(void)snprintk(full_name, sizeof(full_name), MTNODE_SUBTREE "/%s", key);
+	read = meshtastic_lockdown_read(full_name, len, read_cb, cb_arg, buf, sizeof(buf));
 	if (read != (ssize_t)MTNODE_REC_LEN) {
-		return 0;
+		return 0; /* unreadable, or sealed on a locked boot: not restored */
 	}
 	last_seen = sys_get_le32(buf);
 	role = buf[sizeof(uint32_t)];
@@ -703,7 +707,7 @@ static int nodekeys_export(int (*export_func)(const char *name, const void *val,
 		       MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
 
 		(void)snprintk(name, sizeof(name), MTNODE_SUBTREE "/%08x", warm_keys[i].num);
-		ret = export_func(name, rec, sizeof(rec));
+		ret = meshtastic_lockdown_export(export_func, name, rec, sizeof(rec));
 		if (ret < 0) {
 			break;
 		}
@@ -974,21 +978,24 @@ static void mtrec_snapshot_work_handler(struct k_work *work)
 static int mtrec_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	uint8_t buf[MTREC_BUF_LEN];
+	char full_name[SETTINGS_MAX_NAME_LEN + 1];
 	meshtastic_NodeInfoLite node;
 	struct nodedb_entry *entry;
 	uint32_t num;
 	char *endptr;
 	ssize_t read;
 
-	if (len > sizeof(buf)) {
+	if (len > sizeof(buf) + MESHTASTIC_LOCKDOWN_SEAL_OVERHEAD) {
 		LOG_WRN("Ignoring oversized persisted node record '%s' (%zu)", key, len);
 		return 0;
 	}
 
-	read = read_cb(cb_arg, buf, len);
-	if (read != (ssize_t)len) {
-		return 0;
+	(void)snprintk(full_name, sizeof(full_name), MTREC_SUBTREE "/%s", key);
+	read = meshtastic_lockdown_read(full_name, len, read_cb, cb_arg, buf, sizeof(buf));
+	if (read <= 0) {
+		return 0; /* unreadable, or sealed on a locked boot: not restored */
 	}
+	len = (size_t)read;
 
 	if (mtrec_decode(buf, len, &node) < 0) {
 		LOG_WRN("Ignoring malformed persisted node record '%s'", key);
@@ -1040,7 +1047,7 @@ static int mtrec_export(int (*export_func)(const char *name, const void *val, si
 		}
 
 		(void)snprintk(name, sizeof(name), MTREC_SUBTREE "/%08x", e->node.num);
-		ret = export_func(name, buf, (size_t)len);
+		ret = meshtastic_lockdown_export(export_func, name, buf, (size_t)len);
 		if (ret < 0) {
 			break;
 		}
