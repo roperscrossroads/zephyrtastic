@@ -112,6 +112,16 @@ enum shell_work_op {
 	SHELL_WORK_SEND_METRICS,
 	SHELL_WORK_SEND_ENVIRONMENT,
 	SHELL_WORK_SEND_NODEINFO,
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+	/* Both run the send path (PSA RNG, protobuf encode, wire build with the
+	 * PKC encrypt) which the shell thread's own stack cannot carry: on the
+	 * XIAO (CONFIG_SHELL_STACK_SIZE=2048) `keyverify start` locked the CPU
+	 * up -- reset cause 0x100, no fatal record, because the overflow lands in
+	 * the MPU guard and the exception entry cannot stack. Bench 2026-09-09. */
+	SHELL_WORK_KEYVERIFY_START,
+	SHELL_WORK_KEYVERIFY_NUMBER,
+	SHELL_WORK_KEYVERIFY_ACCEPT, /* ends with a NodeInfo send: same path */
+#endif
 };
 
 struct shell_work_item {
@@ -206,6 +216,48 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 		case SHELL_WORK_SEND_NODEINFO:
 			ret = meshtastic_send_node_info(item.dest);
 			break;
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+		case SHELL_WORK_KEYVERIFY_START:
+			ret = meshtastic_keyverify_start(item.dest);
+			if (ret == -EBUSY) {
+				shell_error(item.sh, "a session is already open (keyverify reject "
+					    "to drop it)");
+			} else if (ret == 0) {
+				shell_print(item.sh, "request sent; ask the peer for the security "
+					    "number it shows, then `meshtastic keyverify number <n>`");
+			}
+			break;
+		case SHELL_WORK_KEYVERIFY_NUMBER: {
+			struct meshtastic_keyverify_status st;
+
+			meshtastic_keyverify_status(&st);
+			ret = meshtastic_keyverify_provide_number(st.nonce, item.dest);
+			if (ret == -EACCES) {
+				shell_error(item.sh, "that number does not match the peer's reply: "
+					    "retype it, or suspect a man in the middle");
+			} else if (ret < 0) {
+				shell_error(item.sh, "not expecting a number now (%d)", ret);
+			} else {
+				meshtastic_keyverify_status(&st);
+				shell_print(item.sh, "verification code: %s -- if the peer shows "
+					    "the same, `meshtastic keyverify accept`", st.code);
+			}
+			break;
+		}
+		case SHELL_WORK_KEYVERIFY_ACCEPT: {
+			struct meshtastic_keyverify_status st;
+
+			meshtastic_keyverify_status(&st);
+			ret = meshtastic_keyverify_accept(st.nonce);
+			if (ret < 0) {
+				shell_error(item.sh, "nothing to accept (%d)", ret);
+			} else {
+				shell_print(item.sh, "peer 0x%08x marked key-verified",
+					    st.remote_node);
+			}
+			break;
+		}
+#endif
 		default:
 			ret = -EINVAL;
 			break;
@@ -1537,6 +1589,9 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "hops away: %u", node.hops_away);
 	}
 	shell_print(sh, "favorite: %s", node.is_favorite ? "yes" : "no");
+#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+	shell_print(sh, "key verified: %s", node.is_key_manually_verified ? "yes" : "no");
+#endif
 
 	if (node.has_user) {
 		shell_print(sh, "long name: %s", node.long_name);
@@ -3674,6 +3729,7 @@ static int cmd_keyverify_show(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_keyverify_start(const struct shell *sh, size_t argc, char **argv)
 {
+	struct shell_work_item item = {0};
 	unsigned long node;
 	char *end;
 	int ret;
@@ -3687,26 +3743,19 @@ static int cmd_keyverify_start(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "invalid node id: %s", argv[1]);
 		return -EINVAL;
 	}
-	ret = meshtastic_keyverify_start((uint32_t)node);
-	if (ret == -EBUSY) {
-		shell_error(sh, "a session is already open (keyverify reject to drop it)");
-		return ret;
-	}
-	if (ret < 0) {
-		shell_error(sh, "start failed: %d", ret);
-		return ret;
-	}
-	shell_print(sh, "request sent; ask the peer for the security number it shows, then "
-			"`meshtastic keyverify number <n>`");
-	return 0;
+	/* Deferred to the shell work thread: the send path does not fit the shell
+	 * thread's stack (see SHELL_WORK_KEYVERIFY_START). */
+	item.op = SHELL_WORK_KEYVERIFY_START;
+	item.dest = (uint32_t)node;
+	ret = enqueue_shell_work(sh, &item);
+	return ret;
 }
 
 static int cmd_keyverify_number(const struct shell *sh, size_t argc, char **argv)
 {
-	struct meshtastic_keyverify_status st;
+	struct shell_work_item item = {0};
 	unsigned long n;
 	char *end;
-	int ret;
 
 	if (argc != 2U) {
 		shell_error(sh, "usage: meshtastic keyverify number <6 digits>");
@@ -3717,40 +3766,23 @@ static int cmd_keyverify_number(const struct shell *sh, size_t argc, char **argv
 		shell_error(sh, "invalid security number: %s", argv[1]);
 		return -EINVAL;
 	}
-	meshtastic_keyverify_status(&st);
-	ret = meshtastic_keyverify_provide_number(st.nonce, (uint32_t)n);
-	if (ret == -EACCES) {
-		shell_error(sh, "that number does not match the peer's reply: retype it, or "
-				"suspect a man in the middle");
-		return ret;
-	}
-	if (ret < 0) {
-		shell_error(sh, "not expecting a number now (%d)", ret);
-		return ret;
-	}
-	meshtastic_keyverify_status(&st);
-	shell_print(sh, "verification code: %s -- if the peer shows the same, `meshtastic keyverify "
-			"accept`",
-		    st.code);
-	return 0;
+	/* Deferred like `start`: this sends M3 and hashes on the way. */
+	item.op = SHELL_WORK_KEYVERIFY_NUMBER;
+	item.dest = (uint32_t)n;
+	return enqueue_shell_work(sh, &item);
 }
 
 static int cmd_keyverify_accept(const struct shell *sh, size_t argc, char **argv)
 {
-	struct meshtastic_keyverify_status st;
-	int ret;
+	struct shell_work_item item = {0};
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	meshtastic_keyverify_status(&st);
-	ret = meshtastic_keyverify_accept(st.nonce);
-	if (ret < 0) {
-		shell_error(sh, "nothing to accept (%d)", ret);
-		return ret;
-	}
-	shell_print(sh, "peer 0x%08x marked key-verified", st.remote_node);
-	return 0;
+	/* Deferred: accept ends by sending our NodeInfo to the peer (the send
+	 * path again). Bench 2026-09-09: inline, it locked kit2 up like `start`. */
+	item.op = SHELL_WORK_KEYVERIFY_ACCEPT;
+	return enqueue_shell_work(sh, &item);
 }
 
 static int cmd_keyverify_reject(const struct shell *sh, size_t argc, char **argv)
