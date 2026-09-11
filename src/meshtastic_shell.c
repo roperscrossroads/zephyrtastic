@@ -5016,10 +5016,15 @@ static int cmd_netlog(const struct shell *sh, size_t argc, char **argv)
  * leaves the restored config applied and a save queued; reboot to be sure
  * every consumer re-reads it, as the admin path does on its own. */
 #if defined(CONFIG_MESHTASTIC_LOCKDOWN)
-/* `meshtastic lockdown` (agents-dnr4.15 phase 2): the bench's stand-in for the
- * app's lockdown_auth until phase 3 wires the PhoneAPI. The passphrase is a
- * plain argument here -- the shell history and the console log see it -- so
- * this is a bench tool, not the operator path. Phase 4 adds obscured input. */
+/* `meshtastic lockdown` (agents-dnr4.15): the console side of lockdown.
+ *
+ * Phase 4 gives the operator an obscured prompt: run `provision` / `unlock` /
+ * `disable` with NO passphrase argument and the shell asks for it with echoing
+ * turned off (shell_readline + shell_obscure_set), so it never reaches the
+ * console log or the shell history. The inline `<passphrase>` form is kept for
+ * the bench and for scripting, but warns that what was typed was visible --
+ * because on a real console it was. The app's PhoneAPI path (phase 3) is the
+ * other, and primary, way in. */
 static int cmd_lockdown_status(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -5043,14 +5048,13 @@ static int cmd_lockdown_status(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-static int lockdown_enqueue(const struct shell *sh, enum shell_work_op op, const char *pass,
-			    const char *boots_arg)
+static int lockdown_enqueue(const struct shell *sh, enum shell_work_op op, const uint8_t *pass,
+			    size_t pass_len, const char *boots_arg)
 {
 	struct shell_work_item item = {0};
-	size_t n = strlen(pass);
 	int ret;
 
-	if (n == 0U || n > MESHTASTIC_LOCKDOWN_PASSPHRASE_MAX) {
+	if (pass_len == 0U || pass_len > MESHTASTIC_LOCKDOWN_PASSPHRASE_MAX) {
 		shell_error(sh, "passphrase must be 1-%u bytes", MESHTASTIC_LOCKDOWN_PASSPHRASE_MAX);
 		return -EINVAL;
 	}
@@ -5065,27 +5069,79 @@ static int lockdown_enqueue(const struct shell *sh, enum shell_work_op op, const
 		item.dest = boots;
 	}
 	item.op = op;
-	memcpy(item.payload, pass, n);
-	item.payload_len = n;
+	memcpy(item.payload, pass, pass_len);
+	item.payload_len = pass_len;
 	ret = enqueue_shell_work(sh, &item);
 	memset(item.payload, 0, sizeof(item.payload));
 	return ret;
 }
 
+/* Ask for the passphrase with echoing off (the reference's obscured console
+ * input). Returns the length, or <0; the buffer is the caller's to zero. On a
+ * non-interactive backend (the dummy backend a test drives, no cmd context)
+ * shell_readline refuses with -EACCES -- there is no way to prompt, so say so. */
+static int read_passphrase(const struct shell *sh, uint8_t *buf, size_t cap)
+{
+	int ret;
+
+	shell_obscure_set(sh, true);
+	shell_readline_prompt_set(sh, "passphrase: ");
+	ret = shell_readline(sh, buf, cap, K_SECONDS(60));
+	shell_readline_prompt_set(sh, NULL);
+	shell_obscure_set(sh, false);
+	shell_print(sh, ""); /* the obscured Enter left the cursor mid-line */
+
+	if (ret == -EACCES) {
+		shell_error(sh, "no passphrase argument, and this console cannot prompt "
+				"(pass it inline, or use the app)");
+	} else if (ret == -ETIMEDOUT) {
+		shell_error(sh, "timed out waiting for the passphrase");
+	} else if (ret == -ENOBUFS) {
+		shell_error(sh, "passphrase too long (max %u bytes)",
+			    MESHTASTIC_LOCKDOWN_PASSPHRASE_MAX);
+	} else if (ret < 0) {
+		shell_error(sh, "passphrase entry failed (%d)", ret);
+	}
+	return ret;
+}
+
+/* Gather the passphrase from argv[1] (inline, visible) or an obscured prompt,
+ * then enqueue @p op. `pass_argc` is the index the passphrase would sit at. */
+static int lockdown_pass_cmd(const struct shell *sh, size_t argc, char **argv,
+			     enum shell_work_op op, const char *boots_arg)
+{
+	uint8_t pass[MESHTASTIC_LOCKDOWN_PASSPHRASE_MAX + 1];
+	int ret;
+
+	if (argc >= 2) {
+		shell_warn(sh, "the inline passphrase is echoed to the console and its log; "
+			       "run with no argument for an obscured prompt");
+		return lockdown_enqueue(sh, op, (const uint8_t *)argv[1], strlen(argv[1]), boots_arg);
+	}
+	ret = read_passphrase(sh, pass, sizeof(pass));
+	if (ret < 0) {
+		return ret;
+	}
+	ret = lockdown_enqueue(sh, op, pass, (size_t)ret, NULL);
+	memset(pass, 0, sizeof(pass));
+	return ret;
+}
+
 static int cmd_lockdown_provision(const struct shell *sh, size_t argc, char **argv)
 {
-	return lockdown_enqueue(sh, SHELL_WORK_LOCKDOWN_PROVISION, argv[1],
-				argc > 2 ? argv[2] : NULL);
+	return lockdown_pass_cmd(sh, argc, argv, SHELL_WORK_LOCKDOWN_PROVISION,
+				 argc > 2 ? argv[2] : NULL);
 }
 
 static int cmd_lockdown_unlock(const struct shell *sh, size_t argc, char **argv)
 {
-	return lockdown_enqueue(sh, SHELL_WORK_LOCKDOWN_UNLOCK, argv[1], argc > 2 ? argv[2] : NULL);
+	return lockdown_pass_cmd(sh, argc, argv, SHELL_WORK_LOCKDOWN_UNLOCK,
+				 argc > 2 ? argv[2] : NULL);
 }
 
 static int cmd_lockdown_disable(const struct shell *sh, size_t argc, char **argv)
 {
-	return lockdown_enqueue(sh, SHELL_WORK_LOCKDOWN_DISABLE, argv[1], NULL);
+	return lockdown_pass_cmd(sh, argc, argv, SHELL_WORK_LOCKDOWN_DISABLE, NULL);
 }
 
 static int cmd_lockdown_lock(const struct shell *sh, size_t argc, char **argv)
@@ -5105,21 +5161,24 @@ static int cmd_lockdown_lock(const struct shell *sh, size_t argc, char **argv)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_lockdown_cmds,
 			       SHELL_CMD_ARG(provision, NULL,
-					     SHELL_HELP("Provision a passphrase and seal the store.",
-							"<passphrase> [boots]"),
-					     cmd_lockdown_provision, 2, 1),
+					     SHELL_HELP("Provision a passphrase and seal the store. "
+							"Omit the passphrase for an obscured prompt.",
+							"[passphrase [boots]]"),
+					     cmd_lockdown_provision, 1, 2),
 			       SHELL_CMD_ARG(unlock, NULL,
-					     SHELL_HELP("Present the passphrase; issues a fresh token.",
-							"<passphrase> [boots]"),
-					     cmd_lockdown_unlock, 2, 1),
+					     SHELL_HELP("Present the passphrase; issues a fresh token. "
+							"Omit it for an obscured prompt.",
+							"[passphrase [boots]]"),
+					     cmd_lockdown_unlock, 1, 2),
 			       SHELL_CMD(lock, NULL,
 					 SHELL_HELP("Lock now: delete the token, zero the keys.", NULL),
 					 cmd_lockdown_lock),
 			       SHELL_CMD_ARG(disable, NULL,
 					     SHELL_HELP("Verify the passphrase, rewrite the store in "
-							"the clear, remove the artifacts.",
-							"<passphrase>"),
-					     cmd_lockdown_disable, 2, 0),
+							"the clear, remove the artifacts. Omit the "
+							"passphrase for an obscured prompt.",
+							"[passphrase]"),
+					     cmd_lockdown_disable, 1, 1),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_LOCKDOWN */
 
