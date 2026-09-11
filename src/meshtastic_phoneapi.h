@@ -75,6 +75,10 @@ enum meshtastic_phoneapi_config_state {
 	MESHTASTIC_PHONEAPI_CONFIG_FILEMANIFEST,
 	MESHTASTIC_PHONEAPI_CONFIG_QUEUE_STATUS,
 	MESHTASTIC_PHONEAPI_CONFIG_COMPLETE,
+	/* Lockdown (agents-dnr4.15 phase 3): the LockdownStatus that follows
+	 * config_complete_id -- how a client learns the device can lock down
+	 * (DISABLED) or that it must present the passphrase (LOCKED). */
+	MESHTASTIC_PHONEAPI_CONFIG_LOCKDOWN_STATUS,
 };
 
 struct meshtastic_phoneapi {
@@ -113,6 +117,26 @@ struct meshtastic_phoneapi {
 	 */
 	meshtastic_ToRadio *to_scratch;
 	meshtastic_FromRadio *from_scratch;
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+	/*
+	 * Lockdown (agents-dnr4.15 phase 3): per-connection authorization. Each
+	 * transport owns exactly one instance and one connection at a time, so
+	 * the flag lives here rather than in the reference's slot table. Set on
+	 * the system workqueue once the passphrase this connection delivered
+	 * has been verified (and, for a cold unlock, once the store has been
+	 * reloaded); cleared by meshtastic_phoneapi_reset() on disconnect and by
+	 * every revoke (lock-now, a session roll). Meaningless while lockdown
+	 * is inactive: meshtastic_phoneapi_authorized() answers true then.
+	 */
+	bool admin_authorized;
+	/* An unlock this connection delivered is waiting on the store reload
+	 * before the connection may see real config (the reference's
+	 * pendingUnlockAfterReload). */
+	bool pending_unlock;
+	/* Bumped by meshtastic_phoneapi_reset(): a passphrase job that outlives
+	 * the connection it was sent on must not authorize the next one. */
+	uint32_t conn_epoch;
+#endif
 };
 
 #if defined(CONFIG_MESHTASTIC_PHONEAPI)
@@ -182,6 +206,57 @@ int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, u
  */
 void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet,
 				   const meshtastic_MeshPacket *decoded_mesh);
+
+/**
+ * @brief Copy the registered transports out under the registry lock.
+ * @return how many were copied (at most @p cap).
+ */
+uint8_t meshtastic_phoneapi_snapshot_transports(struct meshtastic_phoneapi **out, uint8_t cap);
+
+/* ---- lockdown (agents-dnr4.15 phase 3) --------------------------------------
+ *
+ * The reference's MESHTASTIC_PHONEAPI_ACCESS_CONTROL, per connection: until a
+ * connection has presented the passphrase it sees a redacted config stream, may
+ * not inject mesh traffic, and has every admin payload but lockdown_auth
+ * dropped. Inactive lockdown (never provisioned, or disabled) = every
+ * connection authorized = stock behaviour; the only trace is a
+ * LockdownStatus{DISABLED} after each config handshake, which is how the app
+ * learns the device could lock down. Implemented in meshtastic_phoneapi_lockdown.c. */
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+/** Register the storage core's event listener. Called once by meshtastic_init(). */
+void meshtastic_phoneapi_lockdown_init(void);
+/** This connection may see real config and administer the node. */
+bool meshtastic_phoneapi_authorized(const struct meshtastic_phoneapi *api);
+/**
+ * @brief The ToRadio packet gate: a lockdown_auth addressed to us is handled
+ *        here (the passphrase never reaches the admin dispatcher or the mesh)
+ *        and any other packet from an unauthorized connection is dropped.
+ * @param res Filled with the QueueStatus result to report when consumed.
+ * @return true if the packet was consumed (handled or dropped): do not send it.
+ */
+bool meshtastic_phoneapi_lockdown_gate(struct meshtastic_phoneapi *api, meshtastic_MeshPacket *pkt,
+				       int *res);
+/** Fill the LockdownStatus that follows config_complete_id; false = none owed. */
+bool meshtastic_phoneapi_lockdown_fill_status(struct meshtastic_phoneapi *api,
+					      meshtastic_FromRadio *from);
+/** A lock-now / disable / session-exhaustion reboot is scheduled (tests). */
+bool meshtastic_phoneapi_lockdown_reboot_pending(void);
+void meshtastic_phoneapi_lockdown_cancel_reboot(void);
+#else
+static inline bool meshtastic_phoneapi_authorized(const struct meshtastic_phoneapi *api)
+{
+	ARG_UNUSED(api);
+	return true;
+}
+static inline bool meshtastic_phoneapi_lockdown_gate(struct meshtastic_phoneapi *api,
+						     meshtastic_MeshPacket *pkt, int *res)
+{
+	ARG_UNUSED(api);
+	ARG_UNUSED(pkt);
+	ARG_UNUSED(res);
+	return false;
+}
+#endif
 #else
 static inline void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet,
 						 const meshtastic_MeshPacket *decoded_mesh)

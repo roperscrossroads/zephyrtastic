@@ -29,6 +29,7 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_lockdown.h"
+#include "meshtastic_phoneapi.h"
 #include "meshtastic_pki.h"
 
 /* Declared privately by meshtastic.c: the NodeDB's boot, which a staged boot must repeat. */
@@ -170,7 +171,10 @@ static void *suite_setup(void)
 static void suite_before(void *f)
 {
 	ARG_UNUSED(f);
-	/* Every test starts stock, on a store that says "stock name". */
+	/* Every test starts stock, on a store that says "stock name". Phase 3's
+	 * listener may have scheduled a reboot (a spent session budget); on
+	 * native_sim that is the end of the process, so it never gets to fire. */
+	meshtastic_phoneapi_lockdown_cancel_reboot();
 	wait_idle();
 	if (meshtastic_lockdown_active()) {
 		if (!meshtastic_lockdown_unlocked()) {

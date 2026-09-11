@@ -247,19 +247,49 @@ ZTEST(lockdown, test_remove_artifacts_returns_to_stock)
 	zassert_false(meshtastic_lockdown_active(), "stock on the next boot too");
 }
 
+/* Phase 3 turned the reference's once-a-second poll into a timer: the cap
+ * consumes its boot by itself and reports what it did. Two boots and a 3 s cap
+ * give three sessions -- the reference's "(boots + 1) * max_session" ceiling. */
+static enum meshtastic_lockdown_event last_ev = -1;
+static unsigned int ev_count;
+
+static void on_ev(enum meshtastic_lockdown_event ev)
+{
+	last_ev = ev;
+	ev_count++;
+}
+
 ZTEST(lockdown, test_session_cap_consumes_boots_without_rebooting)
 {
+	meshtastic_lockdown_set_event_hook(on_ev);
+	ev_count = 0U;
 	zassert_ok(meshtastic_lockdown_provision(PP, sizeof(PP) - 1U, 2U, 0U, 3U), "");
 	zassert_false(meshtastic_lockdown_session_expired(), "");
-	k_sleep(K_SECONDS(4));
-	zassert_true(meshtastic_lockdown_session_expired(), "cap hit");
+	zassert_equal(meshtastic_lockdown_boots_remaining(), 2U, "");
 
-	zassert_equal(meshtastic_lockdown_consume_session_boot(), 1U, "one boot consumed in place");
+	k_sleep(K_SECONDS(4));
+	zassert_equal(ev_count, 1U, "the cap fired once");
+	zassert_equal(last_ev, MESHTASTIC_LOCKDOWN_EV_SESSION_ROLLED, "budget left: rolled");
+	zassert_equal(meshtastic_lockdown_boots_remaining(), 1U, "one boot consumed in place");
 	zassert_false(meshtastic_lockdown_session_expired(), "re-armed");
 	zassert_true(meshtastic_lockdown_unlocked(), "storage stays unlocked");
-	k_sleep(K_SECONDS(4));
-	zassert_equal(meshtastic_lockdown_consume_session_boot(), 0U, "budget spent: token deleted");
+
+	k_sleep(K_SECONDS(3));
+	zassert_equal(ev_count, 2U, "");
+	zassert_equal(last_ev, MESHTASTIC_LOCKDOWN_EV_SESSION_ROLLED, "");
+	zassert_equal(meshtastic_lockdown_boots_remaining(), 0U, "last boot consumed: token deleted");
+	zassert_true(meshtastic_lockdown_unlocked(), "this session still runs");
+
+	k_sleep(K_SECONDS(3));
+	zassert_equal(ev_count, 3U, "");
+	zassert_equal(last_ev, MESHTASTIC_LOCKDOWN_EV_SESSION_EXHAUSTED, "budget spent: locked");
+	zassert_false(meshtastic_lockdown_unlocked(), "");
+	zassert_str_equal(meshtastic_lockdown_lock_reason(), "session_budget_exhausted", "");
 	zassert_equal(meshtastic_lockdown_consume_session_boot(), 0U, "nothing left to consume");
+
+	k_sleep(K_SECONDS(4));
+	zassert_equal(ev_count, 3U, "a locked device's timer is gone");
+	meshtastic_lockdown_set_event_hook(NULL);
 	reboot();
 	zassert_false(meshtastic_lockdown_unlocked(), "");
 	zassert_str_equal(meshtastic_lockdown_lock_reason(), "token_missing", "");

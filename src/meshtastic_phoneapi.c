@@ -125,7 +125,25 @@ void meshtastic_phoneapi_reset(struct meshtastic_phoneapi *api)
 	api->config_index = 0U;
 	api->config_request_id = 0U;
 	api->from_num = 0U;
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+	/* A connection's authorization dies with it, and a passphrase job that
+	 * was sent on it must not vouch for the next one. */
+	api->admin_authorized = false;
+	api->pending_unlock = false;
+	api->conn_epoch++;
+#endif
 	k_mutex_unlock(&api->lock);
+}
+
+uint8_t meshtastic_phoneapi_snapshot_transports(struct meshtastic_phoneapi **out, uint8_t cap)
+{
+	uint8_t n;
+
+	k_mutex_lock(&phoneapi_lock, K_FOREVER);
+	n = MIN(phoneapi.count, cap);
+	memcpy(out, phoneapi.transports, n * sizeof(out[0]));
+	k_mutex_unlock(&phoneapi_lock);
+	return n;
 }
 
 uint32_t meshtastic_phoneapi_from_num(struct meshtastic_phoneapi *api)
@@ -433,6 +451,9 @@ int meshtastic_phoneapi_enqueue_client_notification(const meshtastic_ClientNotif
 	k_mutex_unlock(&phoneapi_lock);
 
 	for (uint8_t i = 0; i < count; i++) {
+		if (!meshtastic_phoneapi_authorized(transports[i])) {
+			continue; /* lockdown: a prompt is content too */
+		}
 		if (meshtastic_phoneapi_enqueue_fromradio(transports[i], from) == 0) {
 			sent++;
 		}
@@ -543,6 +564,13 @@ toradio_decoded:
 	switch (to->which_payload_variant) {
 	case meshtastic_ToRadio_packet_tag:
 		LOG_DBG("%s ToRadio packet id=%u", api->name, to->packet.id);
+		/* Lockdown first: a lockdown_auth is consumed here, on this thread,
+		 * and never reaches the admin dispatcher or the mesh; anything else
+		 * from an unauthorized connection stops here too. */
+		if (meshtastic_phoneapi_lockdown_gate(api, &to->packet, &ret)) {
+			meshtastic_phoneapi_enqueue_queue_status(api, ret, to->packet.id);
+			break;
+		}
 #if IS_ENABLED(CONFIG_MESHTASTIC_ADMIN)
 		if (to->packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
 		    to->packet.decoded.portnum == meshtastic_PortNum_ADMIN_APP &&
@@ -657,6 +685,11 @@ int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, u
 	for (uint8_t i = 0; i < count; i++) {
 		struct meshtastic_phoneapi *api = transports[i];
 
+		if (!meshtastic_phoneapi_authorized(api)) {
+			/* Lockdown: diagnostics describe the traffic an unauthorized
+			 * client may not see. Not a drop -- it was never a reader. */
+			continue;
+		}
 		k_mutex_lock(&api->lock, K_FOREVER);
 		if (api->count >= api->queue_size) {
 			k_mutex_unlock(&api->lock);
@@ -723,6 +756,9 @@ void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet,
 	LOG_DBG("FromRadio packet fan-out to %u transport(s), mesh id=%u", count, from->packet.id);
 
 	for (uint8_t i = 0; i < count; i++) {
+		if (!meshtastic_phoneapi_authorized(transports[i])) {
+			continue; /* lockdown: mesh traffic is content (reference releasePhonePacket) */
+		}
 		(void)meshtastic_phoneapi_enqueue_fromradio(transports[i], from);
 	}
 

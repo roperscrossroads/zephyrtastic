@@ -20,6 +20,7 @@
 #include "meshtastic_ble_registry.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_ext_ram.h"
+#include "meshtastic_lockdown.h"
 #include "meshtastic_phoneapi.h"
 
 #include <zephyr/logging/log.h>
@@ -314,6 +315,25 @@ static void to_radio_work_handler(struct k_work *work)
 	k_mutex_unlock(&ble.lock);
 
 	meshtastic_phoneapi_handle_toradio(&ble.api, buf, buf_len);
+
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+	/* A ToRadio may have carried a passphrase. The PhoneAPI wipes its own
+	 * decoded copy; these two are the transport's, and only it can wipe
+	 * them. The characteristic buffer is cleared only if nothing has been
+	 * written into it since the copy above. */
+	{
+		volatile uint8_t *v = buf;
+
+		for (size_t i = 0U; i < sizeof(buf); i++) {
+			v[i] = 0U;
+		}
+		k_mutex_lock(&ble.lock, K_FOREVER);
+		if (ble.to_radio_len == 0U) {
+			memset(ble.to_radio_buf, 0, sizeof(ble.to_radio_buf));
+		}
+		k_mutex_unlock(&ble.lock);
+	}
+#endif
 }
 
 static ssize_t write_toradio(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
@@ -753,6 +773,18 @@ static enum bt_security_err pairing_accept(struct bt_conn *conn,
 	LOG_DBG("BLE pairing request auth_req=0x%02x io=0x%02x", feat->auth_req,
 		feat->io_capability);
 
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+	/* A locked device takes no new pairings (LOCKDOWN-DESIGN.md §2, phase 3).
+	 * A phone already bonded re-encrypts with its stored key and never comes
+	 * through here, so it can still connect and unlock; a stranger's first
+	 * pairing is refused until the operator has unlocked over a bonded link
+	 * or the console. Stricter than the reference, which only hides the
+	 * pairing UI. */
+	if (meshtastic_lockdown_locked()) {
+		LOG_WRN("BLE pairing refused: device locked");
+		return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
+	}
+#endif
 	return BT_SECURITY_ERR_SUCCESS;
 }
 #endif

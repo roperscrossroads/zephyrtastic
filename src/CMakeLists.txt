@@ -90,6 +90,7 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SETTINGS meshtastic_settings.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SETTINGS meshtastic_backup.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_LOCKDOWN meshtastic_lockdown.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_LOCKDOWN meshtastic_phoneapi_lockdown.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_REBOOT_TRACE meshtastic_reboot_trace.c)
   if(CONFIG_MESHTASTIC_REBOOT_TRACE)
     # Wrap sys_reboot() at LINK time rather than instrumenting call sites. Every caller is

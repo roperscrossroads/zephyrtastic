@@ -20,6 +20,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
 #include "meshtastic_config_store.h"
+#include "meshtastic_lockdown.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_region_presets.h"
 #if defined(CONFIG_MESHTASTIC_POSITION)
@@ -37,7 +38,26 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define MESHTASTIC_PHONEAPI_NONCE_ONLY_CONFIG 69420U
 #define MESHTASTIC_PHONEAPI_NONCE_ONLY_NODES  69421U
 
-static void fill_my_info(meshtastic_FromRadio *from)
+/*
+ * Lockdown redaction (agents-dnr4.15 phase 3), mirrored gate for gate from the
+ * reference's getFromRadio() under MESHTASTIC_PHONEAPI_ACCESS_CONTROL. An
+ * unauthorized connection under active lockdown gets a stream shaped exactly
+ * like the real one -- the same states in the same order, so the app's
+ * handshake completes -- with the content that would identify, fingerprint or
+ * expose the operator's setup emptied: device_id and build flavour, the whole
+ * DeviceMetadata, every channel, network and security, LoRa down to the five
+ * fields observable on the air anyway, the BLE fixed PIN, MQTT credentials and
+ * the mesh-beacon offer channel, and the node DB. What it does get: my_node_num
+ * (broadcast on the mesh regardless), nodedb_count (so it knows to pull the DB
+ * after unlocking), the region-preset map (regulatory, public), and its own
+ * NodeInfo. Inactive lockdown = authorized = untouched.
+ */
+static bool authorized(const struct meshtastic_phoneapi *api)
+{
+	return meshtastic_phoneapi_authorized(api);
+}
+
+static void fill_my_info(meshtastic_FromRadio *from, bool auth)
 {
 	uint8_t node_id[4];
 
@@ -46,6 +66,11 @@ static void fill_my_info(meshtastic_FromRadio *from)
 	from->my_info.my_node_num = meshtastic_get_node_id();
 	from->my_info.min_app_version = 0U;
 	from->my_info.nodedb_count = (uint32_t)meshtastic_nodedb_count();
+	if (!auth) {
+		/* A stable identifier and the build flavour: correlation and
+		 * which-CVE-to-try material, neither needed to send a passphrase. */
+		return;
+	}
 	from->my_info.device_id.size = sizeof(node_id);
 	sys_put_le32(meshtastic_get_node_id(), node_id);
 	memcpy(from->my_info.device_id.bytes, node_id, sizeof(node_id));
@@ -128,14 +153,20 @@ static void fill_other_node_info(meshtastic_FromRadio *from,
 	 * app fills position/metrics from packets it receives directly. */
 }
 
-static void fill_metadata_frame(meshtastic_FromRadio *from)
+static void fill_metadata_frame(meshtastic_FromRadio *from, bool auth)
 {
 	from->id = meshtastic_next_fromradio_id();
 	from->which_payload_variant = meshtastic_FromRadio_metadata_tag;
+	if (!auth) {
+		/* One large fingerprint vector (firmware version, hw model, role,
+		 * excluded modules...). Left zeroed; the client re-fetches once
+		 * authenticated. */
+		return;
+	}
 	meshtastic_fill_device_metadata(&from->metadata);
 }
 
-static void fill_channel(meshtastic_FromRadio *from, int index)
+static void fill_channel(meshtastic_FromRadio *from, int index, bool auth)
 {
 	meshtastic_Channel slot = meshtastic_Channel_init_zero;
 
@@ -143,17 +174,77 @@ static void fill_channel(meshtastic_FromRadio *from, int index)
 	from->which_payload_variant = meshtastic_FromRadio_channel_tag;
 	from->channel.index = index;
 
-	if (meshtastic_config_store_get_channel((uint8_t)index, &slot) == 0 &&
+	if (auth && meshtastic_config_store_get_channel((uint8_t)index, &slot) == 0 &&
 	    slot.role != meshtastic_Channel_Role_DISABLED) {
 		from->channel = slot;
 		from->channel.index = index;
 	} else {
+		/* An empty entry: no name, no PSK, no role. Unauthorized clients
+		 * get one for every slot, and the state machine advances as usual
+		 * so config_complete_id still fires. */
 		from->channel.role = meshtastic_Channel_Role_DISABLED;
 		from->channel.has_settings = true;
 	}
 }
 
-static int fill_config_variant(meshtastic_FromRadio *from, pb_size_t which_tag)
+/* Reference STATE_SEND_CONFIG gates, applied after the store filled the section. */
+static void redact_config(meshtastic_Config *cfg)
+{
+	switch (cfg->which_payload_variant) {
+	case meshtastic_Config_network_tag:
+		/* No wifi PSK, no SSID, no static addressing. */
+		cfg->payload_variant.network =
+			(meshtastic_Config_NetworkConfig)meshtastic_Config_NetworkConfig_init_zero;
+		break;
+	case meshtastic_Config_security_tag:
+		/* No private key, no admin keys, no public key. */
+		cfg->payload_variant.security =
+			(meshtastic_Config_SecurityConfig)meshtastic_Config_SecurityConfig_init_zero;
+		break;
+	case meshtastic_Config_lora_tag: {
+		/* Whitelist the radio identity that is observable on the air anyway;
+		 * the operator's tuning (tx_power, ignore lists, boosted gain, the
+		 * overrides) stays hidden. */
+		meshtastic_Config_LoRaConfig w = meshtastic_Config_LoRaConfig_init_zero;
+
+		w.use_preset = cfg->payload_variant.lora.use_preset;
+		w.modem_preset = cfg->payload_variant.lora.modem_preset;
+		w.region = cfg->payload_variant.lora.region;
+		w.channel_num = cfg->payload_variant.lora.channel_num;
+		w.hop_limit = cfg->payload_variant.lora.hop_limit;
+		cfg->payload_variant.lora = w;
+		break;
+	}
+	case meshtastic_Config_bluetooth_tag:
+		/* The pairing PIN is a shared secret. */
+		cfg->payload_variant.bluetooth.fixed_pin = 0U;
+		break;
+	default:
+		break;
+	}
+}
+
+/* Reference STATE_SEND_MODULECONFIG gates. */
+static void redact_module(meshtastic_ModuleConfig *mod)
+{
+	switch (mod->which_payload_variant) {
+	case meshtastic_ModuleConfig_mqtt_tag:
+		/* Broker address, username, password, root topic. */
+		mod->payload_variant.mqtt =
+			(meshtastic_ModuleConfig_MQTTConfig)meshtastic_ModuleConfig_MQTTConfig_init_zero;
+		break;
+	case meshtastic_ModuleConfig_mesh_beacon_tag:
+		/* Carries the broadcast-offer channel, PSK and all. */
+		mod->payload_variant.mesh_beacon =
+			(meshtastic_ModuleConfig_MeshBeaconConfig)
+				meshtastic_ModuleConfig_MeshBeaconConfig_init_zero;
+		break;
+	default:
+		break;
+	}
+}
+
+static int fill_config_variant(meshtastic_FromRadio *from, pb_size_t which_tag, bool auth)
 {
 	int ret;
 
@@ -164,11 +255,14 @@ static int fill_config_variant(meshtastic_FromRadio *from, pb_size_t which_tag)
 	if (ret < 0) {
 		return ret;
 	}
+	if (!auth) {
+		redact_config(&from->config);
+	}
 
 	return 0;
 }
 
-static int fill_module_variant(meshtastic_FromRadio *from, pb_size_t which_tag)
+static int fill_module_variant(meshtastic_FromRadio *from, pb_size_t which_tag, bool auth)
 {
 	int ret;
 
@@ -178,6 +272,9 @@ static int fill_module_variant(meshtastic_FromRadio *from, pb_size_t which_tag)
 	ret = meshtastic_config_store_get_module(which_tag, &from->moduleConfig);
 	if (ret < 0) {
 		return ret;
+	}
+	if (!auth) {
+		redact_module(&from->moduleConfig);
 	}
 
 	return 0;
@@ -234,6 +331,9 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 	 * called repeatedly (once per emitted config frame) from the same
 	 * single-owner transport thread. */
 	meshtastic_FromRadio *from = api->from_scratch;
+	/* Sampled once per frame: an authorization that lands mid-handshake
+	 * shows in the next frame, and never half-way through one. */
+	const bool auth = authorized(api);
 	int ret;
 
 	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
@@ -243,7 +343,7 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 		case MESHTASTIC_PHONEAPI_CONFIG_IDLE:
 			return -ENOENT;
 		case MESHTASTIC_PHONEAPI_CONFIG_MY_INFO:
-			fill_my_info(from);
+			fill_my_info(from, auth);
 			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_DEVICE_UI, 0U,
 					  frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_DEVICE_UI:
@@ -256,15 +356,17 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 			fill_node_info(from);
 			/* ONLY_NODES (app Stage 2): own node info then straight to the
 			 * node DB, skipping metadata/config -- mirrors firmware
-			 * STATE_SEND_OWN_NODEINFO under SPECIAL_NONCE_ONLY_NODES. */
+			 * STATE_SEND_OWN_NODEINFO under SPECIAL_NONCE_ONLY_NODES. An
+			 * unauthorized client gets no node DB: straight to complete. */
 			return emit_frame(
 				api, from,
 				(api->config_request_id == MESHTASTIC_PHONEAPI_NONCE_ONLY_NODES)
-					? MESHTASTIC_PHONEAPI_CONFIG_OTHER_NODEINFOS
+					? (auth ? MESHTASTIC_PHONEAPI_CONFIG_OTHER_NODEINFOS
+						: MESHTASTIC_PHONEAPI_CONFIG_COMPLETE)
 					: MESHTASTIC_PHONEAPI_CONFIG_METADATA,
 				0U, frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_METADATA:
-			fill_metadata_frame(from);
+			fill_metadata_frame(from, auth);
 			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_REGION_PRESETS,
 					  0U, frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_REGION_PRESETS:
@@ -279,7 +381,7 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_CHANNELS, 0U,
 					  frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_CHANNELS:
-			fill_channel(from, api->config_index);
+			fill_channel(from, api->config_index, auth);
 			return emit_frame(api, from,
 					  (api->config_index + 1U >= MESHTASTIC_MAX_CHANNELS)
 						  ? MESHTASTIC_PHONEAPI_CONFIG_CONFIGS
@@ -291,7 +393,7 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 		case MESHTASTIC_PHONEAPI_CONFIG_CONFIGS:
 			while (api->config_index < ARRAY_SIZE(config_tags)) {
 				*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
-				ret = fill_config_variant(from, config_tags[api->config_index]);
+				ret = fill_config_variant(from, config_tags[api->config_index], auth);
 				if (ret == 0) {
 					return emit_frame(
 						api, from,
@@ -315,13 +417,14 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 			 * under SPECIAL_NONCE_ONLY_CONFIG. Otherwise stream peers next. */
 			enum meshtastic_phoneapi_config_state after_modules =
 				(api->config_request_id ==
-				 MESHTASTIC_PHONEAPI_NONCE_ONLY_CONFIG)
+					 MESHTASTIC_PHONEAPI_NONCE_ONLY_CONFIG ||
+				 !auth) /* lockdown: no node DB for the unauthorized */
 					? MESHTASTIC_PHONEAPI_CONFIG_FILEMANIFEST
 					: MESHTASTIC_PHONEAPI_CONFIG_OTHER_NODEINFOS;
 
 			while (api->config_index < ARRAY_SIZE(module_tags)) {
 				*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
-				ret = fill_module_variant(from, module_tags[api->config_index]);
+				ret = fill_module_variant(from, module_tags[api->config_index], auth);
 				if (ret == 0) {
 					return emit_frame(
 						api, from,
@@ -386,7 +489,25 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 			from->id = meshtastic_next_fromradio_id();
 			from->which_payload_variant = meshtastic_FromRadio_config_complete_id_tag;
 			from->config_complete_id = api->config_request_id;
-			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_IDLE, 0U, frame);
+			return emit_frame(api, from,
+					  IS_ENABLED(CONFIG_MESHTASTIC_LOCKDOWN)
+						  ? MESHTASTIC_PHONEAPI_CONFIG_LOCKDOWN_STATUS
+						  : MESHTASTIC_PHONEAPI_CONFIG_IDLE,
+					  0U, frame);
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+		case MESHTASTIC_PHONEAPI_CONFIG_LOCKDOWN_STATUS:
+			/* Right after config_complete_id (reference: queued post-config
+			 * and drained first thing in STATE_SEND_PACKETS): DISABLED so
+			 * the app renders its toggle off, or LOCKED so it asks for the
+			 * passphrase. */
+			if (meshtastic_phoneapi_lockdown_fill_status(api, from)) {
+				return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_IDLE, 0U,
+						  frame);
+			}
+			api->config_state = MESHTASTIC_PHONEAPI_CONFIG_IDLE;
+			api->config_index = 0U;
+			return -ENOENT;
+#endif
 		default:
 			api->config_state = MESHTASTIC_PHONEAPI_CONFIG_IDLE;
 			api->config_index = 0U;

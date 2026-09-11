@@ -92,10 +92,25 @@ static struct {
 #define LD_RAW_MAX (256U + MESHTASTIC_LOCKDOWN_SEAL_OVERHEAD)
 
 static void (*reload_hook)(void);
+static void (*event_hook)(enum meshtastic_lockdown_event ev);
 static void reload_work_fn(struct k_work *work);
 static void rewrite_work_fn(struct k_work *work);
+static void session_work_fn(struct k_work *work);
 static K_WORK_DEFINE(reload_work, reload_work_fn);
 static K_WORK_DEFINE(rewrite_work, rewrite_work_fn);
+static K_WORK_DELAYABLE_DEFINE(session_work, session_work_fn);
+
+static void emit(enum meshtastic_lockdown_event ev)
+{
+	if (event_hook != NULL) {
+		event_hook(ev);
+	}
+}
+
+void meshtastic_lockdown_set_event_hook(void (*hook)(enum meshtastic_lockdown_event ev))
+{
+	event_hook = hook;
+}
 
 /* ---- small helpers ------------------------------------------------------------ */
 
@@ -638,6 +653,7 @@ static void bump_boots_since_fail(void)
 
 void meshtastic_lockdown_reset(void)
 {
+	(void)k_work_cancel_delayable(&session_work);
 	zero(&ld, sizeof(ld));
 	ld.lock_reason = "not_provisioned";
 }
@@ -860,8 +876,12 @@ int meshtastic_lockdown_unlock(const uint8_t *passphrase, size_t len, uint8_t bo
 	return 0;
 }
 
-void meshtastic_lockdown_lock_now(void)
+/* The lock itself, without telling the listener: the disable and the session
+ * exhaustion both lock on their way to an event of their own, and a LOCKED in
+ * front of a DISABLED would have the app flip twice. */
+static void lock_now_quiet(void)
 {
+	(void)k_work_cancel_delayable(&session_work);
 	delete_token();
 	zero(ld.dek, sizeof(ld.dek));
 	zero(ld.kek, sizeof(ld.kek));
@@ -875,13 +895,19 @@ void meshtastic_lockdown_lock_now(void)
 	LOG_INF("Lockdown: locked now (token deleted, keys zeroed)");
 }
 
+void meshtastic_lockdown_lock_now(void)
+{
+	lock_now_quiet();
+	emit(MESHTASTIC_LOCKDOWN_EV_LOCKED);
+}
+
 int meshtastic_lockdown_remove_artifacts(void)
 {
 	(void)settings_delete(LD_KEY_DEK);
 	(void)settings_delete(LD_KEY_TOKEN);
 	(void)settings_delete(LD_KEY_MONO);
 	(void)settings_delete(LD_KEY_BACKOFF);
-	meshtastic_lockdown_lock_now();
+	lock_now_quiet();
 	ld.provisioned = false;
 	ld.lock_reason = "not_provisioned";
 	LOG_INF("Lockdown: artifacts removed, inactive");
@@ -974,6 +1000,11 @@ void meshtastic_lockdown_set_session(uint32_t max_s)
 {
 	ld.session_max_ms = max_s * 1000U;
 	ld.session_started_ms = k_uptime_get();
+	if (max_s != 0U) {
+		(void)k_work_reschedule(&session_work, K_SECONDS(max_s));
+	} else {
+		(void)k_work_cancel_delayable(&session_work);
+	}
 }
 
 bool meshtastic_lockdown_session_expired(void)
@@ -981,7 +1012,31 @@ bool meshtastic_lockdown_session_expired(void)
 	if (ld.session_max_ms == 0U) {
 		return false;
 	}
-	return (k_uptime_get() - ld.session_started_ms) > (int64_t)ld.session_max_ms;
+	return (k_uptime_get() - ld.session_started_ms) >= (int64_t)ld.session_max_ms;
+}
+
+/* The cap fired (reference main.cpp's session-expiry check, as the timer it
+ * always was). k_work_reschedule() from set_session() replaces a pending
+ * item, so this only ever runs for the cap currently armed. */
+static void session_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (!ld.dek_ok || ld.session_max_ms == 0U) {
+		return;
+	}
+	if (ld.boots_remaining == 0U) {
+		LOG_WRN("Lockdown: session cap hit and the boot budget is spent: locking");
+		lock_now_quiet();
+		ld.lock_reason = "session_budget_exhausted";
+		emit(MESHTASTIC_LOCKDOWN_EV_SESSION_EXHAUSTED);
+		return;
+	}
+	LOG_WRN("Lockdown: session cap hit, %u boot(s) left after this one: clients must "
+		"re-authenticate",
+		(unsigned int)(ld.boots_remaining - 1U));
+	(void)meshtastic_lockdown_consume_session_boot(); /* re-arms via set_session() */
+	emit(MESHTASTIC_LOCKDOWN_EV_SESSION_ROLLED);
 }
 
 uint8_t meshtastic_lockdown_consume_session_boot(void)
@@ -1108,6 +1163,7 @@ static void reload_work_fn(struct k_work *work)
 	ld.reload_pending = false;
 	ld.needs_reload = false;
 	LOG_INF("Lockdown: store reloaded after unlock");
+	emit(MESHTASTIC_LOCKDOWN_EV_RELOADED);
 }
 
 /* ---- phase 2: seal-all / unseal-all ------------------------------------------------ */
@@ -1242,9 +1298,11 @@ static void rewrite_work_fn(struct k_work *work)
 		ld.sealing_off = false;
 		ld.disable_done = true;
 		LOG_INF("Lockdown: disabled, store rewritten in the clear");
-	} else {
-		LOG_INF("Lockdown: store sealed");
+		ld.rewrite_pending = false;
+		emit(MESHTASTIC_LOCKDOWN_EV_DISABLED);
+		return;
 	}
+	LOG_INF("Lockdown: store sealed");
 	ld.rewrite_pending = false;
 }
 

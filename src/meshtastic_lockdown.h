@@ -158,10 +158,40 @@ int meshtastic_lockdown_open(const char *name, const void *in, size_t len, void 
 /** @brief Whether a stored blob carries the sealed-record magic. */
 bool meshtastic_lockdown_is_sealed(const void *buf, size_t len);
 
-/* Session cap (reference setSession / isSessionExpired / consumeSessionBoot). */
+/* Session cap (reference setSession / isSessionExpired / consumeSessionBoot).
+ * Phase 3: set_session() also arms a delayable work item for the cap; when it
+ * fires with budget left a boot is consumed in place and the cap re-armed
+ * (EV_SESSION_ROLLED), and with the budget spent the device locks
+ * (EV_SESSION_EXHAUSTED) -- the reference's once-a-second main-loop poll, as a
+ * timer. Uptime-based, so a clock change cannot move it. */
 void meshtastic_lockdown_set_session(uint32_t max_s);
 bool meshtastic_lockdown_session_expired(void);
 uint8_t meshtastic_lockdown_consume_session_boot(void);
+
+/* ---- phase 3: what the PhoneAPI needs to hear --------------------------------
+ *
+ * The storage core does not know about connections. It tells one listener what
+ * happened; the PhoneAPI turns that into per-connection authorization changes
+ * and LockdownStatus frames. Every event fires on the system workqueue except
+ * EV_LOCKED, which fires on whichever thread called meshtastic_lockdown_lock_now(). */
+enum meshtastic_lockdown_event {
+	/** lock_now: token deleted, keys zeroed. Every connection's authorization is void. */
+	MESHTASTIC_LOCKDOWN_EV_LOCKED,
+	/** The deferred reload after an unlock ran: the store holds the real records. */
+	MESHTASTIC_LOCKDOWN_EV_RELOADED,
+	/** The disable's plaintext rewrite finished and the artifacts are gone. */
+	MESHTASTIC_LOCKDOWN_EV_DISABLED,
+	/** The session cap hit with budget left: one boot consumed, cap re-armed,
+	 *  storage still unlocked, connections must re-authenticate. */
+	MESHTASTIC_LOCKDOWN_EV_SESSION_ROLLED,
+	/** The session cap hit with the budget spent: locked (reason
+	 *  "session_budget_exhausted"); the listener reboots. */
+	MESHTASTIC_LOCKDOWN_EV_SESSION_EXHAUSTED,
+};
+
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+void meshtastic_lockdown_set_event_hook(void (*hook)(enum meshtastic_lockdown_event ev));
+#endif
 
 #ifdef __cplusplus
 }

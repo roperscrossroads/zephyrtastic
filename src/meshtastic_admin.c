@@ -70,6 +70,7 @@
 #endif
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
+#include "meshtastic_lockdown.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_router.h"
 #include "meshtastic_settings.h"
@@ -871,6 +872,32 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	LOG_DBG("admin: variant %u from 0x%08x id=0x%08x remote=%d",
 		(unsigned int)admin_req.which_payload_variant, admin_cur.from, admin_cur.id,
 		(int)admin_cur.remote);
+
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+	/* lockdown_auth is the PhoneAPI's, handled on the transport thread before
+	 * a packet gets here; one arriving by any other route (the mesh, a test
+	 * injecting straight into the dispatcher) is dropped without a reply, as
+	 * the reference does, rather than leak a partial response. */
+	if (admin_req.which_payload_variant == meshtastic_AdminMessage_lockdown_auth_tag) {
+		LOG_WRN("admin: lockdown_auth reached the dispatcher (remote=%d); ignored",
+			(int)admin_cur.remote);
+		k_mutex_unlock(&admin_lock);
+		return;
+	}
+	/* While the store is locked -- or unlocked but not yet reloaded, when
+	 * RAM holds placeholders -- every admin payload is dropped, local and
+	 * remote. The unlock is the prerequisite for administering the node; a
+	 * PKC-authorized peer (or a baked-in admin key) must not be able to drive
+	 * factory_reset / set_config against a locked device. Only gated while
+	 * active: a capable build that was never provisioned serves admin as
+	 * stock (reference AdminModule::handleReceivedProtobuf). */
+	if (meshtastic_lockdown_active() && !meshtastic_lockdown_store_ready()) {
+		LOG_WRN("admin: dropping variant %u -- storage locked",
+			(unsigned int)admin_req.which_payload_variant);
+		k_mutex_unlock(&admin_lock);
+		return;
+	}
+#endif
 
 	/* Managed node: the directly-connected app may not administer it — only an
 	 * authorized remote admin can. Consume without applying; the app already

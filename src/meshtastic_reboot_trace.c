@@ -49,6 +49,7 @@ static const char *const reason_names[] = {
 	[MESHTASTIC_REBOOT_SHELL] = "shell",
 	[MESHTASTIC_REBOOT_CONFIG] = "config-apply",
 	[MESHTASTIC_REBOOT_OTA] = "ota",
+	[MESHTASTIC_REBOOT_LOCKDOWN] = "lockdown",
 };
 
 const char *meshtastic_reboot_reason_str(uint8_t reason)

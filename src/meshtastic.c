@@ -599,6 +599,7 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	(void)settings_subsys_init();
 	meshtastic_lockdown_init();
 	meshtastic_lockdown_set_reload_hook(lockdown_reload);
+	meshtastic_phoneapi_lockdown_init();
 	mt.radio_held = meshtastic_lockdown_locked();
 	if (mt.radio_held) {
 		LOG_WRN("Lockdown: locked boot -- defaults loaded, radio held until unlock");

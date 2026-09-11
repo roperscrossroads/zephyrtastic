@@ -54,6 +54,8 @@ enum meshtastic_reboot_reason {
 	MESHTASTIC_REBOOT_CONFIG,
 	/** A firmware update swapped an image in. */
 	MESHTASTIC_REBOOT_OTA,
+	/** Lockdown: a lock-now, a disable, or a spent session budget (detail names which). */
+	MESHTASTIC_REBOOT_LOCKDOWN,
 };
 
 /** What the reboot recorded about itself. */

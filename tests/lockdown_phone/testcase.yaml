@@ -1,0 +1,16 @@
+# Lockdown phase 3 (agents-dnr4.15): the PhoneAPI half -- per-connection
+# authorization, the ToRadio gate, the redacted config stream, LockdownStatus,
+# the inline lockdown_auth verified on the workqueue, the admin gate while
+# locked, the session cap's revoke-and-lock, and the disable. Stack + sim radio
+# + real NVS, driven through the real ToRadio/FromRadio frames.
+common:
+  tags:
+    - meshtastic
+    - lockdown
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.lockdown_phone.native_sim: {}
