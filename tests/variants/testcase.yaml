@@ -237,3 +237,44 @@ tests:
       - CONFIG_MESHTASTIC_LOCKDOWN=y
       - CONFIG_HWINFO=y
       - CONFIG_MBEDTLS=y
+
+  # The console WITH the settings flash (agents-68g8). Every shell build in twister
+  # pins MESHTASTIC_SETTINGS=n, so the settings-only console commands (backup,
+  # restore, and the lockdown verbs) had never compiled here. That hid a nesting
+  # bug: their definitions sat inside `#if CONFIG_MESHTASTIC_DFU_TRIGGER` while
+  # their registrations were guarded by SETTINGS alone, so every DFU_TRIGGER=n +
+  # SETTINGS=y image -- the ESP32-S3 courier among them -- failed with
+  # `cmd_backup undeclared` (fixed in c719297).
+  #
+  # DFU_TRIGGER itself cannot be swept on this platform: it depends on
+  # SOC_SERIES_NRF52, so on native_sim it is always =n, which is exactly the arm
+  # that broke. Its =y arm is compiled by every XIAO kit image, and by nothing in
+  # twister. Two scenarios, because the lockdown verbs are a second #if inside the
+  # settings block and each arm of it can strand a reference on its own.
+  meshtastic.variants.shell_settings.native_sim:
+    extra_configs:
+      - CONFIG_SHELL=y
+      - CONFIG_SHELL_BACKEND_DUMMY=y
+      - CONFIG_SHELL_BACKEND_SERIAL=n
+      - CONFIG_MESHTASTIC_SHELL=y
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS_NVS=y
+  meshtastic.variants.shell_settings_lockdown.native_sim:
+    extra_configs:
+      - CONFIG_SHELL=y
+      - CONFIG_SHELL_BACKEND_DUMMY=y
+      - CONFIG_SHELL_BACKEND_SERIAL=n
+      - CONFIG_MESHTASTIC_SHELL=y
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS_NVS=y
+      - CONFIG_MESHTASTIC_LOCKDOWN=y
+      - CONFIG_HWINFO=y
+      - CONFIG_MBEDTLS=y
