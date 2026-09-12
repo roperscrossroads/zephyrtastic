@@ -5010,7 +5010,6 @@ static int cmd_netlog(const struct shell *sh, size_t argc, char **argv)
 }
 #endif
 
-#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 /* The admin backup/restore, from the console (agents-dnr4.14). A restore
  * leaves the restored config applied and a save queued; reboot to be sure
@@ -5218,6 +5217,7 @@ static int cmd_backup(const struct shell *sh, size_t argc, char **argv)
 }
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
 
+#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
 static int cmd_dfu(const struct shell *sh, size_t argc, char **argv)
 {
 	bool serial_only = (argc >= 2) && (strcmp(argv[1], "serial") == 0);
@@ -5234,7 +5234,7 @@ static int cmd_dfu(const struct shell *sh, size_t argc, char **argv)
 	meshtastic_dfu_enter(serial_only);
 	return 0; /* unreachable */
 }
-#endif
+#endif /* CONFIG_MESHTASTIC_DFU_TRIGGER */
 
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 /* ---- node-to-node BLE peer link (a4it.6) ---- */
