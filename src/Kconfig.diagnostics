@@ -42,3 +42,30 @@ config MESHTASTIC_STACK_PROTECTION
 	  STACK_USAGE and INIT_STACKS come along because without the fill pattern
 	  the thread high-water numbers have nothing to measure against, and those
 	  numbers are the input to the watching.
+
+# The ESP32-S3 class-B hard-hang fix (agents-xhli.24), for every S3 image rather
+# than per board: the fault is in the Xtensa arch's interrupt exit, so it applies
+# to every ESP32-S3 target (V4, V4-R8, V3, SenseCAP D1L) equally.
+#
+# With the upstream default (=n), EXCINT_HANDLER leaves a level-1 interrupt by
+# the "_not_l1 -> PS_INTLEVEL(1)" branch that xtensa_asm2.inc.S itself flags with
+# an "optimization FIXME": EXCM is unmasked while the handler is still unwinding,
+# a pending level-1 interrupt re-fires at once, re-enters the handler and
+# underflows the per-CPU nested count. On the bench that was ~1.29 M re-entries
+# per second, a starved CPU (consoles hung while LoRa limped on), and a TG0WDT
+# about twice a day. Unfixed on upstream main as of 2026-09-12.
+#
+# =y takes upstream's other branch, which holds PS.INTLEVEL raised through the
+# whole exit, so nothing can preempt that window. The cost is that a medium- or
+# high-priority interrupt no longer preempts a running low-priority handler;
+# measured free on this stack (BLE peer links, cluster sync, LoRa TX/RX all
+# unchanged). Proven by A/B: patched nodes' ISR-nesting guard never acted and
+# JTAG halts landed in arch_cpu_idle; the unpatched control floored the count
+# 3.26e9 times and sampled 11/11 in the level-1 exception path.
+#
+# A default, not a select, so an explicit CONFIG_XTENSA_INTERRUPT_NONPREEMPTABLE=n
+# still builds the unfixed control. Gated on MESHTASTIC (this file sits inside
+# `if MESHTASTIC`), which keeps the MCUboot image -- identical on every board
+# and never reflashed by the fleet -- untouched.
+config XTENSA_INTERRUPT_NONPREEMPTABLE
+	default y if SOC_SERIES_ESP32S3
