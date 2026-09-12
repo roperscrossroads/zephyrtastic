@@ -5755,7 +5755,13 @@ usage:
 	return -EINVAL;
 }
 #endif /* CONFIG_MESHTASTIC_ADMIN_CLIENT */
+#endif /* CONFIG_MESHTASTIC_ADMIN */
 
+/* The cluster and fleet commands are NOT admin features: MESHTASTIC_CLUSTER does
+ * not depend on MESHTASTIC_ADMIN, and their registrations below are guarded by
+ * CLUSTER/FLEET alone. They used to sit inside the ADMIN block, so SHELL=y +
+ * CLUSTER=y + PHONEAPI=n (which forces ADMIN=n) failed to compile -- found by
+ * meshtastic.variants.shell_settings (agents-68g8). */
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
 /* Config-section names for `cluster promote`/`pin`/`unpin` — the shareable set
  * plus lora (which promote and pin both refuse with the §7.9 explanation, a
@@ -6683,6 +6689,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_FLEET */
 
+#if defined(CONFIG_MESHTASTIC_ADMIN)
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_admin_cmds,
 			       SHELL_CMD(trust, NULL,
 					 SHELL_HELP("List/manage trusted remote-admin keys.",
