@@ -106,4 +106,32 @@ void meshtastic_admin_redact_module_config_for_mesh(meshtastic_ModuleConfig *mod
  */
 int meshtastic_admin_prepare_module_config_write(meshtastic_ModuleConfig *module);
 
+/**
+ * @brief Strip secrets from a Config section before it leaves over the mesh.
+ *
+ * Reference (AdminModule::handleGetConfig): the device identity private key is
+ * backup material for the LOCAL owner only. A get_config(SECURITY) answered to a
+ * remote requester, even an authorized admin, carries no private_key; public_key
+ * and admin_key are public and stay. Applied by the remote get path; public so the
+ * sim suite can prove it without decrypting a PKC reply.
+ */
+void meshtastic_admin_redact_config_for_mesh(meshtastic_Config *config);
+
+/**
+ * @brief Reconcile an incoming SecurityConfig write with the stored one.
+ *
+ * The two identity rules of the reference's handleSetConfig(security):
+ *  - a write that OMITS the private key keeps the current keypair. It is a partial
+ *    or remote client (a remote admin is never given the private key, so every
+ *    remote security write omits it), not an identity reset -- that goes through
+ *    factory_reset_device. Without this the empty key is stored, and the next boot
+ *    generates a new identity, orphaning the node from every peer that pinned it.
+ *  - a BARE keypair rotation (a new private key, every other field at its default)
+ *    keeps the other security fields, so rotating the key does not also drop the
+ *    admin keys and lock the owner out of remote admin.
+ * @p incoming is rewritten in place; @p current is the stored section.
+ */
+void meshtastic_admin_prepare_security_write(meshtastic_Config_SecurityConfig *incoming,
+					     const meshtastic_Config_SecurityConfig *current);
+
 #endif /* MESHTASTIC_ADMIN_H_ */

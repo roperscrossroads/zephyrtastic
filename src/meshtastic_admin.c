@@ -412,8 +412,60 @@ static bool handle_get_config(uint32_t config_type)
 		LOG_WRN("admin: get_config unknown type %u", (unsigned int)config_type);
 		return false;
 	}
+	/* Same discriminator as the module-config redaction below: this port stamps
+	 * our own node id on a phone-originated packet, so `remote` is the honest
+	 * test where the reference uses req.from != 0. */
+	if (admin_cur.remote) {
+		meshtastic_admin_redact_config_for_mesh(
+			&admin_resp.payload_variant.get_config_response);
+	}
 	admin_emit_reply(&admin_resp);
 	return true;
+}
+
+void meshtastic_admin_redact_config_for_mesh(meshtastic_Config *config)
+{
+	if (config == NULL || config->which_payload_variant != meshtastic_Config_security_tag) {
+		return;
+	}
+	memset(config->payload_variant.security.private_key.bytes, 0,
+	       sizeof(config->payload_variant.security.private_key.bytes));
+	config->payload_variant.security.private_key.size = 0;
+}
+
+void meshtastic_admin_prepare_security_write(meshtastic_Config_SecurityConfig *incoming,
+					     const meshtastic_Config_SecurityConfig *current)
+{
+	const size_t klen = sizeof(incoming->private_key.bytes);
+	bool bare_rotation;
+
+	if (incoming == NULL || current == NULL) {
+		return;
+	}
+
+	if (incoming->private_key.size != klen && current->private_key.size == klen) {
+		LOG_WRN("admin: security set omitted the private key; keeping the identity keypair");
+		incoming->private_key = current->private_key;
+		incoming->public_key = current->public_key;
+		return;
+	}
+
+	bare_rotation = incoming->private_key.size == klen &&
+			!(current->private_key.size == klen &&
+			  memcmp(incoming->private_key.bytes, current->private_key.bytes, klen) == 0) &&
+			incoming->admin_key_count == 0U && !incoming->is_managed &&
+			!incoming->serial_enabled && !incoming->debug_log_api_enabled &&
+			!incoming->admin_channel_enabled;
+	if (bare_rotation) {
+		meshtastic_Config_SecurityConfig rotated = *current;
+
+		LOG_INF("admin: security set is a bare keypair rotation; keeping the other fields");
+		rotated.private_key = incoming->private_key;
+		/* Usually empty: the boot-time PKI init derives it from the new private
+		 * key and self-heals the stored copy (meshtastic_pki_init). */
+		rotated.public_key = incoming->public_key;
+		*incoming = rotated;
+	}
 }
 
 void meshtastic_admin_redact_module_config_for_mesh(meshtastic_ModuleConfig *module)
@@ -972,6 +1024,18 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 
 	/* Setters — apply + persist (persistence deferred if a txn is open). */
 	case meshtastic_AdminMessage_set_config_tag:
+		if (admin_req.payload_variant.set_config.which_payload_variant ==
+		    meshtastic_Config_security_tag) {
+			meshtastic_Config stored = meshtastic_Config_init_zero;
+
+			if (meshtastic_config_store_get_config(meshtastic_Config_security_tag,
+							       &stored) == 0 &&
+			    stored.which_payload_variant == meshtastic_Config_security_tag) {
+				meshtastic_admin_prepare_security_write(
+					&admin_req.payload_variant.set_config.payload_variant.security,
+					&stored.payload_variant.security);
+			}
+		}
 		ret = meshtastic_config_store_set_config(&admin_req.payload_variant.set_config);
 		if (ret < 0) {
 			LOG_WRN("admin: set_config failed (%d)", ret);

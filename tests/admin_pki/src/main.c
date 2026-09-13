@@ -3418,3 +3418,174 @@ ZTEST(admin_pki, test_factory_reset_device_also_clears_the_nodedb)
 	 * suite depends on PEER's identity still being pinned. */
 	seed_peer_pubkey(peer_pubkey);
 }
+
+/* --- The identity rules of a security write, and the private key on the mesh ---
+ * Found 2026-09-13 while scoping the remote-admin hardware lane (agents-dnr4.16):
+ * this port stored a SecurityConfig write verbatim. A write without the private key
+ * -- the only shape a remote admin can send, because it is never given the key --
+ * stored an empty key, and the next boot's meshtastic_pki_init() generated a new
+ * identity, orphaning the node from every peer that pinned it. And a remote
+ * get_config(SECURITY) returned the private key over the air. The reference
+ * (AdminModule::handleSetConfig / handleGetConfig) does neither. */
+
+static size_t encode_admin_set_security(const meshtastic_Config_SecurityConfig *sec, uint8_t *buf,
+					size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
+	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_security_tag;
+	am.payload_variant.set_config.payload_variant.security = *sec;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+static size_t encode_admin_get_config(uint32_t config_type, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	am.which_payload_variant = meshtastic_AdminMessage_get_config_request_tag;
+	am.payload_variant.get_config_request = config_type;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+#define ADMIN_CONFIGTYPE_SECURITY 7U /* AdminMessage.ConfigType.SECURITY_CONFIG */
+
+ZTEST(admin_pki, test_security_set_without_private_key_keeps_the_identity)
+{
+	meshtastic_Config before = meshtastic_Config_init_zero;
+	meshtastic_Config after = meshtastic_Config_init_zero;
+	meshtastic_Config_SecurityConfig w = meshtastic_Config_SecurityConfig_init_zero;
+	uint8_t buf[256];
+	size_t len;
+
+	/* Install a known, consistent keypair first. Earlier tests in this suite write a
+	 * SecurityConfig holding only an admin key straight into the store (set_admin_key),
+	 * the very shape this test is about, so the stored private key cannot be assumed. */
+	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+	psa_key_id_t kid = PSA_KEY_ID_NULL;
+	size_t olen = 0;
+
+	psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
+	psa_set_key_bits(&attr, 255);
+	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_DERIVE | PSA_KEY_USAGE_EXPORT);
+	psa_set_key_algorithm(&attr, PSA_ALG_ECDH);
+	zassert_equal(psa_generate_key(&attr, &kid), PSA_SUCCESS, "keygen failed");
+	before.which_payload_variant = meshtastic_Config_security_tag;
+	before.payload_variant.security.private_key.size = MESHTASTIC_PKI_KEY_LEN;
+	zassert_equal(psa_export_key(kid, before.payload_variant.security.private_key.bytes,
+				     MESHTASTIC_PKI_KEY_LEN, &olen), PSA_SUCCESS, "priv export");
+	before.payload_variant.security.public_key.size = MESHTASTIC_PKI_KEY_LEN;
+	zassert_equal(psa_export_public_key(kid, before.payload_variant.security.public_key.bytes,
+					    MESHTASTIC_PKI_KEY_LEN, &olen), PSA_SUCCESS, "pub export");
+	(void)psa_destroy_key(kid);
+	zassert_ok(meshtastic_config_store_set_config(&before), "seed keypair");
+	zassert_ok(meshtastic_pki_init(), "adopt the seeded keypair");
+
+	/* What a remote admin adding itself sends: an admin key, no private key. */
+	w.admin_key_count = 1U;
+	w.admin_key[0].size = MESHTASTIC_PKI_KEY_LEN;
+	memcpy(w.admin_key[0].bytes, peer_pubkey, MESHTASTIC_PKI_KEY_LEN);
+	len = encode_admin_set_security(&w, buf, sizeof(buf));
+	zassert_equal(send_local_admin_and_pop_routing(buf, len), meshtastic_Routing_Error_NONE,
+		      "the write must be accepted");
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &after));
+	zassert_equal(after.payload_variant.security.private_key.size, MESHTASTIC_PKI_KEY_LEN,
+		      "the stored private key must survive a write that omitted it");
+	zassert_mem_equal(after.payload_variant.security.private_key.bytes,
+			  before.payload_variant.security.private_key.bytes, MESHTASTIC_PKI_KEY_LEN,
+			  "same private key, not a new identity");
+	zassert_mem_equal(after.payload_variant.security.public_key.bytes,
+			  before.payload_variant.security.public_key.bytes, MESHTASTIC_PKI_KEY_LEN,
+			  "same public key");
+	zassert_equal(after.payload_variant.security.admin_key_count, 1U,
+		      "the field the write DID carry is applied");
+
+	/* What the next boot does with it: the identity must not change. */
+	uint8_t pub_before[MESHTASTIC_PKI_KEY_LEN], pub_after[MESHTASTIC_PKI_KEY_LEN];
+
+	(void)meshtastic_pki_get_public_key(pub_before);
+	zassert_ok(meshtastic_pki_init(), "boot-time PKI init");
+	(void)meshtastic_pki_get_public_key(pub_after);
+	zassert_mem_equal(pub_after, pub_before, MESHTASTIC_PKI_KEY_LEN,
+			  "after a boot the node must still advertise the same key");
+
+	/* Leave the seeded keypair in place (consistent in the store and in RAM), but
+	 * drop the admin key this test added. */
+	zassert_ok(meshtastic_config_store_set_config(&before), "restore");
+}
+
+ZTEST(admin_pki, test_bare_keypair_rotation_keeps_the_other_security_fields)
+{
+	meshtastic_Config_SecurityConfig cur = meshtastic_Config_SecurityConfig_init_zero;
+	meshtastic_Config_SecurityConfig in = meshtastic_Config_SecurityConfig_init_zero;
+
+	cur.private_key.size = 32U;
+	memset(cur.private_key.bytes, 0xA1, 32U);
+	cur.public_key.size = 32U;
+	memset(cur.public_key.bytes, 0xB2, 32U);
+	cur.admin_key_count = 1U;
+	cur.admin_key[0].size = 32U;
+	memset(cur.admin_key[0].bytes, 0xC3, 32U);
+	cur.admin_channel_enabled = true;
+
+	/* A "regenerate keys" client: a new private key and nothing else. */
+	in.private_key.size = 32U;
+	memset(in.private_key.bytes, 0xD4, 32U);
+	meshtastic_admin_prepare_security_write(&in, &cur);
+	zassert_equal(in.private_key.bytes[0], 0xD4, "the new private key is taken");
+	zassert_equal(in.admin_key_count, 1U, "rotating the key must not drop the admin keys");
+	zassert_true(in.admin_channel_enabled, "nor the other fields");
+	zassert_equal(in.public_key.size, 0U, "public key left to be derived from the new private key");
+
+	/* The same private key with an empty admin list is NOT a rotation: it is how an
+	 * owner clears the admin keys, and must go through as sent. */
+	in = (meshtastic_Config_SecurityConfig)meshtastic_Config_SecurityConfig_init_zero;
+	in.private_key = cur.private_key;
+	meshtastic_admin_prepare_security_write(&in, &cur);
+	zassert_equal(in.admin_key_count, 0U, "clearing the admin keys still works");
+
+	/* A new private key WITH other fields set is a full write, taken as sent. */
+	in = (meshtastic_Config_SecurityConfig)meshtastic_Config_SecurityConfig_init_zero;
+	in.private_key.size = 32U;
+	memset(in.private_key.bytes, 0xE5, 32U);
+	in.is_managed = true;
+	meshtastic_admin_prepare_security_write(&in, &cur);
+	zassert_equal(in.admin_key_count, 0U, "a full write is not merged");
+	zassert_true(in.is_managed, "and keeps what it carried");
+}
+
+ZTEST(admin_pki, test_private_key_is_redacted_for_mesh_not_for_phone)
+{
+	meshtastic_Config c = meshtastic_Config_init_zero;
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	uint8_t buf[32];
+	size_t len;
+
+	c.which_payload_variant = meshtastic_Config_security_tag;
+	c.payload_variant.security.private_key.size = 32U;
+	memset(c.payload_variant.security.private_key.bytes, 0x5A, 32U);
+	c.payload_variant.security.public_key.size = 32U;
+	memset(c.payload_variant.security.public_key.bytes, 0x6B, 32U);
+	meshtastic_admin_redact_config_for_mesh(&c);
+	zassert_equal(c.payload_variant.security.private_key.size, 0U, "no private key on the mesh");
+	zassert_equal(c.payload_variant.security.private_key.bytes[0], 0U, "and no bytes left behind");
+	zassert_equal(c.payload_variant.security.public_key.size, 32U, "the public key stays");
+
+	/* Another section passes through untouched. */
+	c = (meshtastic_Config)meshtastic_Config_init_zero;
+	c.which_payload_variant = meshtastic_Config_device_tag;
+	c.payload_variant.device.node_info_broadcast_secs = 900U;
+	meshtastic_admin_redact_config_for_mesh(&c);
+	zassert_equal(c.payload_variant.device.node_info_broadcast_secs, 900U, "device untouched");
+
+	/* The LOCAL owner still gets the key (it is their backup material). */
+	len = encode_admin_get_config(ADMIN_CONFIGTYPE_SECURITY, buf, sizeof(buf));
+	zassert_true(send_local_admin_and_pop_reply(buf, len, &resp), "get_config must reply");
+	zassert_equal(resp.payload_variant.get_config_response.payload_variant.security.private_key.size,
+		      MESHTASTIC_PKI_KEY_LEN, "the phone gets the private key");
+}
