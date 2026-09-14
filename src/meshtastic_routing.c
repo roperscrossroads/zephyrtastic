@@ -235,6 +235,32 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
 				 routing_hop_limit_for_reply(req), false, K_NO_WAIT);
 }
 
+uint8_t meshtastic_routing_reply_hop_limit(uint8_t req_hop_limit, uint8_t req_hop_start)
+{
+	const struct meshtastic_packet req = {
+		.hop_limit = req_hop_limit,
+		.hop_start = req_hop_start,
+	};
+
+	return routing_hop_limit_for_reply(&req);
+}
+
+int meshtastic_routing_answer(uint32_t to, uint32_t request_id, uint8_t channel_index,
+			      uint8_t req_hop_limit, uint8_t req_hop_start, bool want_ack,
+			      meshtastic_Routing_Error err)
+{
+	if (to == 0U || to == mt.node_id) {
+		return -EINVAL;
+	}
+
+	return routing_send_reply(to, request_id,
+				  (channel_index < MESHTASTIC_MAX_CHANNELS)
+					  ? channel_index
+					  : meshtastic_channels_primary_index(),
+				  err, meshtastic_routing_reply_hop_limit(req_hop_limit, req_hop_start),
+				  want_ack, K_NO_WAIT);
+}
+
 void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet,
 				   const meshtastic_MeshPacket *mesh)
 {

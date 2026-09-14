@@ -6228,6 +6228,151 @@ ZTEST(protocol_stack, test_remote_admin_channel_requires_passkey)
 	admin_set_is_managed(false);
 }
 
+/* --- agents-dnr4.32: one request, one answer ------------------------------ */
+
+/* The single frame the node sent for a remote admin request, over the FULL RX
+ * path (router + admin), decoded: the routing error when it is a ROUTING answer
+ * (-1 otherwise), its request_id, and the wire header. Asserts exactly one send:
+ * that count IS the property. Before the fix the router's generic want_ack ACK
+ * NONE went out as well, and on the air it arrived first. */
+static int remote_admin_single_answer(const struct meshtastic_packet *req,
+				      struct meshtastic_wire_header *hdr, uint32_t *request_id)
+{
+	struct meshtastic_packet decoded;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_Routing routing = meshtastic_Routing_init_zero;
+	pb_istream_t is;
+
+	reset_mock_lora();
+	meshtastic_handle_inbound_packet(req, NULL, 0U, true);
+	k_sleep(ADMIN_REPLY_SETTLE);
+
+	assert_mock_send_count(1U); /* one answer, not an ACK NONE plus the answer */
+	copy_last_tx_header(hdr);
+	decode_last_tx(&decoded, payload, sizeof(payload));
+	*request_id = decoded.request_id;
+	/* A want_ack answer is tracked for retransmission; keep it out of later tests. */
+	meshtastic_reliable_reset();
+	if (decoded.portnum != MESHTASTIC_PORT_ROUTING) {
+		return -1;
+	}
+	is = pb_istream_from_buffer(decoded.payload, decoded.payload_len);
+	zassert_true(pb_decode(&is, meshtastic_Routing_fields, &routing), "Routing decode failed");
+	return (int)routing.error_reason;
+}
+
+/* A refused remote admin write is answered by its NAK ALONE. A client that acts
+ * on the first packet carrying its request id (the python library's onResponse,
+ * the app's delivery state) must not be told a refused write succeeded. */
+ZTEST(protocol_stack, test_remote_admin_refusal_is_the_only_answer)
+{
+	uint8_t buf[256];
+	struct meshtastic_packet pkt;
+	struct meshtastic_wire_header hdr;
+	uint32_t request_id;
+	size_t len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_ROUTER, buf,
+					   sizeof(buf));
+
+	admin_set_is_managed(false);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+
+	/* Unauthorized: not PKC, not on the admin channel. */
+	make_remote_admin_packet(&pkt, buf, len, meshtastic_channels_primary_index(), true);
+	pkt.id = 0xADD13201U;
+	pkt.hop_limit = 3U;
+	pkt.hop_start = 3U;
+	zassert_equal(remote_admin_single_answer(&pkt, &hdr, &request_id),
+		      meshtastic_Routing_Error_NOT_AUTHORIZED,
+		      "the one answer to an unauthorized write must be its NAK");
+	zassert_equal(request_id, pkt.id, "the NAK must name the request");
+
+	/* Authorized by the legacy channel, but no session passkey. */
+	admin_channel_set(true);
+	make_remote_admin_packet(&pkt, buf, len, ADMIN_TEST_CH_INDEX, true);
+	pkt.id = 0xADD13202U;
+	pkt.hop_limit = 3U;
+	pkt.hop_start = 3U;
+	zassert_equal(remote_admin_single_answer(&pkt, &hdr, &request_id),
+		      meshtastic_Routing_Error_ADMIN_BAD_SESSION_KEY,
+		      "the one answer to a passkey-less write must be its NAK");
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "the refused write must not apply");
+
+	admin_channel_set(false);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}
+
+/* An accepted remote write gets exactly one ACK, and a remote answer follows the
+ * request like the reference's setReplyTo: its want_ack (so RF loss is retried),
+ * and a hop limit from the hops the request used (0 used + margin 2 = 2). */
+ZTEST(protocol_stack, test_remote_admin_accepted_write_one_ack_follows_the_request)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	struct meshtastic_packet pkt;
+	struct meshtastic_wire_header hdr;
+	uint32_t request_id;
+	size_t len;
+
+	admin_set_is_managed(false);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	admin_channel_set(true);
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+
+	len = encode_admin_set_role_key(meshtastic_Config_DeviceConfig_Role_ROUTER, key,
+					sizeof(key), buf, sizeof(buf));
+	make_remote_admin_packet(&pkt, buf, len, ADMIN_TEST_CH_INDEX, true);
+	pkt.id = 0xADD13203U;
+	pkt.hop_limit = 3U;
+	pkt.hop_start = 3U;
+	zassert_equal(remote_admin_single_answer(&pkt, &hdr, &request_id),
+		      meshtastic_Routing_Error_NONE, "an accepted write is ACKed once");
+	zassert_equal(request_id, pkt.id, "the ACK must name the request");
+	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "the accepted write must apply");
+	zassert_true((hdr.flags & MESHTASTIC_FLAGS_WANT_ACK) != 0U,
+		     "a remote answer copies the request's want_ack (reference setReplyTo)");
+	zassert_equal(hdr.flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK, 2U,
+		      "reply hop limit = hops the request used (0) + margin (2)");
+	zassert_equal(hdr.channel, meshtastic_channels_get_hash(ADMIN_TEST_CH_INDEX),
+		      "the answer goes back on the channel the request came in on");
+
+	admin_channel_set(false);
+	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	admin_set_is_managed(false);
+}
+
+/* A remote getter's answer is its response alone: no ACK NONE beside it. */
+ZTEST(protocol_stack, test_remote_admin_getter_response_is_the_only_answer)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	uint8_t buf[64];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet pkt;
+	struct meshtastic_wire_header hdr;
+	uint32_t request_id;
+
+	admin_set_is_managed(false);
+	admin_channel_set(true);
+
+	am.which_payload_variant = meshtastic_AdminMessage_get_owner_request_tag;
+	am.payload_variant.get_owner_request = true;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "encode failed");
+	make_remote_admin_packet(&pkt, buf, os.bytes_written, ADMIN_TEST_CH_INDEX, true);
+	pkt.id = 0xADD13204U;
+	pkt.want_response = true;
+	pkt.hop_limit = 3U;
+	pkt.hop_start = 3U;
+	zassert_equal(remote_admin_single_answer(&pkt, &hdr, &request_id), -1,
+		      "a getter's one answer must be its ADMIN_APP response, not a ROUTING ACK");
+	zassert_equal(request_id, pkt.id, "the response must name the request");
+	zassert_true((hdr.flags & MESHTASTIC_FLAGS_WANT_ACK) != 0U,
+		     "a remote response copies the request's want_ack, so RF loss is retried");
+
+	admin_channel_set(false);
+}
+
 /* A fixed 32-byte "peer public key". The admin_key authorization path only
  * memcmps NodeDB key vs SecurityConfig.admin_key — no crypto validation — so any
  * stable 32 bytes exercise the PKC match/mismatch without a PKI build. (The real

@@ -32,8 +32,14 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt);
  * packet (the caller must not deliver it to the phone as a normal RX packet).
  *
  * @param pkt Decoded internal packet carrying the AdminMessage bytes.
+ * @return true when the admin path answered the requester itself (a NAK, a
+ *         response, or its own ACK). The router must then NOT send its generic
+ *         want_ack ACK for the same packet: one request, one answer, as the
+ *         reference's ReliableRouter (agents-dnr4.32). false when nothing was
+ *         sent (a dropped or undecodable payload, a response to our own client),
+ *         so the router's ACK stands exactly as for any other packet.
  */
-void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
+bool meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 				    const meshtastic_MeshPacket *mesh);
 
 /** Reset admin edit-transaction state (call on phone disconnect). */

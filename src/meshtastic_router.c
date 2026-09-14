@@ -906,6 +906,8 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 	struct meshtastic_packet materialized;
 	uint8_t mpayload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	bool suppress_relay = false;
+	/* A module answered this request itself; the generic want_ack ACK is then not sent. */
+	bool module_answered = false;
 
 	/* C3 Phase 8d: a caller may pass packet == NULL when it hands us a decoded MeshPacket
 	 * (the MQTT-downlink inject) — we materialise the struct from it below. Only both-NULL
@@ -977,7 +979,7 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 			 * delivered to the phone as an ordinary RX packet. */
 			if (pkt->portnum == MESHTASTIC_PORT_ADMIN && pkt->to == mt.node_id &&
 			    pkt->from != mt.node_id) {
-				meshtastic_admin_handle_remote(pkt, decoded_mesh);
+				module_answered = meshtastic_admin_handle_remote(pkt, decoded_mesh);
 			} else
 #endif
 			{
@@ -993,7 +995,16 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 			meshtastic_mqtt_on_rx(pkt, wire, wire_len, decoded_mesh);
 		}
 #endif
-		meshtastic_routing_on_decoded(pkt, decoded_mesh);
+		/* One request, one answer: when a module already answered this packet
+		 * (a NAK, a response, its own ACK) the generic want_ack ACK is not sent
+		 * as well -- reference ReliableRouter::sniffReceived acks only when
+		 * !MeshModule::currentReply. Sending both put an ACK NONE ahead of a
+		 * remote admin refusal, so a client taking the first answer was told a
+		 * refused write succeeded (agents-dnr4.32). An admin packet is never a
+		 * ROUTING packet, so skipping this call skips no ACK/NAK bookkeeping. */
+		if (!module_answered) {
+			meshtastic_routing_on_decoded(pkt, decoded_mesh);
+		}
 		meshtastic_dispatch_modules(pkt, decoded_mesh);
 		/* After module dispatch: the NodeDB has now created/refreshed the
 		 * source entry, so a learned next hop has somewhere to land.

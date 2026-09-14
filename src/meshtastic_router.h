@@ -121,6 +121,27 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
 				   meshtastic_Routing_Error err);
 
 /**
+ * @brief Answer a decoded request a module handled: a ROUTING ACK/NAK, as the reference's
+ * MeshModule::allocErrorResponse + setReplyTo build it.
+ *
+ * Unlike @ref meshtastic_routing_send_error (for a frame that could not be decoded, so its
+ * channel is unknown) this replies on the request's own @p channel_index (primary when
+ * invalid), derives the hop limit from the request's @p req_hop_limit / @p req_hop_start the
+ * way the router's own ACK does, and copies the request's @p want_ack so the answer is
+ * retransmitted over RF rather than lost. Fire-and-forget (K_NO_WAIT): runs on the RX path.
+ *
+ * A module that answers this way must tell the router, so the router does not ALSO send its
+ * generic ACK for the same request (agents-dnr4.32; reference ReliableRouter::sniffReceived
+ * acks only when no module replied).
+ */
+int meshtastic_routing_answer(uint32_t to, uint32_t request_id, uint8_t channel_index,
+			      uint8_t req_hop_limit, uint8_t req_hop_start, bool want_ack,
+			      meshtastic_Routing_Error err);
+
+/** @brief The hop limit a reply to a request that arrived with these hop fields should carry. */
+uint8_t meshtastic_routing_reply_hop_limit(uint8_t req_hop_limit, uint8_t req_hop_start);
+
+/**
  * @brief Record that a neighbour rebroadcast one of our own packets.
  *
  * Called from the own-echo RX branch (wire src == this node) with the echo's

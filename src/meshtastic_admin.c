@@ -118,6 +118,8 @@ static struct admin_ctx {
 	uint32_t id;	       /* request packet id (reply request_id) */
 	bool want_ack;	       /* requester asked for a ROUTING ACK */
 	uint8_t channel_index; /* channel the request arrived on */
+	uint8_t hop_limit;     /* the request's hop fields: a remote reply's hop */
+	uint8_t hop_start;     /* limit is derived from them, as the reference's */
 	bool remote;	       /* true: reply over the mesh, not PhoneAPI */
 } admin_cur;
 
@@ -335,7 +337,16 @@ static void admin_emit_reply(meshtastic_AdminMessage *resp)
 	pkt.payload_len = stream.bytes_written;
 
 	if (admin_cur.remote) {
+		/* As the reference's setReplyTo: the request's channel, a hop limit
+		 * derived from the request, and the request's want_ack -- a response
+		 * lost over RF is retransmitted, not silently gone (agents-dnr4.32:
+		 * one remote get_config response was lost on the bench and never
+		 * retried). */
 		pkt.channel_index = admin_cur.channel_index;
+		pkt.hop_limit = meshtastic_routing_reply_hop_limit(admin_cur.hop_limit,
+								   admin_cur.hop_start);
+		pkt.hop_start = pkt.hop_limit;
+		pkt.want_ack = admin_cur.want_ack;
 		(void)meshtastic_send_packet(&pkt, K_NO_WAIT);
 	} else {
 		pkt.channel_index = 0U;
@@ -345,7 +356,9 @@ static void admin_emit_reply(meshtastic_AdminMessage *resp)
 
 /* Emit a ROUTING_APP ACK/NAK the client matches to its want_ack request_id.
  * Routes like admin_emit_reply: local via the PhoneAPI, remote back over the
- * mesh via the router (K_NO_WAIT, primary channel — matching NAK behaviour). */
+ * mesh as the reference's allocErrorResponse does (the request's channel, hop
+ * limit and want_ack; K_NO_WAIT). A remote answer from here REPLACES the
+ * router's generic ACK -- see meshtastic_admin_handle_remote's return. */
 static void admin_ack_write(meshtastic_Routing_Error err)
 {
 	meshtastic_Routing routing = meshtastic_Routing_init_zero;
@@ -354,12 +367,11 @@ static void admin_ack_write(meshtastic_Routing_Error err)
 	struct meshtastic_packet pkt = {0};
 
 	if (admin_cur.remote) {
-		/* routing_send_error reads only from/id off the request; synthesize the
-		 * minimal struct from the stashed scalars (C3 Phase 7 — no retained
-		 * struct pointer, no lifetime coupling to the RX frame). */
-		meshtastic_routing_send_error(
-			&(struct meshtastic_packet){.from = admin_cur.from, .id = admin_cur.id},
-			err);
+		/* From the stashed scalars (C3 Phase 7 — no retained struct pointer,
+		 * no lifetime coupling to the RX frame). */
+		(void)meshtastic_routing_answer(admin_cur.from, admin_cur.id,
+						admin_cur.channel_index, admin_cur.hop_limit,
+						admin_cur.hop_start, admin_cur.want_ack, err);
 		return;
 	}
 
@@ -902,8 +914,9 @@ static bool admin_variant_needs_passkey(pb_size_t variant)
 /* Shared decode + gate + dispatch + reply. @p ctx (copied into admin_cur under
  * the lock) tells the emit helpers where to reply. Local and remote both flow
  * through here; the differences are the is_managed gate (local) and the passkey
- * gate (remote). */
-static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t payload_len)
+ * gate (remote). Returns true when it answered the requester (a response, a
+ * NAK or its own ACK), false when it sent nothing. */
+static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t payload_len)
 {
 	pb_istream_t stream;
 	meshtastic_Routing_Error ack_err = meshtastic_Routing_Error_NONE;
@@ -918,7 +931,7 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	if (!pb_decode(&stream, meshtastic_AdminMessage_fields, &admin_req)) {
 		LOG_WRN("admin: AdminMessage decode failed: %s", PB_GET_ERROR(&stream));
 		k_mutex_unlock(&admin_lock);
-		return;
+		return false;
 	}
 
 	LOG_DBG("admin: variant %u from 0x%08x id=0x%08x remote=%d",
@@ -934,7 +947,7 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		LOG_WRN("admin: lockdown_auth reached the dispatcher (remote=%d); ignored",
 			(int)admin_cur.remote);
 		k_mutex_unlock(&admin_lock);
-		return;
+		return false;
 	}
 	/* While the store is locked -- or unlocked but not yet reloaded, when
 	 * RAM holds placeholders -- every admin payload is dropped, local and
@@ -947,7 +960,7 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		LOG_WRN("admin: dropping variant %u -- storage locked",
 			(unsigned int)admin_req.which_payload_variant);
 		k_mutex_unlock(&admin_lock);
-		return;
+		return false;
 	}
 #endif
 
@@ -959,7 +972,7 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		LOG_INF("admin: ignoring local admin variant %u — node is_managed",
 			(unsigned int)admin_req.which_payload_variant);
 		k_mutex_unlock(&admin_lock);
-		return;
+		return false;
 	}
 
 	/* Remote mutating ops must carry a live session passkey (replay protection);
@@ -972,7 +985,7 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 			(unsigned int)admin_req.which_payload_variant);
 		admin_ack_write(meshtastic_Routing_Error_ADMIN_BAD_SESSION_KEY);
 		k_mutex_unlock(&admin_lock);
-		return;
+		return true;
 	}
 
 	/* Any further activity while a transaction is open pushes its idle
@@ -1516,6 +1529,7 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	 * but still ACK a failed getter and every setter. */
 	if (admin_cur.want_ack && !response_sent) {
 		admin_ack_write(ack_err);
+		response_sent = true; /* answered: the ACK/NAK above is this request's one answer */
 	}
 
 	/* Fire a deferred reboot once the write that needs it is not inside an open
@@ -1526,6 +1540,7 @@ static void admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	}
 
 	k_mutex_unlock(&admin_lock);
+	return response_sent;
 }
 
 bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
@@ -1534,18 +1549,18 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt)
 		return false;
 	}
 
-	admin_dispatch((struct admin_ctx){
-			       .from = pkt->from,
-			       .id = pkt->id,
-			       .want_ack = pkt->want_ack,
-			       .channel_index = 0U,
-			       .remote = false,
-		       },
-		       pkt->decoded.payload.bytes, pkt->decoded.payload.size);
+	(void)admin_dispatch((struct admin_ctx){
+				     .from = pkt->from,
+				     .id = pkt->id,
+				     .want_ack = pkt->want_ack,
+				     .channel_index = 0U,
+				     .remote = false,
+			     },
+			     pkt->decoded.payload.bytes, pkt->decoded.payload.size);
 	return true; /* consumed — never forward admin onto the mesh */
 }
 
-void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
+bool meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 				    const meshtastic_MeshPacket *mesh)
 {
 	meshtastic_Routing_Error auth_err = meshtastic_Routing_Error_NOT_AUTHORIZED;
@@ -1554,13 +1569,15 @@ void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 	uint32_t request_id;
 	bool want_ack;
 	uint8_t channel_index;
+	uint8_t hop_limit;
+	uint8_t hop_start;
 	bool pki_encrypted;
 	bool via_mqtt;
 	const uint8_t *payload;
 	size_t payload_len;
 
 	if (pkt == NULL && mesh == NULL) {
-		return;
+		return false;
 	}
 
 	/* C3 Phase 7: read the request from the decoded MeshPacket when the RF path supplied
@@ -1570,6 +1587,8 @@ void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 	from = mesh ? mesh->from : pkt->from;
 	id = mesh ? mesh->id : pkt->id;
 	want_ack = mesh ? mesh->want_ack : pkt->want_ack;
+	hop_limit = mesh ? (uint8_t)mesh->hop_limit : pkt->hop_limit;
+	hop_start = mesh ? (uint8_t)mesh->hop_start : pkt->hop_start;
 	channel_index = mesh ? ((mesh->channel < MESHTASTIC_MAX_CHANNELS)
 					? (uint8_t)mesh->channel
 					: MESHTASTIC_CHANNEL_INDEX_INVALID)
@@ -1581,7 +1600,7 @@ void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 	payload_len = mesh ? mesh->decoded.payload.size : pkt->payload_len;
 
 	if (payload == NULL && payload_len != 0U) {
-		return;
+		return false;
 	}
 
 	/* A response to a request WE originated (agents-xhli.3): consumed by the
@@ -1590,7 +1609,7 @@ void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 	 * already proven by the PKC decrypt (checked inside). */
 	if (meshtastic_admin_client_on_admin(from, request_id, pki_encrypted, payload,
 					     payload_len)) {
-		return;
+		return false; /* consumed, not answered: the router's ACK stands */
 	}
 
 	/* Packet-level authorization before touching the AdminMessage contents. On
@@ -1598,19 +1617,21 @@ void meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 	if (!admin_remote_authorized(pki_encrypted, from, via_mqtt, channel_index, &auth_err)) {
 		LOG_WRN("admin: remote admin from 0x%08x unauthorized (err=%d)", from,
 			(int)auth_err);
-		meshtastic_routing_send_error(
-			&(struct meshtastic_packet){.from = from, .id = id}, auth_err);
-		return;
+		(void)meshtastic_routing_answer(from, id, channel_index, hop_limit, hop_start,
+						want_ack, auth_err);
+		return true;
 	}
 
-	admin_dispatch((struct admin_ctx){
-			       .from = from,
-			       .id = id,
-			       .want_ack = want_ack,
-			       .channel_index = channel_index,
-			       .remote = true,
-		       },
-		       payload, payload_len);
+	return admin_dispatch((struct admin_ctx){
+				      .from = from,
+				      .id = id,
+				      .want_ack = want_ack,
+				      .channel_index = channel_index,
+				      .hop_limit = hop_limit,
+				      .hop_start = hop_start,
+				      .remote = true,
+			      },
+			      payload, payload_len);
 }
 
 void meshtastic_admin_reset(void)
