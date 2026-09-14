@@ -581,6 +581,9 @@ toradio_decoded:
 			meshtastic_phoneapi_enqueue_queue_status(api, 0, to->packet.id);
 			break;
 		}
+		/* An admin getter for a remote node: remember it, so the remote's
+		 * response is delivered back here rather than refused (agents-dnr4.33). */
+		meshtastic_admin_note_outgoing_request(&to->packet);
 #endif
 		ret = meshtastic_send_mesh_pb(&to->packet);
 		meshtastic_phoneapi_enqueue_queue_status(api, ret, to->packet.id);

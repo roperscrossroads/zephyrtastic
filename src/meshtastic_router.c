@@ -979,7 +979,14 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 			 * delivered to the phone as an ordinary RX packet. */
 			if (pkt->portnum == MESHTASTIC_PORT_ADMIN && pkt->to == mt.node_id &&
 			    pkt->from != mt.node_id) {
-				module_answered = meshtastic_admin_handle_remote(pkt, decoded_mesh);
+				/* ...unless it is the answer to a request the phone sent
+				 * through us: that one is the phone's (agents-dnr4.33). */
+				if (meshtastic_admin_take_solicited_response(pkt, decoded_mesh)) {
+					deliver_packet(pkt, decoded_mesh);
+				} else {
+					module_answered =
+						meshtastic_admin_handle_remote(pkt, decoded_mesh);
+				}
 			} else
 #endif
 			{

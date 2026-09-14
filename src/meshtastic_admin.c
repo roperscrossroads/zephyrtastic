@@ -908,6 +908,268 @@ static bool admin_variant_needs_passkey(pb_size_t variant)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Responses to requests a client sent THROUGH this node (agents-dnr4.33)      */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A phone administers a remote node through the node it is attached to: its
+ * get_*_request leaves over the mesh, and the remote's *_response comes back
+ * addressed to us. That response carries no session passkey and its sender
+ * need not hold an admin key here, so the request we relayed is the only thing
+ * vouching for it. Mirrors the reference AdminModule's outstandingAdminRequests
+ * + responseIsSolicited(): one slot per request (a client sends eight indexed
+ * get_channel requests, each answered once), the response must echo the
+ * request's packet id, arrive within the session-passkey window, come over PKC
+ * from the pinned key when the request went PKC, and it consumes its slot.
+ *
+ * Before this, every such response went through the admin_key gate as if it
+ * were a request, was NAKed ADMIN_PUBLIC_KEY_UNAUTHORIZED and consumed: the
+ * phone never saw a single remote getter answer through a port node.
+ */
+#define ADMIN_OUTSTANDING_MAX 8
+#define ADMIN_OUTSTANDING_MS  (300 * MSEC_PER_SEC) /* the session passkey's window */
+
+static struct admin_outstanding {
+	uint32_t to;	     /* 0 = free slot */
+	uint32_t request_id; /* the response must echo it */
+	int64_t sent_ms;
+	pb_size_t expected;  /* the one response variant this request authorizes */
+	uint32_t module_type; /* for get_module_config_request: which type was asked */
+	bool key_valid;
+	uint8_t key[ADMIN_PUBKEY_LEN]; /* the destination's key when the request went out */
+} admin_outstanding[ADMIN_OUTSTANDING_MAX];
+static K_MUTEX_DEFINE(admin_outstanding_lock);
+
+/* The AdminMessage variant (its oneof field number) and, for the module-config
+ * getter/response, the module subtype -- by walking tags, without decoding a
+ * multi-KB AdminMessage off the RX path. session_passkey (101) is the only
+ * field outside the oneof. */
+static bool admin_peek_variant(const uint8_t *payload, size_t len, pb_size_t *variant,
+			       uint32_t *sub)
+{
+	pb_istream_t stream = pb_istream_from_buffer(payload, len);
+	pb_wire_type_t wire_type;
+	uint32_t tag;
+	bool eof = false;
+
+	*variant = 0;
+	*sub = 0U;
+	while (pb_decode_tag(&stream, &wire_type, &tag, &eof)) {
+		if (tag != meshtastic_AdminMessage_session_passkey_tag) {
+			*variant = (pb_size_t)tag;
+			*sub = 0U;
+			if (tag == meshtastic_AdminMessage_get_module_config_request_tag &&
+			    wire_type == PB_WT_VARINT) {
+				if (!pb_decode_varint32(&stream, sub)) {
+					return false;
+				}
+				continue;
+			}
+			if (tag == meshtastic_AdminMessage_get_module_config_response_tag &&
+			    wire_type == PB_WT_STRING) {
+				pb_istream_t inner;
+				pb_wire_type_t inner_type;
+				uint32_t inner_tag;
+				bool inner_eof;
+
+				if (!pb_make_string_substream(&stream, &inner)) {
+					return false;
+				}
+				if (pb_decode_tag(&inner, &inner_type, &inner_tag, &inner_eof)) {
+					*sub = inner_tag; /* ModuleConfig's oneof field number */
+				}
+				if (!pb_close_string_substream(&stream, &inner)) {
+					return false;
+				}
+				continue;
+			}
+		}
+		if (!pb_skip_field(&stream, wire_type)) {
+			return false;
+		}
+	}
+	return eof && *variant != 0;
+}
+
+/* The response variant a getter is answered with; 0 for anything else.
+ * Reference adminResponseForRequest(). */
+static pb_size_t admin_response_for_request(pb_size_t request)
+{
+	switch (request) {
+	case meshtastic_AdminMessage_get_channel_request_tag:
+		return meshtastic_AdminMessage_get_channel_response_tag;
+	case meshtastic_AdminMessage_get_owner_request_tag:
+		return meshtastic_AdminMessage_get_owner_response_tag;
+	case meshtastic_AdminMessage_get_config_request_tag:
+		return meshtastic_AdminMessage_get_config_response_tag;
+	case meshtastic_AdminMessage_get_module_config_request_tag:
+		return meshtastic_AdminMessage_get_module_config_response_tag;
+	case meshtastic_AdminMessage_get_canned_message_module_messages_request_tag:
+		return meshtastic_AdminMessage_get_canned_message_module_messages_response_tag;
+	case meshtastic_AdminMessage_get_device_metadata_request_tag:
+		return meshtastic_AdminMessage_get_device_metadata_response_tag;
+	case meshtastic_AdminMessage_get_ringtone_request_tag:
+		return meshtastic_AdminMessage_get_ringtone_response_tag;
+	case meshtastic_AdminMessage_get_device_connection_status_request_tag:
+		return meshtastic_AdminMessage_get_device_connection_status_response_tag;
+	case meshtastic_AdminMessage_get_node_remote_hardware_pins_request_tag:
+		return meshtastic_AdminMessage_get_node_remote_hardware_pins_response_tag;
+	case meshtastic_AdminMessage_get_ui_config_request_tag:
+		return meshtastic_AdminMessage_get_ui_config_response_tag;
+	default:
+		return 0;
+	}
+}
+
+/* Reference AdminModule::messageIsResponse(). */
+static bool admin_variant_is_response(pb_size_t variant)
+{
+	switch (variant) {
+	case meshtastic_AdminMessage_get_channel_response_tag:
+	case meshtastic_AdminMessage_get_owner_response_tag:
+	case meshtastic_AdminMessage_get_config_response_tag:
+	case meshtastic_AdminMessage_get_module_config_response_tag:
+	case meshtastic_AdminMessage_get_canned_message_module_messages_response_tag:
+	case meshtastic_AdminMessage_get_device_metadata_response_tag:
+	case meshtastic_AdminMessage_get_ringtone_response_tag:
+	case meshtastic_AdminMessage_get_device_connection_status_response_tag:
+	case meshtastic_AdminMessage_get_node_remote_hardware_pins_response_tag:
+	case meshtastic_AdminMessage_get_ui_config_response_tag:
+		return true;
+	default:
+		return false;
+	}
+}
+
+void meshtastic_admin_note_outgoing_request(meshtastic_MeshPacket *pkt)
+{
+	struct admin_outstanding *slot = NULL;
+	pb_size_t variant;
+	pb_size_t expected;
+	uint32_t sub;
+	int64_t now;
+
+	if (pkt == NULL || pkt->which_payload_variant != meshtastic_MeshPacket_decoded_tag ||
+	    pkt->decoded.portnum != meshtastic_PortNum_ADMIN_APP) {
+		return;
+	}
+	/* Local admin is answered in-process; a broadcast asks no one node. */
+	if (pkt->to == 0U || pkt->to == MESHTASTIC_NODE_BROADCAST ||
+	    pkt->to == meshtastic_get_node_id()) {
+		return;
+	}
+	if (!admin_peek_variant(pkt->decoded.payload.bytes, pkt->decoded.payload.size, &variant,
+				&sub)) {
+		return;
+	}
+	expected = admin_response_for_request(variant);
+	if (expected == 0) {
+		return; /* not a getter whose response can be paired */
+	}
+	/* The response must echo the id, so it has to be known now; the send path
+	 * would otherwise allocate one we never see (reference handleToRadio also
+	 * assigns before noting the request). */
+	if (pkt->id == 0U) {
+		pkt->id = meshtastic_allocate_packet_id();
+	}
+
+	now = k_uptime_get();
+	k_mutex_lock(&admin_outstanding_lock, K_FOREVER);
+	for (size_t i = 0; i < ARRAY_SIZE(admin_outstanding); i++) {
+		if (admin_outstanding[i].to == 0U) {
+			slot = &admin_outstanding[i];
+			break;
+		}
+	}
+	if (slot == NULL) { /* evict the oldest */
+		slot = &admin_outstanding[0];
+		for (size_t i = 1; i < ARRAY_SIZE(admin_outstanding); i++) {
+			if (admin_outstanding[i].sent_ms < slot->sent_ms) {
+				slot = &admin_outstanding[i];
+			}
+		}
+	}
+	slot->to = pkt->to;
+	slot->request_id = pkt->id;
+	slot->sent_ms = now;
+	slot->expected = expected;
+	slot->module_type = (variant == meshtastic_AdminMessage_get_module_config_request_tag) ? sub : 0U;
+	/* Pin the key the request is PKC-encrypted to: a response must come back
+	 * over PKC from that same key. */
+	slot->key_valid = meshtastic_nodedb_copy_pubkey(pkt->to, slot->key) == 0;
+	k_mutex_unlock(&admin_outstanding_lock);
+	LOG_DBG("admin: request id=0x%08x relayed to 0x%08x, expecting variant %u", pkt->id,
+		pkt->to, (unsigned int)expected);
+}
+
+bool meshtastic_admin_take_solicited_response(const struct meshtastic_packet *pkt,
+					      const meshtastic_MeshPacket *mesh)
+{
+	uint8_t key[ADMIN_PUBKEY_LEN];
+	const uint8_t *payload;
+	size_t payload_len;
+	uint32_t from;
+	uint32_t request_id;
+	bool pki_encrypted;
+	pb_size_t variant;
+	uint32_t sub;
+	int64_t now;
+	bool matched = false;
+
+	if (pkt == NULL && mesh == NULL) {
+		return false;
+	}
+	from = mesh ? mesh->from : pkt->from;
+	request_id = mesh ? mesh->decoded.request_id : pkt->request_id;
+	pki_encrypted = mesh ? mesh->pki_encrypted : pkt->pki_encrypted;
+	payload = mesh ? mesh->decoded.payload.bytes : pkt->payload;
+	payload_len = mesh ? mesh->decoded.payload.size : pkt->payload_len;
+
+	/* An id of 0 is no token at all: an omitted request_id decodes to 0. */
+	if (request_id == 0U || (payload == NULL && payload_len != 0U) ||
+	    !admin_peek_variant(payload, payload_len, &variant, &sub) ||
+	    !admin_variant_is_response(variant)) {
+		return false;
+	}
+
+	now = k_uptime_get();
+	k_mutex_lock(&admin_outstanding_lock, K_FOREVER);
+	for (size_t i = 0; i < ARRAY_SIZE(admin_outstanding); i++) {
+		struct admin_outstanding *o = &admin_outstanding[i];
+
+		if (o->to == 0U || o->to != from || o->expected != variant ||
+		    o->request_id != request_id) {
+			continue;
+		}
+		if (now - o->sent_ms > ADMIN_OUTSTANDING_MS) {
+			o->to = 0U; /* lapsed: free it and keep looking */
+			continue;
+		}
+		if (o->key_valid &&
+		    (!pki_encrypted || meshtastic_nodedb_copy_pubkey(from, key) != 0 ||
+		     memcmp(key, o->key, sizeof(key)) != 0)) {
+			continue;
+		}
+		/* remote_hardware is the one module config that mutates state (its pin
+		 * table): it must answer a request for exactly that type. */
+		if (variant == meshtastic_AdminMessage_get_module_config_response_tag &&
+		    sub == meshtastic_ModuleConfig_remote_hardware_tag &&
+		    o->module_type != meshtastic_AdminMessage_ModuleConfigType_REMOTEHARDWARE_CONFIG) {
+			continue;
+		}
+		o->to = 0U; /* one request authorizes one response */
+		matched = true;
+		break;
+	}
+	k_mutex_unlock(&admin_outstanding_lock);
+	if (matched) {
+		LOG_DBG("admin: response variant %u from 0x%08x answers a relayed request; to the phone",
+			(unsigned int)variant, from);
+	}
+	return matched;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Dispatcher                                                                 */
 /* ------------------------------------------------------------------------- */
 
@@ -1610,6 +1872,21 @@ bool meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 	if (meshtastic_admin_client_on_admin(from, request_id, pki_encrypted, payload,
 					     payload_len)) {
 		return false; /* consumed, not answered: the router's ACK stands */
+	}
+
+	/* A response that answers nothing we relayed (meshtastic_admin_take_solicited_response
+	 * already had its chance in the router) is ignored, as the reference does: never
+	 * NAKed as if it were an unauthorized request. */
+	{
+		pb_size_t variant;
+		uint32_t sub;
+
+		if (admin_peek_variant(payload, payload_len, &variant, &sub) &&
+		    admin_variant_is_response(variant)) {
+			LOG_INF("admin: ignoring response variant %u from 0x%08x, no outstanding request",
+				(unsigned int)variant, from);
+			return false;
+		}
 	}
 
 	/* Packet-level authorization before touching the AdminMessage contents. On

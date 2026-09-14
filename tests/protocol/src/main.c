@@ -6420,6 +6420,92 @@ static void admin_set_admin_key(const uint8_t *key, size_t len)
 	zassert_ok(meshtastic_config_store_set_config(&sec), "set admin_key failed");
 }
 
+/* --- agents-dnr4.33: a response to a request the phone relayed through us ---- */
+
+static size_t encode_admin_variant(bool response, uint8_t *buf, size_t cap)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+
+	if (response) {
+		am.which_payload_variant = meshtastic_AdminMessage_get_owner_response_tag;
+		strncpy(am.payload_variant.get_owner_response.long_name, "remote owner",
+			sizeof(am.payload_variant.get_owner_response.long_name) - 1U);
+	} else {
+		am.which_payload_variant = meshtastic_AdminMessage_get_owner_request_tag;
+		am.payload_variant.get_owner_request = true;
+	}
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+	return os.bytes_written;
+}
+
+/* Deliver one get_owner_response from PEER over the full RX path; report
+ * whether the phone received it and how many frames the node sent back. */
+static bool relayed_response_reaches_phone(uint32_t request_id, bool pki, uint32_t *sends)
+{
+	uint8_t buf[128];
+	struct meshtastic_packet rsp = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.portnum = MESHTASTIC_PORT_ADMIN,
+		.channel_index = meshtastic_channels_primary_index(),
+		.request_id = request_id,
+		.pki_encrypted = pki,
+	};
+	uint32_t before = state.recv_count;
+
+	rsp.id = 0x0AD13300U + request_id % 0x100U + (pki ? 0x1000U : 0U) + state.recv_count;
+	rsp.payload = buf;
+	rsp.payload_len = encode_admin_variant(true, buf, sizeof(buf));
+	reset_mock_lora();
+	meshtastic_handle_inbound_packet(&rsp, NULL, 0U, true);
+	k_sleep(ADMIN_REPLY_SETTLE);
+	k_mutex_lock(&mock_lora.lock, K_FOREVER);
+	*sends = mock_lora.send_count;
+	k_mutex_unlock(&mock_lora.lock);
+	return state.recv_count != before;
+}
+
+/* The phone administers a remote node THROUGH this node: its getter leaves over
+ * the mesh and the remote's response comes back addressed to us. That response
+ * is the phone's. Before the fix it went through the admin_key gate as if it
+ * were a request -- NAKed unauthorized, consumed, never seen by the phone. A
+ * response nobody asked for is still dropped, silently (reference
+ * AdminModule::responseIsSolicited). PEER is deliberately NOT an admin here. */
+ZTEST(protocol_stack, test_relayed_admin_response_reaches_the_phone)
+{
+	meshtastic_MeshPacket req = meshtastic_MeshPacket_init_zero;
+	uint32_t sends;
+
+	seed_peer_pubkey(admin_peer_pubkey); /* the request goes PKC: its key is pinned */
+	admin_set_admin_key(NULL, 0U);
+
+	req.to = PEER_NODE_ID;
+	req.id = 0U;
+	req.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	req.decoded.portnum = meshtastic_PortNum_ADMIN_APP;
+	req.decoded.payload.size = (pb_size_t)encode_admin_variant(
+		false, req.decoded.payload.bytes, sizeof(req.decoded.payload.bytes));
+	meshtastic_admin_note_outgoing_request(&req);
+	zassert_not_equal(req.id, 0U, "the request needs an id the response can echo");
+
+	zassert_false(relayed_response_reaches_phone(req.id + 1U, true, &sends),
+		      "a response echoing an id we never sent must not reach the phone");
+	zassert_equal(sends, 0U, "an unsolicited response is ignored, never NAKed");
+
+	zassert_false(relayed_response_reaches_phone(req.id, false, &sends),
+		      "the request went PKC: a plaintext response cannot prove the sender");
+	zassert_equal(sends, 0U, "a refused response is ignored, never NAKed");
+
+	zassert_true(relayed_response_reaches_phone(req.id, true, &sends),
+		     "the answer to the phone's relayed getter must reach the phone");
+	zassert_equal(sends, 0U, "a delivered response is not NAKed");
+
+	zassert_false(relayed_response_reaches_phone(req.id, true, &sends),
+		      "one request authorizes one response: a replay must not reach the phone");
+	zassert_equal(sends, 0U, "a replayed response is ignored, never NAKed");
+}
+
 /* A PKC (pki_encrypted) remote admin whose sender key is in admin_key[] is
  * authorized; with a valid passkey the mutating op applies. Exercises the
  * admin_key match without real crypto (pki_encrypted set directly). */

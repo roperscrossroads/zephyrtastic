@@ -42,6 +42,25 @@ bool meshtastic_admin_handle_local(const meshtastic_MeshPacket *pkt);
 bool meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 				    const meshtastic_MeshPacket *mesh);
 
+/**
+ * Note an admin getter a client is sending through this node to a remote node,
+ * so the remote's response is recognized and delivered to the client instead of
+ * being refused as an unauthorized request (agents-dnr4.33; reference
+ * AdminModule::noteOutgoingAdminRequest). Call on the client-to-mesh path before
+ * the send. Assigns @p pkt->id when it is 0, because the response must echo it.
+ */
+void meshtastic_admin_note_outgoing_request(meshtastic_MeshPacket *pkt);
+
+/**
+ * True when @p pkt (an ADMIN_APP unicast to us) is a response to a request
+ * noted by meshtastic_admin_note_outgoing_request(): same sender, the request's
+ * packet id echoed, within the window, over PKC from the pinned key when the
+ * request went PKC. Consumes the match. The caller then delivers the packet to
+ * the client like any other received packet.
+ */
+bool meshtastic_admin_take_solicited_response(const struct meshtastic_packet *pkt,
+					      const meshtastic_MeshPacket *mesh);
+
 /** Reset admin edit-transaction state (call on phone disconnect). */
 void meshtastic_admin_reset(void);
 
