@@ -119,6 +119,7 @@ static void fill_other_node_info(meshtastic_FromRadio *from,
 	}
 	ni->is_favorite = node->is_favorite;
 	ni->is_ignored = node->is_ignored;
+	ni->is_muted = node->is_muted;
 
 	if (node->has_user) {
 		meshtastic_User *u = &ni->user;

@@ -2057,6 +2057,154 @@ static meshtastic_Routing_Error send_local_admin_and_pop_routing(const uint8_t *
 	return send_local_admin_and_pop_routing_ex(admin_bytes, admin_len, NULL);
 }
 
+/* ---- agents-dnr4.31 / agents-ooma.2: no admin variant is ACKed as done when it isn't ---- */
+
+static meshtastic_Routing_Error send_local_admin_msg(meshtastic_AdminMessage *am)
+{
+	uint8_t buf[512];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, am), "admin encode failed");
+	return send_local_admin_and_pop_routing(buf, os.bytes_written);
+}
+
+/* Every variant the port does not implement is refused. An ACK told the client
+ * it took effect; ham mode in particular would have reported "licensed" on a
+ * node that changed nothing. */
+ZTEST(admin_pki, test_unsupported_admin_variants_are_refused)
+{
+	static const pb_size_t variants[] = {
+		meshtastic_AdminMessage_set_ham_mode_tag,
+		meshtastic_AdminMessage_ota_request_tag,
+		meshtastic_AdminMessage_reboot_ota_seconds_tag,
+		meshtastic_AdminMessage_store_ui_config_tag,
+		meshtastic_AdminMessage_send_input_event_tag,
+		meshtastic_AdminMessage_delete_file_request_tag,
+		meshtastic_AdminMessage_set_scale_tag,
+		meshtastic_AdminMessage_sensor_config_tag,
+		meshtastic_AdminMessage_exit_simulator_tag,
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(variants); i++) {
+		meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+
+		am.which_payload_variant = variants[i];
+		if (variants[i] == meshtastic_AdminMessage_set_ham_mode_tag) {
+			strcpy(am.payload_variant.set_ham_mode.call_sign, "N0CALL");
+		}
+		zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_BAD_REQUEST,
+			      "variant %u must be refused, not ACKed as done", (unsigned int)variants[i]);
+	}
+}
+
+#define CONTACT_NODE 0x0AD0C0A1U
+
+static void contact_msg(meshtastic_AdminMessage *am, uint8_t key_fill, bool with_key,
+			bool verified, bool ignore)
+{
+	*am = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	am->which_payload_variant = meshtastic_AdminMessage_add_contact_tag;
+	am->payload_variant.add_contact.node_num = CONTACT_NODE;
+	am->payload_variant.add_contact.has_user = true;
+	strcpy(am->payload_variant.add_contact.user.long_name, "Contact");
+	strcpy(am->payload_variant.add_contact.user.short_name, "CTCT");
+	if (with_key) {
+		am->payload_variant.add_contact.user.public_key.size = 32U;
+		memset(am->payload_variant.add_contact.user.public_key.bytes, key_fill, 32U);
+	}
+	am->payload_variant.add_contact.manually_verified = verified;
+	am->payload_variant.add_contact.should_ignore = ignore;
+}
+
+static uint8_t contact_key_byte(void)
+{
+	struct meshtastic_nodedb_node n;
+
+	zassert_ok(meshtastic_nodedb_get(CONTACT_NODE, &n), "contact must be in the NodeDB");
+	return n.public_key_len == 32U ? n.public_key[0] : 0U;
+}
+
+/* add_contact really adds the contact (reference NodeDB::addFromContact): the
+ * app sends one before every DM and awaits the answer, so the port used to ACK
+ * it while learning nothing -- and then could not PKC-DM a node it had never
+ * heard a NodeInfo from. */
+ZTEST(admin_pki, test_add_contact_adds_and_keeps_key_rules)
+{
+	meshtastic_AdminMessage am;
+	struct meshtastic_nodedb_node n;
+
+	(void)meshtastic_nodedb_remove(CONTACT_NODE);
+
+	contact_msg(&am, 0xA1, true, false, false);
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_NONE, "");
+	zassert_ok(meshtastic_nodedb_get(CONTACT_NODE, &n), "a new contact is created");
+	zassert_true(n.has_user && strcmp(n.long_name, "Contact") == 0, "its user is copied in");
+	zassert_equal(contact_key_byte(), 0xA1, "its key is stored");
+	zassert_true(n.is_favorite, "favorited so it is not the first evicted");
+
+	contact_msg(&am, 0, false, false, false);
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_NONE, "");
+	zassert_equal(contact_key_byte(), 0xA1, "a keyless contact never erases the stored key");
+
+	contact_msg(&am, 0xB2, true, false, false);
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_NONE, "");
+	zassert_equal(contact_key_byte(), 0xB2,
+		      "the phone may replace an unverified pinned key (a NodeInfo off the air may not)");
+
+	zassert_ok(meshtastic_nodedb_set_key_verified(CONTACT_NODE, true), "");
+	contact_msg(&am, 0xC3, true, false, false);
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_NONE,
+		      "refused quietly, as the reference does (the app awaits this answer)");
+	zassert_equal(contact_key_byte(), 0xB2, "a verified key is not changed by an unverified contact");
+
+	contact_msg(&am, 0xC3, true, true, false);
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_NONE, "");
+	zassert_equal(contact_key_byte(), 0xC3, "a verified contact may change a verified key");
+
+	contact_msg(&am, 0xC3, true, false, true);
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_NONE, "");
+	zassert_ok(meshtastic_nodedb_get(CONTACT_NODE, &n), "");
+	zassert_true(n.is_ignored && !n.is_favorite, "should_ignore ignores and un-favorites");
+
+	am = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	am.which_payload_variant = meshtastic_AdminMessage_add_contact_tag;
+	am.payload_variant.add_contact.node_num = meshtastic_get_node_id();
+	am.payload_variant.add_contact.has_user = true;
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_BAD_REQUEST,
+		      "our own node is not a contact");
+
+	(void)meshtastic_nodedb_set_ignored(CONTACT_NODE, false);
+	zassert_ok(meshtastic_nodedb_remove(CONTACT_NODE), "");
+}
+
+ZTEST(admin_pki, test_toggle_muted_node_flips_and_is_reported)
+{
+	meshtastic_AdminMessage am;
+	struct meshtastic_nodedb_node n;
+
+	(void)meshtastic_nodedb_remove(CONTACT_NODE);
+	contact_msg(&am, 0xA1, true, false, false);
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_NONE, "");
+
+	am = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	am.which_payload_variant = meshtastic_AdminMessage_toggle_muted_node_tag;
+	am.payload_variant.toggle_muted_node = CONTACT_NODE;
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_NONE, "");
+	zassert_ok(meshtastic_nodedb_get(CONTACT_NODE, &n), "");
+	zassert_true(n.is_muted, "muted after one toggle");
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_NONE, "");
+	zassert_ok(meshtastic_nodedb_get(CONTACT_NODE, &n), "");
+	zassert_false(n.is_muted, "unmuted after the second");
+
+	am.payload_variant.toggle_muted_node = 0x0AD0DEADU;
+	zassert_equal(send_local_admin_msg(&am), meshtastic_Routing_Error_NONE,
+		      "an unknown node is a quiet no-op, as in the reference");
+
+	(void)meshtastic_nodedb_set_favorite(CONTACT_NODE, false);
+	zassert_ok(meshtastic_nodedb_remove(CONTACT_NODE), "");
+}
+
+
 static void read_stored_mqtt(meshtastic_ModuleConfig_MQTTConfig *out)
 {
 	meshtastic_ModuleConfig got = meshtastic_ModuleConfig_init_zero;

@@ -41,6 +41,10 @@ struct meshtastic_nodedb_node {
 
 	bool is_favorite;
 	bool is_ignored;
+	/* Muted by the user (admin toggle_muted_node): shown as NodeInfo.is_muted.
+	 * Reference bitfield bit 1. Persists only with a curated record
+	 * (favorite/ignored); an uncurated node's mute lasts until reboot. */
+	bool is_muted;
 	/* The user confirmed possession of exactly public_key out of band
 	 * (key verification, agents-dnr4.13). Reference bitfield bit 0. */
 	bool is_key_manually_verified;
@@ -216,6 +220,37 @@ bool meshtastic_nodedb_is_from_or_to_favorite(uint32_t from, uint32_t to);
  * @retval -ENOTSUP NodeDB support is not enabled.
  */
 int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored);
+
+struct _meshtastic_User;
+
+/**
+ * @brief Add or update a contact the phone shares (admin add_contact).
+ *
+ * The reference's NodeDB::addFromContact: the node is created if absent and its
+ * user copied in. The phone is trusted with the key, so an incoming 32-byte key
+ * replaces a pinned one -- unless the stored key is manually verified and the
+ * contact is not, when the update is refused. A contact without a key never
+ * erases a stored key (clients send add_contact before every DM, often keyless).
+ * @p should_ignore ignores the node (and un-favorites it); otherwise the node is
+ * favorited so it is not the first evicted (a CLIENT_BASE is stamped heard
+ * instead), and @p manually_verified marks its key verified.
+ *
+ * @retval 0 Contact applied.
+ * @retval -EINVAL Our own node, broadcast, 0, or no user.
+ * @retval -EPERM Refused: would change a manually verified key.
+ * @retval -ENOMEM No NodeDB slot.
+ * @retval -ENOTSUP NodeDB support is not enabled.
+ */
+int meshtastic_nodedb_add_contact(uint32_t node_num, const struct _meshtastic_User *user,
+				  bool manually_verified, bool should_ignore);
+
+/**
+ * @brief Flip a node's muted flag (admin toggle_muted_node).
+ *
+ * @return The new state (1 muted, 0 not), -ENOENT for an unknown node, or
+ *         -ENOTSUP without NodeDB support.
+ */
+int meshtastic_nodedb_toggle_muted(uint32_t node_num);
 
 /**
  * @brief Whether a node is marked ignored in the in-RAM NodeDB.

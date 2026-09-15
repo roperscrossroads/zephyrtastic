@@ -1372,6 +1372,24 @@ bool meshtastic_nodedb_is_ignored(uint32_t node_num)
 	return false;
 }
 
+int meshtastic_nodedb_add_contact(uint32_t node_num, const struct _meshtastic_User *user,
+				  bool manually_verified, bool should_ignore)
+{
+	ARG_UNUSED(node_num);
+	ARG_UNUSED(user);
+	ARG_UNUSED(manually_verified);
+	ARG_UNUSED(should_ignore);
+
+	return -ENOTSUP;
+}
+
+int meshtastic_nodedb_toggle_muted(uint32_t node_num)
+{
+	ARG_UNUSED(node_num);
+
+	return -ENOTSUP;
+}
+
 /* No NodeDB means no favourites, so a CLIENT_BASE node has nothing to treat as
  * router-like and falls through to the client behaviour (cancel the dupe relay).
  * Missing from this block until the variant sweep tried NODEDB=n and the link

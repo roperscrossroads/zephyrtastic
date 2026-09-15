@@ -1779,9 +1779,52 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 #endif
 		break;
 
+	/* A contact the phone shares -- clients send one before every DM, and a
+	 * scanned QR code sends one too (reference NodeDB::addFromContact). The
+	 * app awaits the answer, so the reference's quiet cases stay quiet: a
+	 * contact without a user, or one that would change a manually verified
+	 * key, is dropped with an ACK, as upstream returns without a reply. */
+	case meshtastic_AdminMessage_add_contact_tag: {
+		const meshtastic_SharedContact *c = &admin_req.payload_variant.add_contact;
+
+		ret = c->has_user ? meshtastic_nodedb_add_contact(c->node_num, &c->user,
+								   c->manually_verified,
+								   c->should_ignore)
+				  : -ENODATA;
+		LOG_INF("admin: add_contact 0x%08x (%d)", c->node_num, ret);
+		if (ret == -EINVAL || ret == -ENOTSUP) {
+			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+		}
+		break;
+	}
+
+	case meshtastic_AdminMessage_toggle_muted_node_tag:
+		ret = meshtastic_nodedb_toggle_muted(admin_req.payload_variant.toggle_muted_node);
+		LOG_INF("admin: toggle_muted_node 0x%08x (%d)",
+			admin_req.payload_variant.toggle_muted_node, ret);
+		if (ret == -ENOTSUP) {
+			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
+		}
+		/* An unknown node is a quiet no-op, as in the reference. */
+		break;
+
+	/* Everything else the port does not implement is REFUSED (agents-dnr4.31,
+	 * agents-ooma.2): an ACK would tell the client it took effect.
+	 *   set_ham_mode       licensed mode is not supported here (the reference
+	 *                      NAKs BAD_REQUEST when it declines one too)
+	 *   ota_request,       no OTA loader / WiFi OTA on this port
+	 *   reboot_ota_seconds
+	 *   store_ui_config,   no device-ui, input broker, file system for the
+	 *   send_input_event,  app, or sensors to scale/configure; the reference
+	 *   delete_file_request, handles these, or ACKs them quietly when no
+	 *   set_scale,         module does -- a NAK is the honest answer here
+	 *   sensor_config
+	 *   exit_simulator     simulator only
+	 * and any variant this build does not know. */
 	default:
-		LOG_WRN("admin: unhandled variant %u (consumed, not forwarded)",
+		LOG_WRN("admin: variant %u not supported here -- refused",
 			(unsigned int)admin_req.which_payload_variant);
+		ack_err = meshtastic_Routing_Error_BAD_REQUEST;
 		break;
 	}
 

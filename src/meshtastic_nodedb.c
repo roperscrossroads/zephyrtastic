@@ -58,7 +58,7 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
  * else and reintroduces exactly the divergence this comment records.
  */
 #define NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT 0 /* key verification (dnr4.13) */
-#define NODEINFO_BITFIELD_IS_MUTED_BIT                 1 /* not yet implemented */
+#define NODEINFO_BITFIELD_IS_MUTED_BIT                 1 /* admin toggle_muted_node */
 #define NODEINFO_BITFIELD_VIA_MQTT_BIT                 2
 #define NODEINFO_BITFIELD_IS_FAVORITE_BIT              3
 #define NODEINFO_BITFIELD_IS_IGNORED_BIT               4
@@ -1215,6 +1215,7 @@ static void fill_snapshot(const struct nodedb_entry *entry, struct meshtastic_no
 	out->is_key_manually_verified =
 		IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT);
 	out->is_ignored = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_IGNORED_BIT);
+	out->is_muted = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_MUTED_BIT);
 
 	out->has_user = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_HAS_USER_BIT);
 	copy_string(out->long_name, sizeof(out->long_name), node->long_name);
@@ -1717,6 +1718,97 @@ bool meshtastic_nodedb_is_from_or_to_favorite(uint32_t from, uint32_t to)
 int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored)
 {
 	return nodedb_set_bit(node_num, NODEINFO_BITFIELD_IS_IGNORED_BIT, ignored);
+}
+
+int meshtastic_nodedb_add_contact(uint32_t node_num, const meshtastic_User *user,
+				  bool manually_verified, bool should_ignore)
+{
+	struct nodedb_entry *entry;
+	meshtastic_NodeInfoLite *node;
+	size_t key_len;
+	bool differs;
+	int ret = 0;
+
+	if (user == NULL || node_num == 0U || node_num == MESHTASTIC_NODE_BROADCAST ||
+	    node_num == meshtastic_get_node_id()) {
+		return -EINVAL;
+	}
+	key_len = MIN((size_t)user->public_key.size, (size_t)MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = get_or_create_entry_locked(node_num);
+	if (entry == NULL) {
+		k_mutex_unlock(&nodedb_lock);
+		return -ENOMEM;
+	}
+	node = &entry->node;
+	differs = node->public_key.size != (pb_size_t)key_len ||
+		  (key_len > 0U && memcmp(node->public_key.bytes, user->public_key.bytes, key_len) != 0);
+
+	/* A verified key is changed only by a contact that is itself verified. */
+	if (IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT) &&
+	    !manually_verified && node->public_key.size == MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN &&
+	    differs) {
+		k_mutex_unlock(&nodedb_lock);
+		LOG_WRN("add_contact 0x%08x refused: would replace a manually verified key",
+			(unsigned int)node_num);
+		return -EPERM;
+	}
+	/* The phone, unlike a NodeInfo off the air, may replace a pinned key:
+	 * clear the pin so apply_user takes the new one (and mirrors it to the
+	 * warm tier). A keyless contact leaves the stored key alone there. */
+	if (key_len == MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN && differs) {
+		node->public_key.size = 0;
+	}
+	apply_user(entry, user);
+	if (!should_ignore &&
+	    meshtastic_device_role() == meshtastic_Config_DeviceConfig_Role_CLIENT_BASE) {
+		/* favorite means something else to a CLIENT_BASE: stamp it heard so
+		 * it is not the first eviction victim instead (reference). */
+		node->last_heard = uptime_seconds();
+	}
+	nodedb_dirty = true;
+	k_mutex_unlock(&nodedb_lock);
+
+	if (should_ignore) {
+		ret = meshtastic_nodedb_set_ignored(node_num, true);
+		(void)meshtastic_nodedb_set_favorite(node_num, false);
+	} else {
+		if (meshtastic_device_role() != meshtastic_Config_DeviceConfig_Role_CLIENT_BASE &&
+		    meshtastic_nodedb_set_favorite(node_num, true) == -ENOSPC) {
+			LOG_WRN("add_contact 0x%08x: protected-node cap, not favorited",
+				(unsigned int)node_num);
+		}
+		if (manually_verified) {
+			ret = meshtastic_nodedb_set_key_verified(node_num, true);
+		}
+	}
+	return ret == -ENOSPC ? 0 : ret;
+}
+
+int meshtastic_nodedb_toggle_muted(uint32_t node_num)
+{
+	struct nodedb_entry *entry;
+	bool muted;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = find_entry_locked(node_num);
+	if (entry == NULL) {
+		k_mutex_unlock(&nodedb_lock);
+		return -ENOENT;
+	}
+	muted = !IS_BIT_SET(entry->node.bitfield, NODEINFO_BITFIELD_IS_MUTED_BIT);
+	WRITE_BIT(entry->node.bitfield, NODEINFO_BITFIELD_IS_MUTED_BIT, muted);
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+	/* The bit rides in the persisted record of a curated node. */
+	if (node_is_protected(&entry->node)) {
+		k_mutex_unlock(&nodedb_lock);
+		mtrec_schedule_save();
+		return muted ? 1 : 0;
+	}
+#endif
+	k_mutex_unlock(&nodedb_lock);
+	return muted ? 1 : 0;
 }
 
 bool meshtastic_nodedb_is_ignored(uint32_t node_num)
