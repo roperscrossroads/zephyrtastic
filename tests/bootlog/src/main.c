@@ -157,6 +157,70 @@ ZTEST(bootlog_durable, test_history_survives_losing_the_ram_copy)
 	}
 }
 
+/* ---- MyNodeInfo.reboot_count (agents-dnr4.28) -------------------------------
+ *
+ * The reference counts every boot in flash, so a client sees the number rise
+ * across a power cycle as well as a reset. A "power cycle" here is exactly what
+ * the reload test above does: the RAM copy is wiped and the boot path reloads
+ * from flash. The boot hook runs the module's own durable boot step (load,
+ * append, count, save), not a re-implementation of it.
+ */
+static void power_cycle_and_boot(void)
+{
+	meshtastic_bootlog_test_durable_reset();
+	zassert_equal(meshtastic_bootlog_reboot_count(), 0U,
+		      "the RAM copy of the count should be gone, or the reload proves nothing");
+	meshtastic_bootlog_test_durable_boot();
+}
+
+ZTEST(bootlog_durable, test_reboot_count_rises_across_power_cycles)
+{
+	zassert_equal(meshtastic_bootlog_reset_count(), 0, NULL);
+
+	for (uint32_t boot = 1U; boot <= 3U; boot++) {
+		power_cycle_and_boot();
+		zassert_equal(meshtastic_bootlog_reboot_count(), boot,
+			      "boot %u reported reboot_count %u: the count did not come back "
+			      "from flash", boot, meshtastic_bootlog_reboot_count());
+	}
+}
+
+ZTEST(bootlog_durable, test_reboot_count_restarts_after_a_device_reset)
+{
+	zassert_equal(meshtastic_bootlog_reset_count(), 0, NULL);
+	power_cycle_and_boot();
+	power_cycle_and_boot();
+	zassert_equal(meshtastic_bootlog_reboot_count(), 2U, NULL);
+
+	/* factory_reset_device, then the reboot it schedules. */
+	zassert_equal(meshtastic_bootlog_reset_count(), 0, NULL);
+	power_cycle_and_boot();
+	zassert_equal(meshtastic_bootlog_reboot_count(), 1U,
+		      "the first boot after a device reset must report 1, as the reference does");
+}
+
+ZTEST(bootlog_durable, test_counting_keeps_the_boot_history)
+{
+	struct meshtastic_boot_durable out[ENTRIES];
+
+	/* The count is its own key so the ring's layout, and so every node's history
+	 * across the upgrade, is untouched. Boots must still append to the ring. */
+	size_t before, after;
+
+	/* Relative, not absolute: the flash ring already holds whatever the module's
+	 * own boot and earlier tests wrote. */
+	zassert_equal(meshtastic_bootlog_reset_count(), 0, NULL);
+	power_cycle_and_boot();
+	before = meshtastic_bootlog_durable_history(out, ARRAY_SIZE(out));
+	zassert_true(before >= 1U, "a counted boot left no ring record");
+	power_cycle_and_boot();
+	after = meshtastic_bootlog_durable_history(out, ARRAY_SIZE(out));
+	zassert_equal(after, MIN(before + 1U, (size_t)ENTRIES),
+		      "a counted boot did not append to the ring (%u -> %u)",
+		      (unsigned int)before, (unsigned int)after);
+	zassert_equal(meshtastic_bootlog_reboot_count(), 2U, NULL);
+}
+
 static void *suite_setup(void)
 {
 	/* NVS needs mounting before the first save; settings_subsys_init is

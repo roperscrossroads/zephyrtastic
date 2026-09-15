@@ -298,6 +298,7 @@ const char *meshtastic_bootlog_cause_str(uint32_t cause, char *buf, size_t bufle
 
 #define BL_DUR_SUBTREE "mtboot"
 #define BL_DUR_KEY     BL_DUR_SUBTREE "/ring"
+#define BL_DUR_COUNT_KEY BL_DUR_SUBTREE "/count"
 #define BL_DUR_MAGIC   0x424C4452U /* "BLDR" */
 #define BL_DUR_VERSION 1U
 #define BL_DUR_ENTRIES CONFIG_MESHTASTIC_BOOTLOG_DURABLE_ENTRIES
@@ -312,6 +313,17 @@ struct bl_durable_blob {
 } __packed;
 
 static struct bl_durable_blob bl_dur;
+
+/* MyNodeInfo.reboot_count (agents-dnr4.28): boots since this key was first
+ * written or last removed by factory_reset_device, this one included.
+ *
+ * Its own key, beside the ring rather than inside it. boot_num cannot serve: it
+ * restarts at 1 whenever retained RAM is lost, so it counts warm resets, and
+ * the reference's counter (an ESP32 NVS "rebootCounter", bumped once per boot,
+ * erased with NVS by a full factory reset) counts power cycles too. Growing the
+ * ring blob instead would change its size, and the loader rightly drops a blob
+ * of the wrong size, so an upgrade would have cost every node its history. */
+static uint32_t bl_boot_total;
 
 static void bl_durable_fresh(void)
 {
@@ -343,6 +355,14 @@ static int bl_durable_settings_set(const char *key, size_t len, settings_read_cb
 {
 	struct bl_durable_blob in;
 
+	if (strcmp(key, "count") == 0) {
+		uint32_t total;
+
+		if (len == sizeof(total) && read_cb(cb_arg, &total, len) == (ssize_t)len) {
+			bl_boot_total = total;
+		}
+		return 0;
+	}
 	if (strcmp(key, "ring") != 0) {
 		return -ENOENT;
 	}
@@ -422,7 +442,10 @@ static void bl_durable_load(void)
 
 static int bl_durable_save(void)
 {
-	return settings_save_one(BL_DUR_KEY, &bl_dur, sizeof(bl_dur));
+	int ret = settings_save_one(BL_DUR_KEY, &bl_dur, sizeof(bl_dur));
+	int ret_count = settings_save_one(BL_DUR_COUNT_KEY, &bl_boot_total, sizeof(bl_boot_total));
+
+	return (ret != 0) ? ret : ret_count;
 }
 
 #define BL_DUR_RETRY_MS   2000
@@ -467,6 +490,9 @@ static int bl_durable_record_boot(void)
 
 	bl_durable_load();
 	bl_durable_append(&rec);
+	/* After the load, so it counts on from flash. A load that failed leaves 0
+	 * and this boot reports 1, like the reference's first boot. */
+	bl_boot_total++;
 
 	/* Try now, so a node that dies seconds later still leaves a record. If that
 	 * fails, retry from a work item rather than shrug.
@@ -517,9 +543,27 @@ void meshtastic_bootlog_durable_report(void)
 	}
 }
 
+uint32_t meshtastic_bootlog_reboot_count(void)
+{
+	return bl_boot_total;
+}
+
+int meshtastic_bootlog_reset_count(void)
+{
+	int ret = settings_delete(BL_DUR_COUNT_KEY);
+
+	return (ret == -ENOENT) ? 0 : ret;
+}
+
 void meshtastic_bootlog_test_durable_reset(void)
 {
 	bl_durable_fresh();
+	bl_boot_total = 0U;
+}
+
+void meshtastic_bootlog_test_durable_boot(void)
+{
+	(void)bl_durable_record_boot();
 }
 
 void meshtastic_bootlog_test_durable_append(const struct meshtastic_boot_durable *rec)
@@ -540,6 +584,22 @@ void meshtastic_bootlog_test_durable_load(void)
 }
 
 #else /* !CONFIG_MESHTASTIC_BOOTLOG_DURABLE */
+
+uint32_t meshtastic_bootlog_reboot_count(void)
+{
+	/* No flash: the retained-RAM counter, which restarts on power loss. Still
+	 * strictly increases across every reset that keeps RAM. */
+	return bl_boot_num;
+}
+
+int meshtastic_bootlog_reset_count(void)
+{
+	return -ENOTSUP;
+}
+
+void meshtastic_bootlog_test_durable_boot(void)
+{
+}
 
 size_t meshtastic_bootlog_durable_history(struct meshtastic_boot_durable *out, size_t max)
 {

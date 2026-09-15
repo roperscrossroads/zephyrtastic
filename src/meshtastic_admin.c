@@ -33,6 +33,9 @@
 
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
+#if defined(CONFIG_MESHTASTIC_BOOTLOG_DURABLE)
+#include <zephyr/meshtastic/bootlog.h>
+#endif
 
 #include "meshtastic_admin_client.h"
 #include "meshtastic_admin_session.h"
@@ -1657,6 +1660,12 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		(void)k_work_cancel_delayable(&admin_edit_idle_work);
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 		(void)meshtastic_settings_wipe(false); /* wipe everything incl. identity */
+#endif
+#if defined(CONFIG_MESHTASTIC_BOOTLOG_DURABLE)
+		/* The reference's full reset erases NVS and its rebootCounter with it,
+		 * so the next boot reports reboot_count 1 (agents-dnr4.28). Only the
+		 * count: the boot history ring is diagnostics and stays. */
+		(void)meshtastic_bootlog_reset_count();
 #endif
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
 		/* The replicated document lives in its own settings subtree, so the

@@ -12,6 +12,7 @@
 
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
+#include <zephyr/meshtastic/bootlog.h>
 
 #include "meshtastic/admin.pb.h"
 #include "meshtastic/mesh.pb.h"
@@ -5186,6 +5187,36 @@ ZTEST(protocol_stack, test_phone_config_handshake_full)
 	zassert_equal(complete_id, nonce, "config_complete_id must echo the request nonce");
 	zassert_equal(api.config_state, MESHTASTIC_PHONEAPI_CONFIG_IDLE,
 		      "state machine returns to IDLE after complete");
+}
+
+/* agents-dnr4.28: my_info carries the boot counter, as the reference's does. A
+ * client reads a rise in it as "the node rebooted"; the port used to send 0. */
+ZTEST(protocol_stack, test_phone_config_my_info_carries_the_reboot_count)
+{
+	static struct meshtastic_phoneapi_frame q[4];
+	struct meshtastic_phoneapi api;
+	struct meshtastic_phoneapi_frame frame;
+	meshtastic_ToRadio to_scratch;
+	meshtastic_FromRadio from_scratch;
+	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+	pb_istream_t s;
+
+	meshtastic_phoneapi_init(&api, "rbtcount", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL,
+				 &to_scratch, &from_scratch);
+	meshtastic_phoneapi_enqueue_phone_config(&api, 0x0BADC0DEU);
+	zassert_equal(meshtastic_phoneapi_next_config_frame(&api, &frame), 0, NULL);
+	s = pb_istream_from_buffer(frame.data, frame.len);
+	zassert_true(pb_decode(&s, meshtastic_FromRadio_fields, &from), NULL);
+	zassert_equal(from.which_payload_variant, meshtastic_FromRadio_my_info_tag, NULL);
+
+	zassert_true(from.my_info.reboot_count >= 1U,
+		     "my_info.reboot_count is 0: this boot was never counted");
+	zassert_equal(from.my_info.reboot_count, meshtastic_bootlog_reboot_count(),
+		      "my_info.reboot_count %u is not the boot counter %u",
+		      from.my_info.reboot_count, meshtastic_bootlog_reboot_count());
+
+	while (meshtastic_phoneapi_next_config_frame(&api, &frame) == 0) {
+	}
 }
 
 ZTEST(protocol_stack, test_phone_config_handshake_only_nodes)

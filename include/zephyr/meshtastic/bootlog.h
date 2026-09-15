@@ -104,6 +104,25 @@ size_t meshtastic_bootlog_durable_history(struct meshtastic_boot_durable *out, s
 /** @brief Log the durable history (the `resets --all` body). */
 void meshtastic_bootlog_durable_report(void);
 
+/**
+ * @brief Boots counted so far, this one included: MyNodeInfo.reboot_count.
+ *
+ * With CONFIG_MESHTASTIC_BOOTLOG_DURABLE it is kept in flash and counts power
+ * cycles as well as resets, like the reference's ESP32 "rebootCounter". It
+ * restarts at 1 after factory_reset_device (the reference erases NVS there),
+ * and a node upgrading from a build without the counter starts at 1 too.
+ * Without the durable ring it is the retained-RAM boot number, which restarts
+ * whenever RAM is lost.
+ */
+uint32_t meshtastic_bootlog_reboot_count(void);
+
+/**
+ * @brief Forget the persisted count, for factory_reset_device: the next boot reports 1.
+ *
+ * @return 0, or a settings error; -ENOTSUP without the durable ring.
+ */
+int meshtastic_bootlog_reset_count(void);
+
 /* Test hooks. The ring arithmetic — append, wrap, oldest-first ordering — is
  * where the bugs live and is pure, so it is tested directly on native_sim
  * rather than through a flash backend. The settings glue around it is the same
@@ -118,6 +137,8 @@ int meshtastic_bootlog_test_durable_save(void);
  *  settings_load(): the boot path loads its own subtree because nothing else
  *  does, and calling settings_load() instead is what hid that being missing. */
 void meshtastic_bootlog_test_durable_load(void);
+/** Run the durable half of the boot path (load, append, count, save) as a boot does. */
+void meshtastic_bootlog_test_durable_boot(void);
 
 #if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
 /*

@@ -16,6 +16,9 @@
 #include <zephyr/sys/byteorder.h>
 
 #include <zephyr/meshtastic/nodedb.h>
+#if defined(CONFIG_MESHTASTIC_BOOTLOG)
+#include <zephyr/meshtastic/bootlog.h>
+#endif
 
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
@@ -75,6 +78,13 @@ static void fill_my_info(meshtastic_FromRadio *from, bool auth)
 	sys_put_le32(meshtastic_get_node_id(), node_id);
 	memcpy(from->my_info.device_id.bytes, node_id, sizeof(node_id));
 	strncpy(from->my_info.pio_env, "zephyr", sizeof(from->my_info.pio_env) - 1U);
+#if defined(CONFIG_MESHTASTIC_BOOTLOG)
+	/* agents-dnr4.28: the reference sends its persisted boot counter here, and
+	 * a client can tell from it that the node rebooted. Behind the auth check
+	 * with the rest: it says how often the node resets, which a locked
+	 * connection has no need to learn. */
+	from->my_info.reboot_count = meshtastic_bootlog_reboot_count();
+#endif
 }
 
 static void fill_node_info(meshtastic_FromRadio *from)
