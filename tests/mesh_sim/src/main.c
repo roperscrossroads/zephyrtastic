@@ -3254,6 +3254,151 @@ ZTEST(mesh_sim, test_fleet_pick_orders_the_star)
 	zassert_equal(meshtastic_fleet_pick(c, 3, now), -1, "three empty slots");
 }
 
+
+/* ==========================================================================
+ * Node-id migration rehearsal (agents-ooma.5; tooling SIGNING-AND-IDENTITY-DESIGN.md §8).
+ *
+ * What a node sees when its MASTER moves to a key-derived id (crc32 of the same public key).
+ * The firmware under test is the existing cluster authorship gate -- unchanged by the migration --
+ * so this pins the behaviour the bench roll depends on rather than assuming it:
+ *
+ *   1. intent authored under the master's OLD id is accepted;
+ *   2. intent authored under its NEW id is REFUSED until this node has heard the master under the
+ *      new id -- trust looks the key up BY ID (admin_node_is_trusted), and admin_key holds keys;
+ *   3. hearing the master's NodeInfo under the new id leaves this node holding the same key under
+ *      BOTH ids (the reference does the same; an automatic move keyed on a public key would be
+ *      unauthenticated, since public keys are public);
+ *   4. the re-published intent under the new id is then accepted, and supersedes the old;
+ *   5. once the old id is forgotten, content still authored under it is refused -- so the roll must
+ *      re-publish every base entry under the new id BEFORE old ids are forgotten, or a node that
+ *      has not yet got that content never will.
+ *
+ * Authorship is the STAMP's node id, not the frame's sender: replicated entries arrive from
+ * whichever peer walks with us. So every frame here is carried by PEER while the stamp names the
+ * old or new id.
+ * ========================================================================== */
+
+#include <zephyr/sys/crc.h>
+
+static void inject_intent_by(uint32_t author, int64_t ms, uint8_t class_id, uint32_t version,
+			     uint32_t id)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	uint8_t buf[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t len = encode_intent(class_id, version, 0U, buf, sizeof(buf));
+
+	msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+	msg.variant.entry.has_key = true;
+	msg.variant.entry.key.layer = zephyrtastic_ClusterLayer_BASE;
+	msg.variant.entry.key.node_id = 0U;
+	msg.variant.entry.key.section = MESHTASTIC_CLUSTER_SECTION_FW;
+	msg.variant.entry.has_stamp = true;
+	msg.variant.entry.stamp.physical_ms = ms;
+	msg.variant.entry.stamp.node_id = author;
+	msg.variant.entry.payload.size = (pb_size_t)len;
+	memcpy(msg.variant.entry.payload.bytes, buf, len);
+	inject_cluster(&msg, TEST_NODE_ID, id);
+	k_sleep(K_MSEC(400));
+}
+
+static void hear_nodeinfo(uint32_t from, const uint8_t *key)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet ni = {
+		.from = from,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	user.public_key.size = MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN;
+	memcpy(user.public_key.bytes, key, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode failed");
+	ni.payload = buf;
+	ni.payload_len = os.bytes_written;
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+}
+
+ZTEST(mesh_sim, test_cluster_fleet_intent_survives_its_master_changing_node_id)
+{
+	const uint32_t old_id = PEER_NODE_ID;
+	const uint32_t new_id = crc32_ieee(peer_key, sizeof(peer_key));
+	const uint32_t v_old = meshtastic_fleet_version_pack(0, 3, 41);
+	const uint32_t v_new = meshtastic_fleet_version_pack(0, 3, 42);
+	struct meshtastic_cluster_stats before_st, after_st;
+	struct meshtastic_fleet_intent want;
+	uint8_t key_out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
+	int64_t ms;
+
+	zassert_not_equal(new_id, old_id, "the rehearsal needs the id to actually change");
+	zassert_true(new_id > 3U && new_id != MESHTASTIC_NODE_BROADCAST, "unusable derived id");
+
+	cluster_channel(true);
+	trust_peer_as_master(true); /* the master, known under its OLD id, key in admin_key */
+	wait_cluster_idle();
+	quiesce();
+
+	/* 1. Before the migration: the old id's intent is accepted. */
+	ms = doc_max_stamp().physical_ms + 1000;
+	meshtastic_cluster_stats_get(&before_st);
+	inject_intent_by(old_id, ms, 1U, v_old, 0x7601U);
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.entry_rx_applied, before_st.entry_rx_applied + 1U,
+		      "intent from the master's old id must be accepted");
+	zassert_true(meshtastic_fleet_desired_for(TEST_NODE_ID, 1U, &want));
+	zassert_equal(want.version, v_old);
+	zassert_equal(want.stamp.node_id, old_id);
+
+	/* 2. The master has rebooted under its new id and publishes at once -- before this node has
+	 * heard its NodeInfo under that id. Refused: nothing maps the new id to a key yet. */
+	ms += 1000;
+	meshtastic_cluster_stats_get(&before_st);
+	inject_intent_by(new_id, ms, 1U, v_new, 0x7602U);
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.entry_rx_refused, before_st.entry_rx_refused + 1U,
+		      "a master's new id is not trusted before its NodeInfo is heard");
+	zassert_true(meshtastic_fleet_desired_for(TEST_NODE_ID, 1U, &want));
+	zassert_equal(want.version, v_old, "the refused intent must not have landed");
+
+	/* 3. The master's NodeInfo arrives under the new id, with the same key. This node now holds
+	 * that key under BOTH ids. */
+	hear_nodeinfo(new_id, peer_key);
+	zassert_ok(meshtastic_nodedb_copy_pubkey(new_id, key_out), "key not learned under new id");
+	zassert_mem_equal(key_out, peer_key, sizeof(peer_key));
+	zassert_ok(meshtastic_nodedb_copy_pubkey(old_id, key_out),
+		   "the old entry is kept, as in the reference");
+	zassert_mem_equal(key_out, peer_key, sizeof(peer_key));
+
+	/* 4. Re-published under the new id: accepted, and it supersedes the old-id intent. */
+	ms += 1000;
+	meshtastic_cluster_stats_get(&before_st);
+	inject_intent_by(new_id, ms, 1U, v_new, 0x7603U);
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.entry_rx_applied, before_st.entry_rx_applied + 1U,
+		      "the master's re-published intent must be accepted under its new id");
+	zassert_true(meshtastic_fleet_desired_for(TEST_NODE_ID, 1U, &want));
+	zassert_equal(want.version, v_new);
+	zassert_equal(want.stamp.node_id, new_id, "authored by the master's new id");
+
+	/* 5. Old ids forgotten. Content still authored under the old id -- here a row a lagging
+	 * peer still carries, stamped NEWER so only authorship can stop it -- is now refused. */
+	zassert_ok(meshtastic_nodedb_forget(old_id));
+	ms += 1000;
+	meshtastic_cluster_stats_get(&before_st);
+	inject_intent_by(old_id, ms, 2U, v_old, 0x7604U);
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.entry_rx_refused, before_st.entry_rx_refused + 1U,
+		      "after forgetting the old id, content authored under it is refused");
+	zassert_true(meshtastic_fleet_desired_for(TEST_NODE_ID, 1U, &want));
+	zassert_equal(want.version, v_new, "the new-id intent must be untouched");
+
+	/* Leave PEER as every other test expects it. */
+	(void)meshtastic_nodedb_forget(new_id);
+	trust_peer_as_master(true);
+	cluster_channel(false);
+}
 #endif /* CONFIG_MESHTASTIC_FLEET */
 
 /*
