@@ -40,6 +40,21 @@ if(CONFIG_MESHTASTIC)
   endif()
   zephyr_nanopb_sources(meshtastic ${MESHTASTIC_NANOPB_PROTOS})
 
+  # The generated *.pb.h land in this library's binary dir, and every test suite puts that
+  # dir on `app`'s include path (see tests/*/CMakeLists.txt) so it can include the port's
+  # private headers, which include meshtastic/mesh.pb.h. An include path is NOT a dependency
+  # though: nothing otherwise tells Ninja that app's objects must wait for the protoc step,
+  # so a parallel build is free to compile them first and fail with
+  #     fatal error: meshtastic/mesh.pb.h: No such file or directory
+  # It presents as a flaky build -- a different scenario fails on each run and everything
+  # passes when a suite is run alone -- but it is a missing edge, not a race for a shared
+  # resource: each config builds in its own directory. `app` is created by include(kernel)
+  # before Zephyr descends into modules, so the target exists here; the guard keeps this a
+  # no-op for any consumer where it does not. agents-y4ku.
+  if(TARGET app)
+    add_dependencies(app meshtastic)
+  endif()
+
   # Build identity (git describe + build time) regenerated on every build into a
   # header, isolated in meshtastic_build.c. See cmake/gen_build_id.cmake.
   set(MT_BUILD_ID_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
