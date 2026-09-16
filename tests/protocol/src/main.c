@@ -3149,6 +3149,80 @@ ZTEST(protocol_stack, test_mqtt_borne_admin_refused_on_legacy_admin_channel)
 	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 }
 
+/* --- C-3: a short PSK is zero-padded, not rejected -------------------------- */
+
+/* Put `len` bytes of PSK into a spare slot and read the key back. */
+static void c3_key_for_psk(uint8_t len, struct meshtastic_channel_key *out)
+{
+	const uint8_t SLOT = 1U;
+	meshtastic_Channel saved = *meshtastic_channels_get(SLOT);
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
+	int ret;
+
+	ch.index = SLOT;
+	ch.has_settings = true;
+	ch.role = meshtastic_Channel_Role_SECONDARY;
+	strncpy(ch.settings.name, "c3", sizeof(ch.settings.name) - 1U);
+	ch.settings.psk.size = len;
+	for (uint8_t i = 0; i < len; i++) {
+		ch.settings.psk.bytes[i] = (uint8_t)(0xA0U + i);
+	}
+	zassert_ok(meshtastic_channels_set_slot(SLOT, &ch), "set_slot failed for psk len %u", len);
+
+	ret = meshtastic_channels_get_key(SLOT, out);
+	zassert_ok(ret, "a %u-byte PSK was REJECTED (%d): the reference pads it", len, ret);
+
+	zassert_ok(meshtastic_channels_set_slot(SLOT, &saved), "slot restore failed");
+}
+
+/* Upstream Channels::getKey pads a short key with zeros rather than refusing it:
+ * "the user specified only the first few bits of an AES128 key ... by convention
+ * we just pad the rest of the key with zeros". 2..15 becomes AES128, 17..31
+ * becomes AES256. The port returned -EINVAL for anything that was not exactly
+ * 16 or 32, so a custom short key a stock node accepts made the channel
+ * undecryptable here (OPEN-DIVERGENCES C-3). */
+ZTEST(protocol_stack, test_short_psk_is_zero_padded_like_the_reference)
+{
+	const struct {
+		uint8_t psk_len;
+		uint8_t want_len;
+	} cases[] = {
+		{2U, 16U}, {4U, 16U}, {15U, 16U},  /* short AES128 */
+		{16U, 16U},                        /* exact, unchanged */
+		{17U, 32U}, {31U, 32U},            /* short AES256 */
+		{32U, 32U},                        /* exact, unchanged */
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct meshtastic_channel_key key;
+
+		c3_key_for_psk(cases[i].psk_len, &key);
+		zassert_equal(key.len, cases[i].want_len, "a %u-byte PSK became a %u-byte key, want %u",
+			      cases[i].psk_len, key.len, cases[i].want_len);
+		for (uint8_t b = 0; b < cases[i].psk_len; b++) {
+			zassert_equal(key.bytes[b], (uint8_t)(0xA0U + b),
+				      "padding disturbed supplied byte %u of a %u-byte PSK", b,
+				      cases[i].psk_len);
+		}
+		for (uint8_t b = cases[i].psk_len; b < key.len; b++) {
+			zassert_equal(key.bytes[b], 0U, "pad byte %u of a %u-byte PSK is not zero", b,
+				      cases[i].psk_len);
+		}
+	}
+}
+
+/* The one-byte case is NOT padding: it is the short-PSK index, expanded against
+ * the default PSK. Pinned here so the padding above cannot swallow it. */
+ZTEST(protocol_stack, test_one_byte_psk_is_still_the_short_index_not_a_pad)
+{
+	struct meshtastic_channel_key key;
+
+	c3_key_for_psk(1U, &key);
+	zassert_equal(key.len, sizeof(meshtastic_default_psk), "a 1-byte PSK must expand, not pad");
+	zassert_mem_equal(key.bytes, meshtastic_default_psk, sizeof(meshtastic_default_psk) - 1U,
+			  "a 1-byte PSK must expand from the default PSK");
+}
+
 /* --- A-4a: passkey-exempt getters must actually respond -------------------- */
 
 /* A capture PhoneAPI transport: locally-emitted admin responses fan out through

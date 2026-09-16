@@ -97,8 +97,24 @@ static int channel_get_key(uint8_t index, struct meshtastic_channel_key *key)
 		expand_short_psk(psk_index, key);
 	}
 
-	if (key->len != 16U && key->len != 32U) {
-		return -EINVAL;
+	/* Zero-pad a short key rather than refuse it, as the reference does
+	 * (Channels.cpp:getKey, "by convention we just pad the rest of the key with
+	 * zeros"): 2..15 bytes become AES128, 17..31 become AES256. The bytes above
+	 * the supplied length are already zero from the memset above.
+	 *
+	 * The port used to reject anything that was not exactly 16 or 32, so a custom
+	 * short key a stock node accepts made the whole channel undecryptable here
+	 * (OPEN-DIVERGENCES C-3). The phone app sends full-length keys, which is why
+	 * it stayed hidden. A length of 1 never reaches this: it is the short-PSK
+	 * index, expanded above.
+	 */
+	if (key->len > sizeof(key->bytes)) {
+		return -EINVAL; /* longer than the buffer: proto caps psk at 32, so unreachable */
+	}
+	if (key->len < 16U) {
+		key->len = 16U;
+	} else if (key->len != 16U && key->len < 32U) {
+		key->len = 32U;
 	}
 
 	return 0;
