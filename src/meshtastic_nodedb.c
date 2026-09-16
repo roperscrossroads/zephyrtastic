@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -29,6 +30,7 @@
 #include "meshtastic_sched.h"
 #if defined(CONFIG_MESHTASTIC_PKI)
 #include "meshtastic_pki.h"
+#include "meshtastic_phoneapi.h"
 #endif
 
 #include "meshtastic/deviceonly.pb.h"
@@ -125,6 +127,125 @@ static void copy_string(char *dst, size_t dst_len, const char *src)
 	}
 }
 
+#if defined(CONFIG_MESHTASTIC_PKI)
+/* agents-ooma.21 -- a peer advertising OUR public key under a different node id.
+ *
+ * Nobody but us should hold our key. A NodeInfo carrying it from another id means the key
+ * was copied (a cloned flash, a restored backup on a second board), or two boards minted the
+ * same key -- which is exactly the failure the ESP32-S3 first-boot entropy question
+ * (agents-0lzm.10) is about, so this is the detector for it. It is also what an echo of our
+ * OWN old NodeInfo looks like after a node-id migration, which is why it matters now.
+ *
+ * Mirrors the reference (NodeDB::updateUser): refuse the identity update, and warn the user
+ * ONCE per boot -- a latch that is never reset -- with the sender's name made safe to embed.
+ *
+ * The notification is raised under nodedb_lock but delivered after it is released: the
+ * PhoneAPI's config stream walks the NodeDB, so enqueueing to the phone while holding this
+ * lock would invert that order. The alert is taken once, so a static buffer cannot race. */
+static struct {
+	bool warned;
+	bool pending;
+	char name[sizeof(((meshtastic_User *)0)->long_name)];
+} own_key_alert;
+
+/* The reference's sanitizeUtf8 (meshUtils.cpp), ported: replace every byte that does not begin
+ * a valid UTF-8 sequence -- a stray continuation byte, a sequence cut short by truncation, an
+ * overlong form, a surrogate half, anything past U+10FFFF -- with '?'. A name truncated to fit
+ * a buffer can end mid-character, and a phone-side protobuf decoder that validates UTF-8 would
+ * then reject the whole frame carrying the warning. */
+static void sanitize_utf8(char *buf, size_t size)
+{
+	size_t i = 0U;
+	size_t len;
+
+	if (buf == NULL || size == 0U) {
+		return;
+	}
+	buf[size - 1U] = '\0';
+	len = strlen(buf);
+
+	while (i < len) {
+		uint8_t b = (uint8_t)buf[i];
+		size_t seq;
+		uint32_t min_cp;
+		uint32_t cp;
+		bool valid = true;
+
+		if (b <= 0x7FU) {
+			i++;
+			continue;
+		} else if ((b & 0xE0U) == 0xC0U) {
+			seq = 2U;
+			min_cp = 0x80U;
+			cp = b & 0x1FU;
+		} else if ((b & 0xF0U) == 0xE0U) {
+			seq = 3U;
+			min_cp = 0x800U;
+			cp = b & 0x0FU;
+		} else if ((b & 0xF8U) == 0xF0U) {
+			seq = 4U;
+			min_cp = 0x10000U;
+			cp = b & 0x07U;
+		} else {
+			buf[i++] = '?';
+			continue;
+		}
+
+		if (i + seq > len) {
+			for (size_t j = i; j < len; j++) {
+				buf[j] = '?';
+			}
+			break;
+		}
+		for (size_t j = 1U; j < seq; j++) {
+			uint8_t c = (uint8_t)buf[i + j];
+
+			if ((c & 0xC0U) != 0x80U) {
+				valid = false;
+				break;
+			}
+			cp = (cp << 6) | (c & 0x3FU);
+		}
+		if (valid && (cp < min_cp || cp > 0x10FFFFU || (cp >= 0xD800U && cp <= 0xDFFFU))) {
+			valid = false;
+		}
+		if (valid) {
+			i += seq;
+		} else {
+			/* Only the lead byte; its continuations are caught on the next pass. */
+			buf[i++] = '?';
+		}
+	}
+}
+
+/* Take a raised alert, under nodedb_lock. */
+static bool own_key_alert_take_locked(char *name, size_t cap)
+{
+	if (!own_key_alert.pending) {
+		return false;
+	}
+	own_key_alert.pending = false;
+	copy_string(name, cap, own_key_alert.name);
+	return true;
+}
+
+/* Deliver a taken alert, WITHOUT nodedb_lock held. Same wording as the reference. */
+static void own_key_alert_deliver(const char *name)
+{
+	static meshtastic_ClientNotification cn;
+
+	LOG_WRN("Remote device %s has advertised your public key. This may indicate a "
+		"compromised key. You may need to regenerate your public keys.", name);
+	cn = (meshtastic_ClientNotification)meshtastic_ClientNotification_init_zero;
+	cn.level = meshtastic_LogRecord_Level_WARNING;
+	(void)snprintf(cn.message, sizeof(cn.message),
+		       "Remote device %s has advertised your public key. This may indicate a "
+		       "compromised key. You may need to regenerate your public keys.",
+		       name);
+	(void)meshtastic_phoneapi_enqueue_client_notification(&cn);
+}
+#endif /* CONFIG_MESHTASTIC_PKI */
+
 static void apply_user(struct nodedb_entry *entry, const meshtastic_User *user)
 {
 	meshtastic_NodeInfoLite *node = &entry->node;
@@ -147,15 +268,30 @@ static void apply_user(struct nodedb_entry *entry, const meshtastic_User *user)
 	}
 
 #if defined(CONFIG_MESHTASTIC_PKI)
-	/* Someone advertising OUR node id with a key that is not our real public
-	 * key is impersonating this node: never store it, and say so loudly. */
-	if (node->num == meshtastic_get_node_id() && incoming_full) {
+	if (incoming_full) {
 		uint8_t own[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
+		bool have_own = (meshtastic_pki_get_public_key(own) == sizeof(own));
+		bool ours = have_own && memcmp(own, user->public_key.bytes, sizeof(own)) == 0;
 
-		if (meshtastic_pki_get_public_key(own) == sizeof(own) &&
-		    memcmp(own, user->public_key.bytes, sizeof(own)) != 0) {
+		/* Someone advertising OUR node id with a key that is not our real public
+		 * key is impersonating this node: never store it, and say so loudly. */
+		if (node->num == meshtastic_get_node_id() && have_own && !ours) {
 			LOG_WRN("NodeInfo advertises our node id 0x%08x with a foreign "
 				"public key — dropped (possible impersonation)",
+				(unsigned int)node->num);
+			return;
+		}
+
+		/* The converse: OUR key under someone else's id (see own_key_alert). */
+		if (node->num != meshtastic_get_node_id() && ours) {
+			if (!own_key_alert.warned) {
+				own_key_alert.warned = true;
+				own_key_alert.pending = true;
+				copy_string(own_key_alert.name, sizeof(own_key_alert.name),
+					    user->long_name);
+				sanitize_utf8(own_key_alert.name, sizeof(own_key_alert.name));
+			}
+			LOG_DBG("NodeInfo from 0x%08x carries our public key — dropped",
 				(unsigned int)node->num);
 			return;
 		}
@@ -1186,7 +1322,16 @@ static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *p
 		apply_user(entry, &user);
 	}
 
+#if defined(CONFIG_MESHTASTIC_PKI)
+	char alert_name[sizeof(own_key_alert.name)];
+	bool alert = own_key_alert_take_locked(alert_name, sizeof(alert_name));
+#endif
 	k_mutex_unlock(&nodedb_lock);
+#if defined(CONFIG_MESHTASTIC_PKI)
+	if (alert) {
+		own_key_alert_deliver(alert_name);
+	}
+#endif
 }
 
 MESHTASTIC_MODULE_DEFINE(nodedb, 0, MESHTASTIC_MODULE_ALL_PACKETS,
@@ -1768,7 +1913,16 @@ int meshtastic_nodedb_add_contact(uint32_t node_num, const meshtastic_User *user
 		node->last_heard = uptime_seconds();
 	}
 	nodedb_dirty = true;
+#if defined(CONFIG_MESHTASTIC_PKI)
+	char alert_name[sizeof(own_key_alert.name)];
+	bool alert = own_key_alert_take_locked(alert_name, sizeof(alert_name));
+#endif
 	k_mutex_unlock(&nodedb_lock);
+#if defined(CONFIG_MESHTASTIC_PKI)
+	if (alert) {
+		own_key_alert_deliver(alert_name);
+	}
+#endif
 
 	if (should_ignore) {
 		ret = meshtastic_nodedb_set_ignored(node_num, true);

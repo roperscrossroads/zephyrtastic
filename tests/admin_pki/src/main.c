@@ -3851,3 +3851,70 @@ ZTEST(admin_pki, test_write_inside_an_edit_transaction_is_not_flushed_early)
 	meshtastic_admin_cancel_reboot();
 	zassert_false(meshtastic_settings_save_pending(), "commit must leave nothing pending");
 }
+
+/* ---- agents-ooma.21: our own public key, advertised under someone else's id ---------------- */
+
+/* The next ClientNotification the phone would see, skipping other frames. (Kept separate from the
+ * key-verification suite's helper so it does not depend on CONFIG_MESHTASTIC_KEYVERIFY.) */
+static bool own_key_pop_notification(meshtastic_ClientNotification *cn)
+{
+	struct meshtastic_phoneapi_frame frame;
+	meshtastic_FromRadio from;
+
+	while (meshtastic_phoneapi_pop_frame(&phone_api, &frame)) {
+		pb_istream_t is = pb_istream_from_buffer(frame.data, frame.len);
+
+		from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+		zassert_true(pb_decode(&is, meshtastic_FromRadio_fields, &from), "FromRadio decode");
+		if (from.which_payload_variant == meshtastic_FromRadio_clientNotification_tag) {
+			*cn = from.clientNotification;
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Nobody else should hold our key. A NodeInfo carrying it from another id means a copied key or
+ * two boards that minted the same one -- the detector for the first-boot entropy question -- and
+ * after a node-id migration it is also what an echo of our own old NodeInfo looks like. As in the
+ * reference: the identity update is refused (nothing stored under the other id), and the user is
+ * warned once per boot with the sender's name made safe to embed. The name here ends in a
+ * three-byte UTF-8 sequence cut after two bytes, as truncation to a buffer leaves it; a phone-side
+ * decoder that validates UTF-8 would reject the frame carrying the raw bytes. */
+ZTEST(admin_pki, test_a_peer_advertising_our_public_key_is_refused_and_warned_once)
+{
+	const uint32_t cloner = 0x0C10E001U;
+	const uint32_t cloner2 = 0x0C10E002U;
+	uint8_t own[MESHTASTIC_PKI_KEY_LEN];
+	struct meshtastic_nodedb_node node;
+	meshtastic_ClientNotification cn;
+	bool warned = false;
+
+	zassert_equal(meshtastic_pki_get_public_key(own), sizeof(own), "no key of our own");
+	meshtastic_phoneapi_reset(&phone_api);
+
+	seed_named_peer(cloner, "Cloner\xE2\x82", own);
+
+	zassert_ok(meshtastic_nodedb_get(cloner, &node), "the sender is still heard");
+	zassert_equal(node.public_key_len, 0U, "our key was stored under another id");
+	zassert_false(node.has_user, "the identity update was not refused");
+
+	while (own_key_pop_notification(&cn)) {
+		if (strstr(cn.message, "has advertised your public key") != NULL) {
+			zassert_equal(cn.level, meshtastic_LogRecord_Level_WARNING, "not a warning");
+			zassert_not_null(strstr(cn.message, "Remote device Cloner?? has"),
+					 "sender name not sanitised: %s", cn.message);
+			warned = true;
+		}
+	}
+	zassert_true(warned, "no warning reached the phone");
+
+	/* Once per boot: a second copy is refused just the same, but not announced again. */
+	seed_named_peer(cloner2, "Second", own);
+	zassert_ok(meshtastic_nodedb_get(cloner2, &node), "the second sender is still heard");
+	zassert_equal(node.public_key_len, 0U, "our key was stored under the second id");
+	while (own_key_pop_notification(&cn)) {
+		zassert_is_null(strstr(cn.message, "has advertised your public key"),
+				"the warning latch did not hold");
+	}
+}
