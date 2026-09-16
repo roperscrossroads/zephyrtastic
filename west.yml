@@ -7,8 +7,14 @@ manifest:
 
   projects:
     - name: zephyr
-      remote: zephyrproject-rtos
-      revision: main
+      # PINNED, not `main`. A floating branch made this manifest unreproducible:
+      # the bench built against the tree from whenever `west update` last ran,
+      # while a fresh clone (and CI) got whatever upstream main was that day --
+      # two months newer, by the time CI first tried to apply the carried
+      # patches and they would not apply. Bumping Zephyr is now a deliberate
+      # act: change this SHA, run `west update && west patch apply`, and fix
+      # whatever the patches no longer apply to.
+      revision: 6072d4880d2d8deeadb506929adca4dba44c8220
       clone-depth: 1
       import:
         name-allowlist:
