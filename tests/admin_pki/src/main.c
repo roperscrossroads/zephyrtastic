@@ -36,6 +36,7 @@
 #include "meshtastic_admin_session.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
+#include "meshtastic_settings.h"
 #include "meshtastic_backup.h"
 #include "meshtastic_hlc.h"
 #include "meshtastic_core.h"
@@ -1011,13 +1012,22 @@ ZTEST(admin_pki, test_edit_transaction_suppresses_a_save_already_queued)
 	k_sleep(K_MSEC(50));
 	zassert_ok(settings_save_subtree("meshtastic"), "baseline flush failed");
 
-	/* Queue a debounced save (default 1000 ms) by changing the role... */
-	meshtastic_admin_session_reset();
-	meshtastic_admin_session_current(key);
-	len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_ROUTER, key, sizeof(key),
-				    buf, sizeof(buf));
-	inject_pkc_admin(buf, len, id++);
-	k_sleep(K_MSEC(50));
+	/* Queue a debounced save (default 1000 ms) by changing the role.
+	 *
+	 * NOT through admin: since agents-ooma.7 an admin write flushes before its ACK, so
+	 * it can never be the save still sitting in the debounce window. The writers that
+	 * can are the ones nobody acknowledges -- node-DB churn, cluster gossip, the backup
+	 * path -- and a direct store write is exactly that shape.
+	 */
+	{
+		meshtastic_Config queued;
+
+		zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag,
+							      &queued), "");
+		queued.payload_variant.device.role = meshtastic_Config_DeviceConfig_Role_ROUTER;
+		zassert_ok(meshtastic_config_store_set_config(&queued), "queued set failed");
+	}
+	zassert_true(meshtastic_settings_save_pending(), "no debounced save was queued");
 
 	/* ...then immediately open an edit transaction, BEFORE that save fires. */
 	meshtastic_admin_session_reset();
@@ -3736,4 +3746,108 @@ ZTEST(admin_pki, test_private_key_is_redacted_for_mesh_not_for_phone)
 	zassert_true(send_local_admin_and_pop_reply(buf, len, &resp), "get_config must reply");
 	zassert_equal(resp.payload_variant.get_config_response.payload_variant.security.private_key.size,
 		      MESHTASTIC_PKI_KEY_LEN, "the phone gets the private key");
+}
+
+/* ---- D4 / agents-ooma.7: an ACKed config write is on flash before the ACK ------------
+ *
+ * Config setters schedule a coalesced save (1 s by default). The ROUTING ACK used to go
+ * out inside that window, so a brownout before the debounce fired reverted a change the
+ * app had already been told was stored. Upstream never has the window: its setters call
+ * saveToDisk() synchronously. These tests read what is actually IN NVS, without sleeping
+ * at all -- if the record is there, only a synchronous flush can have put it there.
+ */
+struct d4_raw {
+	uint8_t buf[MESHTASTIC_STORE_VALUE_MAX];
+	size_t len;
+	bool found;
+};
+
+static int d4_raw_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		     void *param)
+{
+	struct d4_raw *r = param;
+
+	ARG_UNUSED(key);
+	if (len <= sizeof(r->buf) && read_cb(cb_arg, r->buf, len) == (ssize_t)len) {
+		r->len = len;
+		r->found = true;
+	}
+	return 1;
+}
+
+static bool d4_flash_record(const char *name, struct d4_raw *r)
+{
+	r->len = 0U;
+	r->found = false;
+	(void)settings_load_subtree_direct(name, d4_raw_cb, r);
+	return r->found;
+}
+
+/* The device record as the store holds it in RAM, to compare against flash. */
+static size_t d4_ram_record(uint8_t *buf, size_t cap)
+{
+	int len = meshtastic_config_store_setting_get("config/device", buf, cap);
+
+	zassert_true(len > 0, "config/device is not in the store (%d)", len);
+	return (size_t)len;
+}
+
+static meshtastic_Config_DeviceConfig_Role d4_other_role(void)
+{
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag, &cfg), "");
+	return cfg.payload_variant.device.role == meshtastic_Config_DeviceConfig_Role_CLIENT
+		       ? meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE
+		       : meshtastic_Config_DeviceConfig_Role_CLIENT;
+}
+
+ZTEST(admin_pki, test_acked_config_write_is_already_on_flash)
+{
+	uint8_t admin[128];
+	uint8_t ram[MESHTASTIC_STORE_VALUE_MAX];
+	struct d4_raw flash;
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	size_t len = encode_admin_set_role(d4_other_role(), NULL, 0U, admin, sizeof(admin));
+	size_t ram_len;
+
+	(void)send_local_admin_and_pop_reply(admin, len, &resp);
+	meshtastic_admin_cancel_reboot();
+
+	/* No k_sleep: the debounced save cannot have run. */
+	zassert_false(meshtastic_settings_save_pending(),
+		      "a coalesced save was still pending after the write was answered -- a "
+		      "brownout here loses a change the client was told had landed (D4)");
+
+	ram_len = d4_ram_record(ram, sizeof(ram));
+	zassert_true(d4_flash_record("meshtastic/config/device", &flash),
+		     "config/device is not in NVS at all after an answered write");
+	zassert_equal(flash.len, ram_len, "flash record %u B, store record %u B",
+		      (unsigned int)flash.len, (unsigned int)ram_len);
+	zassert_mem_equal(flash.buf, ram, ram_len,
+			  "the record in NVS is not the one the client was ACKed for");
+}
+
+ZTEST(admin_pki, test_write_inside_an_edit_transaction_is_not_flushed_early)
+{
+	uint8_t admin[128];
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+	size_t len;
+
+	/* The other half of the rule: inside a transaction the client is promised
+	 * atomicity at commit, not per-op durability, so the flush above must NOT run --
+	 * it would defeat the transaction exactly as an early debounce would.
+	 */
+	len = encode_admin_edit_settings(false, NULL, 0U, admin, sizeof(admin));
+	(void)send_local_admin_and_pop_reply(admin, len, &resp);
+
+	len = encode_admin_set_role(d4_other_role(), NULL, 0U, admin, sizeof(admin));
+	(void)send_local_admin_and_pop_reply(admin, len, &resp);
+	zassert_true(meshtastic_config_store_save_suppressed(),
+		     "the transaction should be suppressing saves");
+
+	len = encode_admin_edit_settings(true, NULL, 0U, admin, sizeof(admin));
+	(void)send_local_admin_and_pop_reply(admin, len, &resp);
+	meshtastic_admin_cancel_reboot();
+	zassert_false(meshtastic_settings_save_pending(), "commit must leave nothing pending");
 }

@@ -138,6 +138,11 @@ void meshtastic_settings_schedule_save(void)
 	(void)k_work_reschedule(&save_work, K_MSEC(CONFIG_MESHTASTIC_SETTINGS_SAVE_DELAY_MS));
 }
 
+bool meshtastic_settings_save_pending(void)
+{
+	return k_work_delayable_is_pending(&save_work);
+}
+
 int meshtastic_settings_flush(void)
 {
 	(void)k_work_cancel_delayable(&save_work);

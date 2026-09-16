@@ -16,6 +16,15 @@ void meshtastic_settings_schedule_save(void);
 int meshtastic_settings_flush(void);
 
 /**
+ * @brief Is a coalesced save still waiting to reach flash?
+ *
+ * True between meshtastic_settings_schedule_save() and the debounced write. A
+ * caller about to tell a client its write succeeded must flush first: the ACK
+ * would otherwise promise durability the store has not got yet (agents-ooma.7).
+ */
+bool meshtastic_settings_save_pending(void);
+
+/**
  * @brief Delete the persisted Meshtastic config/module/channel/owner from NVS.
  *
  * Removes every key in the config subtree. When @p preserve_security is true the

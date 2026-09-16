@@ -1837,6 +1837,30 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		break;
 	}
 
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	/* agents-ooma.7 (D4): make the write durable BEFORE the client is told it
+	 * succeeded. Config setters schedule a coalesced save
+	 * (CONFIG_MESHTASTIC_SETTINGS_SAVE_DELAY_MS, 1 s by default); the ACK below used
+	 * to go out inside that window, so a brownout before the debounce fired reverted a
+	 * change the app had already been told was stored. Upstream has no window at all --
+	 * its setters call saveToDisk() synchronously (NodeDB.cpp) -- and the coalescing is
+	 * still worth keeping for the unacknowledged writers (nodedb churn, cluster
+	 * gossip), which is why this flushes here rather than removing the delay.
+	 *
+	 * Not inside an open edit transaction: there the client is promised atomicity at
+	 * commit, not per-op durability, and a flush would defeat it (save_work_handler
+	 * skips for the same reason). Commit, the idle auto-commit, reboot, shutdown and
+	 * DFU all flush already.
+	 */
+	if (!admin_edit_open && meshtastic_settings_save_pending()) {
+		int flush_ret = meshtastic_settings_flush();
+
+		if (flush_ret < 0) {
+			LOG_WRN("admin: flush before ACK failed (%d)", flush_ret);
+		}
+	}
+#endif
+
 	/* The client's write timeout waits on a ROUTING ACK. A getter already
 	 * emitted an AdminMessage response (carrying the passkey), so suppress the
 	 * redundant ACK there — matching firmware, which sends only the response —
