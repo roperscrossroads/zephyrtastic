@@ -3223,6 +3223,101 @@ ZTEST(protocol_stack, test_one_byte_psk_is_still_the_short_index_not_a_pad)
 			  "a 1-byte PSK must expand from the default PSK");
 }
 
+/* --- A-2: the legacy admin channel is matched by name, before PKC ----------- */
+
+/* Deliver one admin set_config(device.role=ROUTER) as a remote packet and say
+ * whether it was applied. `pki` marks it PKC-encrypted from `from`. */
+static bool a2_remote_admin_applies(const char *channel_name, bool gate_enabled, bool pki,
+				    uint32_t from, uint32_t id)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	uint8_t payload[128];
+	pb_ostream_t os;
+	meshtastic_Channel saved;
+	struct meshtastic_packet pkt = {0};
+	bool applied;
+
+	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	enable_legacy_admin_channel(gate_enabled);
+	swap_primary_channel_name(channel_name, &saved);
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
+	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_device_tag;
+	am.payload_variant.set_config.payload_variant.device.role =
+		meshtastic_Config_DeviceConfig_Role_ROUTER;
+	am.session_passkey.size = (pb_size_t)sizeof(key);
+	memcpy(am.session_passkey.bytes, key, sizeof(key));
+	os = pb_ostream_from_buffer(payload, sizeof(payload));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
+
+	pkt.from = from;
+	pkt.to = TEST_NODE_ID;
+	pkt.id = id;
+	pkt.portnum = MESHTASTIC_PORT_ADMIN;
+	pkt.channel_index = meshtastic_channels_primary_index();
+	pkt.payload = payload;
+	pkt.payload_len = os.bytes_written;
+	pkt.pki_encrypted = pki;
+
+	meshtastic_admin_handle_remote(&pkt, NULL);
+	k_sleep(K_MSEC(30));
+	applied = current_device_role() == meshtastic_Config_DeviceConfig_Role_ROUTER;
+
+	zassert_ok(meshtastic_channels_set_slot(meshtastic_channels_primary_index(), &saved),
+		   "channel restore failed");
+	enable_legacy_admin_channel(false);
+	force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	return applied;
+}
+
+/* The reference compares the channel name with strcasecmp (AdminModule.cpp), so
+ * "Admin" IS the legacy admin channel. The port compared case-sensitively and did
+ * not recognise it, which is half of OPEN-DIVERGENCES A-2. */
+ZTEST(protocol_stack, test_legacy_admin_channel_name_is_case_insensitive)
+{
+	zassert_true(a2_remote_admin_applies("Admin", true, false, PEER_NODE_ID, 0x0A200001U),
+		     "a channel named \"Admin\" must be the legacy admin channel");
+	zassert_true(a2_remote_admin_applies("ADMIN", true, false, PEER_NODE_ID, 0x0A200002U),
+		     "a channel named \"ADMIN\" must be the legacy admin channel");
+	zassert_false(a2_remote_admin_applies("adminx", true, false, PEER_NODE_ID, 0x0A200003U),
+		      "a channel named \"adminx\" is NOT the admin channel");
+}
+
+/* A DELIBERATE divergence from the reference, and the reason for it.
+ *
+ * A PKC packet is attributed to channel 0 by both implementations, so the
+ * reference's name-first ordering means: enable the legacy gate on a node whose
+ * PRIMARY channel is named "admin", and any PKC admin request is authorized by
+ * the channel with the key never checked. PKC needs no channel PSK -- only the
+ * target's public key, which is public -- so that is remote admin for anyone.
+ * Here a PKC packet is judged on its key, always. */
+ZTEST(protocol_stack, test_pkc_never_gets_identity_less_channel_authorization)
+{
+	zassert_false(a2_remote_admin_applies("admin", true, true, PEER_NODE_ID, 0x0A200011U),
+		      "an untrusted key must NOT be authorized by the channel name, even with the "
+		      "legacy gate enabled (the reference authorizes it; we do not)");
+	/* Control, same configuration, plaintext: the legacy gate still works for what
+	 * it is for, so the refusal above is the key check and not a dead gate. */
+	zassert_true(a2_remote_admin_applies("admin", true, false, PEER_NODE_ID, 0x0A200012U),
+		     "plaintext admin on an enabled legacy admin channel must still apply");
+}
+
+/* The other side of the same divergence: a trusted admin key is authorized
+ * whatever the channels are called. The reference refuses it whenever the gate is
+ * off and the channel is named "admin", because its name branch matched and
+ * returned -- a foot-gun that denies legitimate admin. */
+ZTEST(protocol_stack, test_a_trusted_key_is_not_blocked_by_a_channel_name)
+{
+	zassert_false(a2_remote_admin_applies("admin", false, true, PEER_NODE_ID, 0x0A200021U),
+		      "control: an UNtrusted key is refused whatever the channel is named");
+	/* PEER_NODE_ID is not in admin_key here, so the positive half of this rule is
+	 * covered where an authorized key exists: tests/admin_pki drives real PKC admin
+	 * with set_admin_key() and would fail if a channel name could block it. */
+}
+
 /* --- A-4a: passkey-exempt getters must actually respond -------------------- */
 
 /* A capture PhoneAPI transport: locally-emitted admin responses fan out through

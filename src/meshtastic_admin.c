@@ -19,6 +19,7 @@
 
 #include <errno.h>
 #include <string.h>
+#include <strings.h>	/* strcasecmp, as the reference's channel-name compare uses */
 
 #include <pb_decode.h>
 #include <pb_encode.h>
@@ -833,25 +834,61 @@ bool meshtastic_admin_node_is_trusted(uint32_t from)
 	return false;
 }
 
-/* True if a plaintext admin packet is allowed via the legacy admin channel:
- * admin_channel_enabled AND the arrival channel is named "admin". */
-static bool admin_channel_authorized(uint8_t channel_index)
+/* Is the arrival channel the legacy admin channel by NAME, whatever the feature
+ * flag says? Name and flag are separate questions because the reference branches
+ * on the name first and only then asks whether the feature is enabled.
+ *
+ * strcaseCMP, as the reference does (AdminModule.cpp, Channels::adminChannel): a
+ * channel named "Admin" or "ADMIN" is the legacy admin channel too. The port used
+ * to compare case-sensitively and simply not recognise those (A-2). */
+static bool admin_channel_named_admin(uint8_t channel_index)
+{
+	const char *name = meshtastic_channels_get_name(channel_index);
+
+	return name != NULL && strcasecmp(name, ADMIN_LEGACY_CHANNEL_NAME) == 0;
+}
+
+/* Is the identity-less legacy admin gate switched on at all? */
+static bool admin_legacy_gate_enabled(void)
 {
 	meshtastic_Config cfg;
-	const char *name;
 
 	if (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg) != 0 ||
-	    cfg.which_payload_variant != meshtastic_Config_security_tag ||
-	    !cfg.payload_variant.security.admin_channel_enabled) {
+	    cfg.which_payload_variant != meshtastic_Config_security_tag) {
 		return false;
 	}
-	name = meshtastic_channels_get_name(channel_index);
-	return name != NULL && strcmp(name, ADMIN_LEGACY_CHANNEL_NAME) == 0;
+	return cfg.payload_variant.security.admin_channel_enabled;
 }
 
 /* Decide whether a remote admin packet is authorized. On refusal, sets *err to
- * the ROUTING error to return. Mirrors AdminModule: PKC admin_key first, then
- * the legacy admin channel, else NOT_AUTHORIZED. */
+ * the ROUTING error to return.
+ *
+ * STRONGEST EVIDENCE FIRST, and this DELIBERATELY DIVERGES from the reference
+ * (OPEN-DIVERGENCES A-2). AdminModule::handleReceivedProtobuf tests the legacy
+ * admin channel by NAME before it looks at PKC, in an if/else chain, so the name
+ * branch wins outright. Both 2.7.26 and 2.8 do it, and it is not safe here:
+ *
+ *   A PKC packet is attributed to CHANNEL 0. Upstream only attempts PKI
+ *   decryption when `p->channel == 0` (Router.cpp), and this port pins the same
+ *   "PKC pseudo-channel" (meshtastic_packet.c). So the name branch tests the
+ *   PRIMARY channel's name. Enable the legacy gate on a node whose primary is
+ *   named "admin" and every PKC admin request is authorized BY THE CHANNEL with
+ *   the key never consulted -- and PKC uses no channel PSK, only the target's
+ *   public key, which is public by design. Authorization collapses to "anyone
+ *   who can reach the node".
+ *
+ * So: a cryptographic identity is checked first and a PKC packet NEVER gets
+ * identity-less authorization. The legacy gate then applies to plaintext only,
+ * which is exactly what it is for -- legacy/ham clients that cannot do PKC,
+ * authenticated by knowing the channel PSK. The reference's other consequence
+ * goes away with it: a trusted admin key works here regardless of how channels
+ * are named, where upstream refuses it whenever the gate is off and a channel is
+ * named "admin".
+ *
+ * Kept from the reference: the name is compared case-insensitively, so "Admin"
+ * and "ADMIN" are the legacy admin channel. The port used to use strcmp and
+ * simply not recognise them.
+ */
 static bool admin_remote_authorized(bool pki_encrypted, uint32_t from, bool via_mqtt,
 				    uint8_t channel_index, meshtastic_Routing_Error *err)
 {
@@ -859,30 +896,31 @@ static bool admin_remote_authorized(bool pki_encrypted, uint32_t from, bool via_
 		if (meshtastic_admin_node_is_trusted(from)) {
 			return true;
 		}
+		/* No fall-through to the channel gate: see the divergence note above. */
 		*err = meshtastic_Routing_Error_ADMIN_PUBLIC_KEY_UNAUTHORIZED;
 		return false;
 	}
-	/* The legacy channel gate authorizes by channel *name* with no identity,
-	 * so it is only ever safe for a packet that actually reached us over the
-	 * mesh. A packet that traversed MQTT has no such provenance: the broker is
-	 * not a mesh peer, an injected packet's channel is forced to primary, and
-	 * on a plaintext or bridged broker any internet peer can produce one. The
-	 * downlink path already rejects ADMIN_APP outright; this refuses the
-	 * identity-less gate for anything that gets here claiming via_mqtt,
-	 * including a frame that arrived over RF with the wire flag set. PKC admin
-	 * is unaffected — its authorization is a key match, which MQTT cannot
-	 * forge. */
-	if (via_mqtt) {
-		LOG_WRN("admin: refusing legacy-channel authorization for an MQTT-borne "
-			"packet from 0x%08x",
-			from);
-		*err = meshtastic_Routing_Error_NOT_AUTHORIZED;
-		return false;
-	}
 
-	if (admin_channel_authorized(channel_index)) {
+	if (admin_channel_named_admin(channel_index) && admin_legacy_gate_enabled()) {
+		/* The legacy channel gate authorizes by channel *name* with no identity,
+		 * so it is only ever safe for a packet that actually reached us over the
+		 * mesh. A packet that traversed MQTT has no such provenance: the broker
+		 * is not a mesh peer, an injected packet's channel is forced to primary,
+		 * and on a plaintext or bridged broker any internet peer can produce one.
+		 * The downlink path already rejects ADMIN_APP outright; this refuses the
+		 * identity-less gate for anything that gets here claiming via_mqtt,
+		 * including a frame that arrived over RF with the wire flag set. Port
+		 * hardening with no upstream equivalent. */
+		if (via_mqtt) {
+			LOG_WRN("admin: refusing legacy-channel authorization for an MQTT-borne "
+				"packet from 0x%08x",
+				from);
+			*err = meshtastic_Routing_Error_NOT_AUTHORIZED;
+			return false;
+		}
 		return true;
 	}
+
 	*err = meshtastic_Routing_Error_NOT_AUTHORIZED;
 	return false;
 }
