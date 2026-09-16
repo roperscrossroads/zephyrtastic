@@ -19,7 +19,6 @@
 
 #include <errno.h>
 #include <string.h>
-#include <strings.h>	/* strcasecmp, as the reference's channel-name compare uses */
 
 #include <pb_decode.h>
 #include <pb_encode.h>
@@ -472,6 +471,15 @@ void meshtastic_admin_prepare_security_write(meshtastic_Config_SecurityConfig *i
 			incoming->admin_key_count == 0U && !incoming->is_managed &&
 			!incoming->serial_enabled && !incoming->debug_log_api_enabled &&
 			!incoming->admin_channel_enabled;
+	if (incoming->admin_channel_enabled && !current->admin_channel_enabled) {
+		/* Accepted and stored so the field round-trips, but it does nothing here:
+		 * the legacy identity-less admin channel is not implemented (see
+		 * admin_remote_authorized). Say so rather than let an operator believe
+		 * they just enabled a way in. */
+		LOG_WRN("admin: security.admin_channel_enabled set, but the legacy admin "
+			"channel is not implemented on this firmware -- it grants nothing");
+	}
+
 	if (bare_rotation) {
 		meshtastic_Config_SecurityConfig rotated = *current;
 
@@ -793,10 +801,6 @@ static bool owner_name_all_whitespace(const char *name)
  * keys are both this size. */
 #define ADMIN_PUBKEY_LEN 32U
 
-/* Legacy insecure admin channel — a plaintext admin packet is accepted only if
- * it arrived on a channel literally named "admin". Mirrors Channels::adminChannel. */
-#define ADMIN_LEGACY_CHANNEL_NAME "admin"
-
 /* True if @p from's stored public key matches a configured admin key
  * (SecurityConfig.admin_key[0..2]) — the modern, secure remote-admin gate.
  * Uses the hot→warm key lookup (not the hot-only nodedb_get): an admin whose
@@ -834,94 +838,47 @@ bool meshtastic_admin_node_is_trusted(uint32_t from)
 	return false;
 }
 
-/* Is the arrival channel the legacy admin channel by NAME, whatever the feature
- * flag says? Name and flag are separate questions because the reference branches
- * on the name first and only then asks whether the feature is enabled.
- *
- * strcaseCMP, as the reference does (AdminModule.cpp, Channels::adminChannel): a
- * channel named "Admin" or "ADMIN" is the legacy admin channel too. The port used
- * to compare case-sensitively and simply not recognise those (A-2). */
-static bool admin_channel_named_admin(uint8_t channel_index)
-{
-	const char *name = meshtastic_channels_get_name(channel_index);
-
-	return name != NULL && strcasecmp(name, ADMIN_LEGACY_CHANNEL_NAME) == 0;
-}
-
-/* Is the identity-less legacy admin gate switched on at all? */
-static bool admin_legacy_gate_enabled(void)
-{
-	meshtastic_Config cfg;
-
-	if (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg) != 0 ||
-	    cfg.which_payload_variant != meshtastic_Config_security_tag) {
-		return false;
-	}
-	return cfg.payload_variant.security.admin_channel_enabled;
-}
-
 /* Decide whether a remote admin packet is authorized. On refusal, sets *err to
  * the ROUTING error to return.
  *
- * STRONGEST EVIDENCE FIRST, and this DELIBERATELY DIVERGES from the reference
- * (OPEN-DIVERGENCES A-2). AdminModule::handleReceivedProtobuf tests the legacy
- * admin channel by NAME before it looks at PKC, in an if/else chain, so the name
- * branch wins outright. Both 2.7.26 and 2.8 do it, and it is not safe here:
+ * ONE way in: a PKC packet whose sender key is in `security.admin_key`.
  *
- *   A PKC packet is attributed to CHANNEL 0. Upstream only attempts PKI
- *   decryption when `p->channel == 0` (Router.cpp), and this port pins the same
- *   "PKC pseudo-channel" (meshtastic_packet.c). So the name branch tests the
- *   PRIMARY channel's name. Enable the legacy gate on a node whose primary is
- *   named "admin" and every PKC admin request is authorized BY THE CHANNEL with
- *   the key never consulted -- and PKC uses no channel PSK, only the target's
- *   public key, which is public by design. Authorization collapses to "anyone
- *   who can reach the node".
+ * THE LEGACY ADMIN CHANNEL IS NOT IMPLEMENTED HERE, deliberately (operator
+ * decision, 2026-09-16; OPEN-DIVERGENCES A-2). Upstream still accepts admin
+ * from any packet arriving on a channel named "admin" while
+ * `security.admin_channel_enabled` is set. That mechanism predates PKC: in 2021
+ * the admin module was BOUND to that channel and knowing the channel PSK was
+ * what made you an administrator. The 2024 PKI rework (upstream 74afd131)
+ * commented out the binding and demoted the channel to an opt-in fallback its
+ * own proto calls "the insecure legacy admin channel". It is still there in 2.8.
  *
- * So: a cryptographic identity is checked first and a PKC packet NEVER gets
- * identity-less authorization. The legacy gate then applies to plaintext only,
- * which is exactly what it is for -- legacy/ham clients that cannot do PKC,
- * authenticated by knowing the channel PSK. The reference's other consequence
- * goes away with it: a trusted admin key works here regardless of how channels
- * are named, where upstream refuses it whenever the gate is off and a channel is
- * named "admin".
+ * Why it is gone here rather than merely off by default:
+ *   - it authorizes with NO identity -- anyone holding the channel PSK is an
+ *     administrator, and PSKs on this fleet are shared widely;
+ *   - it is one boolean away from live, and that boolean is itself settable by a
+ *     remote config write or a restored backup;
+ *   - a PKC packet is attributed to channel 0, so with the flag on and the
+ *     primary channel named "admin" upstream's ordering authorizes ANY PKC
+ *     sender -- no key, no PSK, just the target's public key, which is public.
+ * Nothing on this fleet used it: no channel is named "admin", no node is in
+ * licensed mode, and its one test lane was sim-only by operator decision.
  *
- * Kept from the reference: the name is compared case-insensitively, so "Admin"
- * and "ADMIN" are the legacy admin channel. The port used to use strcmp and
- * simply not recognise them.
+ * `admin_channel_enabled` remains readable and writable so the app, the CLI and
+ * backup/restore round-trip unchanged -- it simply does nothing, and a write
+ * that sets it says so in the log.
  */
 static bool admin_remote_authorized(bool pki_encrypted, uint32_t from, bool via_mqtt,
 				    uint8_t channel_index, meshtastic_Routing_Error *err)
 {
-	if (pki_encrypted) {
-		if (meshtastic_admin_node_is_trusted(from)) {
-			return true;
-		}
-		/* No fall-through to the channel gate: see the divergence note above. */
-		*err = meshtastic_Routing_Error_ADMIN_PUBLIC_KEY_UNAUTHORIZED;
-		return false;
-	}
+	ARG_UNUSED(via_mqtt);      /* no identity-less path left for MQTT to abuse */
+	ARG_UNUSED(channel_index); /* authorization does not depend on the channel */
 
-	if (admin_channel_named_admin(channel_index) && admin_legacy_gate_enabled()) {
-		/* The legacy channel gate authorizes by channel *name* with no identity,
-		 * so it is only ever safe for a packet that actually reached us over the
-		 * mesh. A packet that traversed MQTT has no such provenance: the broker
-		 * is not a mesh peer, an injected packet's channel is forced to primary,
-		 * and on a plaintext or bridged broker any internet peer can produce one.
-		 * The downlink path already rejects ADMIN_APP outright; this refuses the
-		 * identity-less gate for anything that gets here claiming via_mqtt,
-		 * including a frame that arrived over RF with the wire flag set. Port
-		 * hardening with no upstream equivalent. */
-		if (via_mqtt) {
-			LOG_WRN("admin: refusing legacy-channel authorization for an MQTT-borne "
-				"packet from 0x%08x",
-				from);
-			*err = meshtastic_Routing_Error_NOT_AUTHORIZED;
-			return false;
-		}
+	if (pki_encrypted && meshtastic_admin_node_is_trusted(from)) {
 		return true;
 	}
 
-	*err = meshtastic_Routing_Error_NOT_AUTHORIZED;
+	*err = pki_encrypted ? meshtastic_Routing_Error_ADMIN_PUBLIC_KEY_UNAUTHORIZED
+			     : meshtastic_Routing_Error_NOT_AUTHORIZED;
 	return false;
 }
 

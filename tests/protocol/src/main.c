@@ -2997,12 +2997,66 @@ static void force_device_role(meshtastic_Config_DeviceConfig_Role role)
 	zassert_ok(meshtastic_config_store_set_config(&dev), "device config write failed");
 }
 
-/* Enable the legacy identity-less admin gate and name the primary channel
- * "admin" — the exact configuration that made the downlink path exploitable. */
+/* A fixed 32-byte "peer public key". The admin_key authorization path only
+ * memcmps NodeDB key vs SecurityConfig.admin_key — no crypto validation — so any
+ * stable 32 bytes exercise the PKC match/mismatch without a PKI build. (The real
+ * X25519 decrypt that sets pki_encrypted is covered by tests/admin_pki.) */
+static const uint8_t admin_peer_pubkey[32] = {
+	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+	0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+	0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+};
+
+/* Seed PEER_NODE_ID's public key into the NodeDB by delivering a NodeInfo — the
+ * same path the stack learns a peer's key on the air (apply_user). */
+static void seed_peer_pubkey(const uint8_t key[32])
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet ni = {
+		.from = PEER_NODE_ID,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	user.public_key.size = 32U;
+	memcpy(user.public_key.bytes, key, 32U);
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode failed");
+	ni.payload = buf;
+	ni.payload_len = os.bytes_written;
+
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+}
+
+/* Set (key != NULL) or clear (key == NULL) SecurityConfig.admin_key[0]. */
+static void admin_set_admin_key(const uint8_t *key, size_t len)
+{
+	meshtastic_Config sec = meshtastic_Config_init_zero;
+
+	sec.which_payload_variant = meshtastic_Config_security_tag;
+	if (key != NULL && len > 0U) {
+		sec.payload_variant.security.admin_key_count = 1U;
+		sec.payload_variant.security.admin_key[0].size = (pb_size_t)len;
+		memcpy(sec.payload_variant.security.admin_key[0].bytes, key, len);
+	}
+	zassert_ok(meshtastic_config_store_set_config(&sec), "set admin_key failed");
+}
+
+/* Set security.admin_channel_enabled. The flag is INERT on this firmware -- the
+ * legacy identity-less admin channel is not implemented (operator decision,
+ * 2026-09-16) -- so tests use it to prove that setting it grants nothing. It
+ * still round-trips through the config store, which is the other half of the
+ * contract. */
 static void enable_legacy_admin_channel(bool enable)
 {
 	meshtastic_Config sec = meshtastic_Config_init_zero;
 
+	/* Read-modify-write: a bare set_config(security) would zero admin_key, which
+	 * is what authorization actually depends on now. */
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &sec),
+		   "security config read failed");
 	sec.which_payload_variant = meshtastic_Config_security_tag;
 	sec.payload_variant.security.admin_channel_enabled = enable;
 	zassert_ok(meshtastic_config_store_set_config(&sec), "security config write failed");
@@ -3082,15 +3136,17 @@ static void swap_primary_channel_name(const char *name, meshtastic_Channel *save
 	zassert_ok(meshtastic_channels_set_slot(index, &ch), "channel rename failed");
 }
 
-/* H4, second layer: even with the primary channel literally named "admin" and
- * the legacy gate enabled — the one configuration where identity-less admin is
- * accepted — a packet marked via_mqtt must still be refused.
+/* The legacy identity-less admin channel is NOT implemented here (see
+ * admin_remote_authorized): a plaintext remote admin is refused whatever the
+ * channel is called and whatever admin_channel_enabled says. Upstream accepts it
+ * -- that mechanism predates PKC, where knowing a channel PSK made you an
+ * administrator -- and its own proto calls the channel insecure and legacy.
  *
- * This is the case the ingest filter cannot see: an admin payload that arrives
- * encrypted has no visible portnum until after decrypt, and a frame can also
- * reach us over RF with the via_mqtt wire flag already set. Authorization by
- * channel name carries no identity, so MQTT provenance has to disqualify it. */
-ZTEST(protocol_stack, test_mqtt_borne_admin_refused_on_legacy_admin_channel)
+ * This replaces a test that asserted the MQTT half of the same configuration was
+ * refused while the mesh-borne half applied. With no identity-less path left,
+ * MQTT provenance no longer decides anything here, so the stronger statement is
+ * the one worth pinning: NOTHING plaintext gets in. */
+ZTEST(protocol_stack, test_legacy_admin_channel_authorizes_nothing)
 {
 	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
 	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
@@ -3105,14 +3161,12 @@ ZTEST(protocol_stack, test_mqtt_borne_admin_refused_on_legacy_admin_channel)
 
 	meshtastic_admin_session_reset();
 	meshtastic_admin_session_current(key);
-
 	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
 	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_device_tag;
 	am.payload_variant.set_config.payload_variant.device.role =
 		meshtastic_Config_DeviceConfig_Role_ROUTER;
 	am.session_passkey.size = (pb_size_t)sizeof(key);
 	memcpy(am.session_passkey.bytes, key, sizeof(key));
-
 	os = pb_ostream_from_buffer(payload, sizeof(payload));
 	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "admin encode failed");
 
@@ -3124,24 +3178,31 @@ ZTEST(protocol_stack, test_mqtt_borne_admin_refused_on_legacy_admin_channel)
 	pkt.payload = payload;
 	pkt.payload_len = os.bytes_written;
 
-	/* The MQTT-marked packet runs first so the refusal is asserted against a
-	 * known-CLIENT starting state, with no store write needed between the two
-	 * phases. */
+	/* Mesh-borne, on the "admin" channel, with the flag on and a valid passkey:
+	 * everything the legacy gate ever asked for. Refused. */
+	meshtastic_admin_handle_remote(&pkt, NULL);
+	k_sleep(K_MSEC(30));
+	zassert_equal(current_device_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "plaintext admin on a channel named \"admin\" must NOT be authorized");
+
+	/* And the MQTT-marked twin, which upstream's gate would also have had to
+	 * refuse by provenance -- here there is simply nothing to refuse it from. */
+	pkt.id = 0xADD10004U;
 	pkt.via_mqtt = true;
 	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(K_MSEC(30));
 	zassert_equal(current_device_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
-		      "an MQTT-borne packet must not get identity-less channel authorization");
+		      "an MQTT-borne plaintext admin must not be authorized either");
 
-	/* Now the identical packet without the MQTT mark. It must apply — proving
-	 * the assertion above was the via_mqtt check firing and not simply a
-	 * fixture that never authorizes anything. */
-	pkt.id = 0xADD10004U;
-	pkt.via_mqtt = false;
-	meshtastic_admin_handle_remote(&pkt, NULL);
-	k_sleep(K_MSEC(30));
-	zassert_equal(current_device_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
-		      "control: a mesh-borne admin on the legacy channel should apply");
+	/* The flag still round-trips even though it grants nothing: the app and
+	 * backup/restore must see the field they wrote. */
+	{
+		meshtastic_Config sec;
+
+		zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &sec), "");
+		zassert_true(sec.payload_variant.security.admin_channel_enabled,
+			     "admin_channel_enabled must still persist, it is simply inert");
+	}
 
 	zassert_ok(meshtastic_channels_set_slot(meshtastic_channels_primary_index(), &saved),
 		   "channel restore failed");
@@ -3223,7 +3284,7 @@ ZTEST(protocol_stack, test_one_byte_psk_is_still_the_short_index_not_a_pad)
 			  "a 1-byte PSK must expand from the default PSK");
 }
 
-/* --- A-2: the legacy admin channel is matched by name, before PKC ----------- */
+/* --- A-2 / legacy admin channel: authorization is by KEY, only ------------- */
 
 /* Deliver one admin set_config(device.role=ROUTER) as a remote packet and say
  * whether it was applied. `pki` marks it PKC-encrypted from `from`. */
@@ -3273,49 +3334,35 @@ static bool a2_remote_admin_applies(const char *channel_name, bool gate_enabled,
 	return applied;
 }
 
-/* The reference compares the channel name with strcasecmp (AdminModule.cpp), so
- * "Admin" IS the legacy admin channel. The port compared case-sensitively and did
- * not recognise it, which is half of OPEN-DIVERGENCES A-2. */
-ZTEST(protocol_stack, test_legacy_admin_channel_name_is_case_insensitive)
+/* No channel name and no flag can authorize anything: the identity-less path is
+ * not implemented here. Upstream authorizes the first two of these. */
+ZTEST(protocol_stack, test_no_channel_name_can_authorize_admin)
 {
-	zassert_true(a2_remote_admin_applies("Admin", true, false, PEER_NODE_ID, 0x0A200001U),
-		     "a channel named \"Admin\" must be the legacy admin channel");
-	zassert_true(a2_remote_admin_applies("ADMIN", true, false, PEER_NODE_ID, 0x0A200002U),
-		     "a channel named \"ADMIN\" must be the legacy admin channel");
-	zassert_false(a2_remote_admin_applies("adminx", true, false, PEER_NODE_ID, 0x0A200003U),
-		      "a channel named \"adminx\" is NOT the admin channel");
+	zassert_false(a2_remote_admin_applies("admin", true, false, PEER_NODE_ID, 0x0A200001U),
+		      "plaintext on \"admin\" with the flag on must not authorize");
+	zassert_false(a2_remote_admin_applies("Admin", true, false, PEER_NODE_ID, 0x0A200002U),
+		      "nor the case-variant upstream matches with strcasecmp");
+	zassert_false(a2_remote_admin_applies("admin", true, true, PEER_NODE_ID, 0x0A200003U),
+		      "and a PKC packet with an UNtrusted key is judged on the key, never on "
+		      "the channel -- upstream's ordering authorizes this one");
 }
 
-/* A DELIBERATE divergence from the reference, and the reason for it.
- *
- * A PKC packet is attributed to channel 0 by both implementations, so the
- * reference's name-first ordering means: enable the legacy gate on a node whose
- * PRIMARY channel is named "admin", and any PKC admin request is authorized by
- * the channel with the key never checked. PKC needs no channel PSK -- only the
- * target's public key, which is public -- so that is remote admin for anyone.
- * Here a PKC packet is judged on its key, always. */
-ZTEST(protocol_stack, test_pkc_never_gets_identity_less_channel_authorization)
+/* The positive half: a trusted key is authorized, and the channel name is
+ * irrelevant to it. Upstream refuses this whenever the gate is off and the
+ * channel happens to be named "admin". */
+ZTEST(protocol_stack, test_a_trusted_key_is_authorized_whatever_the_channel_is_called)
 {
-	zassert_false(a2_remote_admin_applies("admin", true, true, PEER_NODE_ID, 0x0A200011U),
-		      "an untrusted key must NOT be authorized by the channel name, even with the "
-		      "legacy gate enabled (the reference authorizes it; we do not)");
-	/* Control, same configuration, plaintext: the legacy gate still works for what
-	 * it is for, so the refusal above is the key check and not a dead gate. */
-	zassert_true(a2_remote_admin_applies("admin", true, false, PEER_NODE_ID, 0x0A200012U),
-		     "plaintext admin on an enabled legacy admin channel must still apply");
-}
+	seed_peer_pubkey(admin_peer_pubkey);
+	admin_set_admin_key(admin_peer_pubkey, sizeof(admin_peer_pubkey));
 
-/* The other side of the same divergence: a trusted admin key is authorized
- * whatever the channels are called. The reference refuses it whenever the gate is
- * off and the channel is named "admin", because its name branch matched and
- * returned -- a foot-gun that denies legitimate admin. */
-ZTEST(protocol_stack, test_a_trusted_key_is_not_blocked_by_a_channel_name)
-{
-	zassert_false(a2_remote_admin_applies("admin", false, true, PEER_NODE_ID, 0x0A200021U),
-		      "control: an UNtrusted key is refused whatever the channel is named");
-	/* PEER_NODE_ID is not in admin_key here, so the positive half of this rule is
-	 * covered where an authorized key exists: tests/admin_pki drives real PKC admin
-	 * with set_admin_key() and would fail if a channel name could block it. */
+	zassert_true(a2_remote_admin_applies("admin", false, true, PEER_NODE_ID, 0x0A200011U),
+		     "a trusted key must work on a channel named \"admin\" with the flag OFF");
+	zassert_true(a2_remote_admin_applies("LongFast", false, true, PEER_NODE_ID, 0x0A200012U),
+		     "and on an ordinarily-named channel");
+
+	admin_set_admin_key(NULL, 0U);
+	zassert_false(a2_remote_admin_applies("LongFast", false, true, PEER_NODE_ID, 0x0A200013U),
+		      "control: with the key removed the same packet is refused");
 }
 
 /* --- A-4a: passkey-exempt getters must actually respond -------------------- */
@@ -4547,8 +4594,11 @@ ZTEST(protocol_stack, test_admin_set_time_trust_depends_on_which_door_it_came_th
 	/* --- the mesh's door: NET --- */
 	meshtastic_clock_test_reset();
 
-	enable_legacy_admin_channel(true);
-	swap_primary_channel_name("admin", &saved);
+	/* Authorized the only way this firmware allows: PEER's key in the NodeDB and in
+	 * security.admin_key, with the packet marked PKC. This used to lean on the
+	 * legacy admin channel, which is no longer implemented. */
+	seed_peer_pubkey(admin_peer_pubkey);
+	admin_set_admin_key(admin_peer_pubkey, sizeof(admin_peer_pubkey));
 	meshtastic_admin_session_reset();
 	meshtastic_admin_session_current(key);
 
@@ -4564,6 +4614,7 @@ ZTEST(protocol_stack, test_admin_set_time_trust_depends_on_which_door_it_came_th
 	pkt.channel_index = meshtastic_channels_primary_index();
 	pkt.payload = payload;
 	pkt.payload_len = os.bytes_written;
+	pkt.pki_encrypted = true;
 	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(K_MSEC(30));
 
@@ -6295,6 +6346,10 @@ ZTEST(protocol_stack, test_managed_node_refuses_local_admin)
  * because the full RX path (meshtastic_handle_inbound_packet) also sends a
  * transport-level ROUTING ACK for want_ack unicasts — desirable in production
  * but a blocking (K_FOREVER) send that would deadlock the mock gate in tests. */
+/* Set while a test has authorized PEER_NODE_ID by key: every remote admin packet
+ * it builds is then marked PKC, which is the only way in on this firmware. */
+static bool admin_pkc_authorized;
+
 static void make_remote_admin_packet(struct meshtastic_packet *pkt, const uint8_t *payload,
 				     size_t len, uint8_t channel_index, bool want_ack)
 {
@@ -6306,7 +6361,23 @@ static void make_remote_admin_packet(struct meshtastic_packet *pkt, const uint8_
 		.payload = payload,
 		.payload_len = len,
 		.want_ack = want_ack,
+		.pki_encrypted = admin_pkc_authorized,
 	};
+}
+
+/* Authorize (or de-authorize) PEER_NODE_ID for remote admin the ONLY way this
+ * firmware allows: its key in the NodeDB and in security.admin_key, with its
+ * packets marked PKC. These tests used to lean on the legacy admin channel,
+ * which is no longer implemented (see admin_remote_authorized). */
+static void admin_authorize_peer_by_key(bool on)
+{
+	if (on) {
+		seed_peer_pubkey(admin_peer_pubkey);
+		admin_set_admin_key(admin_peer_pubkey, sizeof(admin_peer_pubkey));
+	} else {
+		admin_set_admin_key(NULL, 0U);
+	}
+	admin_pkc_authorized = on;
 }
 
 /* Let the outbound worker transmit a fire-and-forget admin reply (NAK/ACK sent
@@ -6314,29 +6385,6 @@ static void make_remote_admin_packet(struct meshtastic_packet *pkt, const uint8_
  * suite's other async-TX tests use, so the reply is counted in this test rather
  * than leaking into the next test's send_count. */
 #define ADMIN_REPLY_SETTLE K_MSEC(50)
-
-/* Test-only admin channel: a secondary slot named "admin" plus the legacy
- * admin_channel_enabled flag, so a plaintext (non-PKC) remote admin packet on
- * that channel authorizes — the only remote-auth path testable without PKI. */
-#define ADMIN_TEST_CH_INDEX 1
-
-static void admin_channel_set(bool enabled)
-{
-	meshtastic_Channel ch = meshtastic_Channel_init_zero;
-	meshtastic_Config sec = meshtastic_Config_init_zero;
-
-	ch.role = enabled ? meshtastic_Channel_Role_SECONDARY : meshtastic_Channel_Role_DISABLED;
-	ch.has_settings = true;
-	if (enabled) {
-		strncpy(ch.settings.name, "admin", sizeof(ch.settings.name) - 1U);
-	}
-	zassert_ok(meshtastic_config_store_set_channel(ADMIN_TEST_CH_INDEX, &ch),
-		   "admin test channel set failed");
-
-	sec.which_payload_variant = meshtastic_Config_security_tag;
-	sec.payload_variant.security.admin_channel_enabled = enabled;
-	zassert_ok(meshtastic_config_store_set_config(&sec), "admin_channel_enabled set failed");
-}
 
 /* Remote admin from an unauthorized sender (not PKC, not on the admin channel)
  * is refused: config is not changed. The core security property. */
@@ -6396,12 +6444,12 @@ ZTEST(protocol_stack, test_remote_admin_channel_requires_passkey)
 
 	admin_set_is_managed(false);
 	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
-	admin_channel_set(true);
+	admin_authorize_peer_by_key(true);
 
 	/* Authorized by channel, but no passkey -> rejected, not applied. */
 	len = encode_admin_set_role_key(meshtastic_Config_DeviceConfig_Role_ROUTER, NULL, 0U, buf,
 					sizeof(buf));
-	make_remote_admin_packet(&pkt, buf, len, ADMIN_TEST_CH_INDEX, true);
+	make_remote_admin_packet(&pkt, buf, len, meshtastic_channels_primary_index(), true);
 	reset_mock_lora();
 	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(ADMIN_REPLY_SETTLE);
@@ -6414,7 +6462,7 @@ ZTEST(protocol_stack, test_remote_admin_channel_requires_passkey)
 	meshtastic_admin_session_current(key);
 	len = encode_admin_set_role_key(meshtastic_Config_DeviceConfig_Role_ROUTER, key, sizeof(key),
 					buf, sizeof(buf));
-	make_remote_admin_packet(&pkt, buf, len, ADMIN_TEST_CH_INDEX, true);
+	make_remote_admin_packet(&pkt, buf, len, meshtastic_channels_primary_index(), true);
 	reset_mock_lora();
 	meshtastic_admin_handle_remote(&pkt, NULL);
 	k_sleep(ADMIN_REPLY_SETTLE);
@@ -6423,7 +6471,7 @@ ZTEST(protocol_stack, test_remote_admin_channel_requires_passkey)
 		      "remote setter with a valid session passkey must apply");
 
 	/* Teardown: disable the admin channel and restore the baseline role. */
-	admin_channel_set(false);
+	admin_authorize_peer_by_key(false);
 	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 	admin_set_is_managed(false);
 }
@@ -6487,8 +6535,8 @@ ZTEST(protocol_stack, test_remote_admin_refusal_is_the_only_answer)
 	zassert_equal(request_id, pkt.id, "the NAK must name the request");
 
 	/* Authorized by the legacy channel, but no session passkey. */
-	admin_channel_set(true);
-	make_remote_admin_packet(&pkt, buf, len, ADMIN_TEST_CH_INDEX, true);
+	admin_authorize_peer_by_key(true);
+	make_remote_admin_packet(&pkt, buf, len, meshtastic_channels_primary_index(), true);
 	pkt.id = 0xADD13202U;
 	pkt.hop_limit = 3U;
 	pkt.hop_start = 3U;
@@ -6498,7 +6546,7 @@ ZTEST(protocol_stack, test_remote_admin_refusal_is_the_only_answer)
 	zassert_equal(admin_current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
 		      "the refused write must not apply");
 
-	admin_channel_set(false);
+	admin_authorize_peer_by_key(false);
 	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 }
 
@@ -6516,13 +6564,13 @@ ZTEST(protocol_stack, test_remote_admin_accepted_write_one_ack_follows_the_reque
 
 	admin_set_is_managed(false);
 	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
-	admin_channel_set(true);
+	admin_authorize_peer_by_key(true);
 	meshtastic_admin_session_reset();
 	meshtastic_admin_session_current(key);
 
 	len = encode_admin_set_role_key(meshtastic_Config_DeviceConfig_Role_ROUTER, key,
 					sizeof(key), buf, sizeof(buf));
-	make_remote_admin_packet(&pkt, buf, len, ADMIN_TEST_CH_INDEX, true);
+	make_remote_admin_packet(&pkt, buf, len, meshtastic_channels_primary_index(), true);
 	pkt.id = 0xADD13203U;
 	pkt.hop_limit = 3U;
 	pkt.hop_start = 3U;
@@ -6535,10 +6583,10 @@ ZTEST(protocol_stack, test_remote_admin_accepted_write_one_ack_follows_the_reque
 		     "a remote answer copies the request's want_ack (reference setReplyTo)");
 	zassert_equal(hdr.flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK, 2U,
 		      "reply hop limit = hops the request used (0) + margin (2)");
-	zassert_equal(hdr.channel, meshtastic_channels_get_hash(ADMIN_TEST_CH_INDEX),
+	zassert_equal(hdr.channel, meshtastic_channels_get_hash(meshtastic_channels_primary_index()),
 		      "the answer goes back on the channel the request came in on");
 
-	admin_channel_set(false);
+	admin_authorize_peer_by_key(false);
 	admin_force_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 	admin_set_is_managed(false);
 }
@@ -6554,12 +6602,12 @@ ZTEST(protocol_stack, test_remote_admin_getter_response_is_the_only_answer)
 	uint32_t request_id;
 
 	admin_set_is_managed(false);
-	admin_channel_set(true);
+	admin_authorize_peer_by_key(true);
 
 	am.which_payload_variant = meshtastic_AdminMessage_get_owner_request_tag;
 	am.payload_variant.get_owner_request = true;
 	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "encode failed");
-	make_remote_admin_packet(&pkt, buf, os.bytes_written, ADMIN_TEST_CH_INDEX, true);
+	make_remote_admin_packet(&pkt, buf, os.bytes_written, meshtastic_channels_primary_index(), true);
 	pkt.id = 0xADD13204U;
 	pkt.want_response = true;
 	pkt.hop_limit = 3U;
@@ -6570,55 +6618,9 @@ ZTEST(protocol_stack, test_remote_admin_getter_response_is_the_only_answer)
 	zassert_true((hdr.flags & MESHTASTIC_FLAGS_WANT_ACK) != 0U,
 		     "a remote response copies the request's want_ack, so RF loss is retried");
 
-	admin_channel_set(false);
+	admin_authorize_peer_by_key(false);
 }
 
-/* A fixed 32-byte "peer public key". The admin_key authorization path only
- * memcmps NodeDB key vs SecurityConfig.admin_key — no crypto validation — so any
- * stable 32 bytes exercise the PKC match/mismatch without a PKI build. (The real
- * X25519 decrypt that sets pki_encrypted is covered by tests/admin_pki.) */
-static const uint8_t admin_peer_pubkey[32] = {
-	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
-	0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
-	0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
-};
-
-/* Seed PEER_NODE_ID's public key into the NodeDB by delivering a NodeInfo — the
- * same path the stack learns a peer's key on the air (apply_user). */
-static void seed_peer_pubkey(const uint8_t key[32])
-{
-	meshtastic_User user = meshtastic_User_init_zero;
-	uint8_t buf[128];
-	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
-	struct meshtastic_packet ni = {
-		.from = PEER_NODE_ID,
-		.to = MESHTASTIC_NODE_BROADCAST,
-		.portnum = MESHTASTIC_PORT_NODEINFO,
-		.channel_index = meshtastic_channels_primary_index(),
-	};
-
-	user.public_key.size = 32U;
-	memcpy(user.public_key.bytes, key, 32U);
-	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode failed");
-	ni.payload = buf;
-	ni.payload_len = os.bytes_written;
-
-	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
-}
-
-/* Set (key != NULL) or clear (key == NULL) SecurityConfig.admin_key[0]. */
-static void admin_set_admin_key(const uint8_t *key, size_t len)
-{
-	meshtastic_Config sec = meshtastic_Config_init_zero;
-
-	sec.which_payload_variant = meshtastic_Config_security_tag;
-	if (key != NULL && len > 0U) {
-		sec.payload_variant.security.admin_key_count = 1U;
-		sec.payload_variant.security.admin_key[0].size = (pb_size_t)len;
-		memcpy(sec.payload_variant.security.admin_key[0].bytes, key, len);
-	}
-	zassert_ok(meshtastic_config_store_set_config(&sec), "set admin_key failed");
-}
 
 /* --- agents-dnr4.33: a response to a request the phone relayed through us ---- */
 
