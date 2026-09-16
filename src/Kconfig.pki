@@ -17,3 +17,25 @@ config MESHTASTIC_PKI
 	  generate/import/export + public key), AES, CCM and SHA-256. On the net
 	  build the ECC/AES/SHA pieces come from the TLS overlay; the overlay adds
 	  PSA_WANT_ALG_CCM.
+
+config MESHTASTIC_NODE_ID_FROM_KEY
+	bool "Derive the node ID from the identity public key (reference >= 2.8)"
+	depends on MESHTASTIC_PKI
+	select CRC
+	help
+	  Use crc32(X25519 public key) as the node ID, as the reference firmware
+	  has since 2.8 (NodeDB::createNewIdentity, shipped with packet signing).
+	  The id then commits to the key: nobody can claim an id without also
+	  holding the key it was derived from, which is what makes trusting a
+	  stranger's first signed NodeInfo safe.
+
+	  MESHTASTIC_NODE_ID_SOURCE still supplies the PROVISIONAL id, used only
+	  when no key is readable and none was stored. The adopted id is kept in
+	  the unsealed "mtid" settings record so a lockdown-locked boot, which
+	  cannot read the keypair, keeps the same id.
+
+	  Turning this on CHANGES the id of an existing node once, on its first
+	  boot, and every peer then holds the node under both ids until the old
+	  entry is forgotten or ages out (the reference does the same). Keys do
+	  not change, so the new id is predictable before flashing, and turning
+	  it off again returns the node to its hardware id.

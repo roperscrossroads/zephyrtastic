@@ -1,0 +1,15 @@
+common:
+  tags:
+    - meshtastic
+    - pki
+    - node_identity
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # CONFIG_MESHTASTIC_NODE_ID_FROM_KEY is default-n and depends on PKI, which the variants
+  # baseline does not carry -- so, like KEYVERIFY, its arms live with a PKI suite: =y here,
+  # =n in every other suite.
+  meshtastic.node_identity.native_sim: {}

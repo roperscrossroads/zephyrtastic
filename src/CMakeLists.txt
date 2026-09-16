@@ -192,6 +192,7 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_WIFI_AUTOCONNECT meshtastic_wifi_auto.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SNTP meshtastic_sntp.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_PKI meshtastic_pki.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_NODE_ID_FROM_KEY meshtastic_node_identity.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_DISPLAY meshtastic_display.c cfb_font_0609.c)
 
 endif()

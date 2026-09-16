@@ -49,6 +49,9 @@
 
 #include "meshtastic_settings.h"
 #include "meshtastic_pki.h"
+#if defined(CONFIG_MESHTASTIC_NODE_ID_FROM_KEY)
+#include "meshtastic_node_identity.h"
+#endif
 #include "meshtastic_gnss.h"
 #include "meshtastic_mqtt.h"
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
@@ -446,6 +449,11 @@ static void lockdown_reload(void)
 #if defined(CONFIG_MESHTASTIC_PKI)
 	(void)meshtastic_pki_init();
 #endif
+#if defined(CONFIG_MESHTASTIC_NODE_ID_FROM_KEY)
+	/* The key is readable for the first time this boot. Record the id it implies; it is
+	 * not switched at runtime, because the radio, NodeDB and cluster took the id at init. */
+	meshtastic_node_identity_key_reloaded(mt.node_id);
+#endif
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
 	(void)settings_load_subtree("mtnode");
 #endif
@@ -637,6 +645,18 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	if (ret < 0) {
 		LOG_WRN("PKI init failed (%d); continuing with PSK channels only", ret);
 	}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_NODE_ID_FROM_KEY)
+	/* The id so far is PROVISIONAL (the source choice above), because the key it should
+	 * be derived from only exists from here on. Adopt the key-derived id now, before the
+	 * radio, NodeDB, cluster and BLE capture it -- everything after this line sees the
+	 * final id. What ran before it only took the id cosmetically: a never-configured
+	 * owner's default short name, and the HLC tie-break author of a first-boot security
+	 * write. The reference has the same shape: a MAC-derived provisional number, then
+	 * createNewIdentity() once the key exists. */
+	mt.node_id = meshtastic_node_identity_adopt(mt.node_id);
+	mt.status.node_id = mt.node_id;
 #endif
 
 	ret = meshtastic_radio_init();
