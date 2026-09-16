@@ -34,6 +34,16 @@ jobs:
           app-path: zephyrtastic
           toolchains: xtensa-espressif_esp32s3_zephyr-elf
 
+      # The bench builds against a PATCHED Zephyr tree (main/zephyr/patches.yml,
+      # re-applied after every `west update`), and some suites compile against
+      # what those patches add -- tests/sx126x_busy includes sx126x_busy_track.h,
+      # which patch 0023 creates in the driver. Without this step CI builds a
+      # pristine tree, so that suite fails to build here while passing locally:
+      # it did exactly that, unnoticed, from 2026-09-11 to 2026-09-16.
+      - name: Apply carried Zephyr patches
+        working-directory: zephyrtastic
+        run: west patch apply
+
       - name: Run twister
         working-directory: zephyrtastic
         run: west twister -T tests -p native_sim/native/64 --inline-logs
