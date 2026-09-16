@@ -3760,6 +3760,67 @@ ZTEST(protocol_stack, test_c3_detector_emoji_reaches_mesh)
 		      "Data.emoji must survive phone -> mesh (TXT-1) -- Phase 3 encodes the phone's Data");
 }
 
+/* agents-ooma.5, send side: this port never signs, so Data.xeddsa_signature must leave as
+ * ZERO on traffic we originate. The schema decodes the field, and the phone path carries its
+ * decoded Data verbatim, so a client that sets it would otherwise have those bytes go out as
+ * ours -- and a reference node holding our public key drops the packet when xeddsa_verify
+ * fails, under every policy including COMPATIBLE. That would make this node silently
+ * invisible to every verifying peer. Upstream keeps the same clear outside its XEdDSA build
+ * guard precisely because a non-signing build is the one that needs it. */
+ZTEST(protocol_stack, test_ooma5_phone_preset_xeddsa_signature_is_stripped)
+{
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	meshtastic_MeshPacket tx;
+
+	mesh.from = TEST_NODE_ID;
+	mesh.to = MESHTASTIC_NODE_BROADCAST;
+	mesh.id = 0x5310U;
+	mesh.channel = meshtastic_channels_primary_index();
+	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh.decoded.portnum = (meshtastic_PortNum)MESHTASTIC_PORT_TEXT_MESSAGE;
+	mesh.decoded.payload.size = 2U;
+	memcpy(mesh.decoded.payload.bytes, "hi", 2U);
+	/* A full-length but bogus signature: the shape an honest signer emits, so this is the
+	 * case that reaches verify and fails, rather than the malformed-length early drop. */
+	mesh.decoded.xeddsa_signature.size = 64U;
+	memset(mesh.decoded.xeddsa_signature.bytes, 0xA5, 64U);
+
+	zassert_ok(meshtastic_send_mesh_pb(&mesh), "send_mesh_pb failed");
+	decode_last_tx_mesh(&tx);
+	zassert_equal(tx.decoded.xeddsa_signature.size, 0U,
+		      "a phone-preset XEdDSA signature must not be transmitted as ours -- a "
+		      "verifying peer would drop every packet we send");
+}
+
+/* The scoping half of the same rule, and the reason the clear is not unconditional: an
+ * MQTT-injected third-party frame is NOT ours, and stripping its signature would turn a
+ * legitimately signed broadcast into an unsigned one from a known signer -- exactly what a
+ * verifying receiver drops as a downgrade. Upstream scopes its clear with isFromUs; this
+ * mirrors it on `from` plus via_mqtt. */
+ZTEST(protocol_stack, test_ooma5_mqtt_third_party_signature_is_preserved)
+{
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	meshtastic_MeshPacket tx;
+
+	mesh.from = PEER_NODE_ID; /* not us */
+	mesh.to = MESHTASTIC_NODE_BROADCAST;
+	mesh.id = 0x5311U;
+	mesh.via_mqtt = true;
+	mesh.channel = meshtastic_channels_primary_index();
+	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh.decoded.portnum = (meshtastic_PortNum)MESHTASTIC_PORT_TEXT_MESSAGE;
+	mesh.decoded.payload.size = 2U;
+	memcpy(mesh.decoded.payload.bytes, "hi", 2U);
+	mesh.decoded.xeddsa_signature.size = 64U;
+	memset(mesh.decoded.xeddsa_signature.bytes, 0xA5, 64U);
+
+	zassert_ok(meshtastic_send_mesh_pb(&mesh), "send_mesh_pb failed");
+	decode_last_tx_mesh(&tx);
+	zassert_equal(tx.decoded.xeddsa_signature.size, 64U,
+		      "a third-party MQTT frame's signature must survive -- stripping it would "
+		      "make it look like a downgrade to a verifying receiver");
+}
+
 /* C3 Phase 4a: mesh_pb_to_packet is the receive-side boundary adapter (MeshPacket -> flat
  * struct). For the RX pipeline to carry a MeshPacket and materialise the struct on demand
  * (Phase 4c), that converter must be faithful for the fields the struct DOES model but the

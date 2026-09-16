@@ -134,6 +134,27 @@ static int encode_packet_data(const meshtastic_MeshPacket *mesh, uint8_t *buf, s
 	 * longer merges a separate `base`. */
 	data = mesh->decoded;
 
+	/* This port does not sign (Data.xeddsa_signature is decoded by the schema but never
+	 * produced -- agents-ooma.5), so on traffic we originate the field must be ZEROED, not
+	 * merely left alone. The phone path carries its own decoded verbatim, so a client that
+	 * sets the field would have those bytes transmitted as ours, and a reference node that
+	 * holds our public key runs xeddsa_verify over them and DROPS the packet on failure --
+	 * under every policy, COMPATIBLE included. A length that is neither 0 nor 64 is dropped
+	 * outright. One bogus field from a client would therefore make this node invisible to
+	 * every XEdDSA-verifying peer, silently. Upstream clears it for the same reason and
+	 * deliberately keeps the clear OUTSIDE its MESHTASTIC_EXCLUDE_XEDDSA guard
+	 * (Router.cpp perhapsEncode, under isFromUs) -- a non-signing build needs it most.
+	 *
+	 * Scoped to our own traffic exactly as upstream's isFromUs is: an MQTT-injected
+	 * third-party frame keeps its signature, because stripping it would turn a legitimately
+	 * signed relay into an unsigned broadcast from a known signer -- which is precisely what
+	 * a verifying receiver drops as a downgrade. A `from` of 0 means us (see the wire-header
+	 * stamp below), and via_mqtt marks the foreign frames.
+	 */
+	if ((mesh->from == 0U || mesh->from == mt.node_id) && !mesh->via_mqtt) {
+		data.xeddsa_signature.size = 0U;
+	}
+
 	/* Every packet we originate carries the bitfield, mirroring the reference
 	 * (Router.cpp: set under isFromUs). Bit 0 is our own MQTT consent, taken
 	 * from config.lora.config_ok_to_mqtt; bit 1 mirrors want_response. This stays
