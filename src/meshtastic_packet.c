@@ -23,6 +23,10 @@
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+#include "meshtastic_pki.h"
+#include "meshtastic_xeddsa.h"
+#endif
 #include "meshtastic_router.h"
 #include "meshtastic_mqtt.h"
 #if defined(CONFIG_MESHTASTIC_PKI)
@@ -112,6 +116,51 @@ destroy:
 	return ret;
 }
 
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+/* Sign a packet we originate, if the reference would have signed it.
+ *
+ * Upstream's rule (Router.cpp perhapsEncode): not PKC-encrypted, and either a broadcast or
+ * a licensed sender. The PKC half needs no test here because the two are disjoint by
+ * construction -- our PKC path only takes UNICASTS from an UNLICENSED sender (see the
+ * decision below), which is exactly what this rule excludes.
+ *
+ * Signing must never cost us a packet: the signature adds 66 bytes to the encoded Data, so
+ * it is only attached when the SIGNED form still fits the frame. Upstream sizes it the same
+ * way and for the same reason -- signing and then failing TOO_LARGE would break packets
+ * that were deliverable unsigned. The mirror of this rule is what a verifier uses to decide
+ * whether an unsigned broadcast from a known signer is a downgrade.
+ */
+static void sign_our_packet(const meshtastic_MeshPacket *mesh, meshtastic_Data *data,
+			    size_t buf_len)
+{
+	bool is_licensed = false;
+	bool is_unmessagable = false;
+	size_t signed_size;
+
+	meshtastic_config_store_get_owner_flags(&is_licensed, &is_unmessagable);
+	if (mesh->to != MESHTASTIC_NODE_BROADCAST && !is_licensed) {
+		return;
+	}
+
+	data->xeddsa_signature.size = MESHTASTIC_XEDDSA_SIGNATURE_LEN;
+	memset(data->xeddsa_signature.bytes, 0, MESHTASTIC_XEDDSA_SIGNATURE_LEN);
+	if (!pb_get_encoded_size(&signed_size, meshtastic_Data_fields, data) ||
+	    signed_size > buf_len ||
+	    MESHTASTIC_HDR_LEN + signed_size > MESHTASTIC_PKT_MAX) {
+		data->xeddsa_signature.size = 0U;
+		return;
+	}
+
+	if (meshtastic_pki_sign_packet(mesh->from == 0U ? mt.node_id : mesh->from, mesh->id,
+				       (uint32_t)data->portnum, data->payload.bytes,
+				       data->payload.size,
+				       data->xeddsa_signature.bytes) != 0) {
+		/* Unsigned beats unsent: every policy but STRICT accepts an unsigned packet. */
+		data->xeddsa_signature.size = 0U;
+	}
+}
+#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */
+
 static int encode_packet_data(const meshtastic_MeshPacket *mesh, uint8_t *buf, size_t buf_len,
 			      size_t *encoded_len)
 {
@@ -153,6 +202,9 @@ static int encode_packet_data(const meshtastic_MeshPacket *mesh, uint8_t *buf, s
 	 */
 	if ((mesh->from == 0U || mesh->from == mt.node_id) && !mesh->via_mqtt) {
 		data.xeddsa_signature.size = 0U;
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+		sign_our_packet(mesh, &data, buf_len);
+#endif
 	}
 
 	/* Every packet we originate carries the bitfield, mirroring the reference

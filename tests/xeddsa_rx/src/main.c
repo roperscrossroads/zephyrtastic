@@ -21,6 +21,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/ztest.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
@@ -30,6 +31,7 @@
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_packet.h"
+#include "meshtastic_pki.h"
 #include "meshtastic_router.h"
 #include "meshtastic_core.h"
 #include "meshtastic_xeddsa.h"
@@ -399,3 +401,170 @@ ZTEST(xeddsa_rx, test_router_delivers_a_genuine_signed_packet)
 
 	meshtastic_set_recv_cb(NULL);
 }
+
+/* ==========================================================================
+ * TX: do the packets we originate actually carry a signature?
+ *
+ * Captured off the sim radio and decoded with the port's own RX path, then verified with
+ * the public key a peer would hold for us -- i.e. end to end, not "the signer returns
+ * bytes". The rule mirrors the reference: broadcasts are signed, an unlicensed unicast
+ * (which our PKC path takes) is not, and a signature is only attached when the SIGNED
+ * packet still fits the frame.
+ * ========================================================================== */
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+
+/* Transmit one packet of our own and hand back what went on the air, decoded. */
+static bool tx_and_capture(uint32_t to, uint32_t portnum, const uint8_t *payload, size_t len,
+			   meshtastic_MeshPacket *out)
+{
+	struct meshtastic_packet pkt = {
+		.to = to,
+		.portnum = portnum,
+		.payload = payload,
+		.payload_len = len,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+	};
+	struct lora_sim_frame f;
+	struct meshtastic_packet decoded_pkt;
+	uint8_t scratch[MESHTASTIC_MAX_PAYLOAD_LEN];
+	enum meshtastic_decode_fail fail;
+	bool decoded = false;
+
+	lora_sim_reset(lora_dev);
+	zassert_ok(meshtastic_send_packet(&pkt, K_SECONDS(2)), "send failed");
+
+	while (lora_sim_take_tx(lora_dev, &f, K_SECONDS(5)) == 0) {
+		const struct meshtastic_wire_header *hdr =
+			(const struct meshtastic_wire_header *)f.data;
+
+		if (f.len < MESHTASTIC_HDR_LEN || sys_le32_to_cpu(hdr->src) != TEST_NODE_ID) {
+			continue;
+		}
+		*out = (meshtastic_MeshPacket)meshtastic_MeshPacket_init_zero;
+		(void)meshtastic_try_decode_wire_packet(f.data, (int)f.len, -50, 6, &decoded_pkt,
+							scratch, sizeof(scratch), &decoded,
+							&fail, out);
+		if (decoded) {
+			return true;
+		}
+	}
+	return false;
+}
+
+ZTEST(xeddsa_rx, test_our_broadcast_is_signed_and_verifies)
+{
+	static const uint8_t payload[] = {0x01, 0x02, 0x03, 0x04};
+	meshtastic_MeshPacket mesh;
+	uint8_t our_key[32];
+	uint8_t buf[MESHTASTIC_XEDDSA_SIGBUF_MAX];
+	size_t len;
+
+	zassert_true(tx_and_capture(MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
+				    payload, sizeof(payload), &mesh),
+		     "no broadcast of ours reached the air");
+	zassert_equal(mesh.decoded.xeddsa_signature.size, 64,
+		      "our broadcast went out unsigned");
+
+	/* Verify it the way a peer would: over the key they hold for us. */
+	zassert_equal(meshtastic_pki_get_public_key(our_key), sizeof(our_key));
+	len = meshtastic_xeddsa_build_signing_buffer(buf, sizeof(buf), TEST_NODE_ID, mesh.id,
+						     (uint32_t)mesh.decoded.portnum,
+						     mesh.decoded.payload.bytes,
+						     mesh.decoded.payload.size);
+	zassert_true(len > 0U, "signing buffer");
+	zassert_true(meshtastic_xeddsa_verify(our_key, buf, len,
+					      mesh.decoded.xeddsa_signature.bytes),
+		     "a peer could not verify our own signature");
+}
+
+/* An unlicensed unicast takes the PKC path, which authenticates the sender by decryption;
+ * upstream does not sign those, and neither do we.
+ *
+ * What is observable here is the PKC framing (channel-hash byte 0x00), NOT the absence of a
+ * signature: the Data is encrypted to the PEER's key, so we cannot read our own frame back,
+ * and the signature field would be inside that ciphertext. The two facts are the same fact
+ * -- the encoder's rule and the PKC rule are disjoint by construction (PKC takes only
+ * unlicensed unicasts, which is exactly what the signing rule excludes) -- so pinning the
+ * framing pins the branch. The licensed arm below is the one that can be read back.
+ *
+ * The peer needs a key first: a DM to a node we hold no key for is REFUSED rather than
+ * downgraded to channel encryption, so without this the test measures that refusal. */
+ZTEST(xeddsa_rx, test_our_unlicensed_unicast_goes_out_pkc_not_signed)
+{
+	static const uint8_t payload[] = {0xAA, 0xBB};
+	const struct mt_xeddsa_vector *peer = vec("position");
+	struct meshtastic_packet pkt = {
+		.to = peer->from,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = payload,
+		.payload_len = sizeof(payload),
+		.hop_limit = 3U,
+		.hop_start = 3U,
+	};
+	struct lora_sim_frame f;
+	bool seen = false;
+
+	seed_key(peer);
+	lora_sim_reset(lora_dev);
+	zassert_ok(meshtastic_send_packet(&pkt, K_SECONDS(2)), "send failed");
+
+	while (lora_sim_take_tx(lora_dev, &f, K_SECONDS(5)) == 0) {
+		const struct meshtastic_wire_header *hdr =
+			(const struct meshtastic_wire_header *)f.data;
+
+		if (f.len < MESHTASTIC_HDR_LEN || sys_le32_to_cpu(hdr->src) != TEST_NODE_ID) {
+			continue;
+		}
+		zassert_equal(hdr->channel, 0x00,
+			      "an unlicensed DM must go out PKC-encrypted (hash byte 0)");
+		seen = true;
+		break;
+	}
+	zassert_true(seen, "no unicast of ours reached the air");
+}
+
+/* The other arm of upstream's rule: a LICENSED sender signs unicasts too -- and a licensed
+ * node does not use PKC (ham traffic must be readable), so this one we can read back. */
+ZTEST(xeddsa_rx, test_a_licensed_unicast_is_signed)
+{
+	static const uint8_t payload[] = {0xC0, 0xDE};
+	const struct mt_xeddsa_vector *peer = vec("position");
+	meshtastic_User owner = meshtastic_User_init_zero;
+	meshtastic_MeshPacket mesh;
+
+	seed_key(peer);
+	owner.is_licensed = true;
+	(void)snprintk(owner.long_name, sizeof(owner.long_name), "licensed");
+	(void)snprintk(owner.short_name, sizeof(owner.short_name), "lic");
+	zassert_ok(meshtastic_config_store_set_owner(&owner), "could not set the owner");
+
+	zassert_true(tx_and_capture(peer->from, MESHTASTIC_PORT_TEXT_MESSAGE, payload,
+				    sizeof(payload), &mesh),
+		     "no licensed unicast of ours reached the air");
+	zassert_equal(mesh.decoded.xeddsa_signature.size, 64,
+		      "a licensed sender signs unicasts too");
+
+	owner.is_licensed = false;
+	zassert_ok(meshtastic_config_store_set_owner(&owner), "could not restore the owner");
+}
+
+/* Signing must never cost a packet: at a payload where the signed form no longer fits the
+ * frame, the packet still goes out -- unsigned. */
+ZTEST(xeddsa_rx, test_oversized_payload_goes_out_unsigned_rather_than_not_at_all)
+{
+	/* Sized so the UNSIGNED packet fits the 255-byte frame and the signed one does not:
+	 * the signature field costs 66 bytes, and the header plus Data framing ~24. */
+	uint8_t payload[200];
+	meshtastic_MeshPacket mesh;
+
+	memset(payload, 0x5A, sizeof(payload));
+	zassert_true(tx_and_capture(MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
+				    payload, sizeof(payload), &mesh),
+		     "the packet was dropped instead of sent unsigned");
+	zassert_equal(mesh.decoded.xeddsa_signature.size, 0,
+		      "a signature was attached that cannot fit the frame");
+	zassert_equal(mesh.decoded.payload.size, sizeof(payload), "payload truncated");
+}
+
+#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */

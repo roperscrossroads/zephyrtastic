@@ -39,6 +39,22 @@ int meshtastic_pki_init(void);
  *        key. Cleared on accept (after the NodeDB commit), reject or timeout, so
  *        an unverified key is never usable for longer than one session.
  */
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+/**
+ * Sign one of our outgoing packets with the identity key.
+ *
+ * Lives here, rather than the caller fetching the key, so the X25519 private scalar never
+ * leaves this module: this is the only operation outside it that needs the private half.
+ * Builds the reference's signing buffer (from | id | portnum | payload) and hedges the
+ * nonce with fresh randomness.
+ *
+ * @return 0 on success, negative on failure -- in which case the packet goes out unsigned
+ *         rather than wrong.
+ */
+int meshtastic_pki_sign_packet(uint32_t from_node, uint32_t packet_id, uint32_t portnum,
+			       const uint8_t *payload, size_t payload_len, uint8_t sig[64]);
+#endif
+
 void meshtastic_pki_set_pending_key(uint32_t node, const uint8_t key[MESHTASTIC_PKI_KEY_LEN]);
 bool meshtastic_pki_get_pending_key(uint32_t node, uint8_t out[MESHTASTIC_PKI_KEY_LEN]);
 void meshtastic_pki_clear_pending_key(void);

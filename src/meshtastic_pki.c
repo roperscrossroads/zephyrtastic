@@ -399,3 +399,34 @@ int meshtastic_pki_encrypt(uint32_t to, uint32_t from, uint32_t id, const uint8_
 	*out_len = ct_tag_len + PKI_EXTRA_LEN;
 	return 0;
 }
+
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+#include "meshtastic_xeddsa.h"
+
+int meshtastic_pki_sign_packet(uint32_t from_node, uint32_t packet_id, uint32_t portnum,
+			       const uint8_t *payload, size_t payload_len, uint8_t sig[64])
+{
+	uint8_t buf[MESHTASTIC_XEDDSA_SIGBUF_MAX];
+	uint8_t z[32];
+	size_t len;
+
+	if (sig == NULL || !meshtastic_pki_have_key()) {
+		return -EACCES;
+	}
+	len = meshtastic_xeddsa_build_signing_buffer(buf, sizeof(buf), from_node, packet_id,
+						     portnum, payload, payload_len);
+	if (len == 0U) {
+		return -EMSGSIZE;
+	}
+	/* Hedging only: the nonce already derives from the key and the message, so a weak Z
+	 * costs defence in depth, never correctness -- which is why a failed draw uses what the
+	 * buffer holds instead of refusing to sign. */
+	if (psa_generate_random(z, sizeof(z)) != PSA_SUCCESS) {
+		LOG_WRN("XEdDSA: no randomness for the signing nonce; hedging degraded");
+	}
+	if (!meshtastic_xeddsa_sign(g_priv, buf, len, z, sig)) {
+		return -EIO;
+	}
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */
