@@ -291,3 +291,13 @@ tests:
       - ../common/pki-psa.conf
     extra_configs:
       - CONFIG_MESHTASTIC_XEDDSA=y
+
+  # Signing is default-N like the verifier, so its untested arm is =Y, and it is the arm
+  # that links the base-point table and sc_muladd -- ~38 KB the verify-only build never
+  # compiles. native_sim has the room; a XIAO does not, which is the point of measuring.
+  meshtastic.variants.xeddsa_sign.native_sim:
+    extra_conf_files:
+      - ../common/pki-psa.conf
+    extra_configs:
+      - CONFIG_MESHTASTIC_XEDDSA=y
+      - CONFIG_MESHTASTIC_XEDDSA_SIGN=y

@@ -255,3 +255,121 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 	LOG_DBG("XEdDSA: no key for 0x%08x, cannot verify", (unsigned int)pkt->from);
 	return !strict;
 }
+
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+/* ==========================================================================
+ * Signing. Reference: meshtastic/Crypto XEdDSA::sign -- whose source carries no licence
+ * (SIGNING-AND-IDENTITY-DESIGN.md §6.1), so this is written from the scheme and pinned
+ * byte-for-byte against signatures that implementation produced (tests/xeddsa_sign).
+ *
+ * It is Ed25519 with three differences, all of them XEdDSA's:
+ *   - the scalar is the clamped X25519 private key, not a hash of a seed;
+ *   - it is negated when the public key would otherwise have its sign bit set, which is
+ *     what makes the verifier's "clear the sign bit" recovery correct;
+ *   - the nonce hash takes a caller-supplied Z as well as the prefix and message.
+ * ========================================================================== */
+
+#include "crypto/ed25519/ge.h"
+#include "crypto/ed25519/sc.h"
+#include "crypto/ed25519/sha512.h"
+
+/* Scalars for the negation: -a mod L computed as (L-1) * a + 0 through sc_muladd. */
+static const uint8_t SC_ZERO[32] = {0};
+static const uint8_t SC_MINUS_ONE[32] = {
+	0xec, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7,
+	0xa2, 0xde, 0xf9, 0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+};
+
+static int sha512_of(const uint8_t *a, size_t a_len, const uint8_t *b, size_t b_len,
+		     const uint8_t *c, size_t c_len, uint8_t out[64])
+{
+	sha512_context h;
+
+	if (sha512_init(&h) != 0 || sha512_update(&h, a, a_len) != 0 ||
+	    sha512_update(&h, b, b_len) != 0 || sha512_update(&h, c, c_len) != 0 ||
+	    sha512_final(&h, out) != 0) {
+		return -1;
+	}
+	return 0;
+}
+
+void meshtastic_xeddsa_derive_ed_keys(const uint8_t x_priv[MESHTASTIC_XEDDSA_KEY_LEN],
+				      uint8_t ed_priv[MESHTASTIC_XEDDSA_KEY_LEN],
+				      uint8_t ed_pub[MESHTASTIC_XEDDSA_KEY_LEN])
+{
+	ge_p3 A;
+
+	memcpy(ed_priv, x_priv, MESHTASTIC_XEDDSA_KEY_LEN);
+	ed_priv[0] &= 0xF8;
+	ed_priv[31] &= 0x7F;
+	ed_priv[31] |= 0x40;
+
+	ge_scalarmult_base(&A, ed_priv);
+	ge_p3_tobytes(ed_pub, &A);
+
+	if ((ed_pub[31] & 0x80) != 0U) {
+		uint8_t neg[MESHTASTIC_XEDDSA_KEY_LEN];
+
+		/* Both (a, A) and (-a, -A) are valid key pairs; XEdDSA always publishes the
+		 * one whose sign bit is zero, so the verifier can reconstruct A from the
+		 * X25519 key alone. */
+		sc_muladd(neg, SC_MINUS_ONE, ed_priv, SC_ZERO);
+		memcpy(ed_priv, neg, sizeof(neg));
+		ge_scalarmult_base(&A, ed_priv);
+		ge_p3_tobytes(ed_pub, &A);
+	}
+}
+
+bool meshtastic_xeddsa_sign(const uint8_t x_priv[MESHTASTIC_XEDDSA_KEY_LEN], const uint8_t *msg,
+			    size_t msg_len, const uint8_t z[MESHTASTIC_XEDDSA_KEY_LEN],
+			    uint8_t sig[MESHTASTIC_XEDDSA_SIGNATURE_LEN])
+{
+	uint8_t a[MESHTASTIC_XEDDSA_KEY_LEN];
+	uint8_t ed_pub[MESHTASTIC_XEDDSA_KEY_LEN];
+	uint8_t prefix[64];
+	uint8_t r[64];
+	uint8_t k[64];
+	ge_p3 R;
+	bool ok = false;
+
+	if (x_priv == NULL || sig == NULL || z == NULL || (msg == NULL && msg_len != 0U)) {
+		return false;
+	}
+
+	meshtastic_xeddsa_derive_ed_keys(x_priv, a, ed_pub);
+
+	/* The nonce prefix is the second half of SHA-512 over the scalar: it keeps the nonce
+	 * tied to the key without ever exposing the key to the nonce hash directly. */
+	if (sha512_of(a, sizeof(a), NULL, 0, NULL, 0, prefix) != 0) {
+		goto out;
+	}
+	if (sha512_of(prefix + 32, 32, msg, msg_len, z, MESHTASTIC_XEDDSA_KEY_LEN, r) != 0) {
+		goto out;
+	}
+	sc_reduce(r);
+
+	ge_scalarmult_base(&R, r);
+	ge_p3_tobytes(sig, &R);
+
+	if (sha512_of(sig, 32, ed_pub, sizeof(ed_pub), msg, msg_len, k) != 0) {
+		goto out;
+	}
+	sc_reduce(k);
+
+	/* s = r + k*a (mod L) */
+	sc_muladd(sig + 32, k, a, r);
+	ok = true;
+
+out:
+	/* The scalar and the nonce are the two secrets here: a leaked nonce yields the key. */
+	memset(a, 0, sizeof(a));
+	memset(prefix, 0, sizeof(prefix));
+	memset(r, 0, sizeof(r));
+	memset(k, 0, sizeof(k));
+	if (!ok) {
+		memset(sig, 0, MESHTASTIC_XEDDSA_SIGNATURE_LEN);
+	}
+	return ok;
+}
+#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */

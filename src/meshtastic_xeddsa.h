@@ -83,4 +83,31 @@ bool meshtastic_xeddsa_verify(const uint8_t curve_pub[MESHTASTIC_XEDDSA_KEY_LEN]
 bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 				       meshtastic_MeshPacket *mesh);
 
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+/**
+ * Derive the Ed25519 signing key pair from this node's X25519 identity key.
+ *
+ * XEdDSA's convention: the scalar is the clamped X25519 private key, negated when that
+ * would otherwise give a public key with its sign bit set -- which is what lets a verifier
+ * recover the public key from the X25519 one by clearing that bit.
+ */
+void meshtastic_xeddsa_derive_ed_keys(const uint8_t x_priv[MESHTASTIC_XEDDSA_KEY_LEN],
+				      uint8_t ed_priv[MESHTASTIC_XEDDSA_KEY_LEN],
+				      uint8_t ed_pub[MESHTASTIC_XEDDSA_KEY_LEN]);
+
+/**
+ * Sign @p msg with this node's X25519 identity key.
+ *
+ * @param z 32 bytes of randomness mixed into the nonce ("hedged" signing). The nonce is
+ *          safe without it -- it already derives from the key and the message -- so a weak
+ *          @p z degrades defence in depth, never correctness. Pass the same bytes as the
+ *          reference to reproduce its signature exactly, which is how the tests pin this.
+ *
+ * @return true on success; false if the key is unusable.
+ */
+bool meshtastic_xeddsa_sign(const uint8_t x_priv[MESHTASTIC_XEDDSA_KEY_LEN], const uint8_t *msg,
+			    size_t msg_len, const uint8_t z[MESHTASTIC_XEDDSA_KEY_LEN],
+			    uint8_t sig[MESHTASTIC_XEDDSA_SIGNATURE_LEN]);
+#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */
+
 #endif /* MESHTASTIC_XEDDSA_H_ */

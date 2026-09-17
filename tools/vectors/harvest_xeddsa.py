@@ -143,6 +143,7 @@ CASE_TMPL = r"""    {
         printf("\"label\": \"%(label)s\", ");
         printf("\"from\": %%u, \"id\": %%u, \"port\": %%u, ",
                (unsigned)%(from)sU, (unsigned)%(id)sU, (unsigned)%(port)sU);
+        emit_hex("x_priv", priv, 32);
         emit_hex("x_pub", xpub, 32);
         emit_hex("ed_pub", edpub, 32);
         emit_hex("ed_pub_from_x", edpub_from_x, 32);
@@ -235,6 +236,9 @@ def emit_header(data: dict, regions: dict[str, Region], rev: str, lib_rev: str) 
     a(" * these are the only data in the tree that can prove our VERIFY agrees with the")
     a(" * thing it has to interoperate with -- a self-test cannot.")
     a(" *")
+    a(" * The deterministic Z mixed into every nonce below is 0xA0, 0xA1, ... 0xBF -- the")
+    a(" * signing tests must pass exactly that to reproduce these signatures.")
+    a(" *")
     a(f" * Upstream firmware: {rev}")
     a(f" * Signer library:    meshtastic/Crypto {lib_rev}")
     a(" * Verbatim regions (sha256 of extracted text):")
@@ -253,6 +257,9 @@ def emit_header(data: dict, regions: dict[str, Region], rev: str, lib_rev: str) 
     a("\tuint32_t from;")
     a("\tuint32_t id;")
     a("\tuint32_t portnum;")
+    a("\t/* TEST KEY ONLY: derived from a fixed seed by the harvester, never a real node's")
+    a("\t * key. Present so the signing tests can reproduce upstream's signature. */")
+    a("\tuint8_t x_priv[32];")
     a("\tuint8_t x_pub[32];        /* the sender's X25519 identity key */")
     a("\tuint8_t ed_pub[32];       /* what upstream derives from the PRIVATE key */")
     a("\tconst uint8_t *payload;")
@@ -276,6 +283,7 @@ def emit_header(data: dict, regions: dict[str, Region], rev: str, lib_rev: str) 
         a(f"\t\t.label = \"{c['label']}\",")
         a(f"\t\t.from = 0x{c['from']:08x}U, .id = 0x{c['id']:08x}U, "
           f".portnum = {c['port']}U,")
+        a(f"\t\t.x_priv = {{{c_bytes(c['x_priv'])}}},")
         a(f"\t\t.x_pub = {{{c_bytes(c['x_pub'])}}},")
         a(f"\t\t.ed_pub = {{{c_bytes(c['ed_pub'])}}},")
         a(f"\t\t.payload = mt_xeddsa_payload_{c['label']},")

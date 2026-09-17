@@ -25,3 +25,27 @@ config MESHTASTIC_XEDDSA
 	  SHA-512 is not otherwise in the image), and the gate itself ~0.9 KB.
 	  Check the headroom before adding this to an image that is already close
 	  to the ceiling.
+
+config MESHTASTIC_XEDDSA_SIGN
+	bool "Sign our own broadcasts with XEdDSA"
+	default n
+	depends on MESHTASTIC_XEDDSA
+	help
+	  Sign the packets this node originates, so peers can authenticate them
+	  instead of trusting the sender id. Without this the node verifies
+	  others but cannot be verified itself, and a peer running the
+	  reference's STRICT policy drops everything we send.
+
+	  ⚠️ COSTS ~38 KB MORE FLASH than verification alone, measured from the
+	  objects: the base-point table 30,720 B, sc_muladd 6,548 B (verify uses
+	  only sc_reduce), ge_scalarmult_base 264 B, plus this code. Verification
+	  links none of it -- the linker garbage-collects the table today.
+
+	  That does NOT fit a XIAO: a class-1 image has ~34 KB of slot left with
+	  verification on, and the lockdown variant ~13 KB. This is for the Heltec
+	  boards (2 MB slot) until a table-free constant-time base multiplication
+	  exists.
+
+	  Do not reach for the vartime path to avoid the table. It is the
+	  verifier's, and its running time depends on the scalar -- which during
+	  signing is the secret nonce.

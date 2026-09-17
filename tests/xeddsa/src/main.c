@@ -210,3 +210,112 @@ ZTEST(xeddsa, test_verify_refuses_null_arguments)
 }
 
 ZTEST_SUITE(xeddsa, NULL, NULL, NULL, NULL, NULL);
+
+/* ==========================================================================
+ * Signing (CONFIG_MESHTASTIC_XEDDSA_SIGN).
+ *
+ * Our signer was written from the scheme, because upstream's implementation of it carries
+ * no licence. So "does it interoperate?" cannot be answered by round-tripping against
+ * ourselves: these tests require our signature to equal, byte for byte, the one upstream's
+ * signer produced for the same key, message and Z.
+ * ========================================================================== */
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+
+/* The Z the harvester's probe used; see the vectors header. */
+static void test_z(uint8_t z[32])
+{
+	for (int i = 0; i < 32; i++) {
+		z[i] = (uint8_t)(0xA0 + i);
+	}
+}
+
+ZTEST(xeddsa, test_sign_reproduces_upstream_signatures)
+{
+	uint8_t z[32];
+
+	test_z(z);
+	for (size_t i = 0; i < N_VECTORS; i++) {
+		const struct mt_xeddsa_vector *v = &mt_xeddsa_vectors[i];
+		uint8_t sig[64];
+
+		zassert_true(meshtastic_xeddsa_sign(v->x_priv, v->signed_bytes, v->signed_len, z,
+						    sig),
+			     "%s: signing failed", v->label);
+		zassert_mem_equal(sig, v->sig, sizeof(sig),
+				  "%s: our signature differs from upstream's", v->label);
+	}
+}
+
+/* The derived public key must be the one upstream derived from the same private key --
+ * including the negation branch, which is what keeps the verifier's sign-bit recovery
+ * correct. */
+ZTEST(xeddsa, test_derived_ed_key_matches_upstream)
+{
+	for (size_t i = 0; i < N_VECTORS; i++) {
+		const struct mt_xeddsa_vector *v = &mt_xeddsa_vectors[i];
+		uint8_t ed_priv[32];
+		uint8_t ed_pub[32];
+
+		meshtastic_xeddsa_derive_ed_keys(v->x_priv, ed_priv, ed_pub);
+		zassert_mem_equal(ed_pub, v->ed_pub, 32, "%s: derived public key differs",
+				  v->label);
+		zassert_equal(ed_pub[31] & 0x80, 0, "%s: sign bit must be normalised to zero",
+			      v->label);
+	}
+}
+
+/* What signing is FOR: our own verifier accepts what we produce, over the X25519 key a peer
+ * would hold for us. */
+ZTEST(xeddsa, test_sign_then_verify_round_trip)
+{
+	static const uint8_t msg[] = "zephyrtastic round trip";
+	uint8_t z[32];
+	uint8_t sig[64];
+
+	test_z(z);
+	for (size_t i = 0; i < N_VECTORS; i++) {
+		const struct mt_xeddsa_vector *v = &mt_xeddsa_vectors[i];
+
+		zassert_true(meshtastic_xeddsa_sign(v->x_priv, msg, sizeof(msg) - 1U, z, sig),
+			     "%s: signing failed", v->label);
+		zassert_true(meshtastic_xeddsa_verify(v->x_pub, msg, sizeof(msg) - 1U, sig),
+			     "%s: our own signature did not verify", v->label);
+		sig[7] ^= 0x01;
+		zassert_false(meshtastic_xeddsa_verify(v->x_pub, msg, sizeof(msg) - 1U, sig),
+			      "%s: a tampered signature verified", v->label);
+	}
+}
+
+/* Z is defence in depth, not correctness: a different Z gives a different (still valid)
+ * signature. If this ever produced the SAME bytes, Z would not be reaching the nonce. */
+ZTEST(xeddsa, test_z_changes_the_signature_but_not_its_validity)
+{
+	const struct mt_xeddsa_vector *v = &mt_xeddsa_vectors[0];
+	uint8_t z1[32];
+	uint8_t z2[32];
+	uint8_t s1[64];
+	uint8_t s2[64];
+
+	test_z(z1);
+	memset(z2, 0x5A, sizeof(z2));
+	zassert_true(meshtastic_xeddsa_sign(v->x_priv, v->signed_bytes, v->signed_len, z1, s1));
+	zassert_true(meshtastic_xeddsa_sign(v->x_priv, v->signed_bytes, v->signed_len, z2, s2));
+	zassert_true(memcmp(s1, s2, sizeof(s1)) != 0, "Z is not reaching the nonce");
+	zassert_true(meshtastic_xeddsa_verify(v->x_pub, v->signed_bytes, v->signed_len, s2),
+		     "a signature made with a different Z must still verify");
+}
+
+ZTEST(xeddsa, test_sign_is_deterministic_for_a_fixed_z)
+{
+	const struct mt_xeddsa_vector *v = &mt_xeddsa_vectors[0];
+	uint8_t z[32];
+	uint8_t s1[64];
+	uint8_t s2[64];
+
+	test_z(z);
+	zassert_true(meshtastic_xeddsa_sign(v->x_priv, v->signed_bytes, v->signed_len, z, s1));
+	zassert_true(meshtastic_xeddsa_sign(v->x_priv, v->signed_bytes, v->signed_len, z, s2));
+	zassert_mem_equal(s1, s2, sizeof(s1), "same key, message and Z must give one signature");
+}
+
+#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */
