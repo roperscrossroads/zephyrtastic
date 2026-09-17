@@ -568,3 +568,76 @@ ZTEST(xeddsa_rx, test_oversized_payload_goes_out_unsigned_rather_than_not_at_all
 }
 
 #endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */
+
+/* ==========================================================================
+ * The counters. They exist because the verify path's success log is DBG and the bench
+ * images compile logging at inf -- so on hardware these ARE the evidence. A counter nobody
+ * checks is decoration, hence these.
+ * ========================================================================== */
+
+ZTEST(xeddsa_rx, test_counters_follow_the_decisions)
+{
+	const struct mt_xeddsa_vector *v = vec("position");
+	struct meshtastic_xeddsa_stats a;
+	struct meshtastic_xeddsa_stats b;
+	struct meshtastic_packet pkt;
+	meshtastic_MeshPacket mesh;
+
+	seed_key(v);
+	meshtastic_xeddsa_reset_stats();
+
+	/* good */
+	make(v, &pkt, &mesh, true);
+	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh));
+	meshtastic_xeddsa_get_stats(&a);
+	zassert_equal(a.verified, 1U, "a verified signature must be counted");
+	zassert_equal(a.failed, 0U, "nothing failed");
+
+	/* forged */
+	make(v, &pkt, &mesh, true);
+	mesh.decoded.xeddsa_signature.bytes[1] ^= 0x01;
+	zassert_false(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh));
+	meshtastic_xeddsa_get_stats(&b);
+	zassert_equal(b.failed, 1U, "a dropped forgery must be counted");
+	zassert_equal(b.verified, a.verified, "a forgery must not count as verified");
+
+	/* malformed */
+	make(v, &pkt, &mesh, true);
+	mesh.decoded.xeddsa_signature.size = 10;
+	zassert_false(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh));
+	meshtastic_xeddsa_get_stats(&b);
+	zassert_equal(b.malformed, 1U, "a malformed signature must be counted");
+
+	/* unsigned, accepted */
+	make(v, &pkt, &mesh, false);
+	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh));
+	meshtastic_xeddsa_get_stats(&b);
+	zassert_equal(b.unsigned_ok, 1U, "an accepted unsigned packet must be counted");
+
+	meshtastic_xeddsa_reset_stats();
+	meshtastic_xeddsa_get_stats(&b);
+	zassert_equal(b.verified + b.failed + b.malformed + b.unsigned_ok, 0U, "reset");
+}
+
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+ZTEST(xeddsa_rx, test_tx_counter_follows_signing)
+{
+	static const uint8_t payload[] = {0x11, 0x22};
+	uint8_t big[200];
+	struct meshtastic_xeddsa_stats st;
+	meshtastic_MeshPacket mesh;
+
+	meshtastic_xeddsa_reset_stats();
+	zassert_true(tx_and_capture(MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
+				    payload, sizeof(payload), &mesh));
+	meshtastic_xeddsa_get_stats(&st);
+	zassert_equal(st.signed_tx, 1U, "a signed transmission must be counted");
+
+	memset(big, 0x5A, sizeof(big));
+	zassert_true(tx_and_capture(MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE, big,
+				    sizeof(big), &mesh));
+	meshtastic_xeddsa_get_stats(&st);
+	zassert_equal(st.sign_skipped, 1U, "a packet too big to sign must be counted");
+	zassert_equal(st.signed_tx, 1U, "and must not count as signed");
+}
+#endif

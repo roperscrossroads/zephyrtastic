@@ -148,6 +148,7 @@ static void sign_our_packet(const meshtastic_MeshPacket *mesh, meshtastic_Data *
 	    signed_size > buf_len ||
 	    MESHTASTIC_HDR_LEN + signed_size > MESHTASTIC_PKT_MAX) {
 		data->xeddsa_signature.size = 0U;
+		meshtastic_xeddsa_note_tx(false);
 		return;
 	}
 
@@ -157,6 +158,9 @@ static void sign_our_packet(const meshtastic_MeshPacket *mesh, meshtastic_Data *
 				       data->xeddsa_signature.bytes) != 0) {
 		/* Unsigned beats unsent: every policy but STRICT accepts an unsigned packet. */
 		data->xeddsa_signature.size = 0U;
+		meshtastic_xeddsa_note_tx(false);
+	} else {
+		meshtastic_xeddsa_note_tx(true);
 	}
 }
 #endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */

@@ -111,6 +111,29 @@ bool meshtastic_xeddsa_verify(const uint8_t curve_pub[MESHTASTIC_XEDDSA_KEY_LEN]
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 
+static struct meshtastic_xeddsa_stats stats;
+
+void meshtastic_xeddsa_get_stats(struct meshtastic_xeddsa_stats *out)
+{
+	if (out != NULL) {
+		*out = stats;
+	}
+}
+
+void meshtastic_xeddsa_reset_stats(void)
+{
+	memset(&stats, 0, sizeof(stats));
+}
+
+void meshtastic_xeddsa_note_tx(bool signed_ok)
+{
+	if (signed_ok) {
+		stats.signed_tx++;
+	} else {
+		stats.sign_skipped++;
+	}
+}
+
 static meshtastic_Config_SecurityConfig_PacketSignaturePolicy rx_policy(void)
 {
 	meshtastic_Config cfg;
@@ -189,10 +212,12 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 			return true;
 		}
 		if (strict) {
+			stats.unsigned_drop++;
 			LOG_WRN("XEdDSA: unsigned packet from 0x%08x dropped (strict)",
 				(unsigned int)pkt->from);
 			return false;
 		}
+		stats.unsigned_ok++;
 		/* COMPATIBLE and BALANCED both accept here. BALANCED's extra rule -- drop an
 		 * unsigned signable broadcast from a node KNOWN to sign -- is deliberately not
 		 * implemented yet: it needs a per-node signer flag that survives warm-tier
@@ -206,6 +231,7 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 		/* Honest senders emit 0 or 64 bytes and nothing else. A partial signature is
 		 * how a forgery would try to land in the unsigned branch above while its bytes
 		 * still inflate the encoded size. */
+		stats.malformed++;
 		LOG_WRN("XEdDSA: malformed signature (%u bytes) from 0x%08x, drop",
 			(unsigned int)sig_size, (unsigned int)pkt->from);
 		return false;
@@ -228,11 +254,13 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 		 * signature -- that would let a planted key vouch for its own node. */
 		if (!meshtastic_xeddsa_verify(key, sigbuf, siglen,
 					      mesh->decoded.xeddsa_signature.bytes)) {
+			stats.failed++;
 			LOG_WRN("XEdDSA: signature verify FAILED from 0x%08x, drop",
 				(unsigned int)pkt->from);
 			return false;
 		}
 		mesh->xeddsa_signed = true;
+		stats.verified++;
 		LOG_DBG("XEdDSA: verified signature from 0x%08x", (unsigned int)pkt->from);
 		return true;
 	}
@@ -242,6 +270,8 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 	if (verify_first_contact_nodeinfo(pkt, mesh->decoded.xeddsa_signature.bytes, sigbuf,
 					  siglen, &applicable)) {
 		mesh->xeddsa_signed = true;
+		stats.verified++;
+		stats.bootstrapped++;
 		LOG_INF("XEdDSA: verified first-contact NodeInfo from 0x%08x",
 			(unsigned int)pkt->from);
 		return true;
@@ -252,6 +282,7 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 		return false;
 	}
 	/* Signed by a node we hold no key for, and not a NodeInfo that could carry one. */
+	stats.no_key++;
 	LOG_DBG("XEdDSA: no key for 0x%08x, cannot verify", (unsigned int)pkt->from);
 	return !strict;
 }

@@ -66,6 +66,29 @@ bool meshtastic_xeddsa_verify(const uint8_t curve_pub[MESHTASTIC_XEDDSA_KEY_LEN]
 			      const uint8_t *msg, size_t msg_len,
 			      const uint8_t sig[MESHTASTIC_XEDDSA_SIGNATURE_LEN]);
 
+/** Counters behind `meshtastic xeddsa`. The only way to see this feature working on a node:
+ *  the verify path's success log is DBG, which the bench images compile out at inf. */
+struct meshtastic_xeddsa_stats {
+	uint32_t verified;      /**< signatures checked and good */
+	uint32_t failed;        /**< present, checked, BAD -- the packet was dropped */
+	uint32_t malformed;     /**< length neither 0 nor 64 -- dropped */
+	uint32_t no_key;        /**< signed by a node we hold no key for */
+	uint32_t bootstrapped;  /**< first-contact NodeInfo whose id committed to its key */
+	uint32_t unsigned_ok;   /**< unsigned, accepted under the policy */
+	uint32_t unsigned_drop; /**< unsigned, dropped (STRICT) */
+	uint32_t signed_tx;     /**< packets we signed on the way out */
+	uint32_t sign_skipped;  /**< we would have signed, but the signed form did not fit */
+};
+
+/** Snapshot the counters. */
+void meshtastic_xeddsa_get_stats(struct meshtastic_xeddsa_stats *out);
+
+/** Zero the counters (shell `meshtastic xeddsa reset`). */
+void meshtastic_xeddsa_reset_stats(void);
+
+/** Count a packet we signed, or one we skipped for size. Called by the encoder. */
+void meshtastic_xeddsa_note_tx(bool signed_ok);
+
 /**
  * Receive-side signature policy gate.
  *

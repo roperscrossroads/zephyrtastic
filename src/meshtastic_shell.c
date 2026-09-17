@@ -64,6 +64,9 @@
 #include "meshtastic_hlc.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#if defined(CONFIG_MESHTASTIC_XEDDSA)
+#include "meshtastic_xeddsa.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 #include "meshtastic_statusmessage.h"
 #endif
@@ -3750,6 +3753,48 @@ static const char *kv_state_name(enum meshtastic_keyverify_state s)
 	}
 }
 
+#if defined(CONFIG_MESHTASTIC_XEDDSA)
+/* `meshtastic xeddsa` -- the only way to see signature verification working on a bench node:
+ * the verify path's success line is LOG_DBG and the bench images compile logging at inf. */
+static int cmd_xeddsa_show(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_xeddsa_stats st;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_xeddsa_get_stats(&st);
+	shell_print(sh, "xeddsa: verify %s, sign %s",
+		    IS_ENABLED(CONFIG_MESHTASTIC_XEDDSA) ? "on" : "off",
+		    IS_ENABLED(CONFIG_MESHTASTIC_XEDDSA_SIGN) ? "on" : "off");
+	shell_print(sh, "  rx verified   : %u  (of which first-contact NodeInfo: %u)",
+		    st.verified, st.bootstrapped);
+	shell_print(sh, "  rx DROPPED    : %u bad signature, %u malformed", st.failed,
+		    st.malformed);
+	shell_print(sh, "  rx unverifiable: %u (signed, no key for the sender)", st.no_key);
+	shell_print(sh, "  rx unsigned   : %u accepted, %u dropped", st.unsigned_ok,
+		    st.unsigned_drop);
+	shell_print(sh, "  tx            : %u signed, %u unsigned (would not fit)", st.signed_tx,
+		    st.sign_skipped);
+	return 0;
+}
+
+static int cmd_xeddsa_reset(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_xeddsa_reset_stats();
+	shell_print(sh, "xeddsa counters cleared");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_xeddsa_cmds,
+			       SHELL_CMD(reset, NULL, SHELL_HELP("Zero the counters.", NULL),
+					 cmd_xeddsa_reset),
+			       SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_XEDDSA */
+
 static int cmd_keyverify_show(const struct shell *sh, size_t argc, char **argv)
 {
 	struct meshtastic_keyverify_status st;
@@ -6834,6 +6879,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  NULL),
 #endif
 #if defined(CONFIG_MESHTASTIC_KEYVERIFY)
+#if defined(CONFIG_MESHTASTIC_XEDDSA)
+	SHELL_CMD(xeddsa, &meshtastic_xeddsa_cmds,
+		  SHELL_HELP("Packet signature verification: counters, reset.", NULL),
+		  cmd_xeddsa_show),
+#endif
 	SHELL_CMD(keyverify, &meshtastic_keyverify_cmds,
 		  SHELL_HELP("Manual key verification (security-number handshake): status, "
 			     "start, number, accept, reject.",
