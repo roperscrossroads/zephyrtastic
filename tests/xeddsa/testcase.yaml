@@ -1,0 +1,14 @@
+common:
+  extra_conf_files:
+    - ../common/pki-psa.conf
+  tags:
+    - meshtastic
+    - xeddsa
+    - crypto
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.xeddsa.native_sim: {}

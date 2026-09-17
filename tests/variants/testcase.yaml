@@ -278,3 +278,16 @@ tests:
       - CONFIG_MESHTASTIC_LOCKDOWN=y
       - CONFIG_HWINFO=y
       - CONFIG_MBEDTLS=y
+
+  # XEdDSA verify is default-N, so its untested arm is =Y -- and, like the MQTT bridge
+  # above, nothing else here compiles it. It pulls in the shared PKI recipe because it
+  # depends on MESHTASTIC_PKI, which the all-on baseline deliberately lacks (SETTINGS=n).
+  # What this scenario is for is the vendored crypto meeting twister's -Werror, which the
+  # app build does not carry: src/crypto/ed25519 is third-party C compiled with this
+  # tree's warning flags, and tests/xeddsa proves it is CORRECT, not that it BUILDS
+  # cleanly in a stripped-down image.
+  meshtastic.variants.xeddsa.native_sim:
+    extra_conf_files:
+      - ../common/pki-psa.conf
+    extra_configs:
+      - CONFIG_MESHTASTIC_XEDDSA=y

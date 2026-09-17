@@ -61,6 +61,38 @@ the host, not cross-compiled.
 Output: `tests/vectors/meshtastic_vectors.h`, consumed by the `wire_vectors`
 suite in `tests/protocol/src/vectors.c`.
 
+## XEdDSA vectors (`harvest_xeddsa.py`)
+
+A second harvester, same trust model, for the signatures this port must VERIFY. It needs two
+sources, because upstream's signer is not in the firmware tree -- it is a PlatformIO
+dependency, pinned per variant:
+
+```console
+# the pinned revision comes from the firmware tree itself:
+#   firmware/variants/nrf52840/nrf52.ini -> github.com/meshtastic/Crypto archive <sha>.zip
+curl -sSL -o crypto.zip https://github.com/meshtastic/Crypto/archive/<sha>.zip
+unzip -q crypto.zip            # sources sit at the archive root
+
+python3 tools/vectors/harvest_xeddsa.py \
+    --upstream   /path/to/meshtastic/firmware \
+    --crypto-lib /path/to/Crypto-<sha>
+
+# CI / drift check (writes nothing)
+python3 tools/vectors/harvest_xeddsa.py --upstream ... --crypto-lib ... --check
+```
+
+Output: `tests/vectors/meshtastic_xeddsa_vectors.h`, consumed by the `xeddsa` suite. Lock:
+`tools/vectors/xeddsa.lock` (region sha256s **and** a sha256 per library file used).
+
+Two things worth knowing before regenerating:
+
+- **The library is compiled, never vendored.** `XEdDSA.cpp` carries no licence (the repo has
+  no LICENSE file; its other files are MIT), so only the resulting DATA lands in this repo.
+  The verify path we ship is orlp/ed25519 instead -- `src/crypto/ed25519/PROVENANCE.md`.
+- **Signing is made deterministic.** XEdDSA mixes `signature[0..31]` into the nonce as the
+  spec's random Z; upstream seeds it from the hardware RNG, the probe from a fixed pattern.
+  A fixed Z changes nothing about verification and makes the vectors reproducible.
+
 ## When upstream drift is reported
 
 `--check` failing means the algorithm changed. Do **not** delete the lock. Read
