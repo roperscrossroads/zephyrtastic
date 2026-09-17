@@ -66,6 +66,25 @@ CASES = [
     ("max_payload", 0xa5, 0x051c2856, 0x12345678, 1, bytes((i * 7) & 0xFF for i in range(244))),
 ]
 
+# The first-contact NodeInfo bootstrap needs a case that cannot be written down in advance:
+# the payload is a User carrying the signer's own public key, and `from` must be
+# crc32(that key) -- neither is known until the probe has derived the key. So the probe runs
+# TWICE: pass 1 produces the key for this seed, python then builds the User payload and the
+# id from it, and pass 2 signs that packet. Same trust model -- upstream signs, we only
+# arrange the inputs.
+BOOTSTRAP_SEED = 0xC3
+BOOTSTRAP_PORT = 4  # NODEINFO_APP
+
+
+def user_payload(pub: bytes) -> bytes:
+    """A minimal meshtastic.User carrying only public_key (field 8, bytes)."""
+    return bytes([(8 << 3) | 2, len(pub)]) + pub
+
+
+def crc32_ieee(data: bytes) -> int:
+    import zlib
+    return zlib.crc32(data) & 0xFFFFFFFF
+
 PROBE = r"""
 #include <cstdio>
 #include <cstring>
@@ -136,7 +155,7 @@ CASE_TMPL = r"""    {
 """
 
 
-def build_probe(regions: dict[str, Region]) -> str:
+def build_probe(regions: dict[str, Region], cases_in=None) -> str:
     bsb = regions["build_signing_buffer"].text
     # Drop only the class qualifier so the member becomes a free function; the body, which
     # is the algorithm, stays verbatim.
@@ -150,7 +169,7 @@ def build_probe(regions: dict[str, Region]) -> str:
             "port": str(port),
             "payload": ", ".join(f"0x{b:02x}" for b in payload) or "0",
         }
-        for label, seed, frm, pid, port, payload in CASES
+        for label, seed, frm, pid, port, payload in (cases_in if cases_in is not None else CASES)
     )
     return PROBE % {
         "build_signing_buffer": bsb,
@@ -286,7 +305,23 @@ def main() -> int:
         print(f"  extracted {n:22s} {r.relpath}:{r.line}  {r.sha256[:16]}")
 
     libs = lib_hashes(args.crypto_lib)
-    data = run_probe(build_probe(regions), args.crypto_lib)
+
+    # Pass 1: the fixed cases, plus a throwaway case that only exists to reveal the
+    # bootstrap seed's public key.
+    probe_cases = list(CASES) + [("bootstrap_probe", BOOTSTRAP_SEED, 1, 1, BOOTSTRAP_PORT, b"")]
+    first = run_probe(build_probe(regions, probe_cases), args.crypto_lib)
+    pub = bytes.fromhex(next(c for c in first["cases"] if c["label"] == "bootstrap_probe")["x_pub"])
+
+    # Pass 2: now the User payload and the key-derived id are computable.
+    payload = user_payload(pub)
+    node_id = crc32_ieee(pub)
+    probe_cases = list(CASES) + [
+        ("nodeinfo_bootstrap", BOOTSTRAP_SEED, node_id, 0x5150C0DE, BOOTSTRAP_PORT, payload)
+    ]
+    data = run_probe(build_probe(regions, probe_cases), args.crypto_lib)
+    boot = next(c for c in data["cases"] if c["label"] == "nodeinfo_bootstrap")
+    if bytes.fromhex(boot["x_pub"]) != pub or boot["from"] != node_id:
+        sys.exit("error: bootstrap case is not self-consistent between passes")
     rev = upstream_revision(args.upstream)
     lib_rev = (args.crypto_lib / ".git").exists() and upstream_revision(args.crypto_lib) or "pinned archive"
 
