@@ -1,0 +1,24 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_XEDDSA
+	bool "Verify XEdDSA-signed packets"
+	default n
+	depends on MESHTASTIC_PKI
+	select MBEDTLS
+	select PSA_WANT_ALG_SHA_512
+	help
+	  Verify the XEdDSA signatures the reference firmware puts on some
+	  broadcasts (position, telemetry, NodeInfo), which are otherwise accepted
+	  on the sender id alone. The signature is made with the sender's X25519
+	  identity key, so verification needs no extra key material: the key is
+	  converted to its Ed25519 form and checked with a standard Ed25519 verify.
+
+	  This is VERIFY ONLY -- this port never signs. That is safe on a mixed
+	  mesh because the reference's default policy accepts unsigned traffic;
+	  what changes here is that a packet arriving WITH a signature must have a
+	  good one.
+
+	  Costs ~10 KB of flash: the vendored orlp/ed25519 field and group
+	  arithmetic (src/crypto/ed25519, zlib -- see its PROVENANCE.md). SHA-512
+	  comes from PSA, which PKC already links.

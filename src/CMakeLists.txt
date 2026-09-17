@@ -192,6 +192,19 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_WIFI_AUTOCONNECT meshtastic_wifi_auto.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SNTP meshtastic_sntp.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_PKI meshtastic_pki.c)
+
+  # XEdDSA verify: our wrapper (the X25519 -> Ed25519 map and the entry point) plus the
+  # vendored orlp/ed25519 verify path. The vendored .c files are byte-identical to
+  # upstream (src/crypto/ed25519/PROVENANCE.md); sha512_psa.c is ours, standing in for
+  # their sha512.c so the image carries one SHA-512, PSA's.
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_XEDDSA
+    meshtastic_xeddsa.c
+    crypto/ed25519/verify.c
+    crypto/ed25519/fe.c
+    crypto/ed25519/ge.c
+    crypto/ed25519/sc.c
+    crypto/ed25519/sha512_psa.c
+  )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_NODE_ID_FROM_KEY meshtastic_node_identity.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_DISPLAY meshtastic_display.c cfb_font_0609.c)
 
