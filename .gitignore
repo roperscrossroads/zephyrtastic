@@ -66,3 +66,4 @@ twister-out*/
 # broker/collector addresses and secrets live here, never in git history.
 prj-local.conf
 *-local.conf
+__pycache__/

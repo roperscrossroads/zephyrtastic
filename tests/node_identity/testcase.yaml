@@ -1,4 +1,6 @@
 common:
+  extra_conf_files:
+    - ../common/pki-psa.conf
   tags:
     - meshtastic
     - pki
