@@ -22,6 +22,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <zephyr/meshtastic/meshtastic.h>
+
+#include "meshtastic/mesh.pb.h"
+
 #define MESHTASTIC_XEDDSA_SIGNATURE_LEN 64U
 #define MESHTASTIC_XEDDSA_KEY_LEN       32U
 
@@ -61,5 +65,22 @@ size_t meshtastic_xeddsa_build_signing_buffer(uint8_t *buf, size_t buf_size, uin
 bool meshtastic_xeddsa_verify(const uint8_t curve_pub[MESHTASTIC_XEDDSA_KEY_LEN],
 			      const uint8_t *msg, size_t msg_len,
 			      const uint8_t sig[MESHTASTIC_XEDDSA_SIGNATURE_LEN]);
+
+/**
+ * Receive-side signature policy gate.
+ *
+ * Runs after decode and BEFORE delivery or relay, like the reference's
+ * checkXeddsaReceivePolicy. Drops a packet whose signature is present and bad, or malformed,
+ * or (under STRICT) absent -- so a forged broadcast never reaches a module, the phone, or
+ * the rest of the mesh through us.
+ *
+ * @param pkt   the decoded packet (from / id / portnum / payload are what get signed).
+ * @param mesh  the decoded MeshPacket, which carries the signature bytes and the
+ *              xeddsa_signed flag; may be NULL, which means "no signature present".
+ *
+ * @return true to accept the packet, false to drop it.
+ */
+bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
+				       meshtastic_MeshPacket *mesh);
 
 #endif /* MESHTASTIC_XEDDSA_H_ */

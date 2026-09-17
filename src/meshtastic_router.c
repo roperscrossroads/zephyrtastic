@@ -31,6 +31,9 @@
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 #include "meshtastic_traffic.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_XEDDSA)
+#include "meshtastic_xeddsa.h"
+#endif
 #include "meshtastic_sched.h"
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
@@ -427,9 +430,14 @@ static int relay_injected_encrypted_mesh_packet(const meshtastic_MeshPacket *mes
 /* Shared body behind the public meshtastic_handle_inbound_packet() (below) and the
  * RF RX path, which passes the decoded MeshPacket so the phone gets it verbatim (C3
  * Phase 2). Forward-declared here because the RX path calls it before its definition. */
+/* decoded_mesh is NOT const: the signature gate stamps MeshPacket.xeddsa_signed on it, and
+ * that flag MUST be rewritten rather than forwarded. The phone receives this struct verbatim
+ * (meshtastic_phoneapi_on_packet does `from->packet = *decoded_mesh`), so an inbound flag set
+ * by the sender would otherwise reach the app as "this packet was signed" with nothing having
+ * verified anything. Both callers own writable objects. */
 static void handle_inbound_impl(const struct meshtastic_packet *packet, const uint8_t *wire,
 				size_t wire_len, bool decoded,
-				const meshtastic_MeshPacket *decoded_mesh,
+				meshtastic_MeshPacket *decoded_mesh,
 				enum meshtastic_bearer bearer);
 
 static void deliver_packet(const struct meshtastic_packet *packet,
@@ -897,7 +905,7 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 
 static void handle_inbound_impl(const struct meshtastic_packet *packet, const uint8_t *wire,
 				size_t wire_len, bool decoded,
-				const meshtastic_MeshPacket *decoded_mesh,
+				meshtastic_MeshPacket *decoded_mesh,
 				enum meshtastic_bearer bearer)
 {
 	const bool rf = (bearer == MESHTASTIC_BEARER_LORA);
@@ -943,6 +951,28 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 	if (pkt == NULL) {
 		return;
 	}
+
+	/* Never forward a sender's claim that its packet was signed. The phone gets this
+	 * MeshPacket verbatim, so an inbound xeddsa_signed=true would show in the app as a
+	 * verified packet with nothing having verified it. Cleared unconditionally -- a build
+	 * with no verifier is the one that needs this most, which is why it sits outside the
+	 * guard below (the TX-side clear in meshtastic_packet.c is outside it for the mirror
+	 * image of this reason). The gate below re-sets it only for a signature it checked. */
+	if (decoded && decoded_mesh != NULL) {
+		decoded_mesh->xeddsa_signed = false;
+	}
+
+#if defined(CONFIG_MESHTASTIC_XEDDSA)
+	/* Signature policy (reference: checkXeddsaReceivePolicy, called from perhapsDecode --
+	 * i.e. before any module sees the packet). A bad or malformed signature is dropped
+	 * here, so a forgery reaches neither a module, nor the phone, nor the rest of the mesh
+	 * through our relay. Only decoded packets have a signature to check: an encrypted
+	 * relay carries a payload we cannot read, and dropping those would make a verifying
+	 * node a black hole for every channel it does not hold. */
+	if (decoded && !meshtastic_xeddsa_check_rx_policy(pkt, decoded_mesh)) {
+		return;
+	}
+#endif
 
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 	/* Traffic management (reference: TrafficManagementModule runs first in
