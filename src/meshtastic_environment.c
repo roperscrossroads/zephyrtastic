@@ -98,6 +98,19 @@ int meshtastic_collect_environment(meshtastic_EnvironmentMetrics *m)
 
 	*m = (meshtastic_EnvironmentMetrics)meshtastic_EnvironmentMetrics_init_zero;
 
+/* Log a float as <int>.<milli> instead of %f.
+ *
+ * These debug lines were the ONLY %f in the firmware, and formatted floating point is not
+ * free: CONFIG_CBPRINTF_FP_SUPPORT plus picolibc's float IO measured 4,727 B on the XIAO.
+ * Splitting into integer and thousandths keeps the same information -- and the same sign,
+ * which a naive split gets wrong for values between -1 and 0 (the integer part prints as 0
+ * and loses the minus), hence the explicit sign character. */
+#define MT_F3_SIGN(v) (((v) < 0.0f) ? "-" : "")
+#define MT_F3_INT(v)  ((int)((v) < 0.0f ? -(v) : (v)))
+#define MT_F3_MILLI(v)                                                                     \
+	((int)(((((v) < 0.0f) ? -(v) : (v)) - (float)MT_F3_INT(v)) * 1000.0f + 0.5f))
+#define MT_F3(v) MT_F3_SIGN(v), MT_F3_INT(v), MT_F3_MILLI(v)
+
 #if MT_ENV_ANY
 	int count = 0;
 
@@ -106,7 +119,7 @@ int meshtastic_collect_environment(meshtastic_EnvironmentMetrics *m)
 	if (mt_env_read(mt_env_temp, SENSOR_CHAN_AMBIENT_TEMP, 1.0f, &m->temperature) ||
 	    mt_env_read(mt_env_temp, SENSOR_CHAN_DIE_TEMP, 1.0f, &m->temperature)) {
 		m->has_temperature = true;
-		LOG_DBG("Collected temperature: %f °C", (double)m->temperature);
+		LOG_DBG("Collected temperature: %s%d.%03d °C", MT_F3(m->temperature));
 		count++;
 	}
 #endif
@@ -114,7 +127,7 @@ int meshtastic_collect_environment(meshtastic_EnvironmentMetrics *m)
 	/* Zephyr humidity is percent RH; Meshtastic field is percent RH. */
 	if (mt_env_read(mt_env_hum, SENSOR_CHAN_HUMIDITY, 1.0f, &m->relative_humidity)) {
 		m->has_relative_humidity = true;
-		LOG_DBG("Collected relative humidity: %f %%", (double)m->relative_humidity);
+		LOG_DBG("Collected relative humidity: %s%d.%03d %%", MT_F3(m->relative_humidity));
 		count++;
 	}
 #endif
@@ -122,7 +135,8 @@ int meshtastic_collect_environment(meshtastic_EnvironmentMetrics *m)
 	/* Zephyr pressure is kPa; Meshtastic barometric_pressure is hPa. */
 	if (mt_env_read(mt_env_press, SENSOR_CHAN_PRESS, 10.0f, &m->barometric_pressure)) {
 		m->has_barometric_pressure = true;
-		LOG_DBG("Collected barometric pressure: %f hPa", (double)m->barometric_pressure);
+		LOG_DBG("Collected barometric pressure: %s%d.%03d hPa",
+			MT_F3(m->barometric_pressure));
 		count++;
 	}
 #endif
@@ -130,7 +144,7 @@ int meshtastic_collect_environment(meshtastic_EnvironmentMetrics *m)
 	/* Zephyr gas resistance is ohms; Meshtastic gas_resistance is MOhm. */
 	if (mt_env_read(mt_env_gas, SENSOR_CHAN_GAS_RES, 1.0f / 1000000.0f, &m->gas_resistance)) {
 		m->has_gas_resistance = true;
-		LOG_DBG("Collected gas resistance: %f MOhm", (double)m->gas_resistance);
+		LOG_DBG("Collected gas resistance: %s%d.%03d MOhm", MT_F3(m->gas_resistance));
 		count++;
 	}
 #endif
@@ -138,7 +152,7 @@ int meshtastic_collect_environment(meshtastic_EnvironmentMetrics *m)
 	/* Zephyr illuminance is lux; Meshtastic lux field is Lux. */
 	if (mt_env_read(mt_env_light, SENSOR_CHAN_LIGHT, 1.0f, &m->lux)) {
 		m->has_lux = true;
-		LOG_DBG("Collected lux: %f Lux", (double)m->lux);
+		LOG_DBG("Collected lux: %s%d.%03d Lux", MT_F3(m->lux));
 		count++;
 	}
 #endif
