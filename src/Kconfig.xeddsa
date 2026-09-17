@@ -19,6 +19,9 @@ config MESHTASTIC_XEDDSA
 	  what changes here is that a packet arriving WITH a signature must have a
 	  good one.
 
-	  Costs ~10 KB of flash: the vendored orlp/ed25519 field and group
-	  arithmetic (src/crypto/ed25519, zlib -- see its PROVENANCE.md). SHA-512
-	  comes from PSA, which PKC already links.
+	  Costs ~19 KB of flash, measured on the XIAO (2026-09-17): the vendored
+	  orlp/ed25519 arithmetic is 12.9 KB (src/crypto/ed25519, zlib -- see its
+	  PROVENANCE.md), SHA-512 from PSA another 3.3 KB (PKC uses SHA-256, so
+	  SHA-512 is not otherwise in the image), and the gate itself ~0.9 KB.
+	  Check the headroom before adding this to an image that is already close
+	  to the ceiling.

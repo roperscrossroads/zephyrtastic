@@ -21,16 +21,25 @@ them; the declarations are harmless and keeping the header unmodified is worth m
 
 **Substituted:** `sha512.c/.h` are **not** vendored. `verify.c` includes `"sha512.h"` and uses the
 streaming init/update/final API, which our own `sha512.h` + `sha512_psa.c` provide on top of Zephyr's
-PSA crypto — already linked by every build for PKC. One SHA-512 in the image, and it is the
-platform's.
+PSA crypto.
+
+⚠️ This is **not free**, and an earlier version of this note wrongly implied it was: PKC uses SHA-**256**,
+so `PSA_WANT_ALG_SHA_512` pulls in mbedTLS's SHA-512 that nothing else needed — **3.3 KB** measured on
+the XIAO. The reason to do it this way is that vendoring orlp's `sha512.c` would cost about the same
+while adding a second hash implementation to audit and update; the platform's is one already in the
+tree. Measured 2026-09-17.
 
 ## Size
 
 `ge.c` references `base[32][8]` from `precomp_data.h` (~30 KB of tables) **only** from
-`ge_scalarmult_base()`, which is a signing primitive. Verify reaches only `Bi[8]`. Zephyr builds with
-`-ffunction-sections -fdata-sections --gc-sections`, so the unused function and its table are
+`ge_scalarmult_base()`, which is a signing primitive. Verify reaches only `Bi[8]` (960 B). Zephyr builds
+with `-ffunction-sections -fdata-sections --gc-sections`, so the unused function and its table are
 discarded at link. That is why these files are vendored unmodified rather than edited down — check
-with `nm zephyr.elf | grep ge_scalarmult_base` if the image ever looks too big.
+with `nm zephyr.elf | grep -w base` if the image ever looks too big.
+
+**Measured cost** (XIAO nRF52840, class 1, 2026-09-17): **+19,320 B** of flash total —
+ed25519 arithmetic 12.9 KB, SHA-512 3.3 KB, our wrapper and RX gate 0.9 KB. GC verified: neither
+`base` nor `ge_scalarmult_base` is present in the linked image.
 
 ## Why this implementation
 
