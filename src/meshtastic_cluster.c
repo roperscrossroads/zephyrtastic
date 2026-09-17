@@ -118,6 +118,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
 #include "meshtastic_cluster.h"
+#include "meshtastic_cluster_key.h"
 #include "meshtastic_cluster_doc.h"
 #if defined(CONFIG_MESHTASTIC_FLEET)
 #include "meshtastic_fleet.h"
@@ -795,7 +796,7 @@ static int cluster_settings_set(const char *key, size_t len, settings_read_cb re
 	}
 
 	/* key is the remainder after "mtclus/": "<l><node-hex>/<sec>" */
-	if (sscanf(key, "%c%8x/%u", &layer, &node_id, &section) != 3) {
+	if (meshtastic_cluster_parse_entry_key(key, &layer, &node_id, &section) != 0) {
 		return -ENOENT;
 	}
 	if (len < offsetof(struct cluster_rec, payload) ||

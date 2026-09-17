@@ -13,6 +13,7 @@
 #include <zephyr/ztest.h>
 
 #include "meshtastic_cluster_doc.h"
+#include "meshtastic_cluster_key.h"
 
 /* meshtastic_hlc.c's convenience wrappers reference the node clock; these
  * tests drive stamps explicitly and never call them, so a stub satisfies the
@@ -926,4 +927,70 @@ ZTEST(cluster_doc, test_clear_empties_and_reports_every_key)
 		      "a NULL callback is allowed");
 	zassert_equal(meshtastic_cluster_doc_clear(&doc, NULL, NULL), 0U,
 		      "and clearing an empty document is a no-op, not an error");
+}
+
+/* ==========================================================================
+ * The settings-key parser (meshtastic_cluster_key.h).
+ *
+ * This replaced the firmware's only sscanf, to get picolibc's vfscanf (~2 KB) out of the
+ * image. It parses keys that are ALREADY PERSISTED IN NVS on the bench, so the shape it
+ * accepts is a compatibility contract, not an implementation detail -- and the version
+ * that lived inside meshtastic_cluster.c was reachable from no test at all.
+ * ========================================================================== */
+
+static void parse_ok(const char *key, char exp_layer, uint32_t exp_node, uint32_t exp_sec)
+{
+	char layer = 0;
+	uint32_t node = 0xDEADBEEF;
+	uint32_t sec = 0xDEADBEEF;
+
+	zassert_ok(meshtastic_cluster_parse_entry_key(key, &layer, &node, &sec),
+		   "\"%s\" should parse", key);
+	zassert_equal(layer, exp_layer, "\"%s\": layer", key);
+	zassert_equal(node, exp_node, "\"%s\": node id", key);
+	zassert_equal(sec, exp_sec, "\"%s\": section", key);
+}
+
+static void parse_fails(const char *key)
+{
+	char layer = 0;
+	uint32_t node = 0;
+	uint32_t sec = 0;
+
+	zassert_true(meshtastic_cluster_parse_entry_key(key, &layer, &node, &sec) != 0,
+		     "\"%s\" should be rejected", key);
+}
+
+/* The canonical shape write_key() emits, "%c%08x/%u", for both layers. */
+ZTEST(cluster_doc, test_entry_key_parses_what_we_write)
+{
+	parse_ok("b00000000/256", 'b', 0x00000000U, 256U);
+	parse_ok("n121f8bac/0", 'n', 0x121f8bacU, 0U);
+	parse_ok("b075c78e8/4294967295", 'b', 0x075c78e8U, 4294967295U);
+	/* upper-case hex, because %8x accepted it and an older writer may have emitted it */
+	parse_ok("nAB12CD34/7", 'n', 0xAB12CD34U, 7U);
+	/* fewer than 8 hex digits: %8x read up to 8, not exactly 8 */
+	parse_ok("nf/1", 'n', 0xfU, 1U);
+}
+
+ZTEST(cluster_doc, test_entry_key_rejects_malformed)
+{
+	parse_fails("");                  /* empty */
+	parse_fails("b");                 /* layer only */
+	parse_fails("b00000000");         /* no section */
+	parse_fails("b00000000/");        /* empty section */
+	parse_fails("bzzzzzzzz/1");       /* not hex */
+	parse_fails("b/1");               /* no node id */
+	parse_fails("b00000000/1x");      /* trailing junk after the section */
+	parse_fails("b00000000/1/2");     /* an extra component */
+	parse_fails("b00000000/4294967296"); /* section overflows uint32 */
+}
+
+/* A 9th hex digit is not part of the id: "%8x" stopped at eight, so the 9th character had
+ * to be the '/'. A key with nine hex digits is malformed, not a key with a truncated id --
+ * getting this wrong would silently map two different nodes onto one entry. */
+ZTEST(cluster_doc, test_entry_key_stops_at_eight_hex_digits)
+{
+	parse_fails("b123456789/1");
+	parse_ok("b12345678/1", 'b', 0x12345678U, 1U);
 }
