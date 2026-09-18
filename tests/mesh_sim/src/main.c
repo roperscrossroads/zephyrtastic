@@ -2745,6 +2745,13 @@ static void inject_entry(uint32_t section, zephyrtastic_ClusterLayer layer, uint
 	msg.variant.entry.stamp.node_id = PEER_NODE_ID;
 	msg.variant.entry.tombstone = tombstone;
 	if (payload_len > 0U) {
+		/* Since fragmentation this field holds ONE FRAGMENT (88 B), not a
+		 * whole payload (128 B). An unchecked copy here would overrun the
+		 * harness's own message silently; inject_whole() is the way to
+		 * send anything bigger. */
+		zassert_true(payload_len <= sizeof(msg.variant.entry.payload.bytes),
+			     "inject_entry sends one frame; use inject_whole for %u B",
+			     (unsigned int)payload_len);
 		msg.variant.entry.payload.size = (pb_size_t)payload_len;
 		memcpy(msg.variant.entry.payload.bytes, payload, payload_len);
 	}
@@ -2994,8 +3001,17 @@ static int64_t frag_stamp_next(void)
 
 /* Inject ONE fragment of an entry, verbatim -- offsets and totals are the
  * caller's to choose, including nonsensical ones. */
+static void inject_frag_ex(int64_t ms, const uint8_t *payload, size_t total, size_t off,
+			   size_t len, uint32_t id, bool tombstone);
+
 static void inject_frag(int64_t ms, const uint8_t *payload, size_t total, size_t off,
 			size_t len, uint32_t id)
+{
+	inject_frag_ex(ms, payload, total, off, len, id, false);
+}
+
+static void inject_frag_ex(int64_t ms, const uint8_t *payload, size_t total, size_t off,
+			   size_t len, uint32_t id, bool tombstone)
 {
 	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
 
@@ -3008,6 +3024,7 @@ static void inject_frag(int64_t ms, const uint8_t *payload, size_t total, size_t
 	msg.variant.entry.has_stamp = true;
 	msg.variant.entry.stamp.physical_ms = ms;
 	msg.variant.entry.stamp.node_id = PEER_NODE_ID;
+	msg.variant.entry.tombstone = tombstone;
 	msg.variant.entry.payload_total = (uint32_t)total;
 	msg.variant.entry.frag_offset = (uint32_t)off;
 	msg.variant.entry.payload.size = (pb_size_t)len;
@@ -3278,20 +3295,18 @@ ZTEST(mesh_sim, test_cluster_large_entry_is_served_as_fragments)
  * tx_next_locked restarts the entry instead; it was found by reading the diff,
  * not by a failure.
  *
- * ⚠️ READ BEFORE TRUSTING THIS TEST: it does NOT reproduce that underflow, and
- * removing the guard does not make it fail. Measured 2026-09-18 -- injecting a
- * frame takes ~2 s of simulated time while the node is transmitting (the
- * injection waits on the sim radio), and the two fragments of an entry are only
- * CLUSTER_TX_GAP_MS = 500 ms apart, so a replacement cannot be landed between
- * them from here. Timing the injection into the gap, and waiting to capture the
- * first fragment before injecting, were both tried and both miss.
+ * This test does NOT reproduce that underflow, and removing the guard does not
+ * make it fail. Measured 2026-09-18: injecting a frame costs ~2 s of simulated
+ * time while the node is transmitting, and the two fragments of an entry are
+ * only CLUSTER_TX_GAP_MS = 500 ms apart, so a replacement cannot be landed
+ * between them from here. THE GUARD IS COVERED ELSEWHERE: the arithmetic was
+ * moved into meshtastic_cluster_frag_take() for exactly this reason, and
+ * tests/cluster's test_frag_take_restarts_an_entry_that_shrank_under_it is the
+ * one that fails when it is removed (mutation-checked).
  *
- * What it DOES prove is worth keeping: the replace-while-serving path is
- * survived end to end, every fragment actually served describes bytes inside
- * the payload it claims, and the document converges on the newer entry. The
- * invariant assertions would catch the bug if the race ever did land. Do not
- * read a passing run as coverage of the guard -- that needs hardware, or a
- * harness that can inject without waiting on the radio.
+ * What this one adds is the end-to-end claim: the replace-while-serving path is
+ * survived, every fragment actually served describes bytes inside the payload
+ * it claims, and the document converges on the newer entry.
  */
 ZTEST(mesh_sim, test_cluster_entry_replaced_mid_serve_is_survived)
 {
@@ -3354,6 +3369,125 @@ ZTEST(mesh_sim, test_cluster_entry_replaced_mid_serve_is_survived)
 	zassert_true(frames > 0U, "the request must have been served at all");
 	zassert_true(stored_equals(small, small_len),
 		     "the newer, shorter entry must be what the document ends up holding");
+
+	cluster_channel(false);
+}
+
+/*
+ * A second entry arriving mid-reassembly takes the slot. There is one slot by
+ * design, so the first entry is abandoned (and recovered by the next digest) --
+ * what must hold is that the swap is counted, that the abandoned half never
+ * reaches the document, and that the newcomer completes normally.
+ */
+ZTEST(mesh_sim, test_cluster_fragment_slot_is_displaced_by_a_new_entry)
+{
+	uint8_t first[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint8_t second[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	struct meshtastic_cluster_stats a, b;
+	size_t first_len, second_len;
+	int64_t s1, s2;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	first_len = encode_big_device(6U, first, sizeof(first));
+	second_len = encode_big_device(7U, second, sizeof(second));
+	s1 = frag_stamp_next();
+	s2 = frag_stamp_next();
+
+	meshtastic_cluster_stats_get(&a);
+	inject_frag(s1, first, first_len, 0U, TEST_FRAG_MAX, 0x7651U);
+	k_sleep(K_MSEC(200));
+	/* The first fragment of a DIFFERENT version of the key. */
+	inject_frag(s2, second, second_len, 0U, TEST_FRAG_MAX, 0x7652U);
+	k_sleep(K_MSEC(200));
+	meshtastic_cluster_stats_get(&b);
+	zassert_true(b.frag_displaced > a.frag_displaced,
+		     "a new entry taking the one slot must be counted as a displacement");
+
+	/* The abandoned entry's tail now has nothing to attach to. */
+	inject_frag(s1, first, first_len, TEST_FRAG_MAX, first_len - TEST_FRAG_MAX, 0x7653U);
+	k_sleep(K_MSEC(250));
+	zassert_false(stored_equals(first, first_len),
+		      "the displaced entry must not complete from its orphaned tail");
+
+	/* The newcomer finishes normally. */
+	inject_frag(s2, second, second_len, TEST_FRAG_MAX, second_len - TEST_FRAG_MAX, 0x7654U);
+	k_sleep(K_MSEC(300));
+	zassert_true(stored_equals(second, second_len),
+		     "the entry that took the slot must complete and merge");
+
+	cluster_channel(false);
+}
+
+/*
+ * A sender that goes quiet mid-entry must not hold the slot (§4.2). After
+ * CLUSTER_FRAG_TIMEOUT_SEC the half is abandoned; a late tail then has nothing
+ * to attach to and the entry never lands half-formed.
+ */
+ZTEST(mesh_sim, test_cluster_fragment_slot_times_out)
+{
+	uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	struct meshtastic_cluster_stats a, b;
+	size_t total;
+	int64_t stamp;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	total = encode_big_device(8U, big, sizeof(big));
+	stamp = frag_stamp_next();
+
+	meshtastic_cluster_stats_get(&a);
+	inject_frag(stamp, big, total, 0U, TEST_FRAG_MAX, 0x7661U);
+	k_sleep(K_SECONDS(CONFIG_MESHTASTIC_CLUSTER_FRAG_TIMEOUT_SEC + 1));
+	inject_frag(stamp, big, total, TEST_FRAG_MAX, total - TEST_FRAG_MAX, 0x7662U);
+	k_sleep(K_MSEC(250));
+	meshtastic_cluster_stats_get(&b);
+
+	zassert_true(b.frag_timed_out > a.frag_timed_out,
+		     "a slot idle past CLUSTER_FRAG_TIMEOUT_SEC must be abandoned");
+	zassert_false(stored_equals(big, total),
+		      "a tail arriving after the timeout must not complete the entry");
+
+	cluster_channel(false);
+}
+
+/*
+ * The tombstone flag is part of an entry's identity. A sender that flips it
+ * part way through is describing two different entries, and the slot must not
+ * splice them -- the tail is refused as not belonging to what is being built.
+ */
+ZTEST(mesh_sim, test_cluster_fragment_tombstone_flip_is_not_spliced)
+{
+	uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	struct meshtastic_cluster_stats a, b;
+	size_t total;
+	int64_t stamp;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	total = encode_big_device(9U, big, sizeof(big));
+	stamp = frag_stamp_next();
+
+	inject_frag(stamp, big, total, 0U, TEST_FRAG_MAX, 0x7671U);
+	k_sleep(K_MSEC(200));
+	meshtastic_cluster_stats_get(&a);
+	inject_frag_ex(stamp, big, total, TEST_FRAG_MAX, total - TEST_FRAG_MAX, 0x7672U, true);
+	k_sleep(K_MSEC(250));
+	meshtastic_cluster_stats_get(&b);
+
+	zassert_true(b.frag_out_of_order > a.frag_out_of_order,
+		     "a tail whose tombstone flag differs from its head must be refused");
+	zassert_false(stored_equals(big, total),
+		      "a head and a tail that disagree must not be spliced into one entry");
 
 	cluster_channel(false);
 }

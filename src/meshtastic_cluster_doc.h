@@ -316,4 +316,46 @@ bool meshtastic_cluster_doc_effective_version(const struct meshtastic_cluster_do
 					      uint32_t node_id, uint16_t section,
 					      struct meshtastic_hlc_stamp *out);
 
+/*
+ * ENTRY FRAGMENTATION ARITHMETIC (agents-ooma.36).
+ *
+ * The module sends an entry too large for one frame as several, and reassembles
+ * on receipt. The part of that which can go wrong in a memory-unsafe way is pure
+ * arithmetic on lengths and offsets, so it lives here -- where tests/cluster runs
+ * it directly -- rather than inside the module, where the only way to reach it is
+ * through a simulated radio that cannot reproduce the timing (see the header of
+ * test_cluster_entry_replaced_mid_serve_is_survived in tests/mesh_sim).
+ */
+
+/**
+ * How many payload bytes the next fragment of an entry carries.
+ *
+ * @p off is the send cursor: bytes of this entry already sent. It is IN-OUT,
+ * because the module re-reads the document for every fragment and a newer,
+ * SHORTER version of the key can merge while a cursor is part way through the
+ * old one. A cursor past the end is reset to 0 -- the entry is restarted --
+ * instead of being subtracted from, since `payload_len - off` is unsigned and
+ * would underflow into a ~64 KB memcpy length.
+ *
+ * @return bytes to send from @p *off; *off + return == payload_len exactly when
+ *         this is the last fragment. A tombstone (payload_len 0) returns 0 and is
+ *         a single, empty last fragment.
+ */
+uint16_t meshtastic_cluster_frag_take(uint16_t payload_len, uint16_t *off, uint16_t cap);
+
+/**
+ * Receive-side bounds for one fragment, checked on the WIRE widths.
+ *
+ * The wire fields are uint32; checking them after narrowing to the 16-bit
+ * bookkeeping would let a fragment claiming offset 65536 pass as offset 0. So
+ * the check is done here, wide, and only its verdict is narrowed.
+ *
+ * @p total is IN-OUT: 0 means "the fragment is the entry" (every tombstone, and
+ * any sender predating fragmentation) and is rewritten to @p len.
+ *
+ * @return true when the fragment lies inside a payload the table can hold.
+ */
+bool meshtastic_cluster_frag_fits(uint32_t *total, uint32_t off, uint32_t len,
+				  uint32_t payload_max, uint32_t frag_max);
+
 #endif /* MESHTASTIC_CLUSTER_DOC_H_ */

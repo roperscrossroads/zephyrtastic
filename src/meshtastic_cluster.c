@@ -1358,11 +1358,13 @@ static void push_enqueue_locked(const struct meshtastic_cluster_key *key)
  * A tombstone has no payload: take is 0, the return equals payload_len (0), and
  * it goes in a single fragment like any small entry.
  */
-static uint16_t entry_to_pb_frag(const struct meshtastic_cluster_entry *e, uint16_t off,
+static uint16_t entry_to_pb_frag(const struct meshtastic_cluster_entry *e, uint16_t *off,
 				 zephyrtastic_ClusterEntry *out)
 {
-	uint16_t take = (uint16_t)MIN((uint16_t)(e->payload_len - off),
-				      (uint16_t)MESHTASTIC_CLUSTER_FRAG_MAX);
+	/* May reset *off: see meshtastic_cluster_frag_take for why a cursor can
+	 * be found past the end of the entry it is sending. */
+	uint16_t take = meshtastic_cluster_frag_take(e->payload_len, off,
+						     (uint16_t)MESHTASTIC_CLUSTER_FRAG_MAX);
 
 	key_to_pb(&e->key, &out->key);
 	out->has_key = true;
@@ -1370,14 +1372,14 @@ static uint16_t entry_to_pb_frag(const struct meshtastic_cluster_entry *e, uint1
 	out->has_stamp = true;
 	out->tombstone = e->tombstone;
 	out->payload_total = e->payload_len;
-	out->frag_offset = off;
+	out->frag_offset = *off;
 	out->payload.size = take;
 	if (take > 0U) {
-		memcpy(out->payload.bytes, e->payload + off, take);
+		memcpy(out->payload.bytes, e->payload + *off, take);
 	}
 	/* author_sig stays empty: the field exists so the frame budget accounts
 	 * for it, but nothing signs yet (agents-ooma.31). */
-	return (uint16_t)(off + take);
+	return (uint16_t)(*off + take);
 }
 
 /* Done with the entry at ent_next — move to the next key the peer asked for. */
@@ -1441,17 +1443,8 @@ static uint32_t tx_next_locked(zephyrtastic_ClusterMessage *msg)
 			continue;
 		}
 
-		/* The document is re-read for every fragment, so a NEWER version
-		 * of this key can merge while we are part way through sending
-		 * the old one -- and a shorter one leaves the cursor past the
-		 * end. Restart the entry rather than subtract past zero: the
-		 * length arithmetic below is unsigned, so this is the
-		 * difference between resending a frame and a 64 KB memcpy. */
-		if (cluster.ent_frag_off > e->payload_len) {
-			cluster.ent_frag_off = 0U;
-		}
 		msg->which_variant = zephyrtastic_ClusterMessage_entry_tag;
-		next = entry_to_pb_frag(e, cluster.ent_frag_off, &msg->variant.entry);
+		next = entry_to_pb_frag(e, &cluster.ent_frag_off, &msg->variant.entry);
 		if (next >= e->payload_len) {
 			ent_advance_locked();
 		} else {
@@ -1567,11 +1560,8 @@ static uint32_t tx_next_locked(zephyrtastic_ClusterMessage *msg)
 			continue; /* superseded out of existence; nothing to say */
 		}
 
-		if (cluster.push_frag_off > e->payload_len) {
-			cluster.push_frag_off = 0U; /* as above */
-		}
 		msg->which_variant = zephyrtastic_ClusterMessage_entry_tag;
-		next = entry_to_pb_frag(e, cluster.push_frag_off, &msg->variant.entry);
+		next = entry_to_pb_frag(e, &cluster.push_frag_off, &msg->variant.entry);
 		if (next >= e->payload_len) {
 			push_advance_locked();
 		} else {
@@ -2504,28 +2494,28 @@ static bool reassemble_entry(uint32_t from, const zephyrtastic_ClusterEntry *e,
 			     const struct meshtastic_hlc_stamp *stamp, const uint8_t **out,
 			     uint16_t *out_len)
 {
-	uint16_t total = (uint16_t)e->payload_total;
-	uint16_t off = (uint16_t)e->frag_offset;
+	uint32_t wide_total = e->payload_total;
+	uint16_t total;
+	uint16_t off;
 	uint16_t len = (uint16_t)e->payload.size;
 	int64_t now;
 	bool matches;
 
-	/* payload_total 0 means "the fragment IS the entry": every tombstone
-	 * (which carries no payload at all), and any sender predating
-	 * fragmentation. Both want the payload taken as it stands. */
-	if (total == 0U) {
-		total = len;
-	}
-
-	/* Bounds before any state is committed. An entry claiming more than the
-	 * table can hold, a fragment larger than a frame can carry, or one that
-	 * runs off the end of the payload it claims, is refused outright rather
-	 * than allowed to size a buffer. */
-	if (total > MESHTASTIC_CLUSTER_PAYLOAD_MAX || len > MESHTASTIC_CLUSTER_FRAG_MAX ||
-	    (uint32_t)off + (uint32_t)len > (uint32_t)total) {
-		refuse_entry("fragment does not fit the payload it claims", total);
+	/* Bounds before any state is committed, and on the wire widths: an entry
+	 * claiming more than the table can hold, a fragment larger than a frame
+	 * can carry, or one running off the end of the payload it claims, is
+	 * refused outright rather than allowed to size a buffer. The check also
+	 * turns payload_total 0 -- "the fragment IS the entry": every tombstone,
+	 * and any sender predating fragmentation -- into the fragment's length. */
+	if (!meshtastic_cluster_frag_fits(&wide_total, e->frag_offset, e->payload.size,
+					  MESHTASTIC_CLUSTER_PAYLOAD_MAX,
+					  MESHTASTIC_CLUSTER_FRAG_MAX)) {
+		refuse_entry("fragment does not fit the payload it claims", e->payload_total);
 		return false;
 	}
+	/* Only now narrow: the check above bounded both by PAYLOAD_MAX. */
+	total = (uint16_t)wide_total;
+	off = (uint16_t)e->frag_offset;
 
 	/* The ordinary case, and the only one before this existed: it all came
 	 * in one frame. No slot, no state, no timeout. */

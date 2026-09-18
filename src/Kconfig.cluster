@@ -192,7 +192,9 @@ config MESHTASTIC_CLUSTER_MAX_ENTRIES
 	  but silent -- it stops being able to serve other nodes their entries
 	  back, and nothing on the node says so until someone reads the scope.
 
-	  ~168 B RAM per entry, 232 B with CONFIG_MESHTASTIC_CLUSTER_SIGN.
+	  ~168 B RAM per entry today; ~232 B once entries carry their author
+	  signature (agents-ooma.31 -- the 64-byte field is on the wire already,
+	  not yet in the table).
 	  PSRAM on boards that have it (the V4 family), internal RAM otherwise.
 	  On flash-poor boards the STORAGE PARTITION binds well before RAM
 	  does: one settings record per entry is ~65-145 B (~130-210 B signed),

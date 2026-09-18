@@ -408,3 +408,26 @@ bool meshtastic_cluster_doc_effective_version(const struct meshtastic_cluster_do
 	}
 	return have;
 }
+
+uint16_t meshtastic_cluster_frag_take(uint16_t payload_len, uint16_t *off, uint16_t cap)
+{
+	uint16_t remain;
+
+	if (*off > payload_len) {
+		*off = 0U;
+	}
+	remain = (uint16_t)(payload_len - *off);
+	return remain < cap ? remain : cap;
+}
+
+bool meshtastic_cluster_frag_fits(uint32_t *total, uint32_t off, uint32_t len,
+				  uint32_t payload_max, uint32_t frag_max)
+{
+	if (*total == 0U) {
+		*total = len;
+	}
+	/* off + len is formed in 64 bits: both come off the wire and a sum that
+	 * wraps 32 bits would pass the last test below. */
+	return *total <= payload_max && len <= frag_max &&
+	       (uint64_t)off + (uint64_t)len <= (uint64_t)*total;
+}

@@ -994,3 +994,116 @@ ZTEST(cluster_doc, test_entry_key_stops_at_eight_hex_digits)
 	parse_fails("b123456789/1");
 	parse_ok("b12345678/1", 'b', 0x12345678U, 1U);
 }
+
+/* ==========================================================================
+ * Fragmentation arithmetic (agents-ooma.36). Tested here, directly, because the
+ * one property that matters most -- a send cursor left past the end of an entry
+ * that was replaced mid-send -- cannot be reproduced through the simulated radio:
+ * injecting a frame costs more simulated time than the gap between two fragments.
+ * ========================================================================== */
+
+/* Walk a whole payload through frag_take and prove the fragments tile it:
+ * contiguous, in order, none empty but a lone tombstone, ending exactly at len. */
+static unsigned int walk_fragments(uint16_t len, uint16_t cap)
+{
+	uint16_t off = 0U;
+	unsigned int n = 0U;
+
+	for (;;) {
+		uint16_t start = off;
+		uint16_t take = meshtastic_cluster_frag_take(len, &off, cap);
+
+		zassert_equal(off, start, "a cursor inside the payload must not move");
+		zassert_true(take <= cap, "a fragment exceeded the cap");
+		zassert_true(take > 0U || len == 0U, "an empty fragment of a non-empty entry");
+		n++;
+		off = (uint16_t)(off + take);
+		if (off >= len) {
+			zassert_equal(off, len, "fragments overran the payload");
+			return n;
+		}
+		zassert_true(n < 1000U, "fragment walk did not terminate");
+	}
+}
+
+ZTEST(cluster_doc, test_frag_take_tiles_a_payload_exactly)
+{
+	zassert_equal(walk_fragments(0U, 88U), 1U, "a tombstone is one empty fragment");
+	zassert_equal(walk_fragments(1U, 88U), 1U, NULL);
+	zassert_equal(walk_fragments(88U, 88U), 1U, "exactly one cap is one fragment");
+	zassert_equal(walk_fragments(89U, 88U), 2U, "one byte over is two");
+	zassert_equal(walk_fragments(128U, 88U), 2U, NULL);
+	zassert_equal(walk_fragments(4U, 2U), 2U, "the 2026-09-18 bench shape");
+	zassert_equal(walk_fragments(128U, 1U), 128U, NULL);
+}
+
+/*
+ * THE SHRINK GUARD. A cursor part way through a 100-byte entry finds the entry
+ * replaced by a 5-byte one. Unguarded, 5 - 88 wraps to 65453 and the caller
+ * memcpys a cap's worth from past the end of the payload. The guard restarts
+ * the entry instead.
+ */
+ZTEST(cluster_doc, test_frag_take_restarts_an_entry_that_shrank_under_it)
+{
+	uint16_t off = 88U;
+	uint16_t take = meshtastic_cluster_frag_take(5U, &off, 88U);
+
+	zassert_equal(off, 0U, "a cursor past the end must restart the entry");
+	zassert_equal(take, 5U, "and then send the new, shorter entry whole");
+
+	/* Shrunk to nothing -- replaced by a tombstone. */
+	off = 40U;
+	take = meshtastic_cluster_frag_take(0U, &off, 88U);
+	zassert_equal(off, 0U, NULL);
+	zassert_equal(take, 0U, NULL);
+
+	/* A cursor exactly AT the end is not "past" it: that is the final,
+	 * empty fragment of an entry that shrank to precisely where we were.
+	 * Harmless, and resetting here would resend the whole entry. */
+	off = 50U;
+	take = meshtastic_cluster_frag_take(50U, &off, 88U);
+	zassert_equal(off, 50U, NULL);
+	zassert_equal(take, 0U, NULL);
+}
+
+ZTEST(cluster_doc, test_frag_fits_bounds_on_the_wire_widths)
+{
+	uint32_t total;
+
+	/* The ordinary shapes. */
+	total = 102U;
+	zassert_true(meshtastic_cluster_frag_fits(&total, 0U, 88U, 128U, 88U), NULL);
+	total = 102U;
+	zassert_true(meshtastic_cluster_frag_fits(&total, 88U, 14U, 128U, 88U), NULL);
+
+	/* total 0 means the fragment is the entry, and is rewritten to say so. */
+	total = 0U;
+	zassert_true(meshtastic_cluster_frag_fits(&total, 0U, 16U, 128U, 88U), NULL);
+	zassert_equal(total, 16U, "payload_total 0 must become the fragment length");
+	total = 0U;
+	zassert_true(meshtastic_cluster_frag_fits(&total, 0U, 0U, 128U, 88U), "tombstone");
+
+	/* Refusals. */
+	total = 129U;
+	zassert_false(meshtastic_cluster_frag_fits(&total, 0U, 88U, 128U, 88U),
+		      "more than the table can hold");
+	total = 102U;
+	zassert_false(meshtastic_cluster_frag_fits(&total, 0U, 89U, 128U, 88U),
+		      "a fragment larger than a frame can carry");
+	total = 102U;
+	zassert_false(meshtastic_cluster_frag_fits(&total, 90U, 14U, 128U, 88U),
+		      "runs off the end of the payload it claims");
+
+	/* The narrowing bug: checked after a cast to 16 bits, these would read as
+	 * offset 0 and total 10 and pass. On the wire widths they cannot. */
+	total = 10U;
+	zassert_false(meshtastic_cluster_frag_fits(&total, 65536U, 10U, 128U, 88U),
+		      "offset 65536 must not alias offset 0");
+	total = 65546U;
+	zassert_false(meshtastic_cluster_frag_fits(&total, 0U, 10U, 128U, 88U),
+		      "total 65546 must not alias total 10");
+	/* And the 32-bit wrap of off + len. */
+	total = 100U;
+	zassert_false(meshtastic_cluster_frag_fits(&total, 0xFFFFFFF0U, 20U, 128U, 88U),
+		      "off + len must not wrap");
+}
