@@ -49,3 +49,11 @@ config MESHTASTIC_XEDDSA_SIGN
 	  Do not reach for the vartime path to avoid the table. It is the
 	  verifier's, and its running time depends on the scalar -- which during
 	  signing is the secret nonce.
+
+	  ⚠️ NEEDS ~2 KB MORE STACK on every thread that originates a packet.
+	  Signing happens inside the encoder, on the caller's thread, and those
+	  stacks were sized for an encoder that did no curve arithmetic. Enabling
+	  this without raising them boot-loops the node: measured on the bench
+	  2026-09-17, rzr1 and rzr2 overflowed in meshtastic_nodeinfo and
+	  gnss_send. Frames: sign 480 B, derive 240 B, ge_scalarmult_base 512 B,
+	  select 176 B, plus hashing. See agents-ooma.35.
