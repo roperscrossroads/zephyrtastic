@@ -65,6 +65,10 @@ struct meshtastic_cluster_key {
 	uint16_t section; /* a meshtastic_Config tag, or a private section (above) */
 };
 
+/* An author signature over an entry (agents-ooma.31): Ed25519 via XEdDSA, made
+ * with the author's X25519 identity key. Not a tunable. */
+#define MESHTASTIC_CLUSTER_SIG_LEN 64U
+
 struct meshtastic_cluster_entry {
 	bool used;
 	struct meshtastic_cluster_key key;
@@ -72,6 +76,13 @@ struct meshtastic_cluster_entry {
 	bool tombstone;
 	uint16_t payload_len;
 	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	/* The AUTHOR's signature, carried so that a node relaying or serving
+	 * someone else's entry can pass the proof on intact. Without storing it,
+	 * every hop after the first would strip authentication. The document
+	 * itself never looks at these bytes: they are not in doc_hash (see the
+	 * migration note on meshtastic_cluster_signing_buffer). */
+	bool has_sig;
+	uint8_t sig[MESHTASTIC_CLUSTER_SIG_LEN];
 };
 
 /* The doc borrows its entry array from the caller so capacity is a caller
@@ -167,6 +178,20 @@ int meshtastic_cluster_doc_accept(struct meshtastic_cluster_doc *doc,
 				  const struct meshtastic_cluster_key *key,
 				  const struct meshtastic_hlc_stamp *stamp, bool tombstone,
 				  const uint8_t *payload, size_t payload_len);
+
+/*
+ * As meshtastic_cluster_doc_accept, carrying the author's signature (@p sig,
+ * MESHTASTIC_CLUSTER_SIG_LEN bytes) or NULL for none. The document does not
+ * verify it -- that needs keys, and this layer has none; the module checks it
+ * before calling. What this layer guarantees is the other half: a stored
+ * version ALWAYS carries exactly the signature it arrived with, so a newer
+ * unsigned version can never inherit an older version's proof.
+ */
+int meshtastic_cluster_doc_accept_signed(struct meshtastic_cluster_doc *doc,
+					 const struct meshtastic_cluster_key *key,
+					 const struct meshtastic_hlc_stamp *stamp, bool tombstone,
+					 const uint8_t *payload, size_t payload_len,
+					 const uint8_t *sig);
 
 /* The digest triple over the sorted rows (key, stamp, tombstone — payloads
  * deliberately excluded: the stamp IS the version, and hashing values would
@@ -357,5 +382,52 @@ uint16_t meshtastic_cluster_frag_take(uint16_t payload_len, uint16_t *off, uint1
  */
 bool meshtastic_cluster_frag_fits(uint32_t *total, uint32_t off, uint32_t len,
 				  uint32_t payload_max, uint32_t frag_max);
+
+/*
+ * THE BYTES AN AUTHOR SIGNS (agents-ooma.31).
+ *
+ * Our own canonical string, deliberately NOT the protobuf encoding: varint
+ * lengths and field order are the encoder's business, and a signature must
+ * survive a re-encode by a relay running different code. Little-endian, fixed
+ * layout:
+ *
+ *   "zephyrtastic/cluster-entry/v1\0"   30  domain separation (below)
+ *   layer u8, key.node_id u32, section u16                     7
+ *   physical_ms i64, counter u32, author u32                  16
+ *   tombstone u8, payload_len u16                              3
+ *   payload                                              0..PAYLOAD_MAX
+ *
+ * Every field that decides what the entry MEANS is inside: the key (so a
+ * signature on base/device cannot be moved to nodes/X/device), the whole stamp
+ * INCLUDING the author (so it cannot be transplanted onto another claimed
+ * author, and a replay carries its old stamp and loses LWW), the tombstone flag
+ * and the payload with its length (so no two inputs share an encoding).
+ *
+ * WHY THE PREFIX. The same X25519 identity key signs mesh packets, whose
+ * signed bytes begin from|id|portnum as three little-endian u32s. Without a
+ * prefix, some packet a node legitimately signed could share bytes with a
+ * cluster entry and its signature be replayed as authorship of fleet config.
+ * With it, the third word a packet reader would take as the portnum is the
+ * ASCII "stic" -- 0x63697473, far outside the portnum space no node will ever
+ * sign -- so no packet signature can collide with an entry signature.
+ * (tests/cluster pins that.)
+ *
+ * MIGRATION NOTE, and the trap in it. doc_hash covers (key, stamp, tombstone)
+ * only, so an unsigned and a signed copy of the same version hash identically
+ * and anti-entropy never exchanges them. A signature therefore reaches the
+ * fleet only on a NEW version: a master re-minting an entry is how an unsigned
+ * document becomes a signed one.
+ *
+ * @return bytes written, or 0 if @p cap is too small or the payload too long.
+ */
+#define MESHTASTIC_CLUSTER_SIGBUF_PREFIX     "zephyrtastic/cluster-entry/v1"
+#define MESHTASTIC_CLUSTER_SIGBUF_PREFIX_LEN (sizeof(MESHTASTIC_CLUSTER_SIGBUF_PREFIX))
+#define MESHTASTIC_CLUSTER_SIGBUF_MAX \
+	(MESHTASTIC_CLUSTER_SIGBUF_PREFIX_LEN + 26U + MESHTASTIC_CLUSTER_PAYLOAD_MAX)
+
+size_t meshtastic_cluster_signing_buffer(uint8_t *buf, size_t cap,
+					 const struct meshtastic_cluster_key *key,
+					 const struct meshtastic_hlc_stamp *stamp, bool tombstone,
+					 const uint8_t *payload, size_t payload_len);
 
 #endif /* MESHTASTIC_CLUSTER_DOC_H_ */

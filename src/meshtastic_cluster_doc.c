@@ -120,10 +120,11 @@ static bool key_is_valid(const struct meshtastic_cluster_key *key)
 	return false;
 }
 
-int meshtastic_cluster_doc_accept(struct meshtastic_cluster_doc *doc,
-				  const struct meshtastic_cluster_key *key,
-				  const struct meshtastic_hlc_stamp *stamp, bool tombstone,
-				  const uint8_t *payload, size_t payload_len)
+int meshtastic_cluster_doc_accept_signed(struct meshtastic_cluster_doc *doc,
+					 const struct meshtastic_cluster_key *key,
+					 const struct meshtastic_hlc_stamp *stamp, bool tombstone,
+					 const uint8_t *payload, size_t payload_len,
+					 const uint8_t *sig)
 {
 	struct meshtastic_cluster_entry *e;
 	bool found;
@@ -173,7 +174,26 @@ int meshtastic_cluster_doc_accept(struct meshtastic_cluster_doc *doc,
 	if (payload_len > 0U) {
 		memcpy(e->payload, payload, payload_len);
 	}
+	/* Set or CLEARED on every store: an entry slot is reused across
+	 * versions, and a newer unsigned version inheriting the old version's
+	 * signature would relay a proof over bytes it does not cover -- which
+	 * every verifying peer then refuses. */
+	e->has_sig = (sig != NULL);
+	if (sig != NULL) {
+		memcpy(e->sig, sig, MESHTASTIC_CLUSTER_SIG_LEN);
+	} else {
+		memset(e->sig, 0, MESHTASTIC_CLUSTER_SIG_LEN);
+	}
 	return 1;
+}
+
+int meshtastic_cluster_doc_accept(struct meshtastic_cluster_doc *doc,
+				  const struct meshtastic_cluster_key *key,
+				  const struct meshtastic_hlc_stamp *stamp, bool tombstone,
+				  const uint8_t *payload, size_t payload_len)
+{
+	return meshtastic_cluster_doc_accept_signed(doc, key, stamp, tombstone, payload,
+						    payload_len, NULL);
 }
 
 /* The canonical 24-byte row: the ONLY bytes that ever reach the digest. */
@@ -430,4 +450,41 @@ bool meshtastic_cluster_frag_fits(uint32_t *total, uint32_t off, uint32_t len,
 	 * wraps 32 bits would pass the last test below. */
 	return *total <= payload_max && len <= frag_max &&
 	       (uint64_t)off + (uint64_t)len <= (uint64_t)*total;
+}
+
+static uint8_t *put_le(uint8_t *p, uint64_t v, size_t n)
+{
+	for (size_t i = 0U; i < n; i++) {
+		*p++ = (uint8_t)(v >> (8U * i));
+	}
+	return p;
+}
+
+size_t meshtastic_cluster_signing_buffer(uint8_t *buf, size_t cap,
+					 const struct meshtastic_cluster_key *key,
+					 const struct meshtastic_hlc_stamp *stamp, bool tombstone,
+					 const uint8_t *payload, size_t payload_len)
+{
+	size_t need = MESHTASTIC_CLUSTER_SIGBUF_PREFIX_LEN + 26U + payload_len;
+	uint8_t *p = buf;
+
+	if (payload_len > MESHTASTIC_CLUSTER_PAYLOAD_MAX || need > cap ||
+	    (payload_len > 0U && payload == NULL)) {
+		return 0U;
+	}
+	memcpy(p, MESHTASTIC_CLUSTER_SIGBUF_PREFIX, MESHTASTIC_CLUSTER_SIGBUF_PREFIX_LEN);
+	p += MESHTASTIC_CLUSTER_SIGBUF_PREFIX_LEN;
+	p = put_le(p, key->layer, 1U);
+	p = put_le(p, key->node_id, 4U);
+	p = put_le(p, key->section, 2U);
+	p = put_le(p, (uint64_t)stamp->physical_ms, 8U);
+	p = put_le(p, stamp->counter, 4U);
+	p = put_le(p, stamp->node_id, 4U);
+	p = put_le(p, tombstone ? 1U : 0U, 1U);
+	p = put_le(p, payload_len, 2U);
+	if (payload_len > 0U) {
+		memcpy(p, payload, payload_len);
+		p += payload_len;
+	}
+	return (size_t)(p - buf);
 }

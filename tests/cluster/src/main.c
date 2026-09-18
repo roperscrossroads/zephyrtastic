@@ -1107,3 +1107,158 @@ ZTEST(cluster_doc, test_frag_fits_bounds_on_the_wire_widths)
 	zassert_false(meshtastic_cluster_frag_fits(&total, 0xFFFFFFF0U, 20U, 128U, 88U),
 		      "off + len must not wrap");
 }
+
+/* ==========================================================================
+ * Signed entries (agents-ooma.31): what the author signs, and what the table
+ * does with the signature. The crypto itself is tested in tests/xeddsa against
+ * the reference's own vectors; these pin the BYTES and the BOOKKEEPING.
+ * ========================================================================== */
+
+static size_t sigbuf_of(uint8_t *buf, struct meshtastic_cluster_key k,
+			struct meshtastic_hlc_stamp s, bool tomb, const uint8_t *p, size_t n)
+{
+	return meshtastic_cluster_signing_buffer(buf, MESHTASTIC_CLUSTER_SIGBUF_MAX, &k, &s, tomb,
+						 p, n);
+}
+
+ZTEST(cluster_doc, test_signing_buffer_layout_is_pinned)
+{
+	static const uint8_t expect[] = {
+		'z', 'e', 'p', 'h', 'y', 'r', 't', 'a', 's', 't', 'i', 'c', '/', 'c', 'l',
+		'u', 's', 't', 'e', 'r', '-', 'e', 'n', 't', 'r', 'y', '/', 'v', '1', 0,
+		0x01,                                     /* layer NODE */
+		0xAA, 0xAA, 0xAA, 0xAA,                   /* key.node_id */
+		0x10, 0x00,                               /* section 16 */
+		0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, /* physical_ms */
+		0x03, 0x00, 0x00, 0x00,                   /* counter */
+		0xBB, 0xBB, 0xBB, 0xBB,                   /* author */
+		0x00,                                     /* tombstone */
+		0x02, 0x00,                               /* payload_len */
+		0x5A, 0xA5,                               /* payload */
+	};
+	struct meshtastic_hlc_stamp s = {
+		.physical_ms = 0x0102030405060708LL, .counter = 3U, .node_id = NODE_B};
+	uint8_t p[] = {0x5A, 0xA5};
+	uint8_t buf[MESHTASTIC_CLUSTER_SIGBUF_MAX];
+	size_t n = sigbuf_of(buf, node_key(NODE_A, SEC_DISPLAY), s, false, p, sizeof(p));
+
+	/* A byte-exact expectation, not a round trip: signer and verifier share
+	 * this function, so a change to it would still "verify" -- and silently
+	 * invalidate every signature a node on the old layout ever made. */
+	zassert_equal(n, sizeof(expect), "length %zu", n);
+	zassert_mem_equal(buf, expect, sizeof(expect), "signing buffer layout changed");
+}
+
+ZTEST(cluster_doc, test_signing_buffer_binds_every_field)
+{
+	uint8_t p[] = {1, 2, 3};
+	uint8_t q[] = {1, 2, 4};
+	struct meshtastic_hlc_stamp s = at(1000, NODE_A);
+	uint8_t ref[MESHTASTIC_CLUSTER_SIGBUF_MAX], alt[MESHTASTIC_CLUSTER_SIGBUF_MAX];
+	size_t rn = sigbuf_of(ref, node_key(NODE_A, SEC_DEVICE), s, false, p, 3);
+	struct meshtastic_hlc_stamp s2;
+
+#define DIFFERS(expr)                                                                           \
+	do {                                                                                    \
+		size_t an = (expr);                                                             \
+		zassert_true(an != rn || memcmp(alt, ref, rn) != 0, "not bound: " #expr);       \
+	} while (0)
+
+	DIFFERS(sigbuf_of(alt, base_key(SEC_DEVICE), s, false, p, 3));         /* layer */
+	DIFFERS(sigbuf_of(alt, node_key(NODE_B, SEC_DEVICE), s, false, p, 3)); /* owner */
+	DIFFERS(sigbuf_of(alt, node_key(NODE_A, SEC_DISPLAY), s, false, p, 3)); /* section */
+	s2 = s; s2.physical_ms++;
+	DIFFERS(sigbuf_of(alt, node_key(NODE_A, SEC_DEVICE), s2, false, p, 3)); /* time */
+	s2 = s; s2.counter++;
+	DIFFERS(sigbuf_of(alt, node_key(NODE_A, SEC_DEVICE), s2, false, p, 3)); /* counter */
+	s2 = s; s2.node_id = NODE_B;
+	DIFFERS(sigbuf_of(alt, node_key(NODE_A, SEC_DEVICE), s2, false, p, 3)); /* AUTHOR */
+	DIFFERS(sigbuf_of(alt, node_key(NODE_A, SEC_DEVICE), s, true, NULL, 0)); /* tombstone */
+	DIFFERS(sigbuf_of(alt, node_key(NODE_A, SEC_DEVICE), s, false, q, 3)); /* payload */
+	DIFFERS(sigbuf_of(alt, node_key(NODE_A, SEC_DEVICE), s, false, p, 2)); /* length */
+#undef DIFFERS
+}
+
+/*
+ * No packet signature can be replayed as an entry signature. A packet's signed
+ * bytes are from | id | portnum | payload (little-endian u32s). Ours begin with
+ * the prefix, so a packet reader sees portnum = bytes 8..11 = "stic". Every real
+ * portnum is below 1024 (upstream reserves up to 511), and a node signs only its
+ * own real packets -- so the two byte spaces cannot meet.
+ */
+ZTEST(cluster_doc, test_signing_buffer_cannot_be_a_packet_buffer)
+{
+	uint8_t buf[MESHTASTIC_CLUSTER_SIGBUF_MAX];
+	uint32_t as_portnum;
+
+	(void)sigbuf_of(buf, base_key(SEC_DEVICE), at(1, NODE_A), false, (const uint8_t *)"x", 1);
+	as_portnum = (uint32_t)buf[8] | ((uint32_t)buf[9] << 8) | ((uint32_t)buf[10] << 16) |
+		     ((uint32_t)buf[11] << 24);
+	zassert_true(as_portnum >= 1024U,
+		     "the word a packet verifier reads as the portnum must be outside every "
+		     "real portnum (got 0x%08x)", as_portnum);
+}
+
+ZTEST(cluster_doc, test_signing_buffer_refuses_what_it_cannot_hold)
+{
+	uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX + 1U];
+	uint8_t buf[MESHTASTIC_CLUSTER_SIGBUF_MAX];
+	struct meshtastic_cluster_key k = base_key(SEC_DEVICE);
+	struct meshtastic_hlc_stamp s = at(1, NODE_A);
+
+	memset(big, 7, sizeof(big));
+	zassert_equal(meshtastic_cluster_signing_buffer(buf, sizeof(buf), &k, &s, false, big,
+							sizeof(big)), 0U, "oversize payload");
+	zassert_equal(meshtastic_cluster_signing_buffer(buf, 40U, &k, &s, false, big, 4U), 0U,
+		      "buffer too small");
+	zassert_true(meshtastic_cluster_signing_buffer(buf, sizeof(buf), &k, &s, false, big,
+						       MESHTASTIC_CLUSTER_PAYLOAD_MAX) > 0U,
+		     "the largest legal payload must fit SIGBUF_MAX");
+}
+
+ZTEST(cluster_doc, test_signature_travels_with_its_version_only)
+{
+	struct meshtastic_cluster_key k = node_key(NODE_A, SEC_DEVICE);
+	struct meshtastic_hlc_stamp s1 = at(100, NODE_A), s2 = at(200, NODE_A);
+	uint8_t v[] = {9};
+	uint8_t sig_a[MESHTASTIC_CLUSTER_SIG_LEN], sig_b[MESHTASTIC_CLUSTER_SIG_LEN];
+	const struct meshtastic_cluster_entry *e;
+
+	memset(sig_a, 0xA1, sizeof(sig_a));
+	memset(sig_b, 0xB2, sizeof(sig_b));
+
+	zassert_equal(meshtastic_cluster_doc_accept_signed(&doc, &k, &s1, false, v, 1, sig_a), 1);
+	e = meshtastic_cluster_doc_find(&doc, &k);
+	zassert_true(e->has_sig, NULL);
+	zassert_mem_equal(e->sig, sig_a, sizeof(sig_a), NULL);
+
+	/* A stale version must not replace the signature on the one we hold. */
+	zassert_equal(meshtastic_cluster_doc_accept_signed(&doc, &k, &s1, false, v, 1, sig_b), 0);
+	zassert_mem_equal(e->sig, sig_a, sizeof(sig_a), "equal-stamp write moved the signature");
+
+	/* A NEWER UNSIGNED version must not inherit the old proof: relayed, it
+	 * would be a signature over bytes it does not cover. */
+	zassert_equal(meshtastic_cluster_doc_accept(&doc, &k, &s2, false, v, 1), 1);
+	e = meshtastic_cluster_doc_find(&doc, &k);
+	zassert_false(e->has_sig, "a newer unsigned version inherited the old signature");
+}
+
+ZTEST(cluster_doc, test_signature_is_not_part_of_the_digest)
+{
+	struct meshtastic_cluster_key k = base_key(SEC_DEVICE);
+	struct meshtastic_hlc_stamp s = at(100, NODE_A);
+	uint8_t v[] = {1};
+	uint8_t sig[MESHTASTIC_CLUSTER_SIG_LEN];
+	uint32_t unsigned_hash;
+
+	/* Documented, not accidental: a signed and an unsigned copy of the same
+	 * version hash the same, which is why signatures spread only on a NEW
+	 * version (see the migration note on meshtastic_cluster_signing_buffer).
+	 * If this ever changes, the rollout procedure changes with it. */
+	memset(sig, 0x33, sizeof(sig));
+	(void)meshtastic_cluster_doc_accept(&doc, &k, &s, false, v, 1);
+	unsigned_hash = meshtastic_cluster_doc_hash(&doc);
+	meshtastic_cluster_doc_init(&doc, storage, CAP);
+	(void)meshtastic_cluster_doc_accept_signed(&doc, &k, &s, false, v, 1, sig);
+	zassert_equal(meshtastic_cluster_doc_hash(&doc), unsigned_hash, NULL);
+}
