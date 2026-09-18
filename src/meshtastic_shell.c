@@ -5998,6 +5998,19 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		    st.entry_rx_future ? "  ** entries refused for being stamped beyond the "
 					 "clock drift horizon — someone's clock is wrong **"
 				       : "");
+	/* Entry fragmentation (agents-ooma.36). Printed even when idle, and that
+	 * is the point: an all-zero row says "nothing here has ever needed more
+	 * than one frame", which is a different and much more useful statement
+	 * than silence. The verify-path counters had to be added later for
+	 * exactly this reason — a feature whose only evidence is a DBG line the
+	 * bench images compile out cannot be observed working at all. */
+	shell_print(sh, "frag    : held=%u assembled=%u out_of_order=%u displaced=%u "
+			"timed_out=%u%s",
+		    st.frag_rx, st.frag_assembled, st.frag_out_of_order, st.frag_displaced,
+		    st.frag_timed_out,
+		    st.frag_out_of_order ? "  (a fragment arrived at an offset the slot was "
+					   "not expecting — reordering, or a peer probing)"
+					 : "");
 
 	/* The per-node rows for THIS node are the ones an operator is reasoning
 	 * about during a pin/unpin, and they are visually identical to every
