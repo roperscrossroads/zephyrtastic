@@ -49,6 +49,10 @@
 #include "meshtastic_outbound.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_packet.h"
+#if defined(CONFIG_MESHTASTIC_PKI)
+#include <psa/crypto.h>
+#include "meshtastic_pki.h"
+#endif
 /* after meshtastic_packet.h: it declares struct meshtastic_wire_header, which
  * meshtastic_router.h uses by pointer in a prototype. */
 #include "meshtastic_router.h"
@@ -2249,13 +2253,29 @@ ZTEST(mesh_sim, test_licence_change_refreshes_the_cached_tx_power)
  * stamps than the leftovers they inherit.
  */
 #define TEST_EPOCH_MS 1787600000000LL
-/* Any 32 bytes: the D4 gate is a memcmp of the NodeDB's stored key against
- * SecurityConfig.admin_key, so nothing here has to be a real X25519 point. */
+/*
+ * PEER's identity: RFC 7748 §6.1's "Bob" keypair, a REAL X25519 key.
+ *
+ * It used to be 32 placeholder bytes, which was fine while every configuration
+ * ran with PKI off (the D4 gate is only a memcmp against admin_key). With PKI on
+ * -- which is how every bench node runs -- a cluster unicast is PKC-encrypted to
+ * the destination's key, and a placeholder that is not a curve point meant no
+ * reply to PEER could ever be sent (agents-ooma.37). A published vector keeps the
+ * public half a constant, usable in configurations with no crypto library at
+ * all, and the private half lets the harness play PEER's side of PKC.
+ */
 static const uint8_t peer_key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN] = {
-	0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA,
-	0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5,
-	0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF,
+	0xde, 0x9e, 0xdb, 0x7d, 0x7b, 0x7d, 0xc1, 0xb4, 0xd3, 0x5b, 0x61,
+	0xc2, 0xec, 0xe4, 0x35, 0x37, 0x3f, 0x83, 0x43, 0xc8, 0x5b, 0x78,
+	0x67, 0x4d, 0xad, 0xfc, 0x7e, 0x14, 0x6f, 0x88, 0x2b, 0x4f,
 };
+#if defined(CONFIG_MESHTASTIC_PKI)
+static const uint8_t peer_priv[32] = {
+	0x5d, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b, 0x79, 0xe1, 0x7f,
+	0x8b, 0x83, 0x80, 0x0e, 0xe6, 0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18,
+	0xb6, 0xfd, 0x1c, 0x2f, 0x8b, 0x27, 0xff, 0x88, 0xe0, 0xeb,
+};
+#endif
 
 /*
  * Provision (or tear down) the channel the module binds to — through the CONFIG
@@ -2376,12 +2396,22 @@ static void trust_peer_as_master(bool trusted)
 }
 
 /* Inject one ClusterMessage as if PEER had transmitted it. */
-static void inject_cluster(const zephyrtastic_ClusterMessage *msg, uint32_t to, uint32_t id)
+/*
+ * Build the wire frame PEER would send. For a unicast to this node with PKI on,
+ * that is a PKC frame -- and the node's own builder can make one: asked for a
+ * frame to PEER, from PEER, it encrypts with ECDH(our key, PEER's key), which is
+ * the same secret PEER derives from its side, and a nonce built from PEER's id,
+ * which is what our decrypt uses for a frame from PEER. The header is not
+ * covered by the encryption (AES-CCM, no associated data), so the destination is
+ * then rewritten to us. Without this, the builder PKC-encrypts to OUR OWN id and
+ * the frame is undecryptable (agents-ooma.37).
+ */
+static void build_peer_frame(const zephyrtastic_ClusterMessage *msg, uint32_t to, uint32_t id,
+			     uint8_t *wire, uint32_t *wire_len)
 {
-	uint8_t cbuf[zephyrtastic_ClusterMessage_size];
-	uint8_t wire[MESHTASTIC_PKT_MAX];
+	static uint8_t cbuf[zephyrtastic_ClusterMessage_size];
 	pb_ostream_t os = pb_ostream_from_buffer(cbuf, sizeof(cbuf));
-	uint32_t wire_len;
+	bool pkc = false;
 	struct meshtastic_packet pkt = {
 		.from = PEER_NODE_ID,
 		.to = to,
@@ -2392,10 +2422,30 @@ static void inject_cluster(const zephyrtastic_ClusterMessage *msg, uint32_t to, 
 		.channel_index = CLUSTER_CH,
 	};
 
+#if defined(CONFIG_MESHTASTIC_PKI)
+	pkc = to != MESHTASTIC_NODE_BROADCAST && meshtastic_pki_have_key();
+#endif
+	if (pkc) {
+		pkt.to = PEER_NODE_ID;
+	}
 	zassert_true(pb_encode(&os, zephyrtastic_ClusterMessage_fields, msg), "encode failed");
 	pkt.payload = cbuf;
 	pkt.payload_len = os.bytes_written;
-	zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "wire build failed");
+	zassert_ok(meshtastic_build_wire_packet(&pkt, wire, wire_len), "wire build failed");
+	if (pkc) {
+		struct meshtastic_wire_header *hdr = (struct meshtastic_wire_header *)wire;
+
+		zassert_equal(hdr->channel, 0U, "expected a PKC frame (channel hash 0)");
+		hdr->dest = sys_cpu_to_le32(to);
+	}
+}
+
+static void inject_cluster(const zephyrtastic_ClusterMessage *msg, uint32_t to, uint32_t id)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	build_peer_frame(msg, to, id, wire, &wire_len);
 	/* The walk is a conversation, so every inject here follows one of OUR
 	 * transmissions — and the stack cancels RX while transmitting. Nothing
 	 * is listening until the radio comes back. */
@@ -2413,24 +2463,10 @@ static void inject_cluster(const zephyrtastic_ClusterMessage *msg, uint32_t to, 
 static void inject_cluster_bearer(const zephyrtastic_ClusterMessage *msg, uint32_t to,
 				  uint32_t id)
 {
-	uint8_t cbuf[zephyrtastic_ClusterMessage_size];
 	uint8_t wire[MESHTASTIC_PKT_MAX];
-	pb_ostream_t os = pb_ostream_from_buffer(cbuf, sizeof(cbuf));
 	uint32_t wire_len;
-	struct meshtastic_packet pkt = {
-		.from = PEER_NODE_ID,
-		.to = to,
-		.id = id,
-		.portnum = MESHTASTIC_PORT_PRIVATE,
-		.hop_limit = 3U,
-		.hop_start = 3U,
-		.channel_index = CLUSTER_CH,
-	};
 
-	zassert_true(pb_encode(&os, zephyrtastic_ClusterMessage_fields, msg), "encode failed");
-	pkt.payload = cbuf;
-	pkt.payload_len = os.bytes_written;
-	zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "wire build failed");
+	build_peer_frame(msg, to, id, wire, &wire_len);
 	zassert_ok(meshtastic_radio_rx_inject(wire, (uint16_t)wire_len,
 					      MESHTASTIC_BEARER_BLE_PEER),
 		   "bearer inject failed");
@@ -2442,6 +2478,84 @@ static void inject_cluster_bearer(const zephyrtastic_ClusterMessage *msg, uint32
  * still carries the PEER's src — so "from == us" is what separates a frame we
  * originated from one we merely repeated.
  */
+#if defined(CONFIG_MESHTASTIC_PKI)
+#include <psa/crypto.h>
+#include "meshtastic_pki.h"
+
+/*
+ * Decrypt a PKC frame this node sent to PEER, as PEER would: X25519(PEER's
+ * private key, our public key) -> SHA-256 -> AES-CCM with an 8-byte tag, nonce
+ * (id, extra, from). Written from the scheme rather than calling this node's own
+ * decrypt -- which cannot be pointed at a frame from itself -- so it doubles as
+ * an independent check that what we send is what a peer can read.
+ */
+static bool peer_decrypt(const uint8_t *frame, uint32_t len, struct meshtastic_packet *pkt,
+			 uint8_t *payload, size_t cap)
+{
+	const struct meshtastic_wire_header *hdr = (const struct meshtastic_wire_header *)frame;
+	const uint8_t *enc = frame + MESHTASTIC_HDR_LEN;
+	size_t enc_len = len - MESHTASTIC_HDR_LEN;
+	psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
+	uint8_t our_pub[32], secret[32], aes[32], nonce[MESHTASTIC_PKI_NONCE_LEN];
+	uint8_t plain[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_Data data = meshtastic_Data_init_zero;
+	psa_key_id_t kid;
+	size_t n, plain_len;
+	pb_istream_t is;
+	bool ok;
+
+	if (len <= MESHTASTIC_HDR_LEN + 12U || hdr->channel != 0U ||
+	    sys_le32_to_cpu(hdr->dest) != PEER_NODE_ID ||
+	    meshtastic_pki_get_public_key(our_pub) != sizeof(our_pub)) {
+		return false;
+	}
+	psa_set_key_type(&a, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
+	psa_set_key_bits(&a, 255);
+	psa_set_key_usage_flags(&a, PSA_KEY_USAGE_DERIVE);
+	psa_set_key_algorithm(&a, PSA_ALG_ECDH);
+	if (psa_import_key(&a, peer_priv, sizeof(peer_priv), &kid) != PSA_SUCCESS) {
+		return false;
+	}
+	ok = psa_raw_key_agreement(PSA_ALG_ECDH, kid, our_pub, 32, secret, sizeof(secret), &n) ==
+		     PSA_SUCCESS &&
+	     psa_hash_compute(PSA_ALG_SHA_256, secret, 32, aes, sizeof(aes), &n) == PSA_SUCCESS;
+	(void)psa_destroy_key(kid);
+	if (!ok) {
+		return false;
+	}
+	meshtastic_pki_nonce_build(nonce, sys_le32_to_cpu(hdr->id), sys_le32_to_cpu(hdr->src),
+				   sys_get_le32(enc + enc_len - 4U));
+	a = (psa_key_attributes_t)PSA_KEY_ATTRIBUTES_INIT;
+	psa_set_key_type(&a, PSA_KEY_TYPE_AES);
+	psa_set_key_bits(&a, 256);
+	psa_set_key_usage_flags(&a, PSA_KEY_USAGE_DECRYPT);
+	psa_set_key_algorithm(&a, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 8));
+	if (psa_import_key(&a, aes, sizeof(aes), &kid) != PSA_SUCCESS) {
+		return false;
+	}
+	ok = psa_aead_decrypt(kid, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 8), nonce,
+			      sizeof(nonce), NULL, 0, enc, enc_len - 4U, plain, sizeof(plain),
+			      &plain_len) == PSA_SUCCESS;
+	(void)psa_destroy_key(kid);
+	if (!ok) {
+		return false;
+	}
+	is = pb_istream_from_buffer(plain, plain_len);
+	if (!pb_decode(&is, meshtastic_Data_fields, &data) || data.payload.size > cap) {
+		return false;
+	}
+	memset(pkt, 0, sizeof(*pkt));
+	pkt->from = sys_le32_to_cpu(hdr->src);
+	pkt->to = sys_le32_to_cpu(hdr->dest);
+	pkt->id = sys_le32_to_cpu(hdr->id);
+	pkt->portnum = data.portnum;
+	memcpy(payload, data.payload.bytes, data.payload.size);
+	pkt->payload = payload;
+	pkt->payload_len = data.payload.size;
+	return true;
+}
+#endif
+
 static bool take_cluster_tx(zephyrtastic_ClusterMessage *out, uint32_t *to)
 {
 	struct lora_sim_frame f;
@@ -2453,7 +2567,14 @@ static bool take_cluster_tx(zephyrtastic_ClusterMessage *out, uint32_t *to)
 
 		if (meshtastic_decode_wire_packet(f.data, f.len, 0, 0, &pkt, payload,
 						  sizeof(payload)) != 0) {
+#if defined(CONFIG_MESHTASTIC_PKI)
+			/* A PKC reply to PEER: ours cannot decode it, PEER can. */
+			if (!peer_decrypt(f.data, f.len, &pkt, payload, sizeof(payload))) {
+				continue;
+			}
+#else
 			continue;
+#endif
 		}
 		if (pkt.from != TEST_NODE_ID || pkt.portnum != MESHTASTIC_PORT_PRIVATE) {
 			continue;
@@ -2548,6 +2669,14 @@ ZTEST(mesh_sim, test_cluster_walk_converges_and_applies)
 	trust_peer_as_master(true);
 	wait_cluster_idle();
 	quiesce();
+	/* Newer than anything already held, by construction. It was a fixed
+	 * TEST_EPOCH_MS + 200 s, which only worked while the suite reached this
+	 * test in under ~200 s of simulated time: earlier tests promote base
+	 * sections with stamps from the RUNNING clock, and once that clock passed
+	 * +200 s this node already held a newer display, correctly judged itself
+	 * ahead, and never asked. The PKI configuration runs slower and crossed
+	 * the line -- the test flipped between runs, not the protocol. */
+	base_stamp.physical_ms = MAX(base_stamp.physical_ms, doc_max_stamp().physical_ms + 1000);
 	before_count = meshtastic_cluster_entry_count();
 	meshtastic_cluster_stats_get(&before_st);
 
@@ -3893,7 +4022,13 @@ static void inject_intent_by(uint32_t author, int64_t ms, uint8_t class_id, uint
 	msg.variant.entry.stamp.node_id = author;
 	msg.variant.entry.payload.size = (pb_size_t)len;
 	memcpy(msg.variant.entry.payload.bytes, buf, len);
-	inject_cluster(&msg, TEST_NODE_ID, id);
+	/* A BROADCAST, as a real intent push is. It used to be a unicast, which
+	 * only worked because the PKI-off configs channel-encrypt one: with PKI
+	 * on, a unicast from PEER is a PKC frame, and the id-change rehearsal
+	 * below FORGETS the id this harness sends from -- so no key, no frame.
+	 * What the rehearsal pins is authorship at the cluster layer, which a
+	 * broadcast reaches the same way in every configuration. */
+	inject_cluster(&msg, MESHTASTIC_NODE_BROADCAST, id);
 	k_sleep(K_MSEC(400));
 }
 
@@ -6623,6 +6758,16 @@ static void inject_as(uint32_t author, const struct meshtastic_cluster_key *k, i
 	k_sleep(K_MSEC(300));
 }
 
+/* A stamp that WINS against everything already in the document. The counter
+ * alone is not enough once the whole suite runs here: earlier tests promote
+ * base sections with stamps from the running clock, which outrank it, and a
+ * stale entry is dropped by LWW after the signature gate -- a test that checks
+ * "stored" would then fail for a reason that has nothing to do with signing. */
+static int64_t winning_ms(void)
+{
+	return MAX(doc_max_stamp().physical_ms + 1000, frag_stamp_next());
+}
+
 static bool find_entry(const struct meshtastic_cluster_key *k, struct meshtastic_cluster_entry *out)
 {
 	for (uint16_t i = 0U; meshtastic_cluster_entry_get(i, out); i++) {
@@ -6684,16 +6829,16 @@ ZTEST(mesh_sim, test_cluster_sign_our_own_writes_are_signed)
 	cluster_channel(false);
 }
 
-/* A master's signed BASE entry is accepted with its signature intact. (That a
- * relay then sends the AUTHOR's signature, not its own, is proven in the PKI-off
- * configurations by test_cluster_sig_carried_and_relayed_without_a_verifier:
- * here the served reply is a PKC unicast the harness cannot decrypt.) */
+/* A master's signed BASE entry is accepted with its signature intact -- and
+ * when this node serves it on, as a PKC unicast, the signature it sends is the
+ * MASTER's, not its own. (The serve leg needed the harness to decrypt a reply to
+ * PEER; until agents-ooma.37 it could not, and this test stopped at "stored".) */
 ZTEST(mesh_sim, test_cluster_sign_masters_entry_verifies_and_keeps_its_signature)
 {
 	struct meshtastic_cluster_key k = {.layer = MESHTASTIC_CLUSTER_LAYER_BASE,
 					   .node_id = 0U,
 					   .section = meshtastic_Config_display_tag};
-	struct meshtastic_hlc_stamp s = {.physical_ms = frag_stamp_next(), .node_id = SIGNER_NODE_ID};
+	struct meshtastic_hlc_stamp s = {.physical_ms = winning_ms(), .node_id = SIGNER_NODE_ID};
 	struct meshtastic_cluster_stats a, b;
 	struct meshtastic_cluster_entry e;
 	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
@@ -6718,6 +6863,29 @@ ZTEST(mesh_sim, test_cluster_sign_masters_entry_verifies_and_keeps_its_signature
 		     "master's signed entry not accepted");
 	zassert_true(e.has_sig && memcmp(e.sig, sig, 64U) == 0,
 		     "the stored signature must be the author's, byte for byte");
+
+	{
+		zephyrtastic_ClusterMessage msg, req = zephyrtastic_ClusterMessage_init_zero;
+		bool served = false;
+
+		req.which_variant = zephyrtastic_ClusterMessage_entry_req_tag;
+		req.variant.entry_req.keys_count = 1U;
+		req.variant.entry_req.keys[0].layer = zephyrtastic_ClusterLayer_BASE;
+		req.variant.entry_req.keys[0].section = meshtastic_Config_display_tag;
+		inject_cluster(&req, TEST_NODE_ID, 0x7803U);
+		while (take_cluster_tx(&msg, NULL)) {
+			if (msg.which_variant == zephyrtastic_ClusterMessage_entry_tag &&
+			    msg.variant.entry.stamp.physical_ms == s.physical_ms) {
+				zassert_equal(msg.variant.entry.author_sig.size, 64U,
+					      "the served entry lost its author's signature");
+				zassert_mem_equal(msg.variant.entry.author_sig.bytes, sig, 64U,
+						  "a relay must send the AUTHOR's signature");
+				served = true;
+				break;
+			}
+		}
+		zassert_true(served, "the signed entry was not served (as a PKC reply)");
+	}
 
 	cluster_channel(false);
 }
@@ -6749,7 +6917,7 @@ ZTEST(mesh_sim, test_cluster_sign_forgeries_are_refused)
 	n = encode_display(302U, payload, sizeof(payload));
 
 	/* 1. One flipped bit. */
-	s = (struct meshtastic_hlc_stamp){.physical_ms = frag_stamp_next(), .node_id = SIGNER_NODE_ID};
+	s = (struct meshtastic_hlc_stamp){.physical_ms = winning_ms(), .node_id = SIGNER_NODE_ID};
 	sign_as(signer_priv, &base_disp, &s, false, payload, n, sig);
 	sig[10] ^= 0x01U;
 	meshtastic_cluster_stats_get(&a);
@@ -6761,7 +6929,7 @@ ZTEST(mesh_sim, test_cluster_sign_forgeries_are_refused)
 
 	/* 2. A genuine signature moved to another claimed author (PEER is a master
 	 *    too): the author is inside the signed bytes, so it cannot move. */
-	s = (struct meshtastic_hlc_stamp){.physical_ms = frag_stamp_next(), .node_id = SIGNER_NODE_ID};
+	s = (struct meshtastic_hlc_stamp){.physical_ms = winning_ms(), .node_id = SIGNER_NODE_ID};
 	sign_as(signer_priv, &base_disp, &s, false, payload, n, sig);
 	meshtastic_cluster_stats_get(&a);
 	inject_as(PEER_NODE_ID, &base_disp, s.physical_ms, false, payload, n, sig, 64U, 0x7812U);
@@ -6785,7 +6953,7 @@ ZTEST(mesh_sim, test_cluster_sign_forgeries_are_refused)
 		      "exactly one refusal, and it must be the signature's");
 
 	/* 4. A signature that is neither absent nor 64 bytes. */
-	s = (struct meshtastic_hlc_stamp){.physical_ms = frag_stamp_next(), .node_id = SIGNER_NODE_ID};
+	s = (struct meshtastic_hlc_stamp){.physical_ms = winning_ms(), .node_id = SIGNER_NODE_ID};
 	meshtastic_cluster_stats_get(&a);
 	inject_as(SIGNER_NODE_ID, &base_disp, s.physical_ms, false, payload, n, sig, 40U, 0x7814U);
 	meshtastic_cluster_stats_get(&b);
@@ -6795,7 +6963,7 @@ ZTEST(mesh_sim, test_cluster_sign_forgeries_are_refused)
 	/* 5. Signed by an author this node knows but holds no key for: refused,
 	 *    not stored unverified for peers who CAN check to reject forever. */
 	announce(NOKEY_NODE_ID, NULL);
-	s = (struct meshtastic_hlc_stamp){.physical_ms = frag_stamp_next(), .node_id = NOKEY_NODE_ID};
+	s = (struct meshtastic_hlc_stamp){.physical_ms = winning_ms(), .node_id = NOKEY_NODE_ID};
 	sign_as(signer_priv, &nokey, &s, false, payload, n, sig);
 	meshtastic_cluster_stats_get(&a);
 	inject_as(NOKEY_NODE_ID, &nokey, s.physical_ms, false, payload, n, sig, 64U, 0x7815U);
@@ -6814,7 +6982,7 @@ ZTEST(mesh_sim, test_cluster_sign_fragmented_entry_verifies_after_reassembly)
 	struct meshtastic_cluster_key k = {.layer = MESHTASTIC_CLUSTER_LAYER_NODE,
 					   .node_id = SIGNER_NODE_ID,
 					   .section = meshtastic_Config_device_tag};
-	struct meshtastic_hlc_stamp s = {.physical_ms = frag_stamp_next(), .node_id = SIGNER_NODE_ID};
+	struct meshtastic_hlc_stamp s = {.physical_ms = winning_ms(), .node_id = SIGNER_NODE_ID};
 	struct meshtastic_cluster_stats a, b;
 	struct meshtastic_cluster_entry e;
 	uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
@@ -6860,7 +7028,7 @@ ZTEST(mesh_sim, test_cluster_sign_unsigned_still_accepted_and_counted)
 		struct meshtastic_cluster_key k = {.layer = MESHTASTIC_CLUSTER_LAYER_BASE,
 						   .section = meshtastic_Config_display_tag};
 
-		inject_as(PEER_NODE_ID, &k, frag_stamp_next(), false, payload, n, NULL, 0U,
+		inject_as(PEER_NODE_ID, &k, winning_ms(), false, payload, n, NULL, 0U,
 			  0x7831U);
 	}
 	meshtastic_cluster_stats_get(&b);
