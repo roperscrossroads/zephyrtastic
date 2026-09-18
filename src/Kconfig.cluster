@@ -126,12 +126,60 @@ config MESHTASTIC_CLUSTER_PEERS
 
 config MESHTASTIC_CLUSTER_MAX_ENTRIES
 	int "Cluster document capacity (entries)"
+	default 128 if ESP_SPIRAM
+	default 48 if SOC_NRF52840
 	default 32
-	range 12 256
+	range 14 256
 	help
-	  base sections + per-node pins the document can hold. 32 covers a
-	  five-node fleet pinning everything. ~168 B RAM per entry (PSRAM on
-	  boards that have it).
+	  The boards deliberately do NOT carry the same number, because what
+	  binds is not the same on each (2026-09-18):
+
+	    ESP_SPIRAM (Heltec V4/R8)  128 -- the table lands in PSRAM on
+	                                     exactly this condition (it is the
+	                                     gate MESHTASTIC_EXT_RAM_BSS_ATTR
+	                                     itself uses), and the storage
+	                                     partition is 512 KB. 128 signed
+	                                     entries is ~29 KB of PSRAM and
+	                                     ~22 KB of that partition --
+	                                     nothing scarce -- and covers a
+	                                     16-node fleet pinning everything.
+	    nRF52840 (XIAO)             48 -- internal RAM only, and a 32 KB
+	                                     storage partition shared with the
+	                                     security config, NodeDB warm keys,
+	                                     the clock and lockdown. 48 is what
+	                                     that carries signed with room to
+	                                     garbage-collect.
+	    everything else             32 -- unchanged.
+
+	  Gate on ESP_SPIRAM and NOT on SOC_SERIES_ESP32S3: the V3 is an
+	  ESP32-S3 with no PSRAM, so keying on the SoC would put 21 KB of table
+	  into internal DRAM on the one ESP32-S3 board that cannot spare it
+	  (see agents-wu94.6, and the V3 trap written up in
+	  meshtastic_ext_ram.h). Capacity and placement must share a condition.
+
+	  A node that cannot hold the fleet's document is not broken: it
+	  narrows to CORE and keeps converging. Sizing the big boards up just
+	  means the fleet keeps a full copy somewhere -- which is what makes
+	  the §2.3 restore path work at all.
+
+	  base sections + per-node pins the document can hold. A fully-pinned
+	  fleet needs 7 + 7*N entries -- the allowlist is seven sections, once
+	  at BASE and once per node -- so 32 covers three nodes pinning
+	  everything, not five as this text claimed until 2026-09-18. Real
+	  fleets pin one or two sections per node, so the practical need is
+	  nearer 7 + 2*N; size for the pessimistic case anyway, because
+	  outgrowing this is not an error. A node over capacity NARROWS ITS
+	  SCOPE CLAIM to CORE (below) and keeps converging, which is correct
+	  but silent -- it stops being able to serve other nodes their entries
+	  back, and nothing on the node says so until someone reads the scope.
+
+	  ~168 B RAM per entry, 232 B with CONFIG_MESHTASTIC_CLUSTER_SIGN.
+	  PSRAM on boards that have it (the V4 family), internal RAM otherwise.
+	  On flash-poor boards the STORAGE PARTITION binds well before RAM
+	  does: one settings record per entry is ~65-145 B (~130-210 B signed),
+	  and the XIAO's partition is 32 KB shared with the security config,
+	  the NodeDB warm keys, the clock and lockdown -- which is why the
+	  boards do not carry the same number.
 
 	  The floor is twice the shareable-section allowlist, because that is
 	  what a CORE-scope node needs to hold its own claim (base + its own
