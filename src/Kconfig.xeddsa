@@ -26,10 +26,46 @@ config MESHTASTIC_XEDDSA
 	  Check the headroom before adding this to an image that is already close
 	  to the ceiling.
 
+config MESHTASTIC_XEDDSA_SIGN_CORE
+	bool
+	depends on MESHTASTIC_XEDDSA
+	help
+	  The XEdDSA signing primitive, and the ONE thread it runs on. Not user
+	  visible: selected by whichever feature needs to sign --
+	  MESHTASTIC_XEDDSA_SIGN (mesh packets) or MESHTASTIC_CLUSTER_SIGN
+	  (cluster entries) -- so a node can sign fleet config without also
+	  signing every packet it originates.
+
+	  Signing runs on a dedicated thread rather than the caller's because
+	  the caller can be any thread at all, and signing needs ~2 KB of frames
+	  (ge_scalarmult_base 512 B, the sign routine 480 B, key derivation
+	  240 B, SHA-512, the scalar arithmetic). Doing it on the caller's stack
+	  is exactly what boot-looped rzr1 and rzr2 on 2026-09-17: the frames
+	  landed on meshtastic_nodeinfo and gnss_send, sized years before any
+	  curve arithmetic (agents-ooma.35). One thread means one stack pays,
+	  sized once, measurable once.
+
+	  Costs the signing stack in INTERNAL RAM (a thread stack may never sit
+	  in PSRAM, see meshtastic_ext_ram.h) and ~38 KB of flash for the
+	  base-point table the linker otherwise drops.
+
+config MESHTASTIC_XEDDSA_SIGN_STACK_SIZE
+	int "Stack for the signing thread (bytes)"
+	depends on MESHTASTIC_XEDDSA_SIGN_CORE
+	default 8192 if ARCH_POSIX
+	default 3584
+	help
+	  The signing chain is ~2 KB of frames on Xtensa (-fstack-usage), plus
+	  the PSA random draw for the hedged nonce. native_sim is 64-bit and
+	  frames there are roughly double, hence its own default. Measure on
+	  hardware (`kernel stacks`) before shrinking it: this is internal RAM
+	  on a courier image that is already near its DRAM ceiling.
+
 config MESHTASTIC_XEDDSA_SIGN
 	bool "Sign our own broadcasts with XEdDSA"
 	default n
 	depends on MESHTASTIC_XEDDSA
+	select MESHTASTIC_XEDDSA_SIGN_CORE
 	help
 	  Sign the packets this node originates, so peers can authenticate them
 	  instead of trusting the sender id. Without this the node verifies

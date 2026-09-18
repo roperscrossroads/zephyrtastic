@@ -488,3 +488,28 @@ size_t meshtastic_cluster_signing_buffer(uint8_t *buf, size_t cap,
 	}
 	return (size_t)(p - buf);
 }
+
+enum meshtastic_cluster_sig_verdict
+meshtastic_cluster_sig_policy(size_t sig_len, bool require_signed, bool author_is_self,
+			      bool can_verify, bool have_key, bool verifies)
+{
+	if (sig_len == 0U) {
+		/* Our own entries are exempt: this node wrote them. */
+		return (require_signed && !author_is_self) ? MESHTASTIC_CLUSTER_SIG_REFUSE_UNSIGNED
+							   : MESHTASTIC_CLUSTER_SIG_ACCEPT_UNSIGNED;
+	}
+	if (sig_len != MESHTASTIC_CLUSTER_SIG_LEN) {
+		return MESHTASTIC_CLUSTER_SIG_REFUSE_MALFORMED;
+	}
+	if (!can_verify) {
+		/* Carry it unverified rather than strip it: stripping would turn every
+		 * signed entry passing through into an unsigned one downstream. */
+		return MESHTASTIC_CLUSTER_SIG_ACCEPT_UNCHECKED;
+	}
+	if (!have_key) {
+		/* Not stored unverified: a node that relays bytes it could not check
+		 * is how one frame plants an entry every verifying peer refuses. */
+		return MESHTASTIC_CLUSTER_SIG_REFUSE_NO_KEY;
+	}
+	return verifies ? MESHTASTIC_CLUSTER_SIG_ACCEPT_VERIFIED : MESHTASTIC_CLUSTER_SIG_REFUSE_BAD;
+}

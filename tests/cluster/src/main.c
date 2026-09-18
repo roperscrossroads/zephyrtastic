@@ -1262,3 +1262,30 @@ ZTEST(cluster_doc, test_signature_is_not_part_of_the_digest)
 	(void)meshtastic_cluster_doc_accept_signed(&doc, &k, &s, false, v, 1, sig);
 	zassert_equal(meshtastic_cluster_doc_hash(&doc), unsigned_hash, NULL);
 }
+
+/* The whole signature policy table. Every refusal row is something a channel
+ * member can send on purpose, so each is pinned by name. */
+ZTEST(cluster_doc, test_sig_policy_table)
+{
+#define P(len, req, self, can, key, ok) meshtastic_cluster_sig_policy(len, req, self, can, key, ok)
+	/* Unsigned: accepted, unless required -- and our own entries never refused. */
+	zassert_equal(P(0, false, false, true, false, false), MESHTASTIC_CLUSTER_SIG_ACCEPT_UNSIGNED);
+	zassert_equal(P(0, true, false, true, false, false), MESHTASTIC_CLUSTER_SIG_REFUSE_UNSIGNED);
+	zassert_equal(P(0, true, true, true, false, false), MESHTASTIC_CLUSTER_SIG_ACCEPT_UNSIGNED,
+		      "a node must never refuse its own entries for being unsigned");
+	/* Wrong length: refused whatever else is true -- including a "verifies". */
+	zassert_equal(P(63, false, false, true, true, true), MESHTASTIC_CLUSTER_SIG_REFUSE_MALFORMED);
+	zassert_equal(P(65, false, false, false, false, false),
+		      MESHTASTIC_CLUSTER_SIG_REFUSE_MALFORMED);
+	/* Present and checkable. */
+	zassert_equal(P(64, false, false, true, true, true), MESHTASTIC_CLUSTER_SIG_ACCEPT_VERIFIED);
+	zassert_equal(P(64, false, false, true, true, false), MESHTASTIC_CLUSTER_SIG_REFUSE_BAD);
+	zassert_equal(P(64, true, true, true, true, false), MESHTASTIC_CLUSTER_SIG_REFUSE_BAD,
+		      "being the author does not excuse a bad signature");
+	/* Present, no key: refused, not stored unverified. */
+	zassert_equal(P(64, false, false, true, false, false), MESHTASTIC_CLUSTER_SIG_REFUSE_NO_KEY);
+	/* No verifier in this build: carried, not stripped. */
+	zassert_equal(P(64, true, false, false, false, false),
+		      MESHTASTIC_CLUSTER_SIG_ACCEPT_UNCHECKED);
+#undef P
+}

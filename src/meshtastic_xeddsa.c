@@ -287,7 +287,7 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 	return !strict;
 }
 
-#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN_CORE)
 /* ==========================================================================
  * Signing. Reference: meshtastic/Crypto XEdDSA::sign -- whose source carries no licence
  * (SIGNING-AND-IDENTITY-DESIGN.md §6.1), so this is written from the scheme and pinned
@@ -403,4 +403,4 @@ out:
 	}
 	return ok;
 }
-#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */
+#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN_CORE */

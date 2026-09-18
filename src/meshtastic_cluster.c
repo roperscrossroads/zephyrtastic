@@ -128,6 +128,12 @@
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_hlc.h"
 #include "meshtastic_modules.h"
+#include "meshtastic_pki.h"
+#if defined(CONFIG_MESHTASTIC_XEDDSA)
+#include "meshtastic_xeddsa.h"
+BUILD_ASSERT(MESHTASTIC_CLUSTER_SIG_LEN == MESHTASTIC_XEDDSA_SIGNATURE_LEN,
+	     "a cluster signature is an XEdDSA signature");
+#endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -146,6 +152,9 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 /* A fragment is part of a payload, so it can never usefully exceed one. Equal
  * is fine and simply means nothing ever fragments. */
+BUILD_ASSERT(sizeof(((zephyrtastic_ClusterEntry *)NULL)->author_sig.bytes) ==
+		     MESHTASTIC_CLUSTER_SIG_LEN,
+	     "cluster.options author_sig must hold exactly one signature");
 BUILD_ASSERT(MESHTASTIC_CLUSTER_FRAG_MAX <= MESHTASTIC_CLUSTER_PAYLOAD_MAX,
 	     "the wire fragment cap cannot exceed what an entry may hold");
 /* The whole envelope must fit a frame's Data payload with margin for the Data
@@ -651,12 +660,24 @@ bool meshtastic_cluster_channel_resolved(uint8_t *ch_index)
  * is stamp + tombstone + payload, packed. Mirrors the hlc/config parallel-
  * subtree pattern: nothing existing is touched. */
 
+/*
+ * `flags` was once a plain tombstone byte holding 0 or 1, which is what lets it
+ * grow without a format break: bit 0 is still the tombstone, and bit 1 says a
+ * 64-byte author signature FOLLOWS the payload (agents-ooma.31). Every record an
+ * older build wrote reads exactly as before. The reverse -- an older build
+ * reading a signed record -- fails closed: it sees a non-zero "tombstone" with a
+ * payload, its section check refuses that, and the entry is re-pulled from the
+ * fleet rather than loaded wrong.
+ */
+#define CLUSTER_REC_TOMBSTONE BIT(0)
+#define CLUSTER_REC_SIGNED    BIT(1)
+
 struct cluster_rec {
 	int64_t physical_ms;
 	uint32_t counter;
 	uint32_t author;
-	uint8_t tombstone;
-	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint8_t flags;
+	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX + MESHTASTIC_CLUSTER_SIG_LEN];
 } __packed;
 
 static void rec_name(const struct meshtastic_cluster_key *key, char *buf, size_t len)
@@ -672,12 +693,17 @@ static void persist_entry(const struct meshtastic_cluster_entry *e)
 		.physical_ms = e->stamp.physical_ms,
 		.counter = e->stamp.counter,
 		.author = e->stamp.node_id,
-		.tombstone = e->tombstone ? 1U : 0U,
+		.flags = (e->tombstone ? CLUSTER_REC_TOMBSTONE : 0U) |
+			 (e->has_sig ? CLUSTER_REC_SIGNED : 0U),
 	};
 	char name[40];
 	size_t len = offsetof(struct cluster_rec, payload) + e->payload_len;
 
 	memcpy(rec.payload, e->payload, e->payload_len);
+	if (e->has_sig) {
+		memcpy(rec.payload + e->payload_len, e->sig, MESHTASTIC_CLUSTER_SIG_LEN);
+		len += MESHTASTIC_CLUSTER_SIG_LEN;
+	}
 	rec_name(&e->key, name, sizeof(name));
 	if (meshtastic_lockdown_save_one(name, &rec, len) != 0) {
 		LOG_WRN("cluster: persist of %s failed", name);
@@ -873,6 +899,16 @@ static int cluster_settings_set(const char *key, size_t len, settings_read_cb re
 	stamp.counter = rec.counter;
 	stamp.node_id = rec.author;
 	plen = len - offsetof(struct cluster_rec, payload);
+	if ((rec.flags & CLUSTER_REC_SIGNED) != 0U) {
+		if (plen < MESHTASTIC_CLUSTER_SIG_LEN) {
+			return -EINVAL;
+		}
+		plen -= MESHTASTIC_CLUSTER_SIG_LEN; /* the signature trails the payload */
+	}
+	if (plen > MESHTASTIC_CLUSTER_PAYLOAD_MAX ||
+	    (rec.flags & ~(CLUSTER_REC_TOMBSTONE | CLUSTER_REC_SIGNED)) != 0U) {
+		return -EINVAL; /* a flag this build does not know: do not guess */
+	}
 
 	/* Flash is more trusted than the air, but not exempt: these same records
 	 * may have been accepted by an older build with laxer rules, so the load
@@ -880,9 +916,13 @@ static int cluster_settings_set(const char *key, size_t len, settings_read_cb re
 	 * should never have stored. Authorship is deliberately NOT re-checked
 	 * here — it depends on the NodeDB, and refusing a persisted entry because
 	 * we have not re-learned a master's key yet would throw away this node's
-	 * own configuration on every cold boot. */
+	 * own configuration on every cold boot. The signature is not re-verified
+	 * either, for the same reason: it was verified on the way in, and the
+	 * author's key may not be back in the NodeDB yet. It is carried so this
+	 * node can still pass it on. */
 	if (!section_shareable(k.section) ||
-	    !payload_is_its_section(k.section, rec.payload, plen, rec.tombstone != 0U)) {
+	    !payload_is_its_section(k.section, rec.payload, plen,
+				    (rec.flags & CLUSTER_REC_TOMBSTONE) != 0U)) {
 		LOG_WRN("cluster: dropping persisted %s — it does not pass the current "
 			"ingest rules", key);
 		return 0;
@@ -904,8 +944,9 @@ static int cluster_settings_set(const char *key, size_t len, settings_read_cb re
 			return 0;
 		}
 	}
-	(void)meshtastic_cluster_doc_accept(&cluster.doc, &k, &stamp, rec.tombstone != 0U,
-					    rec.payload, plen);
+	(void)meshtastic_cluster_doc_accept_signed(
+		&cluster.doc, &k, &stamp, (rec.flags & CLUSTER_REC_TOMBSTONE) != 0U, rec.payload,
+		plen, (rec.flags & CLUSTER_REC_SIGNED) != 0U ? rec.payload + plen : NULL);
 	(void)meshtastic_hlc_observe(&cluster.hlc, &stamp);
 	k_mutex_unlock(&cluster_lock);
 	return 0;
@@ -1377,8 +1418,15 @@ static uint16_t entry_to_pb_frag(const struct meshtastic_cluster_entry *e, uint1
 	if (take > 0U) {
 		memcpy(out->payload.bytes, e->payload + *off, take);
 	}
-	/* author_sig stays empty: the field exists so the frame budget accounts
-	 * for it, but nothing signs yet (agents-ooma.31). */
+	/* The author's signature rides the LAST fragment only: it covers the
+	 * whole reassembled entry, and 66 bytes on every fragment would buy
+	 * nothing. The frame budget in cluster.options is sized for exactly this
+	 * -- a last fragment carrying a full cap AND a signature. A relay sends
+	 * the signature it stored, which is the author's, never one of its own. */
+	if (e->has_sig && (uint32_t)*off + take >= e->payload_len) {
+		out->author_sig.size = MESHTASTIC_CLUSTER_SIG_LEN;
+		memcpy(out->author_sig.bytes, e->sig, MESHTASTIC_CLUSTER_SIG_LEN);
+	}
 	return (uint16_t)(*off + take);
 }
 
@@ -2588,11 +2636,120 @@ static bool reassemble_entry(uint32_t from, const zephyrtastic_ClusterEntry *e,
 	return true;
 }
 
+static void sig_count(uint32_t *counter)
+{
+	k_mutex_lock(&cluster_lock, K_FOREVER);
+	(*counter)++;
+	k_mutex_unlock(&cluster_lock);
+}
+
+/*
+ * The author-signature gate (agents-ooma.31). Runs on the fully reassembled
+ * entry, after the cheap gates and the section check -- a verify is the most
+ * expensive thing ingest does, so it goes last. @p e is the fragment that
+ * COMPLETED the entry, which is the one the signature rides.
+ *
+ * The rules, and why each:
+ *  - a present signature must verify, under every setting. An honest node never
+ *    sends a bad one, so a bad one is a forgery or a bug, and either way the
+ *    entry is not what it claims to be;
+ *  - a signature we cannot check, because we have not learned the author's key
+ *    yet, is REFUSED rather than stored. Storing it unverified would make this
+ *    node relay whatever bytes arrived to peers that CAN check -- a way for one
+ *    frame to plant an entry that every verifying node then refuses forever.
+ *    Refusing costs nothing: the entry is not in our document, the next digest
+ *    mismatches, and the walk retries once NodeInfo has brought the key;
+ *  - no signature at all is accepted unless CLUSTER_SIG_REQUIRED, because a fleet
+ *    adopts signing one node at a time. Our own entries are exempt: this node
+ *    wrote them.
+ *
+ * A build without MESHTASTIC_XEDDSA cannot check anything. It stores and relays
+ * the signature unverified -- the one case where that is right, because the
+ * alternative, stripping it, would downgrade every signed entry that passes
+ * through to unsigned for every node downstream.
+ */
+static bool entry_signature_ok(const struct meshtastic_cluster_key *key,
+			       const struct meshtastic_hlc_stamp *stamp,
+			       const zephyrtastic_ClusterEntry *e, const uint8_t *payload,
+			       uint16_t payload_len, const uint8_t **sig_out)
+{
+	const bool self = stamp->node_id == meshtastic_get_node_id();
+	const bool can_verify = IS_ENABLED(CONFIG_MESHTASTIC_XEDDSA);
+	bool have_key = false;
+	bool verifies = false;
+	enum meshtastic_cluster_sig_verdict v;
+
+	*sig_out = NULL;
+
+#if defined(CONFIG_MESHTASTIC_XEDDSA)
+	if (e->author_sig.size == MESHTASTIC_CLUSTER_SIG_LEN) {
+		/* Static: RX dispatch is single-threaded (see cluster_on_packet), and
+		 * the signing buffer is up to ~190 bytes on a thread that already
+		 * carries the verifier's 2.3 KB frame. */
+		static uint8_t buf[MESHTASTIC_CLUSTER_SIGBUF_MAX];
+		uint8_t pub[MESHTASTIC_XEDDSA_KEY_LEN];
+		size_t n;
+
+		if (self) {
+			have_key = meshtastic_pki_get_public_key(pub) == sizeof(pub);
+		} else {
+			/* The NodeDB's stored key only -- never the PKI's pending slot,
+			 * whose key is unverified by definition and must not vouch for
+			 * its own node (the packet verifier's rule, for the same reason). */
+			have_key = meshtastic_nodedb_copy_pubkey(stamp->node_id, pub) == 0;
+		}
+		if (have_key) {
+			n = meshtastic_cluster_signing_buffer(buf, sizeof(buf), key, stamp,
+							      e->tombstone, payload, payload_len);
+			verifies = n > 0U &&
+				   meshtastic_xeddsa_verify(pub, buf, n, e->author_sig.bytes);
+		}
+	}
+#endif
+
+	v = meshtastic_cluster_sig_policy(e->author_sig.size,
+					  IS_ENABLED(CONFIG_MESHTASTIC_CLUSTER_SIG_REQUIRED), self,
+					  can_verify, have_key, verifies);
+	switch (v) {
+	case MESHTASTIC_CLUSTER_SIG_ACCEPT_VERIFIED:
+		sig_count(&cluster.stats.sig_verified);
+		break;
+	case MESHTASTIC_CLUSTER_SIG_ACCEPT_UNSIGNED:
+		sig_count(&cluster.stats.sig_unsigned);
+		break;
+	case MESHTASTIC_CLUSTER_SIG_ACCEPT_UNCHECKED:
+		break;
+	case MESHTASTIC_CLUSTER_SIG_REFUSE_UNSIGNED:
+		sig_count(&cluster.stats.sig_refused_unsigned);
+		refuse_entry("unsigned, and this node requires signatures", stamp->node_id);
+		return false;
+	case MESHTASTIC_CLUSTER_SIG_REFUSE_MALFORMED:
+		sig_count(&cluster.stats.sig_refused_malformed);
+		refuse_entry("author signature is neither absent nor 64 bytes", stamp->node_id);
+		return false;
+	case MESHTASTIC_CLUSTER_SIG_REFUSE_NO_KEY:
+		sig_count(&cluster.stats.sig_refused_no_key);
+		refuse_entry("signed by an author whose key this node has not learned",
+			     stamp->node_id);
+		return false;
+	case MESHTASTIC_CLUSTER_SIG_REFUSE_BAD:
+	default:
+		sig_count(&cluster.stats.sig_refused_bad);
+		refuse_entry("author signature does NOT verify", stamp->node_id);
+		return false;
+	}
+	if (e->author_sig.size == MESHTASTIC_CLUSTER_SIG_LEN) {
+		*sig_out = e->author_sig.bytes;
+	}
+	return true;
+}
+
 static void on_entry(uint32_t from, const zephyrtastic_ClusterEntry *e)
 {
 	struct meshtastic_cluster_key key;
 	struct meshtastic_hlc_stamp stamp;
 	const uint8_t *payload = NULL;
+	const uint8_t *sig = NULL;
 	uint16_t payload_len = 0U;
 	bool changed = false;
 	int ret;
@@ -2693,11 +2850,14 @@ static void on_entry(uint32_t from, const zephyrtastic_ClusterEntry *e)
 		refuse_entry("payload is not the section its key claims", key.section);
 		return;
 	}
+	if (!entry_signature_ok(&key, &stamp, e, payload, payload_len, &sig)) {
+		return;
+	}
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
 	(void)meshtastic_hlc_observe(&cluster.hlc, &stamp);
-	ret = meshtastic_cluster_doc_accept(&cluster.doc, &key, &stamp, e->tombstone, payload,
-					    payload_len);
+	ret = meshtastic_cluster_doc_accept_signed(&cluster.doc, &key, &stamp, e->tombstone,
+						   payload, payload_len, sig);
 	if (ret == 1) {
 		persist_entry(meshtastic_cluster_doc_find(&cluster.doc, &key));
 		cluster.stats.entry_rx_applied++;
@@ -2876,18 +3036,59 @@ static void push_kick(void)
  * matters for a tombstone too, where there is no value to carry: the tombstone
  * has to out-rank the store's current version or `unpin` cannot revert it.
  */
+#if defined(CONFIG_MESHTASTIC_CLUSTER_SIGN)
+/*
+ * Sign a version this node is about to write. Called with cluster_lock held,
+ * which is what serialises the static buffers (the same discipline as
+ * tx_work_fn's message) -- and holding it across the signature is deliberate:
+ * the entry must not be visible to a peer until it is signed. See
+ * MESHTASTIC_CLUSTER_SIGN for why "sign it afterwards" is not recoverable.
+ *
+ * The signing itself happens on the signing thread (meshtastic_pki_sign_bytes);
+ * this thread only waits, so no writer's stack -- the shell's, the courier's --
+ * ever carries the curve arithmetic. That thread never takes cluster_lock, so
+ * waiting on it here cannot deadlock.
+ *
+ * NULL on failure: the write still happens, unsigned, and is counted. Refusing
+ * a local write because signing failed would turn a crypto hiccup into a node
+ * that cannot be configured.
+ */
+static const uint8_t *sign_entry_locked(const struct meshtastic_cluster_key *key,
+					const struct meshtastic_hlc_stamp *stamp, bool tombstone,
+					const uint8_t *payload, size_t payload_len)
+{
+	static uint8_t buf[MESHTASTIC_CLUSTER_SIGBUF_MAX];
+	static uint8_t sig[MESHTASTIC_CLUSTER_SIG_LEN];
+	size_t n = meshtastic_cluster_signing_buffer(buf, sizeof(buf), key, stamp, tombstone,
+						     payload, payload_len);
+	int ret = (n == 0U) ? -EMSGSIZE : meshtastic_pki_sign_bytes(buf, n, sig);
+
+	if (ret != 0) {
+		cluster.stats.sig_sign_failed++;
+		LOG_WRN("cluster: could not sign our own entry (%d) -- stored UNSIGNED", ret);
+		return NULL;
+	}
+	cluster.stats.sig_signed++;
+	return sig;
+}
+#endif
+
 static int doc_write_local(const struct meshtastic_cluster_key *key,
 			   const struct meshtastic_hlc_stamp *store_stamp, bool tombstone,
 			   const uint8_t *payload, size_t payload_len,
 			   struct meshtastic_hlc_stamp *minted)
 {
+	const uint8_t *sig = NULL;
 	int ret;
 
 	k_mutex_lock(&cluster_lock, K_FOREVER);
 	meshtastic_hlc_observe(&cluster.hlc, store_stamp);
 	meshtastic_hlc_local(&cluster.hlc, meshtastic_get_node_id(), minted);
-	ret = meshtastic_cluster_doc_accept(&cluster.doc, key, minted, tombstone, payload,
-					    payload_len);
+#if defined(CONFIG_MESHTASTIC_CLUSTER_SIGN)
+	sig = sign_entry_locked(key, minted, tombstone, payload, payload_len);
+#endif
+	ret = meshtastic_cluster_doc_accept_signed(&cluster.doc, key, minted, tombstone, payload,
+						   payload_len, sig);
 	if (ret == -ENOSPC) {
 		/* Our OWN write, refused for room. The most honest overflow
 		 * signal there is -- nobody chose this key for us -- and the one
@@ -2896,8 +3097,8 @@ static int doc_write_local(const struct meshtastic_cluster_key *key,
 		 * those, so the retry is not optimism: a CORE claim is inside
 		 * the table's floor by construction, and this key is in it. */
 		demote_locked("a local write had nowhere to go");
-		ret = meshtastic_cluster_doc_accept(&cluster.doc, key, minted, tombstone,
-						    payload, payload_len);
+		ret = meshtastic_cluster_doc_accept_signed(&cluster.doc, key, minted, tombstone,
+							   payload, payload_len, sig);
 	}
 	if (ret == 1) {
 		persist_entry(meshtastic_cluster_doc_find(&cluster.doc, key));

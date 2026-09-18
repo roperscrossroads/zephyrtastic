@@ -215,6 +215,23 @@ struct meshtastic_cluster_stats {
 	uint32_t push_tx;
 	uint32_t push_suppressed;
 
+	/* Author signatures (agents-ooma.31). The interesting readings:
+	 *   sig_signed climbing on the master and nowhere else -- as designed;
+	 *   sig_refused_bad > 0 -- someone presented a signature that does not
+	 *     verify, which an honest node never does: a forgery, or a bug;
+	 *   sig_refused_no_key -- a signed entry from an author whose key we have
+	 *     not learned yet; retried by the next digest, so transient;
+	 *   sig_unsigned -- accepted unsigned, the rollout-era normal; it should
+	 *     fall to zero once the master has re-minted everything it wrote. */
+	uint32_t sig_signed;	     /* entries we authored and signed */
+	uint32_t sig_sign_failed;    /* we meant to sign and could not: stored unsigned */
+	uint32_t sig_verified;	     /* inbound, signature checked and good */
+	uint32_t sig_unsigned;	     /* inbound unsigned, accepted (policy allows) */
+	uint32_t sig_refused_bad;    /* signature present and WRONG */
+	uint32_t sig_refused_no_key; /* signed by an author whose key we lack */
+	uint32_t sig_refused_malformed; /* neither 0 nor 64 bytes */
+	uint32_t sig_refused_unsigned;	/* unsigned, and CLUSTER_SIG_REQUIRED */
+
 	/* The reconciler (effective(me) → config store). */
 	uint32_t sections_applied;
 	uint32_t sections_kept_local; /* our store's version was newer */

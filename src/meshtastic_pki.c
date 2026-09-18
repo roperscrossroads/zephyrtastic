@@ -400,9 +400,84 @@ int meshtastic_pki_encrypt(uint32_t to, uint32_t from, uint32_t id, const uint8_
 	return 0;
 }
 
-#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN_CORE)
 #include "meshtastic_xeddsa.h"
 
+/*
+ * THE SIGNING THREAD. One work queue with one right-sized stack; every signature
+ * this node makes through meshtastic_pki_sign_bytes is computed here, whichever
+ * thread asked. A request is handed over under sign_lock (one in flight) and the
+ * caller sleeps on sign_done.
+ */
+static K_THREAD_STACK_DEFINE(sign_stack, CONFIG_MESHTASTIC_XEDDSA_SIGN_STACK_SIZE);
+static struct k_work_q sign_q;
+static K_MUTEX_DEFINE(sign_lock);
+static K_SEM_DEFINE(sign_done, 0, 1);
+static bool sign_q_started;
+static struct {
+	struct k_work work;
+	const uint8_t *msg;
+	size_t len;
+	uint8_t *sig;
+	int ret;
+} sign_req;
+
+static void sign_work_fn(struct k_work *work)
+{
+	uint8_t z[32];
+
+	ARG_UNUSED(work);
+	/* Hedging only: the nonce already derives from the key and the message, so
+	 * a weak Z costs defence in depth, never correctness. */
+	if (psa_generate_random(z, sizeof(z)) != PSA_SUCCESS) {
+		LOG_WRN("XEdDSA: no randomness for the signing nonce; hedging degraded");
+	}
+	sign_req.ret = meshtastic_xeddsa_sign(g_priv, sign_req.msg, sign_req.len, z, sign_req.sig)
+			       ? 0
+			       : -EIO;
+	k_sem_give(&sign_done);
+}
+
+int meshtastic_pki_sign_bytes(const uint8_t *msg, size_t len, uint8_t sig[64])
+{
+	int ret;
+
+	if (msg == NULL || sig == NULL || len == 0U) {
+		return -EINVAL;
+	}
+	if (!meshtastic_pki_have_key()) {
+		return -EACCES;
+	}
+	if (k_is_in_isr()) {
+		return -EWOULDBLOCK;
+	}
+
+	k_mutex_lock(&sign_lock, K_FOREVER);
+	if (!sign_q_started) {
+		k_work_queue_start(&sign_q, sign_stack, K_THREAD_STACK_SIZEOF(sign_stack),
+				   K_PRIO_PREEMPT(10), NULL);
+		k_thread_name_set(k_work_queue_thread_get(&sign_q), "xeddsa_sign");
+		k_work_init(&sign_req.work, sign_work_fn);
+		sign_q_started = true;
+	}
+	if (k_current_get() == k_work_queue_thread_get(&sign_q)) {
+		k_mutex_unlock(&sign_lock);
+		return -EWOULDBLOCK;
+	}
+	sign_req.msg = msg;
+	sign_req.len = len;
+	sign_req.sig = sig;
+	sign_req.ret = -EIO;
+	k_sem_reset(&sign_done);
+	(void)k_work_submit_to_queue(&sign_q, &sign_req.work);
+	(void)k_sem_take(&sign_done, K_FOREVER);
+	ret = sign_req.ret;
+	k_mutex_unlock(&sign_lock);
+	return ret;
+}
+#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN_CORE */
+
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
 int meshtastic_pki_sign_packet(uint32_t from_node, uint32_t packet_id, uint32_t portnum,
 			       const uint8_t *payload, size_t payload_len, uint8_t sig[64])
 {

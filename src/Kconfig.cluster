@@ -122,6 +122,48 @@ config MESHTASTIC_CLUSTER_FRAG_TIMEOUT_SEC
 	  owes, so the gap between two fragments of one entry is bounded by
 	  airtime, not by this.
 
+config MESHTASTIC_CLUSTER_SIGN
+	bool "Sign the cluster entries this node authors"
+	default n
+	depends on MESHTASTIC_XEDDSA
+	select MESHTASTIC_XEDDSA_SIGN_CORE
+	help
+	  Every entry this node writes (promote, pin, unpin, fleet desire)
+	  carries an XEdDSA signature by its identity key, so a receiver can
+	  check the author instead of believing the stamp (agents-ooma.31).
+	  Until this existed, anyone holding the cluster PSK could mint an entry
+	  claiming a master wrote it -- including the fleet's firmware intent.
+
+	  This is for the node that AUTHORS fleet config: the master. Every
+	  build with MESHTASTIC_XEDDSA already VERIFIES signed entries; a node
+	  only needs this to produce them. Independent of MESHTASTIC_XEDDSA_SIGN
+	  (packet signing), which is the one that boot-looped the bench.
+
+	  Signing happens BEFORE the entry is visible to anyone, synchronously
+	  on the signing thread. Signing afterwards would leave a window in
+	  which a peer pulls the unsigned version -- and a signed copy of the
+	  same version hashes identically, so that peer would never be
+	  corrected.
+
+	  Costs ~38 KB of flash (the base-point table) and the signing thread's
+	  stack. Heltec-class boards only.
+
+config MESHTASTIC_CLUSTER_SIG_REQUIRED
+	bool "Refuse unsigned entries authored by other nodes"
+	default n
+	depends on MESHTASTIC_XEDDSA
+	help
+	  The second step of the rollout, not the first. Without this a present
+	  signature must be valid -- a bad or unverifiable one is refused -- but
+	  an unsigned entry is still accepted, which is what lets a fleet adopt
+	  signing one node at a time. With it, an unsigned entry from anyone
+	  but this node is refused.
+
+	  Turn it on only after the master signs AND has re-minted what it
+	  authored: an entry written before signing stays unsigned forever
+	  (signed and unsigned copies of one version hash the same, so nothing
+	  replaces it), and this would refuse it.
+
 config MESHTASTIC_CLUSTER_PEERS
 	int "Fleet-view capacity (peers whose digest agreement is remembered)"
 	default 8
@@ -192,9 +234,9 @@ config MESHTASTIC_CLUSTER_MAX_ENTRIES
 	  but silent -- it stops being able to serve other nodes their entries
 	  back, and nothing on the node says so until someone reads the scope.
 
-	  ~168 B RAM per entry today; ~232 B once entries carry their author
-	  signature (agents-ooma.31 -- the 64-byte field is on the wire already,
-	  not yet in the table).
+	  ~233 B RAM per entry: 168 of entry, plus the author's 64-byte
+	  signature and its flag, which every build carries whether or not it
+	  signs -- a node relaying someone else's entry must pass the proof on.
 	  PSRAM on boards that have it (the V4 family), internal RAM otherwise.
 	  On flash-poor boards the STORAGE PARTITION binds well before RAM
 	  does: one settings record per entry is ~65-145 B (~130-210 B signed),

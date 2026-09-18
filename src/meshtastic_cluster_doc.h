@@ -430,4 +430,35 @@ size_t meshtastic_cluster_signing_buffer(uint8_t *buf, size_t cap,
 					 const struct meshtastic_hlc_stamp *stamp, bool tombstone,
 					 const uint8_t *payload, size_t payload_len);
 
+/*
+ * THE SIGNATURE POLICY, as a table (agents-ooma.31). The module works out the
+ * facts -- how long the signature is, whether we could check it, whether we
+ * hold the author's key, whether it verified -- and this decides. Kept pure so
+ * every row, including the CLUSTER_SIG_REQUIRED ones, is tested in
+ * tests/cluster without a radio or a special build.
+ *
+ * @p have_key and @p verifies are only consulted for a 64-byte signature on a
+ * build that CAN verify; pass false otherwise.
+ */
+enum meshtastic_cluster_sig_verdict {
+	MESHTASTIC_CLUSTER_SIG_ACCEPT_VERIFIED,	 /* present, checked, good */
+	MESHTASTIC_CLUSTER_SIG_ACCEPT_UNSIGNED,	 /* absent, and allowed */
+	MESHTASTIC_CLUSTER_SIG_ACCEPT_UNCHECKED, /* present, this build has no verifier */
+	MESHTASTIC_CLUSTER_SIG_REFUSE_UNSIGNED,	 /* absent, and signatures are required */
+	MESHTASTIC_CLUSTER_SIG_REFUSE_MALFORMED, /* neither 0 nor 64 bytes */
+	MESHTASTIC_CLUSTER_SIG_REFUSE_NO_KEY,	 /* present, author's key unknown */
+	MESHTASTIC_CLUSTER_SIG_REFUSE_BAD,	 /* present, and does not verify */
+};
+
+enum meshtastic_cluster_sig_verdict
+meshtastic_cluster_sig_policy(size_t sig_len, bool require_signed, bool author_is_self,
+			      bool can_verify, bool have_key, bool verifies);
+
+static inline bool meshtastic_cluster_sig_accepts(enum meshtastic_cluster_sig_verdict v)
+{
+	return v == MESHTASTIC_CLUSTER_SIG_ACCEPT_VERIFIED ||
+	       v == MESHTASTIC_CLUSTER_SIG_ACCEPT_UNSIGNED ||
+	       v == MESHTASTIC_CLUSTER_SIG_ACCEPT_UNCHECKED;
+}
+
 #endif /* MESHTASTIC_CLUSTER_DOC_H_ */

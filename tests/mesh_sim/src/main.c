@@ -2358,7 +2358,14 @@ static void trust_peer_as_master(bool trusted)
 	ni.payload_len = os.bytes_written;
 	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
 
+	/* Read-modify-write, not a fresh SecurityConfig: in the cluster_sign
+	 * configuration PKI is on, and a fresh one would overwrite this node's
+	 * stored private key with zeros. Only the admin list is ours to change. */
+	if (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &sec) != 0) {
+		sec = (meshtastic_Config)meshtastic_Config_init_zero;
+	}
 	sec.which_payload_variant = meshtastic_Config_security_tag;
+	sec.payload_variant.security.admin_key_count = 0U;
 	if (trusted) {
 		sec.payload_variant.security.admin_key_count = 1U;
 		sec.payload_variant.security.admin_key[0].size = (pb_size_t)sizeof(peer_key);
@@ -6415,3 +6422,451 @@ ZTEST(mesh_sim, test_a_channel_that_never_clears_drops_the_frame_at_the_defer_ca
 
 	lora_sim_set_busy(lora_dev, 0U);
 }
+
+
+#if !defined(CONFIG_MESHTASTIC_XEDDSA)
+/*
+ * A build that cannot verify must still CARRY an author's signature, and a relay
+ * must serve the author's bytes, never strip them or substitute its own -- or a
+ * signed entry would reach every node downstream of it unsigned. Runs in the
+ * PKI-off configurations, which are the ones where the harness can capture a
+ * served (unicast) reply at all.
+ */
+ZTEST(mesh_sim, test_cluster_sig_carried_and_relayed_without_a_verifier)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	zephyrtastic_ClusterMessage req = zephyrtastic_ClusterMessage_init_zero;
+	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	int64_t ms = frag_stamp_next();
+	uint8_t sig[64];
+	size_t n;
+	bool served = false;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	for (size_t i = 0U; i < sizeof(sig); i++) {
+		sig[i] = (uint8_t)(0xC0U + i);
+	}
+	/* nodes/PEER/bluetooth: a key no other test writes. A BASE key would race
+	 * the suite's local promotes, whose stamps come from the running clock and
+	 * outrank this counter's -- the entry would lose LWW and never land. */
+	n = encode_section(meshtastic_Config_bluetooth_tag, payload, sizeof(payload));
+	msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+	msg.variant.entry.has_key = true;
+	msg.variant.entry.key.layer = zephyrtastic_ClusterLayer_NODE;
+	msg.variant.entry.key.node_id = PEER_NODE_ID;
+	msg.variant.entry.key.section = meshtastic_Config_bluetooth_tag;
+	msg.variant.entry.has_stamp = true;
+	msg.variant.entry.stamp.physical_ms = ms;
+	msg.variant.entry.stamp.node_id = PEER_NODE_ID;
+	msg.variant.entry.payload.size = (pb_size_t)n;
+	memcpy(msg.variant.entry.payload.bytes, payload, n);
+	msg.variant.entry.author_sig.size = 64U;
+	memcpy(msg.variant.entry.author_sig.bytes, sig, 64U);
+	inject_cluster(&msg, TEST_NODE_ID, 0x7851U);
+	k_sleep(K_MSEC(300));
+
+	req.which_variant = zephyrtastic_ClusterMessage_entry_req_tag;
+	req.variant.entry_req.keys_count = 1U;
+	req.variant.entry_req.keys[0].layer = zephyrtastic_ClusterLayer_NODE;
+	req.variant.entry_req.keys[0].node_id = PEER_NODE_ID;
+	req.variant.entry_req.keys[0].section = meshtastic_Config_bluetooth_tag;
+	inject_cluster(&req, TEST_NODE_ID, 0x7852U);
+	while (take_cluster_tx(&msg, NULL)) {
+		if (msg.which_variant == zephyrtastic_ClusterMessage_entry_tag &&
+		    msg.variant.entry.key.section == (uint32_t)meshtastic_Config_bluetooth_tag &&
+		    msg.variant.entry.stamp.physical_ms == ms) {
+			zassert_equal(msg.variant.entry.author_sig.size, 64U,
+				      "the relayed entry lost its author's signature");
+			zassert_mem_equal(msg.variant.entry.author_sig.bytes, sig, 64U,
+					  "a relay must serve the AUTHOR's signature");
+			served = true;
+			break;
+		}
+	}
+	zassert_true(served, "the signed entry was not served back");
+
+	cluster_channel(false);
+}
+#endif /* !CONFIG_MESHTASTIC_XEDDSA */
+
+#if defined(CONFIG_MESHTASTIC_CLUSTER_SIGN)
+/* ==========================================================================
+ * Signed cluster entries (agents-ooma.31), end to end on the sim radio.
+ *
+ * Built only in the cluster_sign configuration, which turns PKI, XEdDSA and
+ * CLUSTER_SIGN on and reruns the WHOLE suite under them -- so every earlier
+ * cluster test also proves that signing changes nothing it should not.
+ *
+ * PEER's key is a placeholder that is not a curve point, so PEER cannot sign.
+ * SIGNER is a second peer with a real X25519 keypair, derived at run time from
+ * a fixed private key, announced over NodeInfo and trusted as a master.
+ * ========================================================================== */
+
+#include <psa/crypto.h>
+#include "meshtastic_pki.h"
+#include "meshtastic_xeddsa.h"
+
+#define SIGNER_NODE_ID 0x5160E501U
+#define NOKEY_NODE_ID  0x5160E502U
+
+static const uint8_t signer_priv[32] = {
+	0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1,
+	0x72, 0x51, 0xb2, 0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0,
+	0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+};
+static uint8_t signer_pub[32];
+
+static void announce(uint32_t id, const uint8_t *pub)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet ni = {
+		.from = id,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	if (pub != NULL) {
+		user.public_key.size = 32U;
+		memcpy(user.public_key.bytes, pub, 32U);
+	}
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode failed");
+	ni.payload = buf;
+	ni.payload_len = os.bytes_written;
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+}
+
+/* Announce SIGNER with its real public key and add it to the admin list
+ * alongside PEER, so it may author BASE entries. */
+static void trust_signer(void)
+{
+	psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
+	meshtastic_Config sec;
+	psa_key_id_t id;
+	size_t n;
+
+	psa_set_key_type(&a, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
+	psa_set_key_bits(&a, 255);
+	psa_set_key_usage_flags(&a, PSA_KEY_USAGE_DERIVE);
+	psa_set_key_algorithm(&a, PSA_ALG_ECDH);
+	zassert_equal(psa_import_key(&a, signer_priv, sizeof(signer_priv), &id), PSA_SUCCESS);
+	zassert_equal(psa_export_public_key(id, signer_pub, sizeof(signer_pub), &n), PSA_SUCCESS);
+	(void)psa_destroy_key(id);
+
+	announce(SIGNER_NODE_ID, signer_pub);
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &sec));
+	sec.payload_variant.security.admin_key_count = 2U;
+	sec.payload_variant.security.admin_key[0].size = (pb_size_t)sizeof(peer_key);
+	memcpy(sec.payload_variant.security.admin_key[0].bytes, peer_key, sizeof(peer_key));
+	sec.payload_variant.security.admin_key[1].size = 32U;
+	memcpy(sec.payload_variant.security.admin_key[1].bytes, signer_pub, 32U);
+	zassert_ok(meshtastic_config_store_set_config(&sec), "security write failed");
+}
+
+static void sign_as(const uint8_t priv[32], const struct meshtastic_cluster_key *k,
+		    const struct meshtastic_hlc_stamp *s, bool tomb, const uint8_t *p, size_t n,
+		    uint8_t sig[64])
+{
+	static uint8_t buf[MESHTASTIC_CLUSTER_SIGBUF_MAX];
+	const uint8_t z[32] = {0};
+	size_t bl = meshtastic_cluster_signing_buffer(buf, sizeof(buf), k, s, tomb, p, n);
+
+	zassert_true(bl > 0U, "signing buffer");
+	zassert_true(meshtastic_xeddsa_sign(priv, buf, bl, z, sig), "test signer failed");
+}
+
+/* Send one entry authored by @p author, fragmenting as the module would and
+ * putting @p sig (may be NULL) on the last fragment. */
+static void inject_as(uint32_t author, const struct meshtastic_cluster_key *k, int64_t ms,
+		      bool tomb, const uint8_t *payload, size_t total, const uint8_t *sig,
+		      pb_size_t sig_len, uint32_t id)
+{
+	size_t off = 0U;
+
+	do {
+		zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+		size_t take = MIN(total - off, (size_t)TEST_FRAG_MAX);
+
+		msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+		msg.variant.entry.has_key = true;
+		msg.variant.entry.key.layer = (zephyrtastic_ClusterLayer)k->layer;
+		msg.variant.entry.key.node_id = k->node_id;
+		msg.variant.entry.key.section = k->section;
+		msg.variant.entry.has_stamp = true;
+		msg.variant.entry.stamp.physical_ms = ms;
+		msg.variant.entry.stamp.node_id = author;
+		msg.variant.entry.tombstone = tomb;
+		msg.variant.entry.payload_total = (uint32_t)total;
+		msg.variant.entry.frag_offset = (uint32_t)off;
+		msg.variant.entry.payload.size = (pb_size_t)take;
+		if (take > 0U) {
+			memcpy(msg.variant.entry.payload.bytes, payload + off, take);
+		}
+		if (sig != NULL && off + take >= total) {
+			msg.variant.entry.author_sig.size = sig_len;
+			memcpy(msg.variant.entry.author_sig.bytes, sig, MIN(sig_len, 64U));
+		}
+		/* A BROADCAST, as a real push-on-change is. With PKI on, the
+		 * harness's own wire builder PKC-encrypts any unicast and refuses
+		 * one to a node whose key it lacks -- so a unicast injection here
+		 * would silently never arrive. */
+		inject_cluster(&msg, MESHTASTIC_NODE_BROADCAST, id++);
+		off += take;
+		k_sleep(K_MSEC(120));
+	} while (off < total);
+	k_sleep(K_MSEC(300));
+}
+
+static bool find_entry(const struct meshtastic_cluster_key *k, struct meshtastic_cluster_entry *out)
+{
+	for (uint16_t i = 0U; meshtastic_cluster_entry_get(i, out); i++) {
+		if (meshtastic_cluster_key_cmp(&out->key, k) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool entry_verifies(const struct meshtastic_cluster_entry *e, const uint8_t pub[32])
+{
+	static uint8_t buf[MESHTASTIC_CLUSTER_SIGBUF_MAX];
+	size_t n = meshtastic_cluster_signing_buffer(buf, sizeof(buf), &e->key, &e->stamp,
+						     e->tombstone, e->payload, e->payload_len);
+
+	return e->has_sig && n > 0U && meshtastic_xeddsa_verify(pub, buf, n, e->sig);
+}
+
+/* What THIS node writes is signed by this node's key, the signature verifies,
+ * and it goes out on the wire -- the pin and the tombstone that retracts it. */
+ZTEST(mesh_sim, test_cluster_sign_our_own_writes_are_signed)
+{
+	struct meshtastic_cluster_key k = {.layer = MESHTASTIC_CLUSTER_LAYER_NODE,
+					   .node_id = meshtastic_get_node_id(),
+					   .section = meshtastic_Config_position_tag};
+	struct meshtastic_cluster_stats a, b;
+	struct meshtastic_cluster_entry e;
+	zephyrtastic_ClusterEntry pushed;
+	uint8_t pub[32];
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	zassert_equal(meshtastic_pki_get_public_key(pub), sizeof(pub), "no identity key");
+
+	(void)meshtastic_cluster_unpin(meshtastic_Config_position_tag);
+	quiesce();
+	meshtastic_cluster_stats_get(&a);
+	zassert_ok(meshtastic_cluster_pin(meshtastic_Config_position_tag), "pin failed");
+	meshtastic_cluster_stats_get(&b);
+	zassert_equal(b.sig_signed, a.sig_signed + 1U, "the pin was not signed");
+
+	zassert_true(find_entry(&k, &e), "pin not in the document");
+	zassert_true(entry_verifies(&e, pub),
+		     "our own entry must carry a signature that verifies under our key");
+
+	zassert_true(take_push(meshtastic_Config_position_tag, &pushed), "pin was not pushed");
+	zassert_equal(pushed.author_sig.size, 64U, "the push went out UNSIGNED");
+	zassert_mem_equal(pushed.author_sig.bytes, e.sig, 64U,
+			  "the wire must carry the stored signature");
+
+	/* The retraction is authored too, and signed like any other write. */
+	zassert_ok(meshtastic_cluster_unpin(meshtastic_Config_position_tag), "unpin failed");
+	zassert_true(find_entry(&k, &e) && e.tombstone, "no tombstone");
+	zassert_true(entry_verifies(&e, pub), "the tombstone must be signed as well");
+
+	cluster_channel(false);
+}
+
+/* A master's signed BASE entry is accepted with its signature intact. (That a
+ * relay then sends the AUTHOR's signature, not its own, is proven in the PKI-off
+ * configurations by test_cluster_sig_carried_and_relayed_without_a_verifier:
+ * here the served reply is a PKC unicast the harness cannot decrypt.) */
+ZTEST(mesh_sim, test_cluster_sign_masters_entry_verifies_and_keeps_its_signature)
+{
+	struct meshtastic_cluster_key k = {.layer = MESHTASTIC_CLUSTER_LAYER_BASE,
+					   .node_id = 0U,
+					   .section = meshtastic_Config_display_tag};
+	struct meshtastic_hlc_stamp s = {.physical_ms = frag_stamp_next(), .node_id = SIGNER_NODE_ID};
+	struct meshtastic_cluster_stats a, b;
+	struct meshtastic_cluster_entry e;
+	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint8_t sig[64];
+	size_t n;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	trust_signer();
+	wait_cluster_idle();
+	quiesce();
+
+	n = encode_display(301U, payload, sizeof(payload));
+	sign_as(signer_priv, &k, &s, false, payload, n, sig);
+
+	meshtastic_cluster_stats_get(&a);
+	inject_as(SIGNER_NODE_ID, &k, s.physical_ms, false, payload, n, sig, 64U, 0x7801U);
+	meshtastic_cluster_stats_get(&b);
+
+	zassert_equal(b.sig_verified, a.sig_verified + 1U, "master's signature not verified");
+	zassert_true(find_entry(&k, &e) && e.stamp.physical_ms == s.physical_ms,
+		     "master's signed entry not accepted");
+	zassert_true(e.has_sig && memcmp(e.sig, sig, 64U) == 0,
+		     "the stored signature must be the author's, byte for byte");
+
+	cluster_channel(false);
+}
+
+/* Everything a channel member can do to a signature, refused -- and never
+ * stored, so none of it can be relayed onward. */
+ZTEST(mesh_sim, test_cluster_sign_forgeries_are_refused)
+{
+	struct meshtastic_cluster_key base_disp = {.layer = MESHTASTIC_CLUSTER_LAYER_BASE,
+						   .section = meshtastic_Config_display_tag};
+	struct meshtastic_cluster_key signer_disp = {.layer = MESHTASTIC_CLUSTER_LAYER_NODE,
+						     .node_id = SIGNER_NODE_ID,
+						     .section = meshtastic_Config_display_tag};
+	struct meshtastic_cluster_key nokey = {.layer = MESHTASTIC_CLUSTER_LAYER_NODE,
+					       .node_id = NOKEY_NODE_ID,
+					       .section = meshtastic_Config_display_tag};
+	struct meshtastic_cluster_stats a, b;
+	struct meshtastic_cluster_entry e;
+	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint8_t sig[64];
+	struct meshtastic_hlc_stamp s;
+	size_t n;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	trust_signer();
+	wait_cluster_idle();
+	quiesce();
+	n = encode_display(302U, payload, sizeof(payload));
+
+	/* 1. One flipped bit. */
+	s = (struct meshtastic_hlc_stamp){.physical_ms = frag_stamp_next(), .node_id = SIGNER_NODE_ID};
+	sign_as(signer_priv, &base_disp, &s, false, payload, n, sig);
+	sig[10] ^= 0x01U;
+	meshtastic_cluster_stats_get(&a);
+	inject_as(SIGNER_NODE_ID, &base_disp, s.physical_ms, false, payload, n, sig, 64U, 0x7811U);
+	meshtastic_cluster_stats_get(&b);
+	zassert_equal(b.sig_refused_bad, a.sig_refused_bad + 1U, "a flipped bit was accepted");
+	zassert_false(find_entry(&base_disp, &e) && e.stamp.physical_ms == s.physical_ms,
+		      "a forged entry reached the document");
+
+	/* 2. A genuine signature moved to another claimed author (PEER is a master
+	 *    too): the author is inside the signed bytes, so it cannot move. */
+	s = (struct meshtastic_hlc_stamp){.physical_ms = frag_stamp_next(), .node_id = SIGNER_NODE_ID};
+	sign_as(signer_priv, &base_disp, &s, false, payload, n, sig);
+	meshtastic_cluster_stats_get(&a);
+	inject_as(PEER_NODE_ID, &base_disp, s.physical_ms, false, payload, n, sig, 64U, 0x7812U);
+	meshtastic_cluster_stats_get(&b);
+	zassert_equal(b.sig_refused_bad, a.sig_refused_bad + 1U,
+		      "a signature was transplanted onto another author");
+
+	/* 3. A genuine signature moved to another KEY: the same display payload,
+	 *    signed for base/display, presented as SIGNER's own pin. Same bytes,
+	 *    same author, legal key -- only the signature can object. (The first
+	 *    version of this step used a payload that was not a position config,
+	 *    so the SECTION check refused it and the step passed without the
+	 *    signature ever being looked at.) */
+	meshtastic_cluster_stats_get(&a);
+	inject_as(SIGNER_NODE_ID, &signer_disp, s.physical_ms, false, payload, n, sig, 64U,
+		  0x7813U);
+	meshtastic_cluster_stats_get(&b);
+	zassert_equal(b.sig_refused_bad, a.sig_refused_bad + 1U,
+		      "a signature was moved onto another key");
+	zassert_equal(b.entry_rx_refused, a.entry_rx_refused + 1U,
+		      "exactly one refusal, and it must be the signature's");
+
+	/* 4. A signature that is neither absent nor 64 bytes. */
+	s = (struct meshtastic_hlc_stamp){.physical_ms = frag_stamp_next(), .node_id = SIGNER_NODE_ID};
+	meshtastic_cluster_stats_get(&a);
+	inject_as(SIGNER_NODE_ID, &base_disp, s.physical_ms, false, payload, n, sig, 40U, 0x7814U);
+	meshtastic_cluster_stats_get(&b);
+	zassert_equal(b.sig_refused_malformed, a.sig_refused_malformed + 1U,
+		      "a truncated signature was accepted");
+
+	/* 5. Signed by an author this node knows but holds no key for: refused,
+	 *    not stored unverified for peers who CAN check to reject forever. */
+	announce(NOKEY_NODE_ID, NULL);
+	s = (struct meshtastic_hlc_stamp){.physical_ms = frag_stamp_next(), .node_id = NOKEY_NODE_ID};
+	sign_as(signer_priv, &nokey, &s, false, payload, n, sig);
+	meshtastic_cluster_stats_get(&a);
+	inject_as(NOKEY_NODE_ID, &nokey, s.physical_ms, false, payload, n, sig, 64U, 0x7815U);
+	meshtastic_cluster_stats_get(&b);
+	zassert_equal(b.sig_refused_no_key, a.sig_refused_no_key + 1U,
+		      "a signature we cannot check must be refused");
+	zassert_false(find_entry(&nokey, &e), "an unverifiable entry was stored");
+
+	cluster_channel(false);
+}
+
+/* Signing and fragmentation together: the signature covers the REASSEMBLED
+ * payload and rides the last fragment. */
+ZTEST(mesh_sim, test_cluster_sign_fragmented_entry_verifies_after_reassembly)
+{
+	struct meshtastic_cluster_key k = {.layer = MESHTASTIC_CLUSTER_LAYER_NODE,
+					   .node_id = SIGNER_NODE_ID,
+					   .section = meshtastic_Config_device_tag};
+	struct meshtastic_hlc_stamp s = {.physical_ms = frag_stamp_next(), .node_id = SIGNER_NODE_ID};
+	struct meshtastic_cluster_stats a, b;
+	struct meshtastic_cluster_entry e;
+	uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint8_t sig[64];
+	size_t total;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	trust_signer();
+	wait_cluster_idle();
+	quiesce();
+
+	total = encode_big_device(11U, big, sizeof(big));
+	sign_as(signer_priv, &k, &s, false, big, total, sig);
+	meshtastic_cluster_stats_get(&a);
+	inject_as(SIGNER_NODE_ID, &k, s.physical_ms, false, big, total, sig, 64U, 0x7821U);
+	meshtastic_cluster_stats_get(&b);
+
+	zassert_true(b.frag_assembled > a.frag_assembled, "the entry did not fragment");
+	zassert_equal(b.sig_verified, a.sig_verified + 1U, "signature over reassembly not verified");
+	zassert_true(find_entry(&k, &e) && e.payload_len == total &&
+			     memcmp(e.payload, big, total) == 0 && entry_verifies(&e, signer_pub),
+		     "the signed fragmented entry was not stored whole with its signature");
+
+	cluster_channel(false);
+}
+
+/* Unsigned entries remain acceptable by default -- the rollout depends on it --
+ * and are counted, so an operator can watch them fall to zero. */
+ZTEST(mesh_sim, test_cluster_sign_unsigned_still_accepted_and_counted)
+{
+	struct meshtastic_cluster_stats a, b;
+	uint8_t payload[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t n;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+	n = encode_display(303U, payload, sizeof(payload));
+	meshtastic_cluster_stats_get(&a);
+	{
+		struct meshtastic_cluster_key k = {.layer = MESHTASTIC_CLUSTER_LAYER_BASE,
+						   .section = meshtastic_Config_display_tag};
+
+		inject_as(PEER_NODE_ID, &k, frag_stamp_next(), false, payload, n, NULL, 0U,
+			  0x7831U);
+	}
+	meshtastic_cluster_stats_get(&b);
+	zassert_equal(b.sig_unsigned, a.sig_unsigned + 1U, "unsigned entry not counted");
+	zassert_equal(b.entry_rx_refused, a.entry_rx_refused, "an unsigned entry was refused");
+
+	cluster_channel(false);
+}
+#endif /* CONFIG_MESHTASTIC_CLUSTER_SIGN */

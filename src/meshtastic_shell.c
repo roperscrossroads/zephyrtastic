@@ -6011,6 +6011,16 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		    st.frag_out_of_order ? "  (a fragment arrived at an offset the slot was "
 					   "not expecting — reordering, or a peer probing)"
 					 : "");
+	/* Author signatures (agents-ooma.31). "bad" is the one that should never
+	 * move: an honest node does not send a signature that fails. */
+	shell_print(sh, "sig     : signed=%u sign_failed=%u verified=%u unsigned=%u "
+			"REFUSED bad=%u no_key=%u malformed=%u unsigned=%u%s",
+		    st.sig_signed, st.sig_sign_failed, st.sig_verified, st.sig_unsigned,
+		    st.sig_refused_bad, st.sig_refused_no_key, st.sig_refused_malformed,
+		    st.sig_refused_unsigned,
+		    st.sig_refused_bad ? "  ** an entry arrived with a signature that does not "
+					 "verify — a forgery, or a bug **"
+				       : "");
 
 	/* The per-node rows for THIS node are the ones an operator is reasoning
 	 * about during a pin/unpin, and they are visually identical to every
@@ -6021,10 +6031,13 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		bool mine = (e.key.layer == MESHTASTIC_CLUSTER_LAYER_NODE) &&
 			    (e.key.node_id == meshtastic_get_node_id());
 
-		shell_print(sh, "  [%c/%08x/%u] %s%u B, stamp %lld.%u by 0x%08x%s",
+		/* "signed" means the entry carries its author's signature, which
+		 * this node verified on the way in (or made, if it is the author). */
+		shell_print(sh, "  [%c/%08x/%u] %s%u B, %s, stamp %lld.%u by 0x%08x%s",
 			    e.key.layer == MESHTASTIC_CLUSTER_LAYER_BASE ? 'b' : 'n',
 			    e.key.node_id, (unsigned int)e.key.section,
 			    e.tombstone ? "TOMBSTONE, " : "", (unsigned int)e.payload_len,
+			    e.has_sig ? "signed" : "UNSIGNED",
 			    (long long)e.stamp.physical_ms, e.stamp.counter, e.stamp.node_id,
 			    mine ? (e.tombstone ? "  <- MY UNPIN (base applies)"
 						: "  <- MY PIN (wins over base)")

@@ -106,7 +106,7 @@ void meshtastic_xeddsa_note_tx(bool signed_ok);
 bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 				       meshtastic_MeshPacket *mesh);
 
-#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN_CORE)
 /**
  * Derive the Ed25519 signing key pair from this node's X25519 identity key.
  *
@@ -131,6 +131,6 @@ void meshtastic_xeddsa_derive_ed_keys(const uint8_t x_priv[MESHTASTIC_XEDDSA_KEY
 bool meshtastic_xeddsa_sign(const uint8_t x_priv[MESHTASTIC_XEDDSA_KEY_LEN], const uint8_t *msg,
 			    size_t msg_len, const uint8_t z[MESHTASTIC_XEDDSA_KEY_LEN],
 			    uint8_t sig[MESHTASTIC_XEDDSA_SIGNATURE_LEN]);
-#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */
+#endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN_CORE */
 
 #endif /* MESHTASTIC_XEDDSA_H_ */

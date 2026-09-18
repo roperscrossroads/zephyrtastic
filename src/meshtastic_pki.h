@@ -55,6 +55,24 @@ int meshtastic_pki_sign_packet(uint32_t from_node, uint32_t packet_id, uint32_t 
 			       const uint8_t *payload, size_t payload_len, uint8_t sig[64]);
 #endif
 
+#if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN_CORE)
+/**
+ * Sign @p msg with this node's identity key, on the dedicated signing thread.
+ *
+ * The caller BLOCKS until the signature is made (milliseconds). It exists so the
+ * private scalar never leaves this module and so no caller's stack ever carries
+ * the curve arithmetic -- see MESHTASTIC_XEDDSA_SIGN_CORE for why that matters.
+ * The caller is responsible for domain separation: @p msg must already be a
+ * buffer that cannot be mistaken for any other signed thing (a cluster entry
+ * uses meshtastic_cluster_signing_buffer, whose prefix does exactly that).
+ *
+ * @return 0 on success; -EACCES with no key; -EWOULDBLOCK from an ISR or from
+ *         the signing thread itself (which would deadlock waiting on itself);
+ *         -EIO if the primitive refused the key.
+ */
+int meshtastic_pki_sign_bytes(const uint8_t *msg, size_t len, uint8_t sig[64]);
+#endif
+
 void meshtastic_pki_set_pending_key(uint32_t node, const uint8_t key[MESHTASTIC_PKI_KEY_LEN]);
 bool meshtastic_pki_get_pending_key(uint32_t node, uint8_t out[MESHTASTIC_PKI_KEY_LEN]);
 void meshtastic_pki_clear_pending_key(void);

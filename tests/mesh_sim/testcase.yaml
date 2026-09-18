@@ -48,3 +48,25 @@ tests:
       # allowlist: a CORE claim is twice the allowlist (14), and a cap equal to
       # the claim would leave narrowing nothing to free.
       - CONFIG_MESHTASTIC_CLUSTER_MAX_ENTRIES=16
+
+  # Signed cluster entries (agents-ooma.31): PKI and persistence on, XEdDSA on,
+  # and this node signs what it authors.
+  #
+  # ONLY the signing tests run here, by name. The rest of this suite cannot run
+  # with PKI on, and that is a harness limit, not a finding about signing --
+  # measured 2026-09-18: with PKI on and signing OFF, 34 cluster tests fail
+  # exactly as they do with signing on. The harness builds injected frames with
+  # the node's own wire builder, which PKC-encrypts any unicast and refuses one to
+  # a node whose key it lacks; PEER's key is a placeholder that is not a curve
+  # point; and the harness cannot decrypt a PKC reply addressed to PEER. So every
+  # walk dies, and the retries burn the duty-cycle budget until later tests
+  # cannot transmit at all. The bench runs PKI ON, so mesh_sim has never
+  # exercised the cluster the way the bench runs it: agents-ooma.37.
+  meshtastic.mesh_sim.cluster_sign.native_sim:
+    extra_conf_files:
+      - prj.conf
+      - ../common/pki-psa.conf
+    extra_configs:
+      - CONFIG_MESHTASTIC_XEDDSA=y
+      - CONFIG_MESHTASTIC_CLUSTER_SIGN=y
+      - CONFIG_NATIVE_EXTRA_CMDLINE_ARGS="-test=mesh_sim::test_cluster_sign_our_own_writes_are_signed,mesh_sim::test_cluster_sign_masters_entry_verifies_and_keeps_its_signature,mesh_sim::test_cluster_sign_forgeries_are_refused,mesh_sim::test_cluster_sign_fragmented_entry_verifies_after_reassembly,mesh_sim::test_cluster_sign_unsigned_still_accepted_and_counted"

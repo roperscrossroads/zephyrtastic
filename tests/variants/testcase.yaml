@@ -301,3 +301,26 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_XEDDSA=y
       - CONFIG_MESHTASTIC_XEDDSA_SIGN=y
+
+  # Cluster-entry signing (agents-ooma.31) is default-N, so its untested arm is =Y --
+  # and it is the one build where the signing primitive is selected WITHOUT packet
+  # signing (XEDDSA_SIGN_CORE via CLUSTER_SIGN alone). A build that only ever
+  # compiled the primitive alongside packet signing would not notice anything that
+  # quietly depended on XEDDSA_SIGN.
+  meshtastic.variants.cluster_sign.native_sim:
+    extra_conf_files:
+      - ../common/pki-psa.conf
+    extra_configs:
+      - CONFIG_MESHTASTIC_XEDDSA=y
+      - CONFIG_MESHTASTIC_CLUSTER_SIGN=y
+
+  # The enforcing arm. Default-N and otherwise never compiled: mesh_sim cannot run
+  # its cluster tests with signatures required (they inject unsigned entries), so
+  # its policy is tested as a pure table in tests/cluster and only BUILT here.
+  meshtastic.variants.cluster_sig_required.native_sim:
+    extra_conf_files:
+      - ../common/pki-psa.conf
+    extra_configs:
+      - CONFIG_MESHTASTIC_XEDDSA=y
+      - CONFIG_MESHTASTIC_CLUSTER_SIGN=y
+      - CONFIG_MESHTASTIC_CLUSTER_SIG_REQUIRED=y
