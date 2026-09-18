@@ -110,15 +110,63 @@ message ClusterEntryReq {
 }
 
 // One document entry: broadcast on change, unicast in reply to ClusterEntryReq.
+//
+// FRAGMENTED since 2026-09-18 (agents-ooma.36). `payload` is a FRAGMENT of the
+// entry's payload, not necessarily the whole of it: an entry whose payload
+// exceeds the per-frame cap is sent as several of these, each carrying the same
+// key and stamp and a different `frag_offset`. One unfragmented entry is the
+// ordinary case and costs nothing extra — payload_total equals payload.size and
+// frag_offset is 0.
+//
+// Why, given the document held whole entries happily for a year: a 64-byte
+// author signature (field 15) does not fit beside a full payload. The budget is
+// ClusterMessage_size + 16 <= 233, so a ClusterEntry may be 214 bytes; it was
+// 174 with a 128-byte payload, and the signature costs 66 on the wire. The only
+// field with room was `payload`, and shrinking it to fit put the cap one byte
+// above the largest allowlisted section (DeviceConfig encodes to 102). That cap
+// was ALREADY a ceiling — SecurityConfig (180) and NetworkConfig (204) do not
+// fit 128 even unsigned — and upstream config growth is the one input here we
+// do not control. Fragmenting decouples the payload cap from the frame size, so
+// what a document entry may hold becomes a RAM/NVS choice (see
+// MESHTASTIC_CLUSTER_PAYLOAD_MAX) instead of a protocol cliff we re-hit on
+// every upstream bump.
+//
+// The key and stamp ride in EVERY fragment deliberately. They are what makes a
+// fragment self-identifying, so a receiver runs the whole cheap ingest gate —
+// shareable section, scope, authorship, drift horizon, owner-known — on each
+// fragment BEFORE committing any reassembly buffer to it. Reassembling first
+// and checking after would let anyone holding the channel PSK occupy the
+// reassembly slot with entries that were always going to be refused.
+//
+// An incomplete entry is NOT in the document: it does not affect doc_hash, is
+// never served to a peer, and is never applied. Only a fully reassembled entry
+// merges.
 message ClusterEntry {
   ClusterKey key = 1;
   HlcStamp stamp = 2;
   bool tombstone = 3; // NODE layer only: "no override" — payload empty
-  bytes payload = 4;  // encoded meshtastic.Config, one section; empty iff tombstone
-  // 15 is reserved for a future author signature (CLUSTER-SYNC-M4.md §4): the
-  // channel PSK bounds replication today, and authorship is honour-system
-  // within it until a signing primitive exists.
-  reserved 15;
+  bytes payload = 4;  // THIS FRAGMENT's bytes of the encoded meshtastic.Config
+                      // (one section); empty iff tombstone
+
+  // Total payload length across all fragments, repeated in every fragment so a
+  // receiver can size and sanity-check the reassembly without having seen the
+  // first one. Equals payload.size for an unfragmented entry.
+  uint32 payload_total = 6;
+  // Byte offset of this fragment within the entry's payload. 0 for the first,
+  // and for an unfragmented entry.
+  uint32 frag_offset = 7;
+
+  // The author's signature over the whole (key, stamp, tombstone, payload) —
+  // agents-ooma.31, CLUSTER-SYNC-M4.md §4. Present only on the LAST fragment,
+  // since it covers the reassembled entry and there is no reason to pay 66
+  // bytes on every one.
+  //
+  // DECLARED BUT NEVER POPULATED YET. It is here now so the frame budget is
+  // computed with it included and the BUILD_ASSERT on ClusterMessage_size
+  // enforces the room. Leaving it reserved until the signing work would have
+  // meant re-tuning the fragment cap later — a second breaking change for a
+  // field we already know the size of.
+  bytes author_sig = 15;
 }
 
 // The top-level PRIVATE_APP payload: one port, one envelope, five verbs.

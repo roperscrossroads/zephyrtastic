@@ -2903,6 +2903,461 @@ ZTEST(mesh_sim, test_cluster_entry_payload_must_match_its_claimed_section)
 	cluster_channel(false);
 }
 
+/* ==========================================================================
+ * Entry fragmentation (agents-ooma.36)
+ *
+ * An entry whose payload does not fit one frame travels as several
+ * ClusterEntry frames sharing a key and stamp. What these prove is the seams:
+ * that a big entry survives the round trip byte-for-byte, that a HALF-arrived
+ * one is invisible to the document, and that the reassembly slot cannot be
+ * driven into a state a peer chooses.
+ *
+ * Two things shape how these are written. The suite shares one document, so
+ * every assertion is on stored CONTENT rather than on an entry count -- a
+ * second test writing the same key is an update, not an insert, and a count
+ * delta would depend on which test ran first. And each test seeds a distinct
+ * payload for the same reason: "the new bytes have not landed" is only a
+ * claim if the new bytes differ from whatever a previous test left there.
+ * ========================================================================== */
+
+/* The wire cap, taken from the generated struct exactly as the module takes it,
+ * so this cannot drift away from cluster.options. */
+#define TEST_FRAG_MAX sizeof(((zephyrtastic_ClusterEntry *)NULL)->payload.bytes)
+
+/*
+ * Encode a DeviceConfig big enough that it CANNOT fit one frame, with @p seed
+ * varying the bytes so two calls are distinguishable.
+ *
+ * It has to be `device`: of the seven shareable sections it is the only one
+ * that can exceed the fragment cap today, because it is the only one with a
+ * string in it (tzdef, 65 bytes). Everything else -- lora, position, power,
+ * display, bluetooth, and the private FW intent -- encodes well under one
+ * frame with realistic values. Note that nanopb's generated _size is a WORST
+ * case over maximal varints and is no guide here: LoRaConfig_size is 91, but a
+ * fully-populated LoRaConfig really encodes to about 75.
+ *
+ * Carried at the NODE layer for the PEER, deliberately. effective() reads
+ * nodes/me and base only, so a pin belonging to another node replicates and is
+ * stored without the reconciler ever applying it to this one -- which keeps a
+ * 102-byte device config out of the config store the rest of the suite shares.
+ */
+static size_t encode_big_device(uint8_t seed, uint8_t *buf, size_t buf_len)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, buf_len);
+	meshtastic_Config_DeviceConfig *d = &cfg.payload_variant.device;
+
+	cfg.which_payload_variant = meshtastic_Config_device_tag;
+	d->role = meshtastic_Config_DeviceConfig_Role_ROUTER;
+	d->serial_enabled = true;
+	d->button_gpio = 0xFFFFFFFFU;
+	d->buzzer_gpio = 0xFFFFFFFEU;
+	d->rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_ALL_SKIP_DECODING;
+	d->node_info_broadcast_secs = 0xFFFFFFFDU;
+	d->double_tap_as_button_press = true;
+	d->is_managed = true;
+	d->disable_triple_click = true;
+	d->led_heartbeat_disabled = true;
+	d->buzzer_mode = meshtastic_Config_DeviceConfig_BuzzerMode_ALL_ENABLED;
+	/* Fill tzdef to its capacity: 64 chars plus the NUL. This is what
+	 * pushes the section past one frame. */
+	memset(d->tzdef, 'A' + (seed % 26U), sizeof(d->tzdef) - 1U);
+	d->tzdef[sizeof(d->tzdef) - 1U] = '\0';
+	zassert_true(pb_encode(&os, meshtastic_Config_fields, &cfg), "encode failed");
+
+	/* Self-check: if upstream ever shrinks DeviceConfig, or the fragment cap
+	 * grows past it, these tests would quietly start proving nothing --
+	 * every one of them would take the unfragmented fast path and still
+	 * pass. Fail loudly here instead. */
+	zassert_true(os.bytes_written > TEST_FRAG_MAX,
+		     "this payload must EXCEED one frame or the fragmentation tests prove "
+		     "nothing (encoded %u, fragment cap %u)",
+		     (unsigned int)os.bytes_written, (unsigned int)TEST_FRAG_MAX);
+	return os.bytes_written;
+}
+
+/*
+ * A stamp that beats every stamp handed out before it, in EXECUTION order.
+ *
+ * These tests share one document and ztest does not run them in source order,
+ * so a hardcoded stamp is a coin flip: if a test with a higher stamp happens to
+ * run first, the next test's write loses LWW and is refused as stale -- which
+ * looks exactly like the fragmentation failing. Handing stamps out from a
+ * counter makes each test's write the newest whenever it runs.
+ */
+static int64_t frag_stamp_next(void)
+{
+	static int64_t n;
+
+	return TEST_EPOCH_MS + 6000 + (++n) * 10;
+}
+
+/* Inject ONE fragment of an entry, verbatim -- offsets and totals are the
+ * caller's to choose, including nonsensical ones. */
+static void inject_frag(int64_t ms, const uint8_t *payload, size_t total, size_t off,
+			size_t len, uint32_t id)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+
+	zassert_true(len <= TEST_FRAG_MAX, "a fragment larger than the wire cap cannot be built");
+	msg.which_variant = zephyrtastic_ClusterMessage_entry_tag;
+	msg.variant.entry.has_key = true;
+	msg.variant.entry.key.layer = zephyrtastic_ClusterLayer_NODE;
+	msg.variant.entry.key.node_id = PEER_NODE_ID;
+	msg.variant.entry.key.section = meshtastic_Config_device_tag;
+	msg.variant.entry.has_stamp = true;
+	msg.variant.entry.stamp.physical_ms = ms;
+	msg.variant.entry.stamp.node_id = PEER_NODE_ID;
+	msg.variant.entry.payload_total = (uint32_t)total;
+	msg.variant.entry.frag_offset = (uint32_t)off;
+	msg.variant.entry.payload.size = (pb_size_t)len;
+	if (len > 0U) {
+		memcpy(msg.variant.entry.payload.bytes, payload + off, len);
+	}
+	inject_cluster(&msg, TEST_NODE_ID, id);
+}
+
+/* Send a whole payload as fragments, in order. */
+static void inject_whole(int64_t ms, const uint8_t *payload, size_t total, uint32_t id)
+{
+	size_t off = 0U;
+
+	while (off < total) {
+		size_t take = MIN(total - off, (size_t)TEST_FRAG_MAX);
+
+		inject_frag(ms, payload, total, off, take, id + (uint32_t)off);
+		off += take;
+		k_sleep(K_MSEC(120));
+	}
+	k_sleep(K_MSEC(250));
+}
+
+/* True when the document holds exactly @p want for the peer's device pin. */
+static bool stored_equals(const uint8_t *want, size_t want_len)
+{
+	uint16_t n = meshtastic_cluster_entry_count();
+
+	for (uint16_t i = 0U; i < n; i++) {
+		struct meshtastic_cluster_entry e;
+
+		if (!meshtastic_cluster_entry_get(i, &e)) {
+			continue;
+		}
+		if (e.key.layer != MESHTASTIC_CLUSTER_LAYER_NODE ||
+		    e.key.node_id != PEER_NODE_ID ||
+		    e.key.section != (uint16_t)meshtastic_Config_device_tag) {
+			continue;
+		}
+		return e.payload_len == want_len && memcmp(e.payload, want, want_len) == 0;
+	}
+	return false;
+}
+
+/* THE ROUND TRIP. A payload too big for one frame arrives in two and the
+ * document ends up holding exactly the bytes that were sent -- which is the
+ * whole point of the mechanism and the thing every other test here assumes. */
+ZTEST(mesh_sim, test_cluster_large_entry_arrives_in_fragments_and_merges)
+{
+	uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	size_t total;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	total = encode_big_device(1U, big, sizeof(big));
+	inject_whole(frag_stamp_next(), big, total, 0x7601U);
+
+	zassert_true(stored_equals(big, total),
+		     "a fragmented entry must be in the document, byte-for-byte, once its "
+		     "last fragment arrives");
+
+	cluster_channel(false);
+}
+
+/*
+ * A HALF-ARRIVED ENTRY IS NOT IN THE DOCUMENT.
+ *
+ * This is the property the ingest gate and the digest both depend on. If a
+ * partial entry were merged, doc_hash would change to a value no peer holds
+ * and this node would mismatch everyone until the rest arrived -- and if it
+ * never arrived, forever.
+ */
+ZTEST(mesh_sim, test_cluster_partial_entry_is_invisible_until_complete)
+{
+	uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint32_t before_hash;
+	int64_t stamp;
+	size_t total;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	total = encode_big_device(2U, big, sizeof(big));
+	stamp = frag_stamp_next();
+	before_hash = meshtastic_cluster_doc_hash_now();
+
+	/* Only the first fragment. */
+	inject_frag(stamp, big, total, 0U, TEST_FRAG_MAX, 0x7611U);
+	k_sleep(K_MSEC(400));
+
+	zassert_false(stored_equals(big, total),
+		      "a half-arrived entry must not be in the document");
+	zassert_equal(meshtastic_cluster_doc_hash_now(), before_hash,
+		      "a half-arrived entry must not move doc_hash -- advertising a hash no "
+		      "peer holds would mismatch the whole fleet until the rest arrived");
+
+	/* Now finish it, and it lands. */
+	inject_frag(stamp, big, total, TEST_FRAG_MAX, total - TEST_FRAG_MAX, 0x7612U);
+	k_sleep(K_MSEC(300));
+	zassert_true(stored_equals(big, total), "the entry must land once completed");
+
+	cluster_channel(false);
+}
+
+/*
+ * The reassembly slot accepts only the offset it is expecting. Every rejection
+ * here is a frame a channel member could send deliberately; none may leave the
+ * slot holding a hole, and none may put a partial payload into the document.
+ *
+ * Each case is bracketed by its OWN counter reading. That is not fussiness: the
+ * first version of this test took one reading across all four cases, and a
+ * mutation that disabled the in-order rule entirely still passed it, because
+ * the orphan-fragment case below had already moved the same counter. A shared
+ * reading proves only that SOMETHING was refused.
+ */
+ZTEST(mesh_sim, test_cluster_fragment_slot_cannot_be_driven_by_a_peer)
+{
+	uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	struct meshtastic_cluster_stats a, b;
+	int64_t stamp;
+	size_t total;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	total = encode_big_device(3U, big, sizeof(big));
+	stamp = frag_stamp_next();
+
+	/* 1. A middle fragment with no slot open -- nothing to attach it to. */
+	meshtastic_cluster_stats_get(&a);
+	inject_frag(stamp, big, total, 40U, 20U, 0x7621U);
+	k_sleep(K_MSEC(250));
+	meshtastic_cluster_stats_get(&b);
+	zassert_true(b.frag_out_of_order > a.frag_out_of_order,
+		     "a fragment for an entry we are not assembling has nothing to attach "
+		     "to and must be refused");
+
+	/* 2. Open the slot properly, then offer a fragment at an offset the
+	 *    slot is NOT expecting. The slot is active and matches on key,
+	 *    stamp and peer, so the in-order rule is the only thing that can
+	 *    reject this -- which is what makes the counter delta a proof of
+	 *    that rule specifically. */
+	inject_frag(stamp, big, total, 0U, 40U, 0x7622U);
+	k_sleep(K_MSEC(200));
+	meshtastic_cluster_stats_get(&a);
+	inject_frag(stamp, big, total, 55U, 20U, 0x7623U);
+	k_sleep(K_MSEC(250));
+	meshtastic_cluster_stats_get(&b);
+	zassert_true(b.frag_out_of_order > a.frag_out_of_order,
+		     "a fragment at an offset the slot is not expecting must be refused, "
+		     "not written into the gap -- a hole is a state this reassembler "
+		     "deliberately cannot represent");
+
+	/* 3. A payload claiming to be larger than the table can ever hold, and
+	 *    4. a fragment running off the end of the payload it claims. Both
+	 *    are refused before any buffer is committed, so they land on the
+	 *    refusal counter rather than the ordering one. */
+	meshtastic_cluster_stats_get(&a);
+	inject_frag(stamp, big, MESHTASTIC_CLUSTER_PAYLOAD_MAX + 1U, 0U, 40U, 0x7624U);
+	k_sleep(K_MSEC(200));
+	inject_frag(stamp, big, 10U, 0U, 40U, 0x7625U);
+	k_sleep(K_MSEC(250));
+	meshtastic_cluster_stats_get(&b);
+	zassert_true(b.entry_rx_refused > a.entry_rx_refused,
+		     "a fragment that does not fit the payload it claims must be refused "
+		     "outright, before it can size a buffer");
+
+	zassert_false(stored_equals(big, total),
+		      "no partial, misaligned or out-of-bounds reassembly may reach the "
+		      "document");
+
+	/* The module must still work afterwards -- surviving the frames and
+	 * still converging are different claims. */
+	inject_whole(frag_stamp_next(), big, total, 0x7626U);
+	zassert_true(stored_equals(big, total),
+		     "after all that the module must still ingest a well-formed entry");
+
+	cluster_channel(false);
+}
+
+/*
+ * THE SEND SIDE. Having a big entry, serve it to a peer that asks, and prove we
+ * emit it as several fragments that reassemble to the original.
+ *
+ * The receive tests above would all pass against a sender that never fragments
+ * anything, so this is the half that pins entry_to_pb_frag.
+ */
+ZTEST(mesh_sim, test_cluster_large_entry_is_served_as_fragments)
+{
+	uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint8_t rebuilt[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	zephyrtastic_ClusterMessage msg;
+	zephyrtastic_ClusterMessage req = zephyrtastic_ClusterMessage_init_zero;
+	size_t total;
+	uint16_t seen = 0U;
+	uint16_t next_off = 0U;
+	uint32_t claimed_total = 0U;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	/* Get the big entry into OUR document first. */
+	total = encode_big_device(4U, big, sizeof(big));
+	inject_whole(frag_stamp_next(), big, total, 0x7631U);
+	zassert_true(stored_equals(big, total), "precondition: we must hold the big entry");
+
+	/* Now ask for it back. */
+	req.which_variant = zephyrtastic_ClusterMessage_entry_req_tag;
+	req.variant.entry_req.keys_count = 1U;
+	req.variant.entry_req.keys[0].layer = zephyrtastic_ClusterLayer_NODE;
+	req.variant.entry_req.keys[0].node_id = PEER_NODE_ID;
+	req.variant.entry_req.keys[0].section = meshtastic_Config_device_tag;
+	inject_cluster(&req, TEST_NODE_ID, 0x7639U);
+
+	while (take_cluster_tx(&msg, NULL)) {
+		const zephyrtastic_ClusterEntry *e = &msg.variant.entry;
+
+		if (msg.which_variant != zephyrtastic_ClusterMessage_entry_tag || !e->has_key ||
+		    e->key.section != (uint32_t)meshtastic_Config_device_tag) {
+			continue;
+		}
+		zassert_equal(e->frag_offset, next_off,
+			      "fragments must be served in order from offset 0 -- the receive "
+			      "side accepts nothing else");
+		if (seen == 0U) {
+			claimed_total = e->payload_total;
+		} else {
+			zassert_equal(e->payload_total, claimed_total,
+				      "every fragment of an entry must claim the same total");
+		}
+		memcpy(rebuilt + e->frag_offset, e->payload.bytes, e->payload.size);
+		next_off = (uint16_t)(e->frag_offset + e->payload.size);
+		seen++;
+		if (next_off >= claimed_total) {
+			break;
+		}
+	}
+
+	zassert_true(seen >= 2U,
+		     "an entry larger than one frame must be SERVED as more than one "
+		     "fragment (saw %u)",
+		     (unsigned int)seen);
+	zassert_equal((size_t)claimed_total, total, "served payload_total %u != %u",
+		      (unsigned int)claimed_total, (unsigned int)total);
+	zassert_mem_equal(rebuilt, big, total,
+			  "the fragments we served must reassemble to the entry we hold");
+
+	cluster_channel(false);
+}
+
+/*
+ * An entry REPLACED by a shorter one while a serve is in flight.
+ *
+ * The send path re-reads the document for every fragment, so a newer version of
+ * the same key can merge mid-send. If that version is shorter than the offset
+ * already reached, the remaining-bytes arithmetic (unsigned, 16-bit) underflows
+ * and the fragment memcpy reads ~64 KB past the entry. A guard in
+ * tx_next_locked restarts the entry instead; it was found by reading the diff,
+ * not by a failure.
+ *
+ * ⚠️ READ BEFORE TRUSTING THIS TEST: it does NOT reproduce that underflow, and
+ * removing the guard does not make it fail. Measured 2026-09-18 -- injecting a
+ * frame takes ~2 s of simulated time while the node is transmitting (the
+ * injection waits on the sim radio), and the two fragments of an entry are only
+ * CLUSTER_TX_GAP_MS = 500 ms apart, so a replacement cannot be landed between
+ * them from here. Timing the injection into the gap, and waiting to capture the
+ * first fragment before injecting, were both tried and both miss.
+ *
+ * What it DOES prove is worth keeping: the replace-while-serving path is
+ * survived end to end, every fragment actually served describes bytes inside
+ * the payload it claims, and the document converges on the newer entry. The
+ * invariant assertions would catch the bug if the race ever did land. Do not
+ * read a passing run as coverage of the guard -- that needs hardware, or a
+ * harness that can inject without waiting on the radio.
+ */
+ZTEST(mesh_sim, test_cluster_entry_replaced_mid_serve_is_survived)
+{
+	uint8_t big[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	uint8_t small[MESHTASTIC_CLUSTER_PAYLOAD_MAX];
+	zephyrtastic_ClusterMessage msg;
+	zephyrtastic_ClusterMessage req = zephyrtastic_ClusterMessage_init_zero;
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(small, sizeof(small));
+	size_t total;
+	size_t small_len;
+	uint16_t frames = 0U;
+
+	cluster_channel(true);
+	trust_peer_as_master(true);
+	wait_cluster_idle();
+	quiesce();
+
+	total = encode_big_device(5U, big, sizeof(big));
+	inject_whole(frag_stamp_next(), big, total, 0x7641U);
+
+	/* A minimal device config for the same key -- far shorter than the one
+	 * being served. */
+	cfg.which_payload_variant = meshtastic_Config_device_tag;
+	cfg.payload_variant.device.node_info_broadcast_secs = 900U;
+	zassert_true(pb_encode(&os, meshtastic_Config_fields, &cfg), "encode failed");
+	small_len = os.bytes_written;
+	zassert_true(small_len < TEST_FRAG_MAX,
+		     "the replacement must be shorter than a fragment");
+
+	/* Ask for the big one, then replace it while the reply is in flight. */
+	req.which_variant = zephyrtastic_ClusterMessage_entry_req_tag;
+	req.variant.entry_req.keys_count = 1U;
+	req.variant.entry_req.keys[0].layer = zephyrtastic_ClusterLayer_NODE;
+	req.variant.entry_req.keys[0].node_id = PEER_NODE_ID;
+	req.variant.entry_req.keys[0].section = meshtastic_Config_device_tag;
+	inject_cluster(&req, TEST_NODE_ID, 0x7642U);
+	inject_frag(frag_stamp_next(), small, small_len, 0U, small_len, 0x7643U);
+
+	while (frames < 8U && take_cluster_tx(&msg, NULL)) {
+		const zephyrtastic_ClusterEntry *e = &msg.variant.entry;
+
+		if (msg.which_variant != zephyrtastic_ClusterMessage_entry_tag || !e->has_key ||
+		    e->key.section != (uint32_t)meshtastic_Config_device_tag) {
+			continue;
+		}
+		frames++;
+		zassert_true(e->payload_total <= MESHTASTIC_CLUSTER_PAYLOAD_MAX,
+			     "a served fragment claimed a payload larger than any entry can "
+			     "hold (%u) -- the send cursor ran past the end of a replaced "
+			     "entry",
+			     (unsigned int)e->payload_total);
+		zassert_true((size_t)e->frag_offset + e->payload.size <= e->payload_total,
+			     "a served fragment described bytes outside its own payload "
+			     "(offset %u + %u > total %u)",
+			     (unsigned int)e->frag_offset, (unsigned int)e->payload.size,
+			     (unsigned int)e->payload_total);
+	}
+
+	zassert_true(frames > 0U, "the request must have been served at all");
+	zassert_true(stored_equals(small, small_len),
+		     "the newer, shorter entry must be what the document ends up holding");
+
+	cluster_channel(false);
+}
+
 #if defined(CONFIG_MESHTASTIC_FLEET)
 /* ==========================================================================
  * Fleet firmware intent (DECLARATIVE-FLEET.md §7): the private FW section.

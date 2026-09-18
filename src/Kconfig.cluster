@@ -103,6 +103,25 @@ config MESHTASTIC_CLUSTER_SYNC_TIMEOUT_SEC
 	  when this fires: the documents still differ, so the next digest
 	  starts the walk again.
 
+config MESHTASTIC_CLUSTER_FRAG_TIMEOUT_SEC
+	int "Abandon a half-received entry after (seconds)"
+	default 60
+	range 5 3600
+	help
+	  An entry whose payload does not fit one frame arrives as several,
+	  reassembled in a single slot. A sender that stops mid-entry must not
+	  hold that slot forever (CLUSTER-SYNC-M4.md §4.2: nothing may run
+	  away), so it is abandoned after this long without a fragment.
+
+	  Nothing is lost when it fires, for the same reason the pull timeout
+	  above loses nothing: the entry is still missing, so the next digest
+	  mismatches and the walk asks again.
+
+	  Time it generously rather than tightly. The sender spaces fragments
+	  by CLUSTER_TX_GAP_MS and they queue behind whatever else the radio
+	  owes, so the gap between two fragments of one entry is bounded by
+	  airtime, not by this.
+
 config MESHTASTIC_CLUSTER_PEERS
 	int "Fleet-view capacity (peers whose digest agreement is remembered)"
 	default 8

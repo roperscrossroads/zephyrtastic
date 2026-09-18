@@ -180,6 +180,27 @@ struct meshtastic_cluster_stats {
 	uint32_t scope_demotions;   /* times table pressure narrowed the claim */
 	uint32_t backstop_walks;    /* scheduled self-checks a narrowed node ran */
 	uint32_t entry_rx_future;   /* stamped beyond the clock drift horizon */
+
+	/* Entry fragmentation (agents-ooma.36). An entry whose payload exceeds
+	 * one frame arrives as several ClusterEntry frames sharing a key and
+	 * stamp; see the reassembly slot in meshtastic_cluster.c.
+	 *
+	 * frag_rx counts fragments consumed into the slot, NOT entries: a
+	 * two-fragment entry that merges shows frag_rx 1, frag_assembled 1 and
+	 * entry_rx_applied 1, because the last fragment completes rather than
+	 * being held.
+	 *
+	 * frag_out_of_order is the in-order rule biting, and on a healthy fleet
+	 * it should be near zero -- our own sender emits in order, so a reading
+	 * that climbs means either reordering in the mesh or a peer probing the
+	 * slot. frag_displaced means a second peer's entry evicted one we were
+	 * part way through; both recover on the next digest and neither costs
+	 * correctness. */
+	uint32_t frag_rx;
+	uint32_t frag_assembled;   /* fragments that completed an entry */
+	uint32_t frag_out_of_order; /* not the offset the slot was expecting */
+	uint32_t frag_displaced;    /* a different entry took the slot mid-way */
+	uint32_t frag_timed_out;    /* the slot was abandoned unfinished */
 	uint32_t rx_unsolicited;   /* a reply we had not asked for */
 	uint32_t tx_busy;	   /* a peer asked while we were serving another */
 

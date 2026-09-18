@@ -1,10 +1,30 @@
 # nanopb sizing for the cluster-sync messages (docs/CLUSTER-SYNC-M4.md §3).
 #
-# payload: an encoded meshtastic.Config carrying ONE allowlisted section. The
-# largest v1 section (DeviceConfig, 100 B) plus the oneof wrapper fits well
-# inside 128; a build-side static assert pins ClusterMessage_size under the
-# Data-payload budget so this cap can never silently outgrow a frame.
-*ClusterEntry.payload    max_size:128
+# payload: ONE FRAGMENT of an encoded meshtastic.Config section, NOT the whole
+# entry payload -- those are two different caps now (agents-ooma.36). What a
+# document entry may hold is MESHTASTIC_CLUSTER_PAYLOAD_MAX, a RAM/NVS choice;
+# what fits one frame is this, a wire fact. Before fragmentation they had to be
+# the same number and the BUILD_ASSERT in meshtastic_cluster.c tied them.
+#
+# 88 is the largest value that leaves a signed last fragment inside the frame
+# budget. The arithmetic, since it is not obvious and is easy to erode:
+#
+#   budget        ClusterMessage_size + 16 <= 233   =>  ClusterEntry <= 214
+#   fixed cost    key 16 + stamp 25 + tombstone 2                     43
+#   fragmentation payload_total 6 + frag_offset 6                     12
+#   signature     author_sig, on the last fragment only               66
+#   fragment      this cap + tag + len                            88 + 2
+#                                                              --------
+#                                                                    211
+#
+# The key and stamp are in every fragment on purpose (see cluster.proto), which
+# is what makes the 43 a per-FRAGMENT cost rather than a per-entry one. Raising
+# this cap costs frame budget one-for-one; the BUILD_ASSERT is what notices.
+*ClusterEntry.payload    max_size:88
+
+# The author signature over a reassembled entry. Ed25519, so this is not a
+# tunable -- 64 is the signature size.
+*ClusterEntry.author_sig max_size:64
 
 # 4 rows x 43 B (generated KeyStamp_size 41 + repeated overhead) keeps a full
 # ClusterVector inside one frame's Data budget; larger documents resume via
@@ -13,7 +33,9 @@
 *ClusterVector.entries   max_count:4
 *ClusterEntryReq.keys    max_count:6
 
-# Firmware intent: 4 classes covers this fleet twice; a row is ~18 B, so a
-# full FleetIntent is ~72 B inside the 128-byte payload cap.
+# Firmware intent: 4 classes covers this fleet twice; a row is ~18 B, so a full
+# FleetIntent is ~72 B -- inside MESHTASTIC_CLUSTER_PAYLOAD_MAX (128) as an
+# entry, and inside the 88-byte fragment cap above, so the fleet's own intent
+# still travels in a single frame.
 *ClassIntent.hash_prefix max_size:4
 *FleetIntent.rows        max_count:4
