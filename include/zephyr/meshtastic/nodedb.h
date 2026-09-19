@@ -197,6 +197,23 @@ int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
 				    const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
 
 /**
+ * @brief Learn that @p node_num is a known XEdDSA signer, from a signature this node just
+ *        verified (never from an inbound claim -- reference NodeDB::isKnownXeddsaSigner /
+ *        the bit checkXeddsaReceivePolicy sets on a successful verify). Creates the hot
+ *        entry if this node has none yet, and mirrors the flag into the warm tier so a
+ *        later hot-store eviction does not forget it (agents-ooma.32) -- a peer re-admitted
+ *        from the warm tier restores it, the same way it already restores role (B-5).
+ *        A no-op for node 0 or our own id.
+ */
+void meshtastic_nodedb_note_xeddsa_signer(uint32_t node_num);
+
+/**
+ * @brief Whether @p node_num is a known XEdDSA signer -- the hot entry's bit if it has one,
+ *        else the warm tier's mirror of it. False for an unknown node.
+ */
+bool meshtastic_nodedb_is_xeddsa_signer(uint32_t node_num);
+
+/**
  * @brief True if either end of a packet is a favorited node.
  *
  * Mirrors the reference NodeDB::isFromOrToFavoritedNode. Used by the relay path:

@@ -103,11 +103,13 @@ bool meshtastic_xeddsa_verify(const uint8_t curve_pub[MESHTASTIC_XEDDSA_KEY_LEN]
  * ========================================================================== */
 
 #include <pb_decode.h>
+#include <pb_encode.h>
 
 #include <zephyr/sys/crc.h>
 
 #include <zephyr/meshtastic/nodedb.h>
 
+#include "meshtastic/telemetry.pb.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 
@@ -184,6 +186,74 @@ static bool verify_first_contact_nodeinfo(const struct meshtastic_packet *pkt,
 	return true;
 }
 
+/*
+ * Whether a decoded Data, canonicalized and sized as if it carried a real signature, would
+ * still have fit the frame -- the same fit rule sign_our_packet already applies on the TX
+ * side (meshtastic_packet.c), reused here so the two never disagree about what "would have
+ * fit signed" means. Canonicalizing first (decode as the known type, re-encode) strips any
+ * padding a forger left in Data.payload: without that, an unsigned broadcast could be
+ * inflated past the signable budget on paper and dodge the downgrade-drop below. Reference:
+ * Router.cpp canonicalSignableSize + the size check in checkXeddsaReceivePolicy's Balanced
+ * branch.
+ *
+ * Sizes only what this build's schema decodes as Position/Telemetry/NodeInfo (User);
+ * anything else, or a payload that fails to decode as its own type, falls back to the raw
+ * encoded size with a full signature attached -- matching upstream's own fallback. Mutates
+ * @p data's payload/signature size fields and restores them before returning either way.
+ *
+ * Static scratch, not stack: these decoded structs are large for the smaller MCU targets.
+ * Safe because this runs synchronously inside meshtastic_xeddsa_check_rx_policy, which this
+ * port calls from one RX-processing context at a time, never reentered mid-check.
+ */
+static bool signed_form_would_fit(meshtastic_Data *data)
+{
+	static union {
+		meshtastic_Position position;
+		meshtastic_Telemetry telemetry;
+		meshtastic_User user;
+	} inner;
+	const pb_msgdesc_t *fields = NULL;
+	const pb_size_t saved_payload_size = data->payload.size;
+	const pb_size_t saved_sig_size = data->xeddsa_signature.size;
+	size_t canonical_payload;
+	size_t signed_size;
+	bool fits;
+
+	switch (data->portnum) {
+	case meshtastic_PortNum_POSITION_APP:
+		fields = meshtastic_Position_fields;
+		break;
+	case meshtastic_PortNum_TELEMETRY_APP:
+		fields = meshtastic_Telemetry_fields;
+		break;
+	case meshtastic_PortNum_NODEINFO_APP:
+		fields = meshtastic_User_fields;
+		break;
+	default:
+		break;
+	}
+
+	if (fields != NULL) {
+		pb_istream_t is = pb_istream_from_buffer(data->payload.bytes, data->payload.size);
+
+		memset(&inner, 0, sizeof(inner));
+		if (pb_decode(&is, fields, &inner) &&
+		    pb_get_encoded_size(&canonical_payload, fields, &inner) &&
+		    canonical_payload <= data->payload.size) {
+			data->payload.size = (pb_size_t)canonical_payload;
+		}
+	}
+
+	data->xeddsa_signature.size = MESHTASTIC_XEDDSA_SIGNATURE_LEN;
+	memset(data->xeddsa_signature.bytes, 0, MESHTASTIC_XEDDSA_SIGNATURE_LEN);
+	fits = pb_get_encoded_size(&signed_size, meshtastic_Data_fields, data) &&
+	       MESHTASTIC_HDR_LEN + signed_size <= MESHTASTIC_PKT_MAX;
+
+	data->payload.size = saved_payload_size;
+	data->xeddsa_signature.size = saved_sig_size;
+	return fits;
+}
+
 bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 				       meshtastic_MeshPacket *mesh)
 {
@@ -217,13 +287,36 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 				(unsigned int)pkt->from);
 			return false;
 		}
+		/* BALANCED's extra rule (agents-ooma.32): drop an unsigned broadcast from a node
+		 * KNOWN to sign, unless its signed form genuinely would not have fit. Unicasts
+		 * get the same treatment only when WE are a licensed sender -- mirrors
+		 * sign_our_packet's own signable rule (meshtastic_packet.c) and upstream's
+		 * checkXeddsaReceivePolicy, which checks the RECEIVER's own owner.is_licensed
+		 * here, not the sender's. mesh == NULL (the flat-struct fallback boundary) has
+		 * no Data to canonicalize -- want_response/bitfield/emoji have no flat-struct
+		 * home -- so it falls through to the same "never drop on a sizing failure" rule
+		 * a genuine sizing failure gets. */
+		if (policy == meshtastic_Config_SecurityConfig_PacketSignaturePolicy_PACKET_SIGNATURE_POLICY_BALANCED &&
+		    mesh != NULL && meshtastic_nodedb_is_xeddsa_signer(pkt->from)) {
+			const bool broadcast = (pkt->to == MESHTASTIC_NODE_BROADCAST);
+			bool is_licensed = false;
+
+			if (!broadcast) {
+				bool is_unmessagable = false;
+
+				meshtastic_config_store_get_owner_flags(&is_licensed,
+									&is_unmessagable);
+			}
+			if ((broadcast || is_licensed) &&
+			    signed_form_would_fit(&mesh->decoded)) {
+				stats.balanced_drop++;
+				LOG_WRN("XEdDSA: dropped unsigned packet from 0x%08x that "
+					"previously signed (balanced)",
+					(unsigned int)pkt->from);
+				return false;
+			}
+		}
 		stats.unsigned_ok++;
-		/* COMPATIBLE and BALANCED both accept here. BALANCED's extra rule -- drop an
-		 * unsigned signable broadcast from a node KNOWN to sign -- is deliberately not
-		 * implemented yet: it needs a per-node signer flag that survives warm-tier
-		 * eviction (see the trap in SIGNING-AND-IDENTITY-DESIGN.md §7), so a half
-		 * version would forget the protection exactly when a node ages out and call
-		 * that "balanced". Until then BALANCED behaves as COMPATIBLE. */
 		return true;
 	}
 
@@ -261,6 +354,11 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 		}
 		mesh->xeddsa_signed = true;
 		stats.verified++;
+		/* agents-ooma.32: learn this node as a signer so a later unsigned signable
+		 * broadcast from it is dropped under BALANCED. The node already has a key on
+		 * file (that is what we just verified against), so its warm-tier slot -- if
+		 * it isn't hot-resident -- already exists and this reaches it. */
+		meshtastic_nodedb_note_xeddsa_signer(pkt->from);
 		LOG_DBG("XEdDSA: verified signature from 0x%08x", (unsigned int)pkt->from);
 		return true;
 	}
@@ -272,6 +370,14 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 		mesh->xeddsa_signed = true;
 		stats.verified++;
 		stats.bootstrapped++;
+		/* Marks the HOT entry immediately -- BALANCED protection is live right away.
+		 * The warm tier catches up on this node's next verified signature instead of
+		 * this one: verify_first_contact_nodeinfo deliberately does not commit the key
+		 * here (see its own comment), so no warm slot exists yet for this node to mark
+		 * a signer on. A first-contact node that is evicted before its next signed
+		 * packet loses BALANCED protection for that one window -- acceptable, and no
+		 * worse than the status quo before this bead. */
+		meshtastic_nodedb_note_xeddsa_signer(pkt->from);
 		LOG_INF("XEdDSA: verified first-contact NodeInfo from 0x%08x",
 			(unsigned int)pkt->from);
 		return true;

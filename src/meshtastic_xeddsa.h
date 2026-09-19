@@ -76,6 +76,7 @@ struct meshtastic_xeddsa_stats {
 	uint32_t bootstrapped;  /**< first-contact NodeInfo whose id committed to its key */
 	uint32_t unsigned_ok;   /**< unsigned, accepted under the policy */
 	uint32_t unsigned_drop; /**< unsigned, dropped (STRICT) */
+	uint32_t balanced_drop; /**< unsigned, dropped (BALANCED: from a known signer, would have fit signed) */
 	uint32_t signed_tx;     /**< packets we signed on the way out */
 	uint32_t sign_skipped;  /**< we would have signed, but the signed form did not fit */
 };

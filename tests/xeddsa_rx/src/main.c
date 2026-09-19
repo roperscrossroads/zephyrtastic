@@ -24,11 +24,14 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/ztest.h>
 
+#include <pb_encode.h>
+
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
 #include <meshtastic/lora_sim.h>
 
 #include "meshtastic/mesh.pb.h"
+#include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_pki.h"
@@ -80,6 +83,11 @@ static void make(const struct mt_xeddsa_vector *v, struct meshtastic_packet *pkt
 	mesh->from = v->from;
 	mesh->id = v->id;
 	mesh->decoded.portnum = (meshtastic_PortNum)v->portnum;
+	/* Matches production (meshtastic_router.c materializes pkt FROM decoded_mesh, so both
+	 * always carry the same bytes): needed so a BALANCED size check on mesh->decoded sees
+	 * the real payload instead of an empty one (agents-ooma.32's tests below). */
+	mesh->decoded.payload.size = (pb_size_t)v->payload_len;
+	memcpy(mesh->decoded.payload.bytes, v->payload, v->payload_len);
 	if (with_signature) {
 		mesh->decoded.xeddsa_signature.size = 64;
 		memcpy(mesh->decoded.xeddsa_signature.bytes, v->sig, 64);
@@ -205,6 +213,139 @@ ZTEST(xeddsa_rx, test_unsigned_is_accepted_under_compatible_and_dropped_under_st
 	set_policy(meshtastic_Config_SecurityConfig_PacketSignaturePolicy_PACKET_SIGNATURE_POLICY_STRICT);
 	make(v, &pkt, &mesh, false);
 	zassert_false(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh), "STRICT must drop");
+}
+
+/* --- BALANCED's downgrade-drop (agents-ooma.32) --------------------------------------- */
+
+/* A genuine signature learns the sender as a known signer; a later UNSIGNED broadcast from
+ * the same sender, small enough that a signed form would have fit, is then dropped rather
+ * than silently accepted as a downgrade. */
+ZTEST(xeddsa_rx, test_balanced_drops_unsigned_broadcast_from_known_signer_when_it_would_fit)
+{
+	const struct mt_xeddsa_vector *v = vec("position");
+	struct meshtastic_packet pkt;
+	meshtastic_MeshPacket mesh;
+
+	seed_key(v);
+	make(v, &pkt, &mesh, true);
+	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh), "genuine signature dropped");
+	zassert_true(meshtastic_nodedb_is_xeddsa_signer(v->from),
+		     "a verified signature must learn the sender as a signer");
+
+	set_policy(meshtastic_Config_SecurityConfig_PacketSignaturePolicy_PACKET_SIGNATURE_POLICY_BALANCED);
+	make(v, &pkt, &mesh, false);
+	zassert_false(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh),
+		      "BALANCED must drop an unsigned broadcast from a known signer");
+}
+
+/* The other arm of the same rule: a payload too large for a signed form to have fit the
+ * frame is accepted unsigned even from a known signer -- upstream's own signable-fits gate
+ * (sign_our_packet, TX side) would have sent it unsigned too, so this is not a downgrade. */
+ZTEST(xeddsa_rx, test_balanced_accepts_unsigned_broadcast_that_would_not_have_fit_signed)
+{
+	const struct mt_xeddsa_vector *v = vec("max_payload"); /* not a NodeInfo: no bootstrap */
+	struct meshtastic_packet pkt;
+	meshtastic_MeshPacket mesh;
+
+	seed_key(v);
+	make(v, &pkt, &mesh, true);
+	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh), "genuine signature dropped");
+	zassert_true(meshtastic_nodedb_is_xeddsa_signer(v->from));
+
+	set_policy(meshtastic_Config_SecurityConfig_PacketSignaturePolicy_PACKET_SIGNATURE_POLICY_BALANCED);
+	make(v, &pkt, &mesh, false);
+	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh),
+		     "an oversized payload must never be dropped for arriving unsigned");
+}
+
+/* Unicast gets the downgrade-drop only when WE are a licensed sender -- mirrors
+ * sign_our_packet's own signable rule and upstream's checkXeddsaReceivePolicy, which checks
+ * the RECEIVER's owner.is_licensed here, not the sender's. */
+ZTEST(xeddsa_rx, test_balanced_unicast_downgrade_drop_depends_on_our_own_license)
+{
+	const struct mt_xeddsa_vector *v = vec("position");
+	struct meshtastic_packet pkt;
+	meshtastic_MeshPacket mesh;
+	meshtastic_User owner = meshtastic_User_init_zero;
+
+	seed_key(v);
+	make(v, &pkt, &mesh, true);
+	pkt.to = TEST_NODE_ID;
+	mesh.to = TEST_NODE_ID;
+	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh), "genuine signature dropped");
+
+	set_policy(meshtastic_Config_SecurityConfig_PacketSignaturePolicy_PACKET_SIGNATURE_POLICY_BALANCED);
+	make(v, &pkt, &mesh, false);
+	pkt.to = TEST_NODE_ID;
+	mesh.to = TEST_NODE_ID;
+	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh),
+		     "an unlicensed receiver does not apply the downgrade-drop to a unicast");
+
+	owner.is_licensed = true;
+	(void)snprintk(owner.long_name, sizeof(owner.long_name), "licensed");
+	(void)snprintk(owner.short_name, sizeof(owner.short_name), "lic");
+	zassert_ok(meshtastic_config_store_set_owner(&owner), "could not set the owner");
+
+	make(v, &pkt, &mesh, false);
+	pkt.to = TEST_NODE_ID;
+	mesh.to = TEST_NODE_ID;
+	zassert_false(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh),
+		      "a licensed receiver applies the downgrade-drop to a unicast too");
+
+	owner.is_licensed = false;
+	zassert_ok(meshtastic_config_store_set_owner(&owner), "could not restore the owner");
+}
+
+/* The trap this bead closes: the signer bit is learned from verified traffic, not NodeInfo,
+ * so it must not be forgotten when the sender ages out of the hot store and is re-admitted --
+ * mirrors the B-5 role-carry test in tests/admin_pki exactly, for the signer bit instead of
+ * role. */
+ZTEST(xeddsa_rx, test_known_signer_bit_survives_hot_eviction_and_readmission)
+{
+	const struct mt_xeddsa_vector *v = vec("position");
+	struct meshtastic_packet pkt;
+	meshtastic_MeshPacket mesh;
+	struct meshtastic_nodedb_node snap;
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet ni;
+
+	seed_key(v);
+	make(v, &pkt, &mesh, true);
+	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh), "genuine signature dropped");
+	zassert_true(meshtastic_nodedb_is_xeddsa_signer(v->from), "should be a known signer now");
+
+	zassert_ok(meshtastic_nodedb_remove(v->from), "remove failed");
+	zassert_equal(meshtastic_nodedb_get(v->from, &snap), -ENOENT, "gone from hot store");
+	zassert_true(meshtastic_nodedb_is_xeddsa_signer(v->from),
+		     "warm tier alone must still say known signer");
+
+	/* Re-admit via a NodeInfo carrying the SAME key -- this port's own answer for "an
+	 * unfamiliar sender" is to queue a NodeInfo request, which a bare re-heard packet would
+	 * trigger and leave in flight for a later test's lora_sim capture to pick up; a NodeInfo
+	 * carrying a known User avoids provoking it, same as this suite's other NodeInfo-based
+	 * tests. What's under test either way is get_or_create_entry_locked's B-5 restoration
+	 * path, which runs before apply_user touches anything -- not apply_user itself. */
+	user.public_key.size = MESHTASTIC_XEDDSA_KEY_LEN;
+	memcpy(user.public_key.bytes, v->x_pub, MESHTASTIC_XEDDSA_KEY_LEN);
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode failed");
+	ni = (struct meshtastic_packet){
+		.from = v->from,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.id = 0xE5000000U,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
+		.channel_index = meshtastic_channels_primary_index(),
+		.payload = buf,
+		.payload_len = os.bytes_written,
+	};
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+
+	zassert_ok(meshtastic_nodedb_get(v->from, &snap), "peer should be re-admitted");
+	zassert_true(meshtastic_nodedb_is_xeddsa_signer(v->from),
+		     "re-admitted hot entry must restore the signer bit from warm (ooma.32)");
+
+	(void)meshtastic_nodedb_remove(v->from);
 }
 
 /* PKC decryption already proves who sent it, so STRICT does not also demand a signature --

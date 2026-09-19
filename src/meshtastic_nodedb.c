@@ -68,7 +68,9 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define NODEINFO_BITFIELD_IS_LICENSED_BIT              6
 #define NODEINFO_BITFIELD_IS_UNMESSAGABLE_BIT          7
 #define NODEINFO_BITFIELD_HAS_IS_UNMESSAGABLE_BIT      8
-#define NODEINFO_BITFIELD_HAS_XEDDSA_SIGNED_BIT        9  /* not yet implemented */
+#define NODEINFO_BITFIELD_HAS_XEDDSA_SIGNED_BIT        9  /* agents-ooma.32; set only via
+							    * meshtastic_nodedb_note_xeddsa_signer(),
+							    * never trusted from inbound data */
 #define NODEINFO_BITFIELD_HAS_SNR_BIT                  10 /* not yet implemented */
 
 /* Full-lean: the DB retains only the NodeInfoLite core (identity + pubkey).
@@ -102,6 +104,8 @@ static void nodekeys_schedule_save(void);
 static void warm_upsert_locked(uint32_t num, const uint8_t *pub, uint8_t role);
 static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
 static bool warm_get_role_locked(uint32_t num, uint8_t *role);
+static bool warm_get_known_signer_locked(uint32_t num);
+static void warm_set_known_signer_locked(uint32_t num, bool signer);
 #endif
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
@@ -463,6 +467,12 @@ static struct nodedb_entry *get_or_create_entry_locked(uint32_t node_num)
 		if (warm_get_role_locked(node_num, &warm_role)) {
 			entry->node.role = warm_role;
 		}
+		/* agents-ooma.32: restore the XEdDSA-signed bit too -- it is learned from
+		 * verified traffic, not from NodeInfo, so a round trip through the warm tier
+		 * must not relearn it from zero (that is the exact trap this bead closes). */
+		if (warm_get_known_signer_locked(node_num)) {
+			WRITE_BIT(entry->node.bitfield, NODEINFO_BITFIELD_HAS_XEDDSA_SIGNED_BIT, 1);
+		}
 	}
 #endif
 
@@ -486,15 +496,20 @@ struct warm_key {
 	uint32_t num;       /* 0 == empty slot */
 	uint32_t last_seen; /* recency for LRU; wall-clock epoch once seeded (see warm_now) */
 	uint8_t role;       /* NodeInfoLite role — carried so an evicted->readmitted peer keeps it (B-5) */
+	uint8_t known_signer; /* 0/1 — learned from a verified XEdDSA signature, carried the same way
+			       * so BALANCED's downgrade protection is not forgotten on eviction
+			       * (agents-ooma.32). Reset to 0 whenever the key itself is (re)placed —
+			       * a rotated key has proven nothing yet under its new identity. */
 	uint8_t pub[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
 };
 
-/* Persisted record: last_seen (LE32) + role (u8) + public key. Restoring recency keeps warm
- * LRU meaningful across reboots; role lets an evicted->readmitted peer keep it (B-5). Only the
- * current 37 B format is read; a differently-sized record is a stale format left by an older
+/* Persisted record: last_seen (LE32) + role (u8) + known_signer (u8) + public key. Restoring
+ * recency keeps warm LRU meaningful across reboots; role and known_signer let an
+ * evicted->readmitted peer keep them (B-5; known_signer is agents-ooma.32). Only the
+ * current 38 B format is read; a differently-sized record is a stale format left by an older
  * build. Pre-1.0 policy is wipe-and-re-learn, not a migration branch — the one-shot
  * CONFIG_MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS deletes any such record from NVS. */
-#define MTNODE_REC_LEN (sizeof(uint32_t) + 1U + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) /* 37 */
+#define MTNODE_REC_LEN (sizeof(uint32_t) + 1U + 1U + MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) /* 38 */
 
 static MESHTASTIC_EXT_RAM_BSS_ATTR struct warm_key warm_keys[CONFIG_MESHTASTIC_NODEDB_WARM_KEYS];
 
@@ -537,6 +552,31 @@ static bool warm_get_role_locked(uint32_t num, uint8_t *role)
 	return true;
 }
 
+/* agents-ooma.32: whether the warm tier remembers @p num as a known XEdDSA signer. False
+ * (not just "unknown") when no warm slot exists -- the hot store is checked first by the
+ * caller, so reaching here already means neither tier knows this node either way. */
+static bool warm_get_known_signer_locked(uint32_t num)
+{
+	struct warm_key *slot = warm_find_locked(num);
+
+	return slot != NULL && slot->known_signer != 0U;
+}
+
+/* Sets the known-signer bit on an EXISTING warm slot only -- a signature only verifies
+ * against a key we already hold, so by the time this is called the node's key (and thus its
+ * warm slot, if it isn't hot-resident) already exists. A no-op otherwise is deliberate: this
+ * must never itself create a slot with no key attached. */
+static void warm_set_known_signer_locked(uint32_t num, bool signer)
+{
+	struct warm_key *slot = warm_find_locked(num);
+	uint8_t value = signer ? 1U : 0U;
+
+	if (slot != NULL && slot->known_signer != value) {
+		slot->known_signer = value;
+		nodekeys_schedule_save();
+	}
+}
+
 /* Slot to (re)write for @num: its existing slot, else an empty slot, else a
  * least-recently-seen entry to evict — but keys whose node is still active in
  * the hot store (favorites are always hot-resident) are protected, so an active
@@ -571,7 +611,8 @@ static struct warm_key *warm_slot_for_locked(uint32_t num)
 	return (victim != NULL) ? victim : fallback;
 }
 
-static void warm_place_locked(uint32_t num, const uint8_t *pub, uint8_t role, uint32_t last_seen)
+static void warm_place_locked(uint32_t num, const uint8_t *pub, uint8_t role, uint8_t known_signer,
+			      uint32_t last_seen)
 {
 	struct warm_key *slot;
 
@@ -588,12 +629,17 @@ static void warm_place_locked(uint32_t num, const uint8_t *pub, uint8_t role, ui
 	slot->num = num;
 	slot->last_seen = last_seen;
 	slot->role = role;
+	slot->known_signer = known_signer;
 	memcpy(slot->pub, pub, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
 }
 
 static void warm_upsert_locked(uint32_t num, const uint8_t *pub, uint8_t role)
 {
-	warm_place_locked(num, pub, role, warm_now());
+	/* known_signer resets to 0 here: this path is a key learned/changed via NodeInfo, and a
+	 * (re)established key has proven nothing under its new identity yet (agents-ooma.32). A
+	 * first-contact NodeInfo that itself arrived signed re-marks it true right afterward, in
+	 * the same synchronous RX handling -- see meshtastic_nodedb_note_xeddsa_signer's callers. */
+	warm_place_locked(num, pub, role, 0U, warm_now());
 }
 
 static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
@@ -795,13 +841,14 @@ static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, v
 	uint32_t node_num;
 	uint32_t last_seen;
 	uint8_t role;
+	uint8_t known_signer;
 	const uint8_t *pub;
 	char *endptr;
 	ssize_t read;
 
-	/* Only the current 37 B format is accepted (plus lockdown's seal when the
-	 * record is sealed). A stale-format record (a pre-role 36 B or key-only
-	 * 32 B one) is ignored here and removed from NVS by the one-shot
+	/* Only the current 38 B format is accepted (plus lockdown's seal when the
+	 * record is sealed). A stale-format record (a pre-signer 37 B, pre-role 36 B,
+	 * or key-only 32 B one) is ignored here and removed from NVS by the one-shot
 	 * CONFIG_MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS pass. */
 	if (len != MTNODE_REC_LEN && len != MTNODE_REC_LEN + MESHTASTIC_LOCKDOWN_SEAL_OVERHEAD) {
 		LOG_WRN("Ignoring persisted node key '%s' with unexpected size %zu", key, len);
@@ -815,7 +862,8 @@ static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, v
 	}
 	last_seen = sys_get_le32(buf);
 	role = buf[sizeof(uint32_t)];
-	pub = buf + sizeof(uint32_t) + 1U;
+	known_signer = buf[sizeof(uint32_t) + 1U];
+	pub = buf + sizeof(uint32_t) + 2U;
 
 	node_num = (uint32_t)strtoul(key, &endptr, 16);
 	if (*endptr != '\0' || node_num == 0U) {
@@ -825,7 +873,7 @@ static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, v
 	/* Restore into the warm tier, not the hot store: keeps the key reachable
 	 * for PKC without occupying a hot record slot (avoids restore thrash). */
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
-	warm_place_locked(node_num, pub, role, last_seen);
+	warm_place_locked(node_num, pub, role, known_signer, last_seen);
 	k_mutex_unlock(&nodedb_lock);
 
 	return 0;
@@ -847,7 +895,8 @@ static int nodekeys_export(int (*export_func)(const char *name, const void *val,
 
 		sys_put_le32(warm_keys[i].last_seen, rec);
 		rec[sizeof(uint32_t)] = warm_keys[i].role;
-		memcpy(rec + sizeof(uint32_t) + 1U, warm_keys[i].pub,
+		rec[sizeof(uint32_t) + 1U] = warm_keys[i].known_signer;
+		memcpy(rec + sizeof(uint32_t) + 2U, warm_keys[i].pub,
 		       MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
 
 		(void)snprintk(name, sizeof(name), MTNODE_SUBTREE "/%08x", warm_keys[i].num);
@@ -1832,6 +1881,45 @@ int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
 #endif
 	k_mutex_unlock(&nodedb_lock);
 	return 0;
+}
+
+void meshtastic_nodedb_note_xeddsa_signer(uint32_t node_num)
+{
+	struct nodedb_entry *entry;
+
+	if (node_num == 0U || node_num == meshtastic_get_node_id()) {
+		return;
+	}
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = get_or_create_entry_locked(node_num);
+	if (entry != NULL) {
+		WRITE_BIT(entry->node.bitfield, NODEINFO_BITFIELD_HAS_XEDDSA_SIGNED_BIT, 1);
+	}
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+	warm_set_known_signer_locked(node_num, true);
+#endif
+	k_mutex_unlock(&nodedb_lock);
+}
+
+bool meshtastic_nodedb_is_xeddsa_signer(uint32_t node_num)
+{
+	struct nodedb_entry *entry;
+	bool result;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	entry = find_entry_locked(node_num);
+	if (entry != NULL) {
+		result = IS_BIT_SET(entry->node.bitfield, NODEINFO_BITFIELD_HAS_XEDDSA_SIGNED_BIT);
+	} else {
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+		result = warm_get_known_signer_locked(node_num);
+#else
+		result = false;
+#endif
+	}
+	k_mutex_unlock(&nodedb_lock);
+	return result;
 }
 
 bool meshtastic_nodedb_is_from_or_to_favorite(uint32_t from, uint32_t to)

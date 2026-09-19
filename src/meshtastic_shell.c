@@ -3772,8 +3772,8 @@ static int cmd_xeddsa_show(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "  rx DROPPED    : %u bad signature, %u malformed", st.failed,
 		    st.malformed);
 	shell_print(sh, "  rx unverifiable: %u (signed, no key for the sender)", st.no_key);
-	shell_print(sh, "  rx unsigned   : %u accepted, %u dropped", st.unsigned_ok,
-		    st.unsigned_drop);
+	shell_print(sh, "  rx unsigned   : %u accepted, %u dropped (strict), %u dropped (balanced)",
+		    st.unsigned_ok, st.unsigned_drop, st.balanced_drop);
 	shell_print(sh, "  tx            : %u signed, %u unsigned (would not fit)", st.signed_tx,
 		    st.sign_skipped);
 	return 0;
