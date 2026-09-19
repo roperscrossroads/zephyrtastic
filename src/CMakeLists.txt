@@ -93,6 +93,11 @@ if(CONFIG_MESHTASTIC)
     meshtastic_contention.c
     meshtastic_tx_power.c
     meshtastic_sched.c
+    # Not gated behind CONFIG_MESHTASTIC_THREAD_SUMMARY/SUPERVISOR (both
+    # `depends on THREAD_ANALYZER`, which is unavailable on native_sim/ARCH_POSIX)
+    # so its due-time math stays unit-testable there even though the diag loop
+    # itself can only ever build on a real target.
+    meshtastic_diag_sched.c
     meshtastic_router.c
     meshtastic_routing.c
     meshtastic_settings_apply.c
@@ -164,8 +169,9 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_HEAP_TRACE meshtastic_heap_trace.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_NETLOG_FILTER meshtastic_netlog_filter.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SHELL_UART0 meshtastic_shell_uart0.c)
-  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_THREAD_SUMMARY meshtastic_thread_summary.c)
-  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SUPERVISOR meshtastic_supervisor.c)
+  if(CONFIG_MESHTASTIC_THREAD_SUMMARY OR CONFIG_MESHTASTIC_SUPERVISOR)
+    zephyr_library_sources(meshtastic_diag_loop.c)
+  endif()
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_HEALTH_REPORT meshtastic_health.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_WIFI_DIAG meshtastic_wifi_diag.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_LOGRING meshtastic_logring.c)

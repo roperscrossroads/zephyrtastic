@@ -38,14 +38,4 @@ config MESHTASTIC_THREAD_SUMMARY_INTERVAL
 	  Matches the interval CONFIG_THREAD_ANALYZER_AUTO_INTERVAL used to be
 	  set to here (5 min) -- enough to catch a trend without spamming.
 
-config MESHTASTIC_THREAD_SUMMARY_STACK_SIZE
-	int "Stack size for the summary thread"
-	default 2048
-	help
-	  Matches the stack size CONFIG_THREAD_ANALYZER_AUTO_STACK_SIZE used
-	  to be set to here -- this thread walks and formats every other
-	  thread's info, doubled from the Zephyr default during an earlier
-	  soak that measured this exact job as the tightest margin on the
-	  bench (STABILITY-2 investigation, 2026-08-05).
-
 endif # MESHTASTIC_THREAD_SUMMARY

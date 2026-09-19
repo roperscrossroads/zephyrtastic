@@ -1,0 +1,17 @@
+# mt_diag_job due-time bookkeeping (agents-wu94.12.1): the scheduling
+# primitive behind the merged thread-summary/supervisor diagnostic thread.
+# Split out from behind CONFIG_MESHTASTIC_THREAD_SUMMARY/SUPERVISOR (both
+# `depends on THREAD_ANALYZER`, unavailable on native_sim/ARCH_POSIX) so this
+# is testable at all -- meshtastic_diag_loop.c itself can only ever build for
+# a real target.
+common:
+  tags:
+    - meshtastic
+    - diag_sched
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.diag_sched.native_sim: {}

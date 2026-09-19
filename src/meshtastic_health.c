@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0
  *
  * Mesh-facing health/crash-loop announcement. See Kconfig.health for the
- * full rationale: rung 4 of meshtastic_supervisor.c's escalation ladder, the
- * only rung that costs airtime, so it only ever fires on an abnormal boot
+ * full rationale: rung 4 of the supervisor's escalation ladder (Kconfig.supervisor,
+ * meshtastic_diag_loop.c), the only rung that costs airtime, so it only ever
+ * fires on an abnormal boot
  * (a pending crash breadcrumb -- zephyr/meshtastic/diagnostics.h) and backs
  * off the more it happens.
  *
