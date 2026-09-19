@@ -692,6 +692,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 }
 
 #if defined(CONFIG_BT_SMP)
+/* The peripheral-side MTU request needs the GATT client. Without it (a build
+ * with no BLE peer link) the phone's own request, which every Meshtastic
+ * client sends, is what raises the MTU. */
+#if defined(CONFIG_BT_GATT_CLIENT)
 static struct bt_gatt_exchange_params mtu_exchange;
 
 static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
@@ -706,6 +710,7 @@ static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
 
 	LOG_INF("BLE MTU %u", bt_gatt_get_mtu(conn));
 }
+#endif /* CONFIG_BT_GATT_CLIENT */
 
 static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
 {
@@ -727,10 +732,12 @@ static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_
 
 	LOG_INF("BLE security level %u", (unsigned int)level);
 
+#if defined(CONFIG_BT_GATT_CLIENT)
 	mtu_exchange.func = mtu_exchange_cb;
 	if (bt_gatt_exchange_mtu(conn, &mtu_exchange) < 0) {
 		LOG_WRN("BLE MTU exchange request failed");
 	}
+#endif
 }
 
 #if defined(CONFIG_MESHTASTIC_BLE_FIXED_PASSKEY)
