@@ -987,6 +987,24 @@ static void ble_peer_frame_ingest(unsigned int index, const uint8_t *frame, size
 }
 #endif
 
+/*
+ * Power up the BT controller alone, ahead of the rest of meshtastic_ble_init() --
+ * meshtastic_init() calls this before psa_crypto_init()/meshtastic_pki_init() on
+ * ESP32 (agents-0lzm.10): WDEV_RND only gets its documented entropy boost "provided
+ * WiFi or BT are enabled" (Espressif's own esp_random.h), and this port used to
+ * mint the X25519 identity before either radio was ever turned on. Idempotent via
+ * bt_is_ready() -- meshtastic_ble_init() below still calls it at its usual spot for
+ * builds/paths that never call this early (e.g. nRF52840, which has a true hardware
+ * RNG and doesn't need the reorder, or CONFIG_MESHTASTIC_BLE without the ESP32 guard).
+ */
+int meshtastic_ble_radio_enable(void)
+{
+	if (bt_is_ready()) {
+		return 0;
+	}
+	return bt_enable(NULL);
+}
+
 int meshtastic_ble_init(void)
 {
 	int ret;
@@ -1007,12 +1025,10 @@ int meshtastic_ble_init(void)
 	k_work_init(&ble.to_radio_work, to_radio_work_handler);
 	k_work_init(&ble.fromradio_work, fromradio_work_handler);
 
-	if (!bt_is_ready()) {
-		ret = bt_enable(NULL);
-		if (ret < 0) {
-			LOG_ERR("bt_enable failed (%d)", ret);
-			return ret;
-		}
+	ret = meshtastic_ble_radio_enable();
+	if (ret < 0) {
+		LOG_ERR("bt_enable failed (%d)", ret);
+		return ret;
 	}
 
 #if defined(CONFIG_SETTINGS)

@@ -63,6 +63,7 @@
 
 #if defined(CONFIG_MESHTASTIC_BLE)
 int meshtastic_ble_init(void);
+int meshtastic_ble_radio_enable(void);
 #endif
 #if defined(CONFIG_MESHTASTIC_SERIAL)
 int meshtastic_serial_init(void);
@@ -573,6 +574,24 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	memset(mt.dup_cache, 0, sizeof(mt.dup_cache));
 	memset(&mt.status, 0, sizeof(mt.status));
 	mt.status.node_id = mt.node_id;
+
+#if defined(CONFIG_MESHTASTIC_BLE) && defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
+	/* Warm up the BT controller BEFORE any entropy gets drawn below (agents-0lzm.10):
+	 * Espressif's own esp_random.h says WDEV_RND "returns true random numbers" only
+	 * "if Wi-Fi or Bluetooth are enabled" -- and psa_crypto_init() right after this
+	 * seeds its DRBG from exactly that register, with meshtastic_pki_init() minting
+	 * (and persisting, for life) a fresh X25519 identity from it on a node's first
+	 * boot. The rest of meshtastic_ble_init() (advertising, PhoneAPI, GATT) still
+	 * runs at its usual, much later spot -- this call is deliberately narrowed to
+	 * just bt_enable(), and it is idempotent (bt_is_ready() guarded) so that later
+	 * call is a no-op. ESP32-only: the nRF52840 XIAOs have a true hardware RNG,
+	 * independent of any radio, and do not need this. */
+	if (meshtastic_ble_radio_enable() == 0) {
+		LOG_INF("BT radio warmed up ahead of PKI init (agents-0lzm.10)");
+	} else {
+		LOG_WRN("BT radio warm-up failed ahead of PKI init; entropy quality unimproved");
+	}
+#endif
 
 	psa_st = psa_crypto_init();
 	if (psa_st != PSA_SUCCESS) {
