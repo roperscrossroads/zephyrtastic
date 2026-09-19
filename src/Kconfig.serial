@@ -8,7 +8,12 @@ menuconfig MESHTASTIC_SERIAL
 	depends on SERIAL
 	depends on UART_INTERRUPT_DRIVEN
 	depends on $(dt_chosen_enabled,$(DT_CHOSEN_Z_MESHTASTIC_UART))
-	select MESHTASTIC_PHONEAPI
+	# depends on, not select: the select closed a Kconfig dependency loop
+	# (PHONEAPI -> ADMIN -> REBOOT -> ... PSA/entropy/I2C/RESET ... ->
+	# SERIAL_HAS_DRIVER -> UART_INTERRUPT_DRIVEN -> this). kconfiglib checks
+	# select edges structurally, so no value could break it. Enable
+	# MESHTASTIC_PHONEAPI alongside (a BLE build already selects it).
+	depends on MESHTASTIC_PHONEAPI
 	help
 	  Expose the Meshtastic PhoneAPI on the UART selected by the
 	  zephyr,meshtastic-uart devicetree chosen node. The transport uses
