@@ -750,8 +750,23 @@ static void auth_passkey_display(struct bt_conn *conn, unsigned int passkey)
 
 static uint32_t auth_app_passkey(struct bt_conn *conn)
 {
+	meshtastic_Config cfg;
+
 	ARG_UNUSED(conn);
 
+	/* agents-ooma.33: read live, not the build-time value baked in at compile time -- the
+	 * phone app's "set Bluetooth PIN" and the equivalent admin write already persist
+	 * config.bluetooth.fixed_pin (meshtastic_config_store_set_config handles every section
+	 * generically), nothing ever read it back. Zephyr calls this callback fresh for every
+	 * pairing attempt (it is not "set once" like upstream's security.setPassKey()), so a
+	 * changed PIN takes effect on the very next pairing with no re-apply step needed -- and
+	 * an EXISTING bond never calls this again at all, since a bonded peer reconnects on its
+	 * stored LTK, so rotating the PIN cannot desync a bond that already exists. The build
+	 * default is the fallback only for a store read failure; meshtastic_config_store_seed()
+	 * already seeds fixed_pin from it, so a normal boot never actually needs the fallback. */
+	if (meshtastic_config_store_get_config(meshtastic_Config_bluetooth_tag, &cfg) == 0) {
+		return cfg.payload_variant.bluetooth.fixed_pin;
+	}
 	return CONFIG_MESHTASTIC_BLE_PASSKEY;
 }
 #endif

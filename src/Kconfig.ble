@@ -42,6 +42,13 @@ config MESHTASTIC_BLE_PASSKEY
 	  Passkey entered in the Meshtastic mobile app during pairing. Matches
 	  the official firmware fixed_pin default.
 
+	  This is only the value meshtastic_config_store_seed() writes into
+	  SecurityConfig.bluetooth.fixed_pin on first boot -- the node then
+	  pairs on whatever that runtime config field holds, which the phone
+	  app's "set Bluetooth PIN" (or the equivalent admin write) can change
+	  without a reflash (agents-ooma.33). A leaked or shoulder-surfed PIN
+	  is rotated by writing the config, not by rebuilding.
+
 config MESHTASTIC_BLE_ADV
 	bool "Start Meshtastic BLE advertising from meshtastic_init"
 	default y
