@@ -86,10 +86,12 @@ config MESHTASTIC_XEDDSA_SIGN
 	  verifier's, and its running time depends on the scalar -- which during
 	  signing is the secret nonce.
 
-	  ⚠️ NEEDS ~2 KB MORE STACK on every thread that originates a packet.
-	  Signing happens inside the encoder, on the caller's thread, and those
-	  stacks were sized for an encoder that did no curve arithmetic. Enabling
-	  this without raising them boot-loops the node: measured on the bench
-	  2026-09-17, rzr1 and rzr2 overflowed in meshtastic_nodeinfo and
-	  gnss_send. Frames: sign 480 B, derive 240 B, ge_scalarmult_base 512 B,
-	  select 176 B, plus hashing. See agents-ooma.35.
+	  Costs no extra stack on the caller: meshtastic_pki_sign_packet routes
+	  through MESHTASTIC_XEDDSA_SIGN_CORE's dedicated thread, the same one
+	  cluster signing uses, so the curve arithmetic never runs on whichever
+	  thread originates the packet -- that thread's own stack is sized by
+	  MESHTASTIC_XEDDSA_SIGN_STACK_SIZE. It was NOT always so: enabling this
+	  inline on the caller's thread boot-looped rzr1 and rzr2 on 2026-09-17,
+	  overflowing meshtastic_nodeinfo and gnss_send (agents-ooma.35) -- fixed
+	  by moving the call onto the shared thread, proven there first by
+	  cluster signing (agents-ooma.31).

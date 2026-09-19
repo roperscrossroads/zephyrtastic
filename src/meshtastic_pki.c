@@ -478,14 +478,21 @@ int meshtastic_pki_sign_bytes(const uint8_t *msg, size_t len, uint8_t sig[64])
 #endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN_CORE */
 
 #if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
+/*
+ * Routed through meshtastic_pki_sign_bytes (the dedicated signing thread) rather than
+ * calling meshtastic_xeddsa_sign inline -- inline is what boot-looped rzr1/rzr2 on
+ * 2026-09-17 (agents-ooma.35): the curve arithmetic landed on whichever thread
+ * originates the packet (meshtastic_nodeinfo, gnss_send, ...), sized years before any
+ * signing existed. The thread this now runs on is shared with cluster signing and was
+ * proven on hardware there (agents-ooma.31) before this call site was switched over.
+ */
 int meshtastic_pki_sign_packet(uint32_t from_node, uint32_t packet_id, uint32_t portnum,
 			       const uint8_t *payload, size_t payload_len, uint8_t sig[64])
 {
 	uint8_t buf[MESHTASTIC_XEDDSA_SIGBUF_MAX];
-	uint8_t z[32];
 	size_t len;
 
-	if (sig == NULL || !meshtastic_pki_have_key()) {
+	if (sig == NULL) {
 		return -EACCES;
 	}
 	len = meshtastic_xeddsa_build_signing_buffer(buf, sizeof(buf), from_node, packet_id,
@@ -493,15 +500,6 @@ int meshtastic_pki_sign_packet(uint32_t from_node, uint32_t packet_id, uint32_t 
 	if (len == 0U) {
 		return -EMSGSIZE;
 	}
-	/* Hedging only: the nonce already derives from the key and the message, so a weak Z
-	 * costs defence in depth, never correctness -- which is why a failed draw uses what the
-	 * buffer holds instead of refusing to sign. */
-	if (psa_generate_random(z, sizeof(z)) != PSA_SUCCESS) {
-		LOG_WRN("XEdDSA: no randomness for the signing nonce; hedging degraded");
-	}
-	if (!meshtastic_xeddsa_sign(g_priv, buf, len, z, sig)) {
-		return -EIO;
-	}
-	return 0;
+	return meshtastic_pki_sign_bytes(buf, len, sig);
 }
 #endif /* CONFIG_MESHTASTIC_XEDDSA_SIGN */
