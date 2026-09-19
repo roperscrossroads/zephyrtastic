@@ -1,0 +1,16 @@
+/*
+ * A second USB CDC-ACM port carrying the Meshtastic StreamAPI, beside the
+ * console on the first. Use with overlay-web-serial.conf (which enables the
+ * init that registers both ports).
+ */
+/ {
+	chosen {
+		zephyr,meshtastic-uart = &phone_cdc_acm_uart;
+	};
+};
+
+&zephyr_udc0 {
+	phone_cdc_acm_uart: phone_cdc_acm_uart {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};

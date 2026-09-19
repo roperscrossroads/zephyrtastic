@@ -6,6 +6,7 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(meshtastic_sample)
 
 target_sources(app PRIVATE src/main.c)
+target_sources_ifdef(CONFIG_MESHTASTIC_SAMPLE_USB_PHONE_CDC app PRIVATE src/usb_phone_cdc.c)
 
 # The fleet class is baked twice — CONFIG_MESHTASTIC_FLEET_CLASS in the firmware
 # (beat, `meshtastic version`) and protected TLV 0x00A0 in the signed image (what a

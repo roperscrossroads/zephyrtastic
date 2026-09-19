@@ -56,3 +56,21 @@ tests:
       - heltec_wifi_lora32_v4/esp32s3/procpu
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf"
+  sample.meshtastic.standalone_phone:
+    # A XIAO carried and used from a phone: fixed-PIN pairing, bonds kept across
+    # reboots, no SMP over BLE, no BLE peer link, and the serial PhoneAPI on a
+    # second USB CDC port for Web Serial. Build-only: it caught two configs that
+    # had never been built (serial PhoneAPI on nRF, BLE without the peer link).
+    tags:
+      - lora
+      - meshtastic
+      - ble
+      - serial
+    platform_allow:
+      - xiao_ble/nrf52840
+    integration_platforms:
+      - xiao_ble/nrf52840
+    extra_args:
+      - SHIELD=wio_sx1262_xiao
+      - "EXTRA_CONF_FILE=overlay-ota-ble.conf;overlay-xeddsa.conf;overlay-standalone-phone.conf;overlay-web-serial.conf"
+      - EXTRA_DTC_OVERLAY_FILE=phone-cdc.overlay

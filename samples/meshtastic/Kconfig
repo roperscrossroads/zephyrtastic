@@ -3,4 +3,16 @@
 # Copyright (c) 2026 The Zephyr Project Contributors
 # SPDX-License-Identifier: GPL-3.0
 
+config MESHTASTIC_SAMPLE_USB_PHONE_CDC
+	bool "Second USB CDC-ACM port for the serial PhoneAPI"
+	depends on USBD_CDC_ACM_CLASS && MESHTASTIC_SERIAL
+	depends on !CDC_ACM_SERIAL_INITIALIZE_AT_BOOT
+	help
+	  Bring up the USB device with every CDC-ACM instance in the devicetree
+	  instead of only the first, so a board whose console is USB CDC can also
+	  carry the Meshtastic StreamAPI on a port of its own (Web Serial, the
+	  Python CLI). Pair it with phone-cdc.overlay, which adds the second port
+	  and points zephyr,meshtastic-uart at it. Replaces
+	  CDC_ACM_SERIAL_INITIALIZE_AT_BOOT, which must be off.
+
 source "Kconfig.zephyr"
