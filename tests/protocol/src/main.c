@@ -33,6 +33,7 @@
 #include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
 #include "meshtastic_sched.h"
+#include "meshtastic_traffic.h"
 
 #define TEST_NODE_ID  0x12345678U
 #define PEER_NODE_ID  0x87654321U
@@ -1651,6 +1652,113 @@ ZTEST(protocol_stack, test_nodeinfo_pubkey_pinning_refuses_key_change)
 
 	zassert_ok(meshtastic_nodedb_get(node, &snap));
 	zassert_equal(strcmp(snap.long_name, "Genuine2"), 0, "matching key updates apply");
+}
+
+/* --- Peer position cache (agents-ooma.39) ---------------------------------
+ *
+ * Upstream caches a peer's last-known position by default on every
+ * architecture this project targets (NodeDB.cpp's nodePositions map,
+ * excluded only on ARCH_STM32WL). This port used to discard it after only
+ * refreshing last_heard/snr/hops -- these tests exercise the fix: the cache
+ * itself, the "a sparse follow-up must not wipe a known timestamp" nuance
+ * ported from updatePosition(), and that a freshly-connected phone's
+ * streamed peer NodeInfo actually carries it. */
+
+/* The traffic gate's own position dedup (Kconfig default 18000s / 5h, real
+ * production behaviour -- meshtastic_traffic.c's should_drop_position())
+ * would otherwise silently drop a same-node position sent again this soon.
+ * These tests are about the NodeDB cache, not dedup policy, so turn it off. */
+static void disable_position_dedup(void)
+{
+	meshtastic_ModuleConfig_TrafficManagementConfig cfg =
+		meshtastic_ModuleConfig_TrafficManagementConfig_init_zero;
+
+	zassert_ok(meshtastic_traffic_set(&cfg), "traffic config set failed");
+}
+
+static void inject_position(uint32_t from, uint32_t id, const meshtastic_Position *pos)
+{
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	zassert_true(pb_encode(&os, meshtastic_Position_fields, pos), "Position encode failed");
+	build_wire_packet(from, MESHTASTIC_NODE_BROADCAST, id, 1U, MESHTASTIC_PORT_POSITION, buf,
+			  os.bytes_written, wire, &wire_len);
+	inject_rx_frame(wire, wire_len, -40, 5);
+	k_sleep(K_MSEC(50));
+}
+
+ZTEST(protocol_stack, test_peer_position_is_cached_and_snapshotted)
+{
+	const uint32_t node = 0x33445566U;
+	meshtastic_Position pos = meshtastic_Position_init_zero;
+	struct meshtastic_nodedb_node snap;
+
+	disable_position_dedup();
+	pos.has_latitude_i = true;
+	pos.latitude_i = 335282176;
+	pos.has_longitude_i = true;
+	pos.longitude_i = -821297152;
+	pos.has_altitude = true;
+	pos.altitude = 42;
+	pos.time = 1700000000U;
+	pos.location_source = meshtastic_Position_LocSource_LOC_INTERNAL;
+	pos.precision_bits = 16U;
+	inject_position(node, 0xC301U, &pos);
+
+	zassert_ok(meshtastic_nodedb_get(node, &snap));
+	zassert_true(snap.has_position, "a decoded Position must be cached, not discarded");
+	zassert_equal(snap.position_latitude_i, pos.latitude_i, "");
+	zassert_equal(snap.position_longitude_i, pos.longitude_i, "");
+	zassert_equal(snap.position_altitude, pos.altitude, "");
+	zassert_equal(snap.position_time, pos.time, "");
+	zassert_equal(snap.position_precision_bits, pos.precision_bits, "");
+
+	/* A Position with no lat/lon (e.g. a malformed or non-fix report) must not
+	 * evict a real cached fix -- decode_position_payload() refuses it outright. */
+	{
+		meshtastic_Position empty = meshtastic_Position_init_zero;
+
+		inject_position(node, 0xC302U, &empty);
+		zassert_ok(meshtastic_nodedb_get(node, &snap));
+		zassert_true(snap.has_position, "a latless/lonless report must not clear the cache");
+		zassert_equal(snap.position_latitude_i, pos.latitude_i,
+			      "and must not overwrite it either");
+	}
+}
+
+/* Reference NodeDB::updatePosition: "if (!slot.time) slot.time = tmp_time" --
+ * a sparse remote report with no timestamp must keep the previously-known
+ * one rather than reporting the position as newly untimed. */
+ZTEST(protocol_stack, test_peer_position_sparse_followup_keeps_the_prior_timestamp)
+{
+	const uint32_t node = 0x33445577U;
+	meshtastic_Position first = meshtastic_Position_init_zero;
+	meshtastic_Position sparse = meshtastic_Position_init_zero;
+	struct meshtastic_nodedb_node snap;
+
+	disable_position_dedup();
+	first.has_latitude_i = true;
+	first.latitude_i = 100;
+	first.has_longitude_i = true;
+	first.longitude_i = 200;
+	first.time = 1700000000U;
+	inject_position(node, 0xC401U, &first);
+
+	sparse.has_latitude_i = true;
+	sparse.latitude_i = 111;
+	sparse.has_longitude_i = true;
+	sparse.longitude_i = 222;
+	sparse.time = 0U; /* not carried on every remote report */
+	inject_position(node, 0xC402U, &sparse);
+
+	zassert_ok(meshtastic_nodedb_get(node, &snap));
+	zassert_equal(snap.position_latitude_i, 111, "the new fix must still apply");
+	zassert_equal(snap.position_longitude_i, 222, "");
+	zassert_equal(snap.position_time, first.time,
+		      "a followup with no timestamp must not wipe the last known one");
 }
 
 /* --- Next-hop route learning (increment 3) -------------------------------- */
@@ -5540,6 +5648,54 @@ ZTEST(protocol_stack, test_phone_config_handshake_only_nodes)
 		      "config_complete_id must be the final frame");
 	zassert_equal(complete_id, PHONEAPI_NONCE_ONLY_NODES,
 		      "config_complete_id must echo the request nonce");
+}
+
+/* agents-ooma.39, end-to-end: the whole point is that a freshly-connected
+ * phone's map view starts populated. Drives the real ONLY_NODES handshake and
+ * decodes the streamed peer NodeInfo directly, rather than trusting the
+ * NodeDB snapshot alone. */
+ZTEST(protocol_stack, test_streamed_peer_nodeinfo_carries_the_cached_position)
+{
+	const uint32_t node = 0x33445588U;
+	static struct meshtastic_phoneapi_frame q[8];
+	struct meshtastic_phoneapi api;
+	struct meshtastic_phoneapi_frame frame;
+	meshtastic_ToRadio to_scratch;
+	meshtastic_FromRadio from_scratch;
+	meshtastic_Position pos = meshtastic_Position_init_zero;
+	bool found = false;
+
+	pos.has_latitude_i = true;
+	pos.latitude_i = 300;
+	pos.has_longitude_i = true;
+	pos.longitude_i = 400;
+	pos.time = 1700000001U;
+	inject_position(node, 0xC501U, &pos);
+
+	meshtastic_phoneapi_init(&api, "postest", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL,
+				 &to_scratch, &from_scratch);
+	meshtastic_phoneapi_enqueue_phone_config(&api, PHONEAPI_NONCE_ONLY_NODES);
+
+	while (meshtastic_phoneapi_next_config_frame(&api, &frame) == 0) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t s = pb_istream_from_buffer(frame.data, frame.len);
+
+		if (!pb_decode(&s, meshtastic_FromRadio_fields, &from)) {
+			continue;
+		}
+		if (from.which_payload_variant != meshtastic_FromRadio_node_info_tag ||
+		    from.node_info.num != node) {
+			continue;
+		}
+
+		found = true;
+		zassert_true(from.node_info.has_position,
+			     "the streamed peer NodeInfo must carry the cached position");
+		zassert_equal(from.node_info.position.latitude_i, pos.latitude_i, "");
+		zassert_equal(from.node_info.position.longitude_i, pos.longitude_i, "");
+	}
+
+	zassert_true(found, "the injected peer must have been streamed during ONLY_NODES");
 }
 
 /* --- Message addressing + DM privacy on the wire -----------------------------

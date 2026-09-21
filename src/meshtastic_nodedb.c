@@ -34,6 +34,7 @@
 #endif
 
 #include "meshtastic/deviceonly.pb.h"
+#include "meshtastic/mesh.pb.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -73,9 +74,14 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 							    * never trusted from inbound data */
 #define NODEINFO_BITFIELD_HAS_SNR_BIT                  10 /* not yet implemented */
 
-/* Full-lean: the DB retains only the NodeInfoLite core (identity + pubkey).
- * Position / device+environment telemetry / status are report-and-forget (as in
- * the reference firmware) — not retained per node. */
+/* Mostly-lean: the DB retains the NodeInfoLite core (identity + pubkey) plus a
+ * last-known position per node (agents-ooma.39). Device+environment telemetry
+ * / status are still report-and-forget for now -- NOT "as in the reference
+ * firmware" (that claim was checked against upstream and found wrong: NodeDB.cpp's
+ * nodePositions/nodeTelemetry/nodeEnvironment/nodeStatus maps are all cached by
+ * default except on ARCH_STM32WL, which this port never targets). Position
+ * shipped first because a freshly-connected phone's map view is the visible
+ * symptom; telemetry/status caching is a natural follow-up, not done here. */
 struct nodedb_entry {
 	bool used;
 	meshtastic_NodeInfoLite node;
@@ -84,6 +90,12 @@ struct nodedb_entry {
 	 * resets to 0 on restore). 0 for nodes heard this boot — their epoch derives
 	 * from node.last_heard via the clock. */
 	uint32_t last_heard_epoch;
+	/* Last-known position, mirroring upstream's nodePositions cache (see the
+	 * comment above). Capped 1:1 with nodedb_entries -- a node's position lives
+	 * and dies with its NodeDB entry, unlike upstream's independently-sized and
+	 * independently-evicted satellite map. */
+	bool has_position;
+	meshtastic_PositionLite position;
 };
 
 static K_MUTEX_DEFINE(nodedb_lock);
@@ -1274,6 +1286,49 @@ static bool decode_user_payload(const uint8_t *payload, size_t payload_len, mesh
 	return true;
 }
 
+#if defined(CONFIG_MESHTASTIC_POSITION)
+static bool decode_position_payload(const uint8_t *payload, size_t payload_len,
+				    meshtastic_Position *pos)
+{
+	pb_istream_t stream;
+
+	if (payload == NULL || payload_len == 0U) {
+		return false;
+	}
+
+	stream = pb_istream_from_buffer(payload, payload_len);
+	if (!pb_decode(&stream, meshtastic_Position_fields, pos) || !pos->has_latitude_i ||
+	    !pos->has_longitude_i) {
+		return false;
+	}
+
+	return true;
+}
+
+/* Cache the last-known position, mirroring upstream's NodeDB::updatePosition()
+ * for a REMOTE report (the LOCAL-position and EUD-time-stamp special cases
+ * there don't apply to a peer cache). One nuance kept: a sparse remote report
+ * with no timestamp must not blow away a previously-known one -- upstream's
+ * own comment calls this out explicitly (`if (!slot.time) slot.time = tmp_time`). */
+static void apply_position(struct nodedb_entry *entry, const meshtastic_Position *pos)
+{
+	uint32_t prior_time = entry->has_position ? entry->position.time : 0U;
+
+	entry->position = (meshtastic_PositionLite){
+		.latitude_i = pos->latitude_i,
+		.longitude_i = pos->longitude_i,
+		.altitude = pos->has_altitude ? pos->altitude : 0,
+		.time = pos->time,
+		.location_source = pos->location_source,
+		.precision_bits = pos->precision_bits,
+	};
+	if (entry->position.time == 0U) {
+		entry->position.time = prior_time;
+	}
+	entry->has_position = true;
+}
+#endif /* CONFIG_MESHTASTIC_POSITION */
+
 /* C3 Phase 8d: dual-rep — read the hop fields from the decoded MeshPacket when the RF path
  * supplied one, else the flat struct (NULL-mesh public inject / test boundary). */
 static bool packet_hops_away(const struct meshtastic_packet *packet,
@@ -1332,6 +1387,10 @@ static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *p
 	uint32_t now_sec;
 	uint32_t from;
 	uint32_t portnum;
+#if defined(CONFIG_MESHTASTIC_POSITION)
+	meshtastic_Position pos = meshtastic_Position_init_zero;
+	bool has_pos = false;
+#endif
 
 	if (packet == NULL && mesh == NULL) {
 		return;
@@ -1345,16 +1404,23 @@ static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *p
 		return;
 	}
 
-	/* Every packet refreshes the basic record (last_heard / snr / hops); only
-	 * NodeInfo carries identity + pubkey. Position/telemetry/status are not
-	 * retained (full-lean) — hearing them still updates last_heard via the
-	 * basic-packet path below. */
+	/* Every packet refreshes the basic record (last_heard / snr / hops); NodeInfo
+	 * carries identity + pubkey, Position carries a last-known fix
+	 * (agents-ooma.39). Telemetry/status are still not retained — hearing them
+	 * still updates last_heard via the basic-packet path below. */
 	portnum = mesh ? (uint32_t)mesh->decoded.portnum : packet->portnum;
 	if (portnum == MESHTASTIC_PORT_NODEINFO) {
 		has_user = decode_user_payload(mesh ? mesh->decoded.payload.bytes : packet->payload,
 					       mesh ? mesh->decoded.payload.size : packet->payload_len,
 					       &user);
 	}
+#if defined(CONFIG_MESHTASTIC_POSITION)
+	else if (portnum == MESHTASTIC_PORT_POSITION) {
+		has_pos = decode_position_payload(
+			mesh ? mesh->decoded.payload.bytes : packet->payload,
+			mesh ? mesh->decoded.payload.size : packet->payload_len, &pos);
+	}
+#endif
 
 	now_sec = uptime_seconds();
 
@@ -1370,6 +1436,11 @@ static void meshtastic_module_nodedb_on_packet(const struct meshtastic_packet *p
 	if (has_user) {
 		apply_user(entry, &user);
 	}
+#if defined(CONFIG_MESHTASTIC_POSITION)
+	if (has_pos) {
+		apply_position(entry, &pos);
+	}
+#endif
 
 #if defined(CONFIG_MESHTASTIC_PKI)
 	char alert_name[sizeof(own_key_alert.name)];
@@ -1426,6 +1497,18 @@ static void fill_snapshot(const struct nodedb_entry *entry, struct meshtastic_no
 	if (key_len > 0U) {
 		memcpy(out->public_key, node->public_key.bytes, key_len);
 	}
+
+#if defined(CONFIG_MESHTASTIC_POSITION)
+	out->has_position = entry->has_position;
+	if (entry->has_position) {
+		out->position_latitude_i = entry->position.latitude_i;
+		out->position_longitude_i = entry->position.longitude_i;
+		out->position_altitude = entry->position.altitude;
+		out->position_time = entry->position.time;
+		out->position_location_source = (uint8_t)entry->position.location_source;
+		out->position_precision_bits = entry->position.precision_bits;
+	}
+#endif
 }
 
 /* Read-time route health (M4, upstream RouteHealth): freshness + failure

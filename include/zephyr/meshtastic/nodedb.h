@@ -59,6 +59,19 @@ struct meshtastic_nodedb_node {
 	bool is_unmessagable;
 	size_t public_key_len;
 	uint8_t public_key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN];
+
+	/* agents-ooma.39: last-known peer position, cached the way upstream's
+	 * nodePositions does on every architecture this project targets (excluded
+	 * only on ARCH_STM32WL, which this port never builds for) -- flattened to
+	 * plain fields rather than a PositionLite sub-struct so this public header
+	 * stays free of a proto include, matching every other field here. */
+	bool has_position;
+	int32_t position_latitude_i;
+	int32_t position_longitude_i;
+	int32_t position_altitude;
+	uint32_t position_time;
+	uint8_t position_location_source;
+	uint32_t position_precision_bits;
 };
 
 /**

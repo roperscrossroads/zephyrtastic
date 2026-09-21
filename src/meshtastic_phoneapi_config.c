@@ -159,9 +159,28 @@ static void fill_other_node_info(meshtastic_FromRadio *from,
 		}
 	}
 
-	/* Position and device metrics are not retained per node (full-lean NodeDB),
-	 * so peer NodeInfo streamed to the phone carries identity + pubkey only; the
-	 * app fills position/metrics from packets it receives directly. */
+#if defined(CONFIG_MESHTASTIC_POSITION)
+	/* agents-ooma.39: last-known position, cached the way upstream's
+	 * nodePositions does -- a freshly-connected phone's map view now starts
+	 * populated instead of empty until nodes broadcast again. Device metrics
+	 * are still not retained per node; that stays a report-and-forget path. */
+	if (node->has_position) {
+		ni->has_position = true;
+		ni->position.has_latitude_i = true;
+		ni->position.latitude_i = node->position_latitude_i;
+		ni->position.has_longitude_i = true;
+		ni->position.longitude_i = node->position_longitude_i;
+		/* The cache is PositionLite-shaped (no has_altitude bit, matching
+		 * upstream's own lossy ConvertToPositionLite) -- a cached altitude of
+		 * 0 is reported as present, same ambiguity upstream accepts. */
+		ni->position.has_altitude = true;
+		ni->position.altitude = node->position_altitude;
+		ni->position.time = node->position_time;
+		ni->position.location_source =
+			(meshtastic_Position_LocSource)node->position_location_source;
+		ni->position.precision_bits = node->position_precision_bits;
+	}
+#endif
 }
 
 static void fill_metadata_frame(meshtastic_FromRadio *from, bool auth)
