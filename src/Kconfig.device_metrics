@@ -40,6 +40,41 @@ config MESHTASTIC_FUEL_GAUGE
 	  of charge and voltage in DeviceMetrics when the driver supports
 	  those properties.
 
+config MESHTASTIC_DEVICE_METRICS_TO_PHONE
+	bool "Push DeviceMetrics to a connected phone on a faster cadence than the mesh broadcast"
+	default y
+	depends on MESHTASTIC_PHONEAPI
+	help
+	  agents-ooma.15: upstream's DeviceTelemetryModule::runOnce() pushes
+	  DeviceMetrics to a connected phone on its own short timer
+	  (sendToPhoneIntervalMs, ~60 s) independent of the much slower mesh
+	  broadcast interval (MESHTASTIC_DEVICE_METRICS_INTERVAL_SEC, 3600 s
+	  default) -- the phone app's battery/util/uptime readings are meant to be
+	  live, not only as fresh as the last airtime-budgeted broadcast. This
+	  port previously had one cadence for both.
+
+	  Same mechanism and reasoning as MESHTASTIC_LOCAL_STATS_TO_PHONE just
+	  above: meshtastic_phoneapi_on_packet() directly, never
+	  meshtastic_send_data() -- zero airtime by construction, the frame never
+	  reaches the radio. Independent of MESHTASTIC_DEVICE_METRICS_AUTO_SEND;
+	  the phone push runs whether or not the mesh broadcast is even enabled,
+	  matching upstream's runOnce() (the phone branch is not gated on
+	  device_telemetry_enabled).
+
+config MESHTASTIC_DEVICE_METRICS_TO_PHONE_SEC
+	int "DeviceMetrics to-phone interval in seconds"
+	default 60
+	range 10 3600
+	depends on MESHTASTIC_DEVICE_METRICS_TO_PHONE
+	help
+	  Matches upstream's sendToPhoneIntervalMs (DeviceTelemetry.h,
+	  SECONDS_IN_MINUTE * 1000) -- one minute. Upstream's real trigger is
+	  "every runOnce tick that isn't the mesh's turn to send", which this
+	  port simplifies to a real independent timer, the same simplification
+	  already made for MESHTASTIC_LOCAL_STATS_TO_PHONE_SEC (whose own upstream
+	  trigger is a proper fixed interval, unlike this one, but the port keeps
+	  both as plain per-job deadlines for one consistent dispatch shape).
+
 endif # MESHTASTIC_DEVICE_METRICS
 
 menuconfig MESHTASTIC_LOCAL_STATS

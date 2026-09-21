@@ -75,6 +75,28 @@ int meshtastic_send_environment(uint32_t dest, k_timeout_t wait);
  */
 int meshtastic_send_local_stats_to_phone(void);
 
+/**
+ * @brief Hand DeviceMetrics to every attached phone transport. Costs no airtime.
+ *
+ * agents-ooma.15: upstream pushes DeviceMetrics to a connected phone on a much
+ * faster cadence (sendToPhoneIntervalMs, ~60 s) than it broadcasts to the mesh
+ * (default_telemetry_broadcast_interval_secs, 900-3600 s) -- the phone app's
+ * battery/util/uptime display is meant to be live. Same mechanism as
+ * meshtastic_send_local_stats_to_phone(): meshtastic_phoneapi_on_packet()
+ * directly, never meshtastic_send_data(). Independent of
+ * @kconfig{CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND} -- this runs whether or
+ * not the mesh broadcast is enabled, matching upstream.
+ *
+ * Requires @kconfig{CONFIG_MESHTASTIC_DEVICE_METRICS_TO_PHONE}. Called on a
+ * timer by the telemetry thread; exposed so the shell (and tests) can force
+ * one.
+ *
+ * @retval 0        Enqueued to every registered transport.
+ * @retval -ENOMEM  Protobuf encoding failed.
+ * @retval -ENOTSUP Not compiled in.
+ */
+int meshtastic_send_device_metrics_to_phone(void);
+
 #ifdef __cplusplus
 }
 #endif

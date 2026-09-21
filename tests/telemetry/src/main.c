@@ -281,6 +281,95 @@ ZTEST(local_stats, test_push_burst_stays_bounded)
 }
 
 /* ------------------------------------------------------------------ */
+/* DeviceMetrics phone hand-off, faster than the mesh cadence (agents-ooma.15) */
+/* ------------------------------------------------------------------ */
+
+/* Mirrors pop_local_stats() above, for the sibling phone-push path. */
+static bool pop_device_metrics(meshtastic_DeviceMetrics *out, uint32_t *portnum)
+{
+	struct meshtastic_phoneapi_frame frame;
+	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+	meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_zero;
+	pb_istream_t stream;
+
+	if (!meshtastic_phoneapi_pop_frame(&api, &frame)) {
+		return false;
+	}
+
+	stream = pb_istream_from_buffer(frame.data, frame.len);
+	if (!pb_decode(&stream, meshtastic_FromRadio_fields, &from)) {
+		return false;
+	}
+	if (from.which_payload_variant != meshtastic_FromRadio_packet_tag ||
+	    from.packet.which_payload_variant != meshtastic_MeshPacket_decoded_tag) {
+		return false;
+	}
+
+	*portnum = from.packet.decoded.portnum;
+
+	stream = pb_istream_from_buffer(from.packet.decoded.payload.bytes,
+					from.packet.decoded.payload.size);
+	if (!pb_decode(&stream, meshtastic_Telemetry_fields, &telemetry)) {
+		return false;
+	}
+	if (telemetry.which_variant != meshtastic_Telemetry_device_metrics_tag) {
+		return false;
+	}
+
+	*out = telemetry.variant.device_metrics;
+	return true;
+}
+
+ZTEST_SUITE(device_metrics_phone, NULL, NULL, telemetry_before, NULL, NULL);
+
+ZTEST(device_metrics_phone, test_push_reaches_the_phone_as_telemetry)
+{
+	meshtastic_DeviceMetrics metrics;
+	uint32_t portnum = 0U;
+
+	zassert_ok(meshtastic_send_device_metrics_to_phone());
+	zassert_equal(meshtastic_phoneapi_pending_count(&api), 1U,
+		      "exactly one frame should have been enqueued");
+
+	zassert_true(
+		pop_device_metrics(&metrics, &portnum),
+		"the queued frame must decode as FromRadio.packet -> Telemetry.device_metrics");
+	zassert_equal(portnum, (uint32_t)meshtastic_PortNum_TELEMETRY_APP,
+		      "DeviceMetrics rides the ordinary telemetry port, same as the mesh path");
+	zassert_true(metrics.has_uptime_seconds, "the decoded metrics should carry real values");
+}
+
+/* The load-bearing property, same reasoning as LocalStats: the faster
+ * phone-only cadence must never reach the radio -- that is the entire premise
+ * that lets it run every ~60 s instead of every ~3600 s. */
+ZTEST(device_metrics_phone, test_push_does_not_transmit)
+{
+	struct meshtastic_status before, after;
+
+	zassert_ok(meshtastic_get_status(&before));
+	zassert_ok(meshtastic_send_device_metrics_to_phone());
+	zassert_ok(meshtastic_get_status(&after));
+
+	zassert_equal(after.tx_packets, before.tx_packets,
+		      "the phone-only push must never reach the radio -- that's the entire "
+		      "reason it can run faster than the mesh broadcast interval");
+	zassert_equal(after.tx_failures, before.tx_failures,
+		      "and must not even attempt a transmission");
+}
+
+/* Same bound as LocalStats' burst test: TELEMETRY_APP is droppable, so a
+ * stalled phone cannot make the queue grow past its configured size. */
+ZTEST(device_metrics_phone, test_push_burst_stays_bounded)
+{
+	for (int i = 0; i < (int)Q_SIZE * 3; i++) {
+		zassert_ok(meshtastic_send_device_metrics_to_phone());
+	}
+
+	zassert_equal(meshtastic_phoneapi_pending_count(&api), Q_SIZE,
+		      "the queue is bounded; a stalled phone cannot make it grow");
+}
+
+/* ------------------------------------------------------------------ */
 /* Cadence: ModuleConfig.telemetry resolved (agents-dnr4.10)           */
 /* ------------------------------------------------------------------ */
 

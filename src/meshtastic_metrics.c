@@ -201,6 +201,52 @@ int meshtastic_send_device_metrics(uint32_t dest, k_timeout_t wait)
 				    wait);
 }
 
+#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_TO_PHONE)
+#include "meshtastic_phoneapi.h"
+
+/* Hand DeviceMetrics straight to whatever phone transports are attached,
+ * without touching the radio -- same mechanism as
+ * meshtastic_send_local_stats_to_phone() below, on its own faster cadence
+ * (agents-ooma.15). meshtastic_collect_device_metrics()/the Telemetry encode
+ * are the same ones meshtastic_send_device_metrics() (the mesh-broadcast
+ * path, above) uses; only the destination differs -- this never reaches
+ * meshtastic_send_data(). */
+int meshtastic_send_device_metrics_to_phone(void)
+{
+	meshtastic_DeviceMetrics metrics;
+	meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_zero;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	pb_ostream_t stream;
+	struct meshtastic_packet pkt = {0};
+	int ret;
+
+	ret = meshtastic_collect_device_metrics(&metrics);
+	if (ret < 0) {
+		return ret;
+	}
+
+	telemetry.which_variant = meshtastic_Telemetry_device_metrics_tag;
+	telemetry.variant.device_metrics = metrics;
+
+	stream = pb_ostream_from_buffer(payload, sizeof(payload));
+	if (!pb_encode(&stream, meshtastic_Telemetry_fields, &telemetry)) {
+		LOG_ERR("Telemetry encode failed: %s", PB_GET_ERROR(&stream));
+		return -ENOMEM;
+	}
+
+	pkt.portnum = MESHTASTIC_PORT_TELEMETRY;
+	pkt.from = meshtastic_get_node_id();
+	pkt.to = MESHTASTIC_NODE_BROADCAST;
+	pkt.id = meshtastic_allocate_packet_id();
+	pkt.payload = payload;
+	pkt.payload_len = (uint16_t)stream.bytes_written;
+
+	meshtastic_phoneapi_on_packet(&pkt, NULL);
+
+	return 0;
+}
+#endif /* CONFIG_MESHTASTIC_DEVICE_METRICS_TO_PHONE */
+
 #if defined(CONFIG_MESHTASTIC_LOCAL_STATS)
 
 /* Upstream's NUM_ONLINE_SECS (NodeDB.cpp): a node heard inside the last two
@@ -589,6 +635,7 @@ MESHTASTIC_MODULE_DEFINE(device_telemetry, MESHTASTIC_PORT_TELEMETRY, 0, NULL,
 #endif /* CONFIG_MESHTASTIC_TELEMETRY_WANT_RESPONSE */
 
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND) ||                                         \
+	defined(CONFIG_MESHTASTIC_DEVICE_METRICS_TO_PHONE) ||                                      \
 	defined(CONFIG_MESHTASTIC_LOCAL_STATS_TO_PHONE) ||                                         \
 	(defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                         \
 	 defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND))
@@ -660,6 +707,23 @@ static void fire_device_metrics(void)
 }
 #endif
 
+#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_TO_PHONE)
+/* Reference sendToPhoneIntervalMs is a constant, not a config field -- and
+ * independent of device_telemetry_enabled (the mesh-broadcast switch): the
+ * phone push runs whether or not the mesh broadcast does, matching
+ * upstream's runOnce() (agents-ooma.15). */
+static bool resolve_device_metrics_to_phone(uint32_t *interval_sec)
+{
+	*interval_sec = CONFIG_MESHTASTIC_DEVICE_METRICS_TO_PHONE_SEC;
+	return true;
+}
+
+static void fire_device_metrics_to_phone(void)
+{
+	(void)meshtastic_send_device_metrics_to_phone();
+}
+#endif
+
 #if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                              \
 	defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND)
 static bool resolve_environment(uint32_t *interval_sec)
@@ -700,6 +764,9 @@ static void telemetry_thread_fn(void *p1, void *p2, void *p3)
 	static struct telemetry_job jobs[] = {
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND)
 		{ .resolve = resolve_device_metrics, .fire = fire_device_metrics },
+#endif
+#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS_TO_PHONE)
+		{ .resolve = resolve_device_metrics_to_phone, .fire = fire_device_metrics_to_phone },
 #endif
 #if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS) &&                                              \
 	defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND)
