@@ -8,19 +8,30 @@ config MESHTASTIC_DIAG_LOOP_STACK_SIZE
 	  agents-wu94.12.1: mt_thread_summary (was CONFIG_MESHTASTIC_THREAD_SUMMARY_STACK_SIZE,
 	  2048 B) and mt_supervisor_thread (was CONFIG_MESHTASTIC_SUPERVISOR_STACK_SIZE,
 	  4096 B) merged onto one thread with one stack, replacing both symbols with
-	  this one. 2026-09-19 soak (0.3.53, courier + class-4, 2-4 h uptime) measured
-	  the two SEPARATE stacks peaking at 1028-1060/2048 B (50-52%) and 852-916/4096 B
-	  (21-22%) respectively -- 2048 B covers both observed peaks with real margin,
-	  not a computed minimum from that one short sample (the standing rule from
-	  agents-wu94.8). Re-measure on the merged thread's own high-water mark before
-	  trusting this number on hardware; a scheduling-coupling regression (a delayed
-	  sweep, not a stack overflow) is the risk this merge trades in, per the parent
-	  bead's soak requirement.
+	  this one.
 
-	  Linked DRAM delta measured on a class-2-style build (heltec_wifi_lora32_v4_r8,
-	  overlay-cluster-sign.conf, otherwise stock samples/meshtastic/prj.conf): dram0_0_seg
-	  150048 B before this merge, 145808 B after -- 4240 B reclaimed, ahead of the ~4 KB
-	  estimate from stack sizes alone. Still outstanding before fleet rollout: flash ONE
-	  node, soak a full multi-day cycle, and provoke both alert paths (a heap-low WARN and
-	  a stack/cpu WARN) at least once before trusting the merged thread's own high-water
-	  mark on real hardware.
+	  2026-09-21: deliberately provoking the supervisor's alert() path on real hardware
+	  (rzr4, class 6) found a genuine crash-loop, not a tight margin -- confirmed via a
+	  full decoded backtrace (Xtensa EXCCAUSE 63, Zephyr's own z_check_stack_sentinel
+	  catching a real overflow): thread_analyzer_run()'s callback calling check_thread()
+	  for mt_diag_loop's OWN entry, once it crosses CONFIG_MESHTASTIC_SUPERVISOR_STACK_WARN_PCT,
+	  fires alert() -> alert_phone() -> meshtastic_phoneapi_on_packet() ->
+	  meshtastic_phoneapi_enqueue_fromradio() (672 B alone, measured with -fstack-usage)
+	  -> meshtastic_phoneapi_notify_data_ready() -> a BLE work-queue submit -> a kernel
+	  reschedule -- roughly 1.6 KB of measured frames across ~13 nested calls, all
+	  running on mt_diag_loop's own stack, self-referentially triggered by mt_diag_loop
+	  warning about its own stack pressure. Doubling this Kconfig's default to 4096 B did
+	  NOT fix it -- identical crash, identical ~41 s timing, both sizes -- because the
+	  true worst case was never a sizing problem: nobody had ever measured this specific
+	  chain (it was pure dead code until the alert path actually fired), and its depth
+	  isn't a small fixed increment over the routine 39-53%/2048 B baseline.
+
+	  FIX (2026-09-21, agents-wu94.12.1): alert()'s actual phoneapi send moved off this
+	  thread entirely, onto a dedicated worker (CONFIG_MESHTASTIC_SUPERVISOR_ALERT_STACK_SIZE,
+	  Kconfig.supervisor) -- the same "isolate the deep call chain onto its own measured
+	  thread" pattern agents-ooma.35 already proved for XEdDSA signing two days earlier
+	  in this codebase (main/src/meshtastic_pki.c). mt_diag_loop itself never runs that
+	  chain anymore, so its own worst case is back to the routine sweep+dispatch cost --
+	  2048 B restores real margin over the 39-53% baseline this Kconfig was originally
+	  sized from, which was always accurate; it was the untested alert path riding on
+	  the SAME stack that was the actual defect, not this number.

@@ -94,6 +94,46 @@ config MESHTASTIC_SUPERVISOR_TO_PHONE
 	  uses. Turning this off still leaves rungs 1 (STATS) and 2 (log ring)
 	  intact.
 
+	  Runs on the dedicated worker CONFIG_MESHTASTIC_SUPERVISOR_ALERT_STACK_SIZE
+	  sizes, not on mt_diag_loop's own stack -- see that config's help for why.
+
+config MESHTASTIC_SUPERVISOR_ALERT_STACK_SIZE
+	int "Stack size for the dedicated supervisor-alert worker thread"
+	default 3584
+	depends on MESHTASTIC_SUPERVISOR_TO_PHONE
+	help
+	  agents-wu94.12.1, 2026-09-21: alert()'s phoneapi send used to run inline on
+	  mt_diag_loop's own stack (meshtastic_diag_loop.c) -- the call chain
+	  alert_phone() -> meshtastic_phoneapi_on_packet() ->
+	  meshtastic_phoneapi_enqueue_fromradio() -> meshtastic_phoneapi_notify_data_ready()
+	  -> a BLE work-queue submit -> a kernel reschedule is a real, deep send path
+	  (~13 nested calls), and firing it from INSIDE the same sweep that detects
+	  mt_diag_loop's own stack pressure overflowed it on real hardware -- a
+	  confirmed crash (Zephyr's own z_check_stack_sentinel catching it), not a
+	  tight margin; doubling mt_diag_loop's stack did not fix it, because the
+	  chain's true depth had never been measured, isolated, or budgeted for by
+	  anyone, including before this merge.
+
+	  Measured with -fstack-usage (Xtensa, class-6 build) along the exact path a
+	  decoded crash backtrace confirmed: alert() 304 B (includes alert_phone(),
+	  inlined) + meshtastic_phoneapi_on_packet() 48 B + enqueue_fromradio() 672 B
+	  (the single largest frame -- its own ~515 B stack-local FromRadio encode
+	  buffer) + notify_data_ready() 32 B + the BLE work-submit + reschedule/sentinel
+	  path (roughly 100-150 B more) -- about 1.2 KB just for this segment, atop
+	  whatever thread_analyzer_run()'s own walk already used to reach it. As with
+	  meshtastic_watchdog.c's own documented caveat, -fstack-usage does not capture
+	  Xtensa's real per-call register-window-spill cost, which is nontrivial across
+	  this many nested calls.
+
+	  3584 B reuses CONFIG_MESHTASTIC_XEDDSA_SIGN_STACK_SIZE's default -- the
+	  already-hardware-proven size for the exact same class of problem
+	  (agents-ooma.35, meshtastic_pki.c's dedicated signing thread: a real send/
+	  crypto call chain isolated onto its own right-sized worker instead of
+	  running inline on whichever thread happened to trigger it), not a fresh
+	  guess. Soak with the alert path DELIBERATELY forced (both the heap-low and
+	  the thread's-own-stack-warn branches -- the latter is what actually crashed)
+	  before trusting a smaller number here.
+
 config MESHTASTIC_SUPERVISOR_HEAP_MIN_BYTES
 	int "Free system-heap bytes below which a WARN fires"
 	default 4096

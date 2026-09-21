@@ -141,16 +141,33 @@ static size_t threads_used;
 
 static bool heap_warn_latched;
 
-/* Send a short text alert to whatever PhoneAPI transports are attached,
- * without touching the radio -- same mechanism and same reasoning as
- * meshtastic_send_local_stats_to_phone() (meshtastic_metrics.c), on its own
- * port so it carries no wire-format compatibility burden and is never
- * subject to meshtastic_sched_tier_for() airtime gating (it never reaches
- * meshtastic_send_data() at all). Deliberately independent of
- * MESHTASTIC_PHONELOG's runtime verbosity knob -- see Kconfig.supervisor. */
-static void alert_phone(const char *text, size_t len)
-{
 #if defined(CONFIG_MESHTASTIC_SUPERVISOR_TO_PHONE)
+/* agents-wu94.12.1, 2026-09-21: this send used to run inline on mt_diag_loop's
+ * own stack. alert_phone_send()'s call chain (meshtastic_phoneapi_on_packet ->
+ * enqueue_fromradio -> notify_data_ready -> a BLE work-queue submit -> a kernel
+ * reschedule) is a real ~1.2 KB, ~13-frame-deep send path -- see
+ * Kconfig.supervisor's MESHTASTIC_SUPERVISOR_ALERT_STACK_SIZE for the measured
+ * numbers and the crash this fixes. Isolating it onto its own dedicated worker,
+ * the same shape agents-ooma.35 already proved for XEdDSA signing
+ * (meshtastic_pki.c's sign_q), means mt_diag_loop's own stack never has to
+ * carry this chain regardless of how deep it turns out to be. No blocking on a
+ * result is needed (unlike signing) -- the caller only waits long enough for
+ * its text to be copied out of the shared request slot, not for the send
+ * itself to finish. */
+static K_THREAD_STACK_DEFINE(alert_stack, CONFIG_MESHTASTIC_SUPERVISOR_ALERT_STACK_SIZE);
+static struct k_work_q alert_q;
+static K_MUTEX_DEFINE(alert_lock);
+static K_SEM_DEFINE(alert_copied, 0, 1);
+static bool alert_q_started;
+static struct {
+	struct k_work work;
+	char text[96];
+	size_t len;
+} alert_req;
+
+/* The deep send itself -- runs on alert_q's own stack, never mt_diag_loop's. */
+static void alert_phone_send(const char *text, size_t len)
+{
 	struct meshtastic_packet pkt = {0};
 
 	if (len > MESHTASTIC_MAX_PAYLOAD_LEN) {
@@ -165,6 +182,64 @@ static void alert_phone(const char *text, size_t len)
 	pkt.payload_len = (uint16_t)len;
 
 	meshtastic_phoneapi_on_packet(&pkt, NULL);
+}
+
+static void alert_work_fn(struct k_work *work)
+{
+	char text[sizeof(alert_req.text)];
+	size_t len = alert_req.len;
+
+	ARG_UNUSED(work);
+
+	memcpy(text, alert_req.text, len);
+	k_sem_give(&alert_copied); /* alert_req is free for the next caller now */
+
+	alert_phone_send(text, len);
+}
+#endif /* MESHTASTIC_SUPERVISOR_TO_PHONE */
+
+/* Send a short text alert to whatever PhoneAPI transports are attached,
+ * without touching the radio -- same mechanism and same reasoning as
+ * meshtastic_send_local_stats_to_phone() (meshtastic_metrics.c), on its own
+ * port so it carries no wire-format compatibility burden and is never
+ * subject to meshtastic_sched_tier_for() airtime gating (it never reaches
+ * meshtastic_send_data() at all). Deliberately independent of
+ * MESHTASTIC_PHONELOG's runtime verbosity knob -- see Kconfig.supervisor.
+ *
+ * Only hands the text off to the dedicated alert_q worker (see above) --
+ * never runs the deep send chain itself, so this stays cheap regardless of
+ * what the send path costs. */
+static void alert_phone(const char *text, size_t len)
+{
+#if defined(CONFIG_MESHTASTIC_SUPERVISOR_TO_PHONE)
+	if (len >= sizeof(alert_req.text)) {
+		len = sizeof(alert_req.text) - 1U;
+	}
+	if (k_is_in_isr()) {
+		return; /* never expected here, but never block a fault path */
+	}
+
+	k_mutex_lock(&alert_lock, K_FOREVER);
+	if (!alert_q_started) {
+		k_work_queue_start(&alert_q, alert_stack, K_THREAD_STACK_SIZEOF(alert_stack),
+				   K_PRIO_PREEMPT(10), NULL);
+		k_thread_name_set(k_work_queue_thread_get(&alert_q), "mt_diag_alert");
+		k_work_init(&alert_req.work, alert_work_fn);
+		alert_q_started = true;
+	}
+	if (k_current_get() == k_work_queue_thread_get(&alert_q)) {
+		/* Should never happen (alert_work_fn never calls back into
+		 * alert_phone()), but never deadlock against ourselves. */
+		k_mutex_unlock(&alert_lock);
+		return;
+	}
+
+	memcpy(alert_req.text, text, len);
+	alert_req.len = len;
+	k_sem_reset(&alert_copied);
+	(void)k_work_submit_to_queue(&alert_q, &alert_req.work);
+	(void)k_sem_take(&alert_copied, K_FOREVER);
+	k_mutex_unlock(&alert_lock);
 #else
 	ARG_UNUSED(text);
 	ARG_UNUSED(len);
