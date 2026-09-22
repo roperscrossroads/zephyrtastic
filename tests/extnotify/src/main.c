@@ -8,7 +8,8 @@
  *   - with nag_timeout the output toggles every output_ms until the timeout;
  *   - alert_bell alone fires only on a message carrying ASCII BEL;
  *   - a broadcast on a muted channel does not alert (a bell still does);
- *   - `active` false inverts the drive level;
+ *   - `active` has no effect on the drive level -- see
+ *     test_active_config_does_not_invert_led0 for why (agents-t2hb.10);
  *   - our own text, or the module disabled, never alerts; stop ends a cycle;
  *   - a config naming outputs this port has none of is refused.
  */
@@ -211,20 +212,36 @@ ZTEST(extnotify, test_a_muted_channel_does_not_alert_but_a_bell_still_does)
 	zassert_ok(meshtastic_channels_set_slot(primary, &saved), "restore");
 }
 
-ZTEST(extnotify, test_active_low_inverts_the_drive)
+ZTEST(extnotify, test_active_config_does_not_invert_led0)
 {
+	/* agents-t2hb.10: `output` is always led0, whose devicetree gpios
+	 * property has already abstracted polarity -- logical 1 from
+	 * gpio_pin_set_dt() always means "lit". The reference's `active`
+	 * flag exists to supply polarity for a raw pin with none of its own,
+	 * which this port never targets, so it must NOT invert the drive
+	 * here: idle is always off (0), an alert is always on (1),
+	 * regardless of `active`. (The previous version of this test,
+	 * test_active_low_inverts_the_drive, asserted the bug itself --
+	 * idle driven HIGH, alert driven LOW -- as intended behavior.) */
 	meshtastic_ModuleConfig_ExternalNotificationConfig c = cfg_led(true, 1000U, 0U, true, false);
 
 	c.active = false;
 	zassert_ok(meshtastic_extnotify_set(&c), "");
-	/* config_changed leaves the output "off", which for active-low means
-	 * the LED's active level -- the reference's !on. */
 	meshtastic_extnotify_stop();
-	zassert_equal(led_level(), 1, "active-low idle: driven high");
+	zassert_equal(led_level(), 0, "active=false idle: off");
 	inject_text(PEER_A, MESHTASTIC_NODE_BROADCAST, "hello");
-	zassert_equal(led_level(), 0, "active-low alert: driven low");
+	zassert_equal(led_level(), 1, "active=false alert: on");
 	meshtastic_extnotify_stop();
-	zassert_equal(led_level(), 1, "");
+	zassert_equal(led_level(), 0, "active=false stop: off");
+
+	c.active = true;
+	zassert_ok(meshtastic_extnotify_set(&c), "");
+	meshtastic_extnotify_stop();
+	zassert_equal(led_level(), 0, "active=true idle: off");
+	inject_text(PEER_A, MESHTASTIC_NODE_BROADCAST, "hello");
+	zassert_equal(led_level(), 1, "active=true alert: on");
+	meshtastic_extnotify_stop();
+	zassert_equal(led_level(), 0, "active=true stop: off");
 }
 
 ZTEST(extnotify, test_own_text_or_disabled_never_alerts_and_stop_ends_a_cycle)

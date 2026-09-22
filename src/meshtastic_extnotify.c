@@ -101,14 +101,20 @@ int meshtastic_extnotify_set(const meshtastic_ModuleConfig_ExternalNotificationC
 
 static void output_set(bool on)
 {
-	struct meshtastic_extnotify_settings s;
-
-	meshtastic_extnotify_settings(&s);
 	output_on = on;
 #if EXTNOTIFY_HAS_LED
-	/* Reference: digitalWrite(output, active ? on : !on), layered on the
-	 * devicetree's own active level. */
-	(void)gpio_pin_set_dt(&led, (s.active ? on : !on) ? 1 : 0);
+	/* The reference's digitalWrite(output, active ? on : !on) exists to
+	 * supply polarity for a raw pin with no polarity information of its
+	 * own. This port's `output` is always led0 (validate() permits no
+	 * other value) -- and led0's devicetree gpios property has ALREADY
+	 * abstracted polarity (GPIO_ACTIVE_LOW/HIGH): logical 1 from
+	 * gpio_pin_set_dt() always means "lit", regardless of the physical
+	 * wiring. Applying `active` on top of that would be a second,
+	 * redundant inversion, and with its default (false, never
+	 * configured by an operator who has no raw pin to describe) it
+	 * flips the wrong way -- asserting the LED at the exact moment
+	 * init means to leave it off (agents-t2hb.10). Ignored on purpose. */
+	(void)gpio_pin_set_dt(&led, on ? 1 : 0);
 #endif
 }
 
