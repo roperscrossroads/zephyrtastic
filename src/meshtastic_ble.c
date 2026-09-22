@@ -1014,10 +1014,23 @@ static void ble_peer_frame_ingest(unsigned int index, const uint8_t *frame, size
  */
 int meshtastic_ble_radio_enable(void)
 {
+	int ret;
+
 	if (bt_is_ready()) {
 		return 0;
 	}
-	return bt_enable(NULL);
+	ret = bt_enable(NULL);
+	/* -EALREADY means something else (most likely MCUmgr's own, separate
+	 * Bluetooth transport, which enables the controller independently and
+	 * can win a boot-time race against this call) already brought the
+	 * radio up between our bt_is_ready() check above and this bt_enable()
+	 * call -- not a real failure. Every caller here wants "is BT usable
+	 * now", and it is; treating this as an error left meshtastic_ble_init()
+	 * aborting its ENTIRE BLE service (no phone, no peer link) whenever the
+	 * race went the other way (agents-t2hb.11) -- confirmed nondeterministic
+	 * on real hardware: a clean reboot of the same board reproduced it,
+	 * then didn't. */
+	return (ret == -EALREADY) ? 0 : ret;
 }
 
 int meshtastic_ble_init(void)
