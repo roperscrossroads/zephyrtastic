@@ -1,0 +1,34 @@
+menuconfig MESHTASTIC_LED_STATUS
+	bool "Board LED reflects BLE peer-link state (bench diagnostic)"
+	default n
+	depends on GPIO
+	depends on MESHTASTIC_BLE_PEER
+	depends on !MESHTASTIC_EXTNOTIFY
+	help
+	  Drives led0 directly, independent of the Meshtastic app/config: solid
+	  while powered with no active BLE peer link, 1 Hz blink (1 s on, 1 s
+	  off) while at least one peer link — inbound or outbound — is up and
+	  exchanging beats/notifications.
+
+	  A bench-visibility aid for the node-to-node BLE peer link
+	  (CONFIG_MESHTASTIC_BLE_PEER), built to answer "which of these boards
+	  are actually meshing over Bluetooth right now" at a glance, without a
+	  console open on every one of them.
+
+	  Mutually exclusive with CONFIG_MESHTASTIC_EXTNOTIFY: both want sole
+	  ownership of led0, and this module does not arbitrate with it. Turn
+	  extnotify off in the same build to use this.
+
+if MESHTASTIC_LED_STATUS
+
+config MESHTASTIC_LED_STATUS_TICK_MS
+	int "Poll/toggle tick (ms)"
+	default 1000
+	range 100 5000
+	help
+	  How often the peer-link state is checked, and — while meshing — the
+	  half-period of the blink. 1000 ms gives the documented 1 s on / 1 s
+	  off pattern. A shorter tick makes the "solid -> blink" transition
+	  snappier at the cost of more frequent GPIO writes; both are cheap.
+
+endif # MESHTASTIC_LED_STATUS
