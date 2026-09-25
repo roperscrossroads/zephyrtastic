@@ -13,6 +13,9 @@ extern "C" {
 
 int meshtastic_gnss_init(void);
 
+/** @brief Apply the stored PositionConfig.gps_mode to the receiver (agents-t2hb.2). */
+int meshtastic_gnss_apply_mode(void);
+
 #if defined(CONFIG_ZTEST)
 /**
  * @brief Test-only: forget when the last fix was sent/attempted.

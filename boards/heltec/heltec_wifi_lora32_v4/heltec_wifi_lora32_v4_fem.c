@@ -33,6 +33,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/meshtastic/fem.h>
+#include <zephyr/meshtastic/gnss.h> /* meshtastic_gnss_board_power() */
 #include <zephyr/shell/shell.h>
 #include <zephyr/meshtastic/gnss_pps.h>
 #include <zephyr/sys/sys_io.h>
@@ -400,6 +401,39 @@ static int heltec_v4_gps_reset(void)
 SYS_INIT(heltec_v4_gps_reset, POST_KERNEL, 85);
 #endif /* GPS_HAS_RESET — on the R8 the gps_en_hog holds GPS enabled; no reset line */
 
+/* Last-commanded EN level, seeded to the gpio-hog boot default (0 = enabled).
+ * Reading back an output pin is driver-dependent on ESP32, so intent is tracked
+ * rather than sampled -- by both gps_mode below and the bench CLI. */
+static int gps_en_level;
+
+/*
+ * PositionConfig.gps_mode -> the L76K's power (agents-t2hb.2). Overrides the weak
+ * default in meshtastic_gnss.c. The same EN line `gps on|off` drives by hand: it
+ * is active-low on both boards (V4 GPIO34, R8 GPIO42), held enabled at boot by
+ * the gps_en_hog. Power-cycling it is also a reset, so the V4's boot reset pulse
+ * is not repeated on the way back up. STANDBY is left alone -- that is a sleep
+ * mode, not off, and on the R8 the pin is Vext.
+ */
+int meshtastic_gnss_board_power(bool on)
+{
+	const struct device *const gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+	int raw = on ? 0 : 1;
+	int rc;
+
+	if (!device_is_ready(gpio1)) {
+		return -ENODEV;
+	}
+	rc = gpio_pin_configure(gpio1, GPS_EN_PIN, GPIO_OUTPUT);
+	if (rc == 0) {
+		rc = gpio_pin_set_raw(gpio1, GPS_EN_PIN, raw);
+	}
+	if (rc == 0) {
+		gps_en_level = raw;
+		LOG_INF("GPS: EN %s (gps_mode)", on ? "on" : "off");
+	}
+	return rc;
+}
+
 /*
  * ---------------------------------------------------------------------------
  * `gps` bench CLI — live L76K control for GNSS bring-up debugging.
@@ -424,10 +458,8 @@ SYS_INIT(heltec_v4_gps_reset, POST_KERNEL, 85);
 
 /* GPS_EN_PIN / GPS_STANDBY_PIN / GPS_HAS_* come from the board-aware block above. */
 
-/* Last-commanded physical levels, seeded to the gpio-hog boot defaults so
- * `gps status` is truthful before any command (reading back an output pin is
- * driver-dependent on ESP32, so intent is tracked rather than sampled). */
-static int gps_en_level = 0;      /* enabled */
+/* Last-commanded STANDBY level, seeded to the gpio-hog boot default so
+ * `gps status` is truthful before any command. EN's is gps_en_level, above. */
 #if GPS_HAS_STANDBY
 static int gps_standby_level = 1; /* awake   */
 #endif

@@ -35,6 +35,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_scanner.h"
 #include "meshtastic_config_store.h"
+#include "meshtastic_position.h"
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
 
@@ -455,6 +456,55 @@ ZTEST(meshtastic_shell, test_nodeinfo_interval_persists_and_reads_back)
 		      "0 must fall back to the compiled default, not stick at 0");
 }
 
+/*
+ * `meshtastic position` (agents-t2hb.2): the two PositionConfig fields with a
+ * consumer. interval must reach meshtastic_position_broadcast_secs() (what both
+ * senders call) with 0 falling back to the compiled default; gps_mode must reach
+ * the stored section by name; an unknown mode is refused, not stored.
+ */
+ZTEST(meshtastic_shell, test_position_interval_and_gps_mode)
+{
+	const char *out;
+
+	zassert_ok(run_cmd("meshtastic position interval 77", &out), "interval set failed");
+	zassert_not_null(strstr(out, "77 s"), "expected the interval echoed, got: %s", out);
+	zassert_not_null(strstr(out, "no reboot"), "must say it applies live, got: %s", out);
+	zassert_equal(meshtastic_position_broadcast_secs(), 77U,
+		      "the function both senders call must see 77");
+
+	zassert_ok(run_cmd("meshtastic position gps_mode disabled", &out), "gps_mode set failed");
+	zassert_equal(meshtastic_position_gps_mode(),
+		      meshtastic_Config_PositionConfig_GpsMode_DISABLED, "");
+	zassert_not_equal(run_cmd("meshtastic position gps_mode sideways", &out), 0,
+			  "an unknown mode must be refused");
+	zassert_equal(meshtastic_position_gps_mode(),
+		      meshtastic_Config_PositionConfig_GpsMode_DISABLED, "and not stored");
+
+	zassert_ok(run_cmd("meshtastic position", &out), "show failed");
+	zassert_not_null(strstr(out, "gps_mode: disabled"), "show gps_mode, got: %s", out);
+	zassert_not_null(strstr(out, "interval: 77 s"), "show interval, got: %s", out);
+	zassert_not_null(strstr(out, "position: none"), "no position in this image, got: %s", out);
+
+	zassert_ok(run_cmd("meshtastic position interval 0", &out), "interval reset failed");
+	zassert_equal(meshtastic_position_broadcast_secs(),
+		      CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC,
+		      "0 must fall back to the compiled default");
+	zassert_not_null(strstr(out, "compiled default"), "got: %s", out);
+	zassert_ok(run_cmd("meshtastic position gps_mode not_present", NULL), "");
+}
+
+ZTEST(meshtastic_shell, test_managed_node_refuses_position_write)
+{
+	const char *out;
+
+	zassert_ok(run_cmd("meshtastic position interval 0", NULL), "");
+	set_managed(true);
+	zassert_not_equal(run_cmd("meshtastic position interval 90", &out), 0,
+			  "a managed node must refuse the write");
+	zassert_equal(meshtastic_position_broadcast_secs(),
+		      CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC, "nothing stored");
+}
+
 ZTEST(meshtastic_shell, test_managed_node_refuses_lora_tx_write)
 {
 	const char *out;
@@ -480,6 +530,16 @@ ZTEST(meshtastic_shell, test_config_write_compiled_out)
 			  "device role write must be refused when compiled out");
 	zassert_equal(stored_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
 		      "nothing should have reached the config store");
+}
+
+ZTEST(meshtastic_shell, test_position_write_compiled_out)
+{
+	const char *out;
+
+	zassert_not_equal(run_cmd("meshtastic position interval 90", NULL), 0,
+			  "position interval must not exist when config writes are compiled out");
+	zassert_ok(run_cmd("meshtastic position", &out), "the read still works");
+	zassert_not_null(strstr(out, "interval:"), "got: %s", out);
 }
 
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */

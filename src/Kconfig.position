@@ -14,13 +14,18 @@ menuconfig MESHTASTIC_POSITION
 if MESHTASTIC_POSITION
 
 config MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC
-	int "Fixed-position broadcast interval in seconds"
+	int "Default position broadcast interval in seconds"
+	default 300 if MESHTASTIC_GNSS
 	default 900
 	range 5 86400
 	help
-	  Interval between periodic re-broadcasts of an admin-set fixed position.
-	  A GNSS-less node has no fix callback to drive sends, so a static fixed
-	  position is re-announced on this timer.
+	  The compiled default for PositionConfig.position_broadcast_secs: a
+	  stored nonzero value overrides it, read afresh at every broadcast, so
+	  an admin/shell write applies to the next one with no reboot
+	  (agents-t2hb.2). Governs both senders -- the GNSS fix-driven gate and
+	  the timer that re-announces a fixed or phone-supplied position. The
+	  two defaults preserve what each build shape did before the two
+	  intervals were merged (GNSS 300 s, fixed-position beacon 900 s).
 
 config MESHTASTIC_POSITION_REPLY_SUPPRESS_SEC
 	int "Minimum seconds between Position want_response replies"

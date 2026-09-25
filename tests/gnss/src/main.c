@@ -60,9 +60,22 @@
 /* The two windows the send gate ANDs together. A send needs both elapsed, so
  * the effective spacing is the larger of the pair — which is the interaction
  * the retry_gate configuration exists to pin. */
-#define SEND_INTERVAL_MS ((int64_t)CONFIG_MESHTASTIC_GNSS_SEND_INTERVAL_SEC * MSEC_PER_SEC)
+#define SEND_INTERVAL_MS ((int64_t)CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC * MSEC_PER_SEC)
 #define RETRY_INTERVAL_MS ((int64_t)CONFIG_MESHTASTIC_GNSS_RETRY_INTERVAL_SEC * MSEC_PER_SEC)
 #define GATE_MS MAX(SEND_INTERVAL_MS, RETRY_INTERVAL_MS)
+
+/* The board's receiver power switch, observed (agents-t2hb.2). A strong
+ * definition here replaces the weak no-op default in meshtastic_gnss.c, the
+ * same way the Heltec V4 board file does with its EN line. */
+static uint32_t board_power_calls;
+static bool board_power_last = true;
+
+int meshtastic_gnss_board_power(bool on)
+{
+	board_power_calls++;
+	board_power_last = on;
+	return 0;
+}
 
 static const struct device *const lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 static const struct device *const gnss_dev = DEVICE_DT_GET(DT_ALIAS(gnss));
@@ -180,6 +193,12 @@ static void gnss_before(void *fixture)
 	int stable = 0;
 
 	ARG_UNUSED(fixture);
+
+	/* The gps_mode and interval tests leave the section changed; every test
+	 * starts from a receiver that is on and the compiled interval. */
+	zassert_ok(meshtastic_position_set_gps_mode(
+		meshtastic_Config_PositionConfig_GpsMode_ENABLED));
+	zassert_ok(meshtastic_position_set_broadcast_secs(0U));
 
 	/* Stop the emulator republishing the previous test's fix: cleared data
 	 * reads as NO_FIX, which the module ignores. Do this FIRST, so the quiesce
@@ -314,7 +333,7 @@ ZTEST(gnss, test_fix_populates_the_advertised_position)
 	zassert_equal(pos.fix_type, 2U, "fix_type wrong for a plain GNSS fix");
 	zassert_equal(pos.location_source, meshtastic_Position_LocSource_LOC_INTERNAL);
 	zassert_equal(pos.altitude_source, meshtastic_Position_AltSource_ALT_INTERNAL);
-	zassert_equal(pos.next_update, CONFIG_MESHTASTIC_GNSS_SEND_INTERVAL_SEC);
+	zassert_equal(pos.next_update, CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC);
 	/* The cached position is full resolution; masking to the channel's sharing
 	 * precision happens on the way out (meshtastic_position_sanitise_tx). */
 	zassert_equal(pos.precision_bits, 32U);
@@ -532,3 +551,97 @@ ZTEST(gnss, test_pps_d_disarmed_capture_is_refused)
 		      "a disarmed capture has nothing to say, however good its last edge was");
 }
 #endif /* CONFIG_MESHTASTIC_GNSS_PPS */
+
+/* ==========================================================================
+ * PositionConfig (agents-t2hb.2): gps_mode switches the receiver, and
+ * position_broadcast_secs governs the fix-driven gate. Before this both were
+ * stored, streamed to the phone, and read by nothing.
+ * ========================================================================== */
+
+ZTEST(gnss, test_gps_mode_disabled_powers_off_and_stops_fixes)
+{
+	struct meshtastic_gnss_status st;
+	struct navigation_data nav;
+	struct gnss_info info;
+	meshtastic_Position pos;
+
+	publish_canonical_fix();
+	zassert_ok(meshtastic_position_get_current(&pos), "precondition: a fix is held");
+	(void)drain_position_tx(K_MSEC(2000));
+
+	board_power_calls = 0U;
+	zassert_ok(meshtastic_position_set_gps_mode(
+		meshtastic_Config_PositionConfig_GpsMode_DISABLED));
+	zassert_equal(board_power_calls, 1U, "the write must reach the board's power line");
+	zassert_false(board_power_last, "... and turn it OFF");
+	zassert_ok(meshtastic_gnss_status_get(&st));
+	zassert_false(st.enabled, "status reports the receiver off");
+	zassert_equal(meshtastic_position_get_current(&pos), -ENODATA,
+		      "the last fix is forgotten, not advertised on after the switch-off");
+
+	/* The receiver is suspended: data handed to it is not published at all. */
+	canonical_fix(&nav, &info);
+	k_sem_reset(&fix_published);
+	gnss_emul_set_data(gnss_dev, &nav, &info, (FIX_EPOCH_SEC * MSEC_PER_SEC) - k_uptime_get());
+	zassert_not_equal(k_sem_take(&fix_published, K_MSEC(3 * EMUL_FIX_INTERVAL_MS)), 0,
+			  "a suspended receiver publishes nothing");
+	zassert_equal(meshtastic_position_get_current(&pos), -ENODATA, "no position");
+	zassert_equal(drain_position_tx(K_NO_WAIT), 0U, "and nothing on the air");
+
+	/* Idempotent: re-writing the same mode does not touch the hardware. */
+	zassert_ok(meshtastic_position_set_gps_mode(
+		meshtastic_Config_PositionConfig_GpsMode_DISABLED));
+	zassert_equal(board_power_calls, 1U, "an unchanged mode is not re-applied");
+
+	/* And back: power, resume, fixes flow again. */
+	zassert_ok(meshtastic_position_set_gps_mode(
+		meshtastic_Config_PositionConfig_GpsMode_ENABLED));
+	zassert_equal(board_power_calls, 2U, "");
+	zassert_true(board_power_last, "ENABLED powers the receiver");
+	zassert_ok(k_sem_take(&fix_published, K_SECONDS(15)),
+		   "a resumed receiver publishes again");
+	k_msleep(50);
+	zassert_ok(meshtastic_position_get_current(&pos), "and the module takes the fix");
+}
+
+/* NOT_PRESENT is off too (the reference never starts the GPS thread for it). */
+ZTEST(gnss, test_gps_mode_not_present_is_off)
+{
+	struct meshtastic_gnss_status st;
+
+	board_power_calls = 0U;
+	zassert_ok(meshtastic_position_set_gps_mode(
+		meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT));
+	zassert_equal(board_power_calls, 1U, "");
+	zassert_false(board_power_last, "");
+	zassert_ok(meshtastic_gnss_status_get(&st));
+	zassert_false(st.enabled, "");
+}
+
+/* A stored position_broadcast_secs beats the compiled default (5 s in this
+ * image) at the very next gate decision, with no reboot. */
+ZTEST(gnss, test_broadcast_secs_governs_the_gate)
+{
+#if !defined(CONFIG_MESHTASTIC_GNSS_AUTO_SEND)
+	ztest_test_skip();
+#else
+	const int64_t stored_ms = 15 * MSEC_PER_SEC;
+	const int64_t gate_ms = MAX(stored_ms, RETRY_INTERVAL_MS);
+	meshtastic_Position pos;
+
+	zassert_ok(meshtastic_position_set_broadcast_secs(15U));
+	meshtastic_gnss_test_reset(); /* the first-fix stamp, re-derived from 15 s */
+
+	publish_canonical_fix();
+	zassert_equal(drain_position_tx(K_MSEC(2000)), 1U, "precondition: first fix sent");
+	zassert_ok(meshtastic_position_get_current(&pos), "");
+	zassert_equal(pos.next_update, 15U, "the advertised next_update follows it too");
+
+	k_msleep(gate_ms - (2 * EMUL_FIX_INTERVAL_MS));
+	zassert_equal(drain_position_tx(K_NO_WAIT), 0U,
+		      "the compiled 5 s would have sent by now; the stored 15 s must not");
+
+	k_msleep(3 * EMUL_FIX_INTERVAL_MS);
+	zassert_true(drain_position_tx(K_NO_WAIT) >= 1U, "and it reopens on the stored interval");
+#endif
+}

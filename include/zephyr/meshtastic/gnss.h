@@ -39,6 +39,7 @@ extern "C" {
 struct meshtastic_gnss_status {
 	bool present;            /**< a gnss alias exists in the devicetree */
 	bool ready;              /**< and its device is ready */
+	bool enabled;            /**< PositionConfig.gps_mode is ENABLED (agents-t2hb.2) */
 	const char *dev_name;    /**< the device's name, or NULL */
 	bool has_fix;            /**< the position module holds a fix */
 	uint32_t callbacks;      /**< data callbacks seen since boot */
@@ -59,6 +60,17 @@ struct meshtastic_gnss_status {
 int meshtastic_gnss_status_get(struct meshtastic_gnss_status *out);
 
 int meshtastic_send_position(uint32_t dest);
+
+/**
+ * @brief Board hook: switch the GNSS receiver's power (agents-t2hb.2).
+ *
+ * Called when PositionConfig.gps_mode changes. The default (weak) returns
+ * -ENOTSUP -- no power line; gps_mode still suspends the driver. A board with an
+ * enable line overrides it.
+ *
+ * @param on true to power the receiver, false to cut it.
+ */
+int meshtastic_gnss_board_power(bool on);
 
 /**
  * @brief Broadcast the latest position as a background beacon (G-5).

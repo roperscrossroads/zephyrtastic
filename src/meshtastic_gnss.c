@@ -22,6 +22,7 @@
 #include <zephyr/meshtastic/gnss_pps.h>
 
 #include "meshtastic_clock.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_gnss.h"
 
 #include "meshtastic_position.h"
@@ -37,8 +38,12 @@ static const struct device *const gnss_dev = DEVICE_DT_GET(MESHTASTIC_GNSS_NODE)
 #define MESHTASTIC_HAS_GNSS_ALIAS 0
 #endif
 
+/* Statically defined, not k_mutex_init()ed in meshtastic_gnss_init(): the data
+ * callback is registered at link time and gps_mode can be applied from the config
+ * path, and neither waits for init. */
+static K_MUTEX_DEFINE(gnss_lock);
+
 static struct {
-	struct k_mutex lock;
 	bool has_fix;
 	int64_t last_sent_ms;
 	int64_t last_attempt_ms;
@@ -56,7 +61,22 @@ static struct {
 	uint8_t fix_status;      /* enum gnss_fix_status, last callback */
 	uint8_t fix_quality;     /* enum gnss_fix_quality, last callback */
 	uint16_t hdop_centi;     /* last callback's HDOP, hundredths */
+	/* PositionConfig.gps_mode as last applied (agents-t2hb.2): false for
+	 * DISABLED and NOT_PRESENT. Written by meshtastic_gnss_apply_mode(), read
+	 * by the data callback on the driver's thread -- a single aligned bool. */
+	bool enabled;
+	bool mode_applied;       /* apply_mode has run once (the boot apply) */
 } gnss_state;
+
+/* The board's receiver power switch. Default: none -- a board without a power
+ * line (or with a DT gpio-hog it never releases) still gets gps_mode through the
+ * driver suspend and the callback gate below. The Heltec V4/V4-R8 board file
+ * overrides this with its EN line (heltec_wifi_lora32_v4_fem.c). */
+__weak int meshtastic_gnss_board_power(bool on)
+{
+	ARG_UNUSED(on);
+	return -ENOTSUP;
+}
 
 #if MESHTASTIC_HAS_GNSS_ALIAS
 static uint32_t mdeg_to_centideg(uint32_t bearing_mdeg)
@@ -87,7 +107,7 @@ static void fill_position(const struct gnss_data *data, meshtastic_Position *pos
 			     : (data->info.fix_status == GNSS_FIX_STATUS_NO_FIX)  ? 0U
 										  : 2U;
 	position->sats_in_view = data->info.satellites_cnt;
-	position->next_update = CONFIG_MESHTASTIC_GNSS_SEND_INTERVAL_SEC;
+	position->next_update = meshtastic_position_broadcast_secs();
 	position->precision_bits = 32U;
 	position->time = meshtastic_clock_now_epoch(); /* epoch secs, 0 if unseeded */
 
@@ -135,10 +155,10 @@ static void position_work_handler(struct k_work *work)
 		return;
 	}
 
-	k_mutex_lock(&gnss_state.lock, K_FOREVER);
+	k_mutex_lock(&gnss_lock, K_FOREVER);
 	gnss_state.last_sent_ms = k_uptime_get();
 	gnss_state.sends++;
-	k_mutex_unlock(&gnss_state.lock);
+	k_mutex_unlock(&gnss_lock);
 }
 
 static K_WORK_DEFINE(position_send_work, position_work_handler);
@@ -185,6 +205,13 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 #endif
 
 	if (dev != gnss_dev || data == NULL) {
+		return;
+	}
+
+	/* gps_mode is not ENABLED: whatever the receiver still says (a driver
+	 * without PM support keeps publishing through a suspend) is not ours to
+	 * use. The reference's GPS thread is simply off in this state. */
+	if (!gnss_state.enabled) {
 		return;
 	}
 
@@ -274,10 +301,12 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 	fill_position(data, &position);
 	meshtastic_position_set_current(&position);
 
-	send_interval_ms = (int64_t)CONFIG_MESHTASTIC_GNSS_SEND_INTERVAL_SEC * MSEC_PER_SEC;
+	/* Read at every fix, so a position_broadcast_secs write reaches the very
+	 * next decision (agents-t2hb.2). */
+	send_interval_ms = (int64_t)meshtastic_position_broadcast_secs() * MSEC_PER_SEC;
 	retry_interval_ms = (int64_t)CONFIG_MESHTASTIC_GNSS_RETRY_INTERVAL_SEC * MSEC_PER_SEC;
 
-	k_mutex_lock(&gnss_state.lock, K_FOREVER);
+	k_mutex_lock(&gnss_lock, K_FOREVER);
 	gnss_state.has_fix = true;
 	now = k_uptime_get();
 
@@ -298,7 +327,7 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 	ARG_UNUSED(due);
 	ARG_UNUSED(can_retry);
 #endif
-	k_mutex_unlock(&gnss_state.lock);
+	k_mutex_unlock(&gnss_lock);
 
 	meshtastic_emit_event(MESHTASTIC_EVENT_GNSS_FIX, 0, NULL);
 }
@@ -312,7 +341,7 @@ GNSS_DT_DATA_CALLBACK_DEFINE(MESHTASTIC_GNSS_NODE, gnss_data_cb);
 static void gnss_gate_reset(void)
 {
 	gnss_state.last_sent_ms =
-		-((int64_t)CONFIG_MESHTASTIC_GNSS_SEND_INTERVAL_SEC * MSEC_PER_SEC);
+		-((int64_t)meshtastic_position_broadcast_secs() * MSEC_PER_SEC);
 	gnss_state.last_attempt_ms =
 		-((int64_t)CONFIG_MESHTASTIC_GNSS_RETRY_INTERVAL_SEC * MSEC_PER_SEC);
 }
@@ -334,6 +363,7 @@ int meshtastic_gnss_status_get(struct meshtastic_gnss_status *out)
 	return -ENODEV;
 #endif
 
+	out->enabled = gnss_state.enabled;
 	out->callbacks = gnss_state.callbacks;
 	out->fixes = gnss_state.fixes;
 	out->sends = gnss_state.sends;
@@ -349,19 +379,84 @@ int meshtastic_gnss_status_get(struct meshtastic_gnss_status *out)
 	return 0;
 }
 
+/* agents-t2hb.2: PositionConfig.gps_mode -> the receiver. ENABLED powers it and
+ * resumes the driver; DISABLED and NOT_PRESENT suspend the driver (it stops
+ * reading NMEA), cut the board's power line where it has one, and forget the
+ * last fix so it is not advertised on after the switch-off (reference:
+ * AdminModule clears the local position when GPS leaves ENABLED; GPS.cpp puts
+ * the receiver in GPS_OFF for DISABLED and never starts it for NOT_PRESENT).
+ * Idempotent: only a change of state touches the hardware. */
+int meshtastic_gnss_apply_mode(void)
+{
+	meshtastic_Config cfg;
+	bool enable = false;
+	int rc;
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg) == 0 &&
+	    cfg.which_payload_variant == meshtastic_Config_position_tag) {
+		enable = (cfg.payload_variant.position.gps_mode ==
+			  meshtastic_Config_PositionConfig_GpsMode_ENABLED);
+	}
+
+	if (gnss_state.mode_applied && enable == gnss_state.enabled) {
+		return 0;
+	}
+
+#if MESHTASTIC_HAS_GNSS_ALIAS
+	if (enable) {
+		rc = meshtastic_gnss_board_power(true);
+		if (rc < 0 && rc != -ENOTSUP) {
+			LOG_WRN("GNSS power on failed (%d)", rc);
+		}
+		gnss_state.enabled = true;
+		/* The gnss-nmea-generic driver boots pm_device_init_suspended() and only
+		 * opens its UART pipe (i.e. starts reading NMEA) on RESUME. With
+		 * CONFIG_PM_DEVICE=y and neither runtime nor system-managed PM, nothing
+		 * else resumes it -- so without this the module is never read at all. */
+		if (IS_ENABLED(CONFIG_PM_DEVICE) && device_is_ready(gnss_dev)) {
+			rc = pm_device_action_run(gnss_dev, PM_DEVICE_ACTION_RESUME);
+			if (rc < 0 && rc != -EALREADY) {
+				LOG_ERR("GNSS resume failed (%d) — no NMEA will be read", rc);
+			}
+		}
+	} else {
+		gnss_state.enabled = false;
+		if (IS_ENABLED(CONFIG_PM_DEVICE) && device_is_ready(gnss_dev)) {
+			rc = pm_device_action_run(gnss_dev, PM_DEVICE_ACTION_SUSPEND);
+			if (rc < 0 && rc != -EALREADY) {
+				LOG_WRN("GNSS suspend failed (%d)", rc);
+			}
+		}
+		rc = meshtastic_gnss_board_power(false);
+		if (rc < 0 && rc != -ENOTSUP) {
+			LOG_WRN("GNSS power off failed (%d)", rc);
+		}
+		k_mutex_lock(&gnss_lock, K_FOREVER);
+		gnss_state.has_fix = false;
+		k_mutex_unlock(&gnss_lock);
+		meshtastic_position_forget_source(meshtastic_Position_LocSource_LOC_INTERNAL);
+	}
+	LOG_INF("GNSS %s (gps_mode)", enable ? "enabled" : "off");
+#else
+	ARG_UNUSED(rc);
+	gnss_state.enabled = enable;
+#endif
+	gnss_state.mode_applied = true;
+	return 0;
+}
+
 #if defined(CONFIG_ZTEST)
 void meshtastic_gnss_test_reset(void)
 {
-	k_mutex_lock(&gnss_state.lock, K_FOREVER);
+	k_mutex_lock(&gnss_lock, K_FOREVER);
 	gnss_gate_reset();
 	gnss_state.has_fix = false;
-	k_mutex_unlock(&gnss_state.lock);
+	k_mutex_unlock(&gnss_lock);
 }
 #endif
 
 int meshtastic_gnss_init(void)
 {
-	k_mutex_init(&gnss_state.lock);
 	gnss_gate_reset();
 
 #if MESHTASTIC_HAS_GNSS_ALIAS
@@ -382,17 +477,9 @@ int meshtastic_gnss_init(void)
 
 	LOG_INF("Meshtastic position module using %s", gnss_dev->name);
 
-	/* The gnss-nmea-generic driver boots pm_device_init_suspended() and only opens
-	 * its UART pipe (i.e. starts reading NMEA) on RESUME. With CONFIG_PM_DEVICE=y and
-	 * neither runtime nor system-managed PM, nothing resumes it — so without this
-	 * explicit resume the module is never read at all (zero NMEA, no fix). */
-	if (IS_ENABLED(CONFIG_PM_DEVICE)) {
-		int rc = pm_device_action_run(gnss_dev, PM_DEVICE_ACTION_RESUME);
-
-		if (rc < 0 && rc != -EALREADY) {
-			LOG_ERR("GNSS resume failed (%d) — no NMEA will be read", rc);
-		}
-	}
+	/* Power and resume the receiver -- or leave it off -- per the stored
+	 * gps_mode. Settings are applied before this runs (meshtastic_init). */
+	(void)meshtastic_gnss_apply_mode();
 #else
 	LOG_WRN("CONFIG_MESHTASTIC_GNSS enabled but no ready gnss alias exists");
 #endif

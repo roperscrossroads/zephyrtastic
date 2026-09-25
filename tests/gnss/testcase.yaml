@@ -11,7 +11,7 @@ common:
     # Short windows so the gate tests run in seconds of virtual time. 5 s is the
     # Kconfig minimum for both, so these are real settable values, not test-only
     # escapes.
-    - CONFIG_MESHTASTIC_GNSS_SEND_INTERVAL_SEC=5
+    - CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC=5
 tests:
   # Send-dominated: the retry window is the same size, so the send interval is
   # what the gate expresses. This is the shape of the shipped defaults (300 s

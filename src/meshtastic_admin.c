@@ -1329,6 +1329,15 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 
 			if (IS_ENABLED(CONFIG_PM) && which == meshtastic_Config_power_tag) {
 				meshtastic_power_config_apply();
+#if defined(CONFIG_MESHTASTIC_POSITION)
+			} else if (which == meshtastic_Config_position_tag) {
+				/* The reference reboots here. This port's position senders
+				 * read position_broadcast_secs at every deadline and gps_mode
+				 * is applied to the receiver live, so the re-apply is the whole
+				 * effect (agents-t2hb.2); the section's other fields have no
+				 * consumer yet, so a reboot would change nothing either. */
+				meshtastic_position_config_changed();
+#endif
 			} else if (which != meshtastic_Config_device_tag &&
 				   which != meshtastic_Config_lora_tag) {
 				reboot_pending = true;

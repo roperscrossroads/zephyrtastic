@@ -104,6 +104,41 @@ void meshtastic_position_clear_fixed(void);
 int meshtastic_position_sanitise_tx(meshtastic_MeshPacket *mesh);
 
 /**
+ * @brief The position broadcast interval in seconds (agents-t2hb.2).
+ *
+ * PositionConfig.position_broadcast_secs, or
+ * CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC when that is 0. Read from the
+ * store on every call; both senders (the GNSS gate and the beacon) use it.
+ */
+uint32_t meshtastic_position_broadcast_secs(void);
+
+/**
+ * @brief Re-apply the position section after a write (admin set_config, shell).
+ *
+ * Re-arms the beacon on the current interval and applies gps_mode to the GNSS
+ * receiver. The GNSS gate needs nothing: it reads the interval at each fix.
+ */
+void meshtastic_position_config_changed(void);
+
+/** @brief Persist position_broadcast_secs (0 = compiled default) and apply it. */
+int meshtastic_position_set_broadcast_secs(uint32_t secs);
+
+/** @brief Persist gps_mode and apply it. -EINVAL for an unknown mode. */
+int meshtastic_position_set_gps_mode(meshtastic_Config_PositionConfig_GpsMode mode);
+
+/** @brief The stored gps_mode. */
+meshtastic_Config_PositionConfig_GpsMode meshtastic_position_gps_mode(void);
+
+/**
+ * @brief Drop the current source position if it came from @p source.
+ *
+ * The GNSS source calls this with LOC_INTERNAL when the receiver is turned off,
+ * so a fix from before the switch-off is not advertised forever (reference:
+ * AdminModule clears the local position when GPS leaves ENABLED).
+ */
+void meshtastic_position_forget_source(meshtastic_Position_LocSource source);
+
+/**
  * @brief Take a POSITION_APP packet the phone handed us (agents-t2hb.13).
  *
  * Addressed to us (Android's "provide phone location") or broadcast, it is the

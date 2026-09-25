@@ -16,6 +16,13 @@
  *
  * The neighbours pin the rest of upstream's rule: a phone BROADCAST is looped
  * back (adopted) and sent; a phone UNICAST to a peer is sent and not adopted.
+ *
+ * The second half is the beacon's cadence (agents-t2hb.2): the timer that
+ * announces a position no fix callback drives (fixed, or phone-supplied) runs on
+ * PositionConfig.position_broadcast_secs, falling back to the compiled default
+ * (30 s in this image), re-read every cycle and re-armed by a write -- through
+ * the setter and through a real admin set_config from the phone, which must also
+ * not reboot the node.
  */
 #include <string.h>
 
@@ -28,6 +35,7 @@
 #include <zephyr/meshtastic/meshtastic.h>
 #include <meshtastic/lora_sim.h>
 
+#include "meshtastic/admin.pb.h"
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
@@ -107,7 +115,10 @@ static void position_before(void *fixture)
 
 	ARG_UNUSED(fixture);
 	meshtastic_position_clear_fixed();
+	/* Cancel the beacon BEFORE draining, or a send already on its way lands in
+	 * the next test's capture. */
 	meshtastic_position_test_reset();
+	(void)meshtastic_position_set_broadcast_secs(0U);
 	meshtastic_clock_test_reset();
 	drain_radio();
 	meshtastic_phoneapi_reset(&phone);
@@ -234,9 +245,17 @@ ZTEST(position, test_to_self_is_never_transmitted)
 	struct meshtastic_packet pkt;
 
 	phone_send_position(me, me, &pos);
-	zassert_false(take_position_frame(500U, &pkt, &got),
+
+	/* What does go out is the node's OWN announcement of its new position
+	 * (agents-t2hb.2: the beacon owns a phone-supplied position), as a
+	 * broadcast masked to the channel -- not the phone's packet. */
+	zassert_true(take_position_frame(1000U, &pkt, &got),
+		     "the first adopted position is announced at once");
+	zassert_equal(pkt.to, MESHTASTIC_NODE_BROADCAST,
 		      "a position the phone addressed to the node must stay on the node, "
 		      "not go out as a unicast to our own id (got one to 0x%08x)", pkt.to);
+	zassert_equal(got.precision_bits, PRECISION, "");
+	zassert_false(position_frame_to(me, 500U), "and nothing addressed to ourselves");
 	zassert_equal(take_queue_status(), 0, "the phone must still see its packet accepted");
 }
 
@@ -263,11 +282,9 @@ ZTEST(position, test_to_self_with_from_zero_is_the_same)
 {
 	meshtastic_Position pos = phone_fix();
 	meshtastic_Position cur;
-	meshtastic_Position got;
-	struct meshtastic_packet pkt;
 
 	phone_send_position(0U, me, &pos);
-	zassert_false(take_position_frame(500U, &pkt, &got), "not transmitted");
+	zassert_false(position_frame_to(me, 1000U), "not transmitted");
 	zassert_ok(meshtastic_position_get_current(&cur), "adopted");
 	zassert_equal(cur.latitude_i, PHONE_LAT);
 }
@@ -366,12 +383,150 @@ ZTEST(position, test_unicast_to_peer_is_sent_and_not_adopted)
 {
 	meshtastic_Position pos = phone_fix();
 	meshtastic_Position cur;
-	meshtastic_Position got;
-	struct meshtastic_packet pkt;
 
 	phone_send_position(me, PEER_ID, &pos);
-	zassert_true(take_position_frame(1000U, &pkt, &got), "a unicast to a peer goes out");
-	zassert_equal(pkt.to, PEER_ID, "");
+	zassert_true(position_frame_to(PEER_ID, 1000U), "a unicast to a peer goes out");
 	zassert_equal(meshtastic_position_get_current(&cur), -ENODATA,
 		      "a position sent to someone else is not our position");
+}
+
+/* ---- the beacon's cadence: position_broadcast_secs (agents-t2hb.2) --------------- */
+
+/* Milliseconds until the next broadcast Position frame, or -1 within @p max_ms. */
+static int64_t ms_to_next_broadcast(uint32_t max_ms)
+{
+	int64_t start = k_uptime_get();
+
+	return position_frame_to(MESHTASTIC_NODE_BROADCAST, max_ms) ? k_uptime_get() - start
+								     : -1;
+}
+
+/* Frame timing on the sim radio carries airtime and a contention window, so a
+ * cadence is asserted to within a few seconds, never to the millisecond. */
+#define SLACK_MS 3000
+
+static void assert_next_broadcast_in(uint32_t secs, const char *why)
+{
+	int64_t ms = ms_to_next_broadcast((secs * MSEC_PER_SEC) + SLACK_MS);
+
+	zassert_true(ms >= 0, "%s: no broadcast within %u s", why, secs);
+	zassert_true(ms >= ((int64_t)secs * MSEC_PER_SEC) - SLACK_MS,
+		     "%s: broadcast after %lld ms, expected ~%u s", why, ms, secs);
+}
+
+ZTEST(position, test_beacon_unset_interval_is_the_compiled_default)
+{
+	meshtastic_Position pos = phone_fix();
+
+	zassert_equal(meshtastic_position_broadcast_secs(),
+		      CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC, "precondition");
+	phone_send_position(me, me, &pos);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "announced at once");
+	assert_next_broadcast_in(CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC,
+				 "unset -> compiled default");
+}
+
+ZTEST(position, test_beacon_follows_the_stored_interval)
+{
+	meshtastic_Position pos = phone_fix();
+
+	zassert_ok(meshtastic_position_set_broadcast_secs(10U));
+	phone_send_position(me, me, &pos);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "announced at once");
+	assert_next_broadcast_in(10U, "stored 10 s beats the compiled 30 s");
+	assert_next_broadcast_in(10U, "and keeps it");
+}
+
+/* The phone refreshes every 30 s; a refresh updates what the beacon sends but
+ * must not restart it, or a phone refreshing faster than the interval would
+ * hold every broadcast off forever. */
+ZTEST(position, test_phone_refreshes_do_not_restart_the_beacon)
+{
+	meshtastic_Position pos = phone_fix();
+	int64_t start;
+
+	zassert_ok(meshtastic_position_set_broadcast_secs(10U));
+	phone_send_position(me, me, &pos);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "announced at once");
+	start = k_uptime_get();
+	k_msleep(4000);
+	pos.latitude_i += 1000;
+	phone_send_position(me, me, &pos);
+	zassert_true(position_frame_to(MESHTASTIC_NODE_BROADCAST, 10000U), "");
+	zassert_true(k_uptime_get() - start <= (10 * MSEC_PER_SEC) + SLACK_MS,
+		     "the refresh at 4 s must not have pushed the broadcast past 10 s");
+}
+
+ZTEST(position, test_interval_write_rearms_the_beacon_live)
+{
+	meshtastic_Position pos = phone_fix();
+
+	zassert_ok(meshtastic_position_set_broadcast_secs(120U));
+	phone_send_position(me, me, &pos);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "announced at once");
+
+	/* Two minutes out; a write to 8 s must not wait for that to expire. */
+	zassert_ok(meshtastic_position_set_broadcast_secs(8U));
+	assert_next_broadcast_in(8U, "the write re-arms the beacon now");
+}
+
+ZTEST(position, test_fixed_position_beacon_follows_the_interval)
+{
+	meshtastic_Position fixed = meshtastic_Position_init_zero;
+
+	fixed.has_latitude_i = true;
+	fixed.latitude_i = 515000000;
+	fixed.has_longitude_i = true;
+	fixed.longitude_i = -1000000;
+	zassert_ok(meshtastic_position_set_broadcast_secs(10U));
+	meshtastic_position_set_fixed(&fixed);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "set_fixed announces at once");
+	assert_next_broadcast_in(10U, "a fixed position re-announces on the stored interval");
+}
+
+/* No position, no beacon: nothing to announce is not an empty broadcast. */
+ZTEST(position, test_no_position_no_beacon)
+{
+	zassert_ok(meshtastic_position_set_broadcast_secs(5U));
+	zassert_equal(ms_to_next_broadcast(8000U), -1, "");
+}
+
+/* The path a phone app actually takes: AdminMessage set_config(position) to
+ * ourselves through the PhoneAPI. The admin module has no per-field code for the
+ * section; the write must reach the store, re-arm the beacon, and -- unlike the
+ * reference, which reboots on any position write -- not reboot (a reboot here
+ * would end the test process). */
+ZTEST(position, test_admin_set_config_position_applies_live)
+{
+	static uint8_t buf[MESHTASTIC_API_FRAME_MAX];
+	meshtastic_ToRadio to = meshtastic_ToRadio_init_zero;
+	meshtastic_AdminMessage admin = meshtastic_AdminMessage_init_zero;
+	meshtastic_Config cfg;
+	meshtastic_Position pos = phone_fix();
+	pb_ostream_t os;
+
+	zassert_ok(meshtastic_position_set_broadcast_secs(120U));
+	phone_send_position(me, me, &pos);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "announced at once");
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
+	cfg.payload_variant.position.position_broadcast_secs = 9U;
+	admin.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
+	admin.payload_variant.set_config = cfg;
+
+	to.which_payload_variant = meshtastic_ToRadio_packet_tag;
+	to.packet.to = me;
+	to.packet.id = next_id++;
+	to.packet.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	to.packet.decoded.portnum = meshtastic_PortNum_ADMIN_APP;
+	os = pb_ostream_from_buffer(to.packet.decoded.payload.bytes,
+				    sizeof(to.packet.decoded.payload.bytes));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &admin), "");
+	to.packet.decoded.payload.size = (pb_size_t)os.bytes_written;
+	os = pb_ostream_from_buffer(buf, sizeof(buf));
+	zassert_true(pb_encode(&os, meshtastic_ToRadio_fields, &to), "");
+	meshtastic_phoneapi_handle_toradio(&phone, buf, os.bytes_written);
+
+	zassert_equal(meshtastic_position_broadcast_secs(), 9U, "the admin write reached the store");
+	assert_next_broadcast_in(9U, "and the beacon, without a reboot");
 }

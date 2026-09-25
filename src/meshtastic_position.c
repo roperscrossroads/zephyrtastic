@@ -25,6 +25,9 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_modules.h"
 #include "meshtastic_position.h"
+#if defined(CONFIG_MESHTASTIC_GNSS)
+#include "meshtastic_gnss.h"
+#endif
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -54,6 +57,49 @@ static bool select_position_locked(meshtastic_Position *out)
 	}
 	return false;
 }
+
+/* Who announces the position, by where it came from. The reference has one
+ * PositionModule::runOnce loop for every source; this port has two senders, and
+ * each position has exactly one owner so the two never both announce it:
+ *
+ *   - a live GNSS fix (LOC_INTERNAL): the GNSS source's own fix-driven gate
+ *     (meshtastic_gnss.c), which knows when the receiver is producing;
+ *   - anything else -- a fixed position, or one the phone supplied
+ *     (agents-t2hb.13) -- this module's beacon timer, since nothing else would
+ *     ever announce it.
+ *
+ * A fixed position outranks a live fix (select_position_locked), so while one
+ * is set the beacon owns the announcement and the GNSS gate stands down --
+ * which also ends the double cadence a GNSS node with a fixed position used to
+ * have (GNSS every 300 s plus the fixed timer every 900 s). */
+static bool beacon_owns_locked(void)
+{
+	if (pos_state.fixed_valid) {
+		return true;
+	}
+	return pos_state.has_current &&
+	       pos_state.current.location_source != meshtastic_Position_LocSource_LOC_INTERNAL;
+}
+
+/* agents-t2hb.2: PositionConfig.position_broadcast_secs, 0 = the compiled
+ * default. Read from the store at every use (the Phase A shape, see
+ * meshtastic_nodeinfo_interval_secs), so a write through admin, the shell or a
+ * cluster document reaches the next broadcast with nothing cached to go stale. */
+uint32_t meshtastic_position_broadcast_secs(void)
+{
+	meshtastic_Config cfg;
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg) == 0 &&
+	    cfg.which_payload_variant == meshtastic_Config_position_tag &&
+	    cfg.payload_variant.position.position_broadcast_secs != 0U) {
+		return cfg.payload_variant.position.position_broadcast_secs;
+	}
+
+	return CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC;
+}
+
+static void beacon_work_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(beacon_work, beacon_work_fn);
 
 /* G-1: mirror upstream getPositionPrecisionForChannel + channelFileUsesPublicKey
  * so a broadcast never leaks a more precise location than the channel it goes out
@@ -279,6 +325,18 @@ int meshtastic_send_position_periodic(void)
 	 * matching the fixed-beacon path and the reference PositionModule's BG cadence.
 	 * A manual meshtastic_send_position() stays K_FOREVER/ungated: the user (or
 	 * shell) asked for it explicitly. */
+	bool beacon_owned;
+
+	k_mutex_lock(&pos_lock, K_FOREVER);
+	beacon_owned = beacon_owns_locked();
+	k_mutex_unlock(&pos_lock);
+
+	/* The GNSS gate's entry point: stand down while the beacon owns the
+	 * announcement (a fixed position is set). */
+	if (beacon_owned) {
+		return -ENODATA;
+	}
+
 	return position_send(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
 }
 
@@ -317,34 +375,32 @@ void meshtastic_position_test_reset(void)
 	pos_state.current = (meshtastic_Position)meshtastic_Position_init_zero;
 	pos_state.reply_time_valid = false;
 	k_mutex_unlock(&pos_lock);
+	(void)k_work_cancel_delayable(&beacon_work);
 }
 #endif
 
-/* Periodic re-broadcast of a fixed position. A GNSS-less node has no data
- * callback to drive sends, so a static fixed position needs its own timer. It
- * self-reschedules only while a fixed position remains set. Runs on the system
- * workqueue with a non-blocking send (drop-if-busy is fine for a periodic
- * beacon). */
-static void fixed_broadcast_work_fn(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(fixed_broadcast_work, fixed_broadcast_work_fn);
-
-static void fixed_broadcast_work_fn(struct k_work *work)
+/* The beacon: periodic re-broadcast of a position no fix callback drives -- a
+ * fixed one, or one the phone supplied (beacon_owns_locked). A GNSS-less node
+ * has no other sender, so without this timer such a position would never go out.
+ * Self-reschedules only while it still owns a position, re-reading the interval
+ * each time; runs on the system workqueue with a non-blocking send (drop-if-busy
+ * is fine for a periodic beacon). */
+static void beacon_work_fn(struct k_work *work)
 {
-	bool valid;
+	bool owned;
 
 	ARG_UNUSED(work);
 
 	k_mutex_lock(&pos_lock, K_FOREVER);
-	valid = pos_state.fixed_valid;
+	owned = beacon_owns_locked();
 	k_mutex_unlock(&pos_lock);
 
-	if (!valid) {
+	if (!owned) {
 		return;
 	}
 
 	(void)position_send(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
-	k_work_reschedule(&fixed_broadcast_work,
-			  K_SECONDS(CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC));
+	k_work_reschedule(&beacon_work, K_SECONDS(meshtastic_position_broadcast_secs()));
 }
 
 void meshtastic_position_set_fixed(const meshtastic_Position *position)
@@ -376,7 +432,7 @@ void meshtastic_position_set_fixed(const meshtastic_Position *position)
 	(void)meshtastic_config_store_set_fixed_position(&pos);
 
 	/* Announce immediately, then let the work re-arm the periodic beacon. */
-	k_work_reschedule(&fixed_broadcast_work, K_NO_WAIT);
+	k_work_reschedule(&beacon_work, K_NO_WAIT);
 }
 
 void meshtastic_position_clear_fixed(void)
@@ -386,9 +442,12 @@ void meshtastic_position_clear_fixed(void)
 	pos_state.fixed = (meshtastic_Position)meshtastic_Position_init_zero;
 	k_mutex_unlock(&pos_lock);
 
-	(void)k_work_cancel_delayable(&fixed_broadcast_work);
+	(void)k_work_cancel_delayable(&beacon_work);
 	(void)meshtastic_config_store_clear_fixed_position();
 	LOG_INF("Position fixed cleared");
+
+	/* A phone-supplied position underneath is the beacon's again. */
+	meshtastic_position_config_changed();
 }
 
 /* Restore a persisted fixed position after settings load. This hook runs before
@@ -411,8 +470,7 @@ static int position_restore_fixed(void)
 		pos.has_latitude_i ? pos.latitude_i : 0,
 		pos.has_longitude_i ? pos.longitude_i : 0, pos.has_altitude ? pos.altitude : 0);
 
-	k_work_reschedule(&fixed_broadcast_work,
-			  K_SECONDS(CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC));
+	k_work_reschedule(&beacon_work, K_SECONDS(meshtastic_position_broadcast_secs()));
 	return 0;
 }
 
@@ -541,6 +599,7 @@ bool meshtastic_position_handle_from_phone(const meshtastic_MeshPacket *mesh)
 {
 	meshtastic_Position position = meshtastic_Position_init_zero;
 	uint32_t me = meshtastic_get_node_id();
+	bool adopted = false;
 	bool to_self;
 
 	if (mesh == NULL || mesh->which_payload_variant != meshtastic_MeshPacket_decoded_tag ||
@@ -570,13 +629,107 @@ bool meshtastic_position_handle_from_phone(const meshtastic_MeshPacket *mesh)
 	     (position.has_longitude_i && position.longitude_i != 0))) {
 		pos_state.current = position;
 		pos_state.has_current = true;
+		adopted = true;
 	}
 	k_mutex_unlock(&pos_lock);
+
+	/* The first adopted position is announced at once -- the reference's
+	 * runOnce sends as soon as hasLocalPositionSinceBoot() turns true -- and the
+	 * beacon then keeps its own cadence; the phone's 30 s refreshes find it
+	 * pending and only update what it will send. A phone BROADCAST has just been
+	 * sent by the phone itself, so its beacon starts one interval out. */
+	if (adopted && !k_work_delayable_is_pending(&beacon_work)) {
+		k_work_reschedule(&beacon_work,
+				  to_self ? K_NO_WAIT
+					  : K_SECONDS(meshtastic_position_broadcast_secs()));
+	}
 
 	LOG_DBG("Position from phone (to %s): lat=%d lon=%d time=%u",
 		to_self ? "self" : "broadcast", position.latitude_i, position.longitude_i,
 		position.time);
 	return to_self;
+}
+
+void meshtastic_position_config_changed(void)
+{
+	bool owned;
+
+	/* A new interval reaches the beacon now rather than after the old one runs
+	 * out; the GNSS gate reads it at its next fix anyway. */
+	k_mutex_lock(&pos_lock, K_FOREVER);
+	owned = beacon_owns_locked();
+	k_mutex_unlock(&pos_lock);
+
+	if (owned) {
+		k_work_reschedule(&beacon_work, K_SECONDS(meshtastic_position_broadcast_secs()));
+	}
+
+#if defined(CONFIG_MESHTASTIC_GNSS)
+	(void)meshtastic_gnss_apply_mode();
+#endif
+}
+
+void meshtastic_position_forget_source(meshtastic_Position_LocSource source)
+{
+	k_mutex_lock(&pos_lock, K_FOREVER);
+	if (pos_state.has_current && pos_state.current.location_source == source) {
+		pos_state.has_current = false;
+		pos_state.current = (meshtastic_Position)meshtastic_Position_init_zero;
+	}
+	k_mutex_unlock(&pos_lock);
+}
+
+/* Read-modify-write of one PositionConfig field, then the same live-apply the
+ * admin path runs. */
+static int position_config_write(uint32_t *broadcast_secs,
+				 const meshtastic_Config_PositionConfig_GpsMode *gps_mode)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+	int ret;
+
+	ret = meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg);
+	if (ret < 0) {
+		return ret;
+	}
+	cfg.which_payload_variant = meshtastic_Config_position_tag;
+	if (broadcast_secs != NULL) {
+		cfg.payload_variant.position.position_broadcast_secs = *broadcast_secs;
+	}
+	if (gps_mode != NULL) {
+		cfg.payload_variant.position.gps_mode = *gps_mode;
+	}
+	ret = meshtastic_config_store_set_config(&cfg);
+	if (ret < 0) {
+		return ret;
+	}
+	meshtastic_position_config_changed();
+	return 0;
+}
+
+int meshtastic_position_set_broadcast_secs(uint32_t secs)
+{
+	return position_config_write(&secs, NULL);
+}
+
+int meshtastic_position_set_gps_mode(meshtastic_Config_PositionConfig_GpsMode mode)
+{
+	if (mode != meshtastic_Config_PositionConfig_GpsMode_DISABLED &&
+	    mode != meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
+	    mode != meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT) {
+		return -EINVAL;
+	}
+	return position_config_write(NULL, &mode);
+}
+
+meshtastic_Config_PositionConfig_GpsMode meshtastic_position_gps_mode(void)
+{
+	meshtastic_Config cfg;
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg) == 0 &&
+	    cfg.which_payload_variant == meshtastic_Config_position_tag) {
+		return cfg.payload_variant.position.gps_mode;
+	}
+	return meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT;
 }
 
 static bool interval_elapsed(bool valid, int64_t last_ms, int64_t now_ms, int64_t interval_ms)

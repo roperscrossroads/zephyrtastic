@@ -64,6 +64,9 @@
 #include "meshtastic_hlc.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#if defined(CONFIG_MESHTASTIC_POSITION)
+#include "meshtastic_position.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_XEDDSA)
 #include "meshtastic_xeddsa.h"
 #endif
@@ -2649,6 +2652,163 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_gnss_cmds,
 					 cmd_gnss_status),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_GNSS */
+
+#if defined(CONFIG_MESHTASTIC_POSITION)
+/* `meshtastic position` (agents-t2hb.2) -- the two PositionConfig fields with a
+ * consumer: gps_mode (the receiver's power) and position_broadcast_secs (both
+ * senders' cadence). Same shape as `nodeinfo interval`: reads always available,
+ * writes gated behind CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE and is_managed. */
+static const char *const gps_mode_names[] = {
+	[meshtastic_Config_PositionConfig_GpsMode_DISABLED] = "disabled",
+	[meshtastic_Config_PositionConfig_GpsMode_ENABLED] = "enabled",
+	[meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT] = "not_present",
+};
+
+static const char *gps_mode_name(meshtastic_Config_PositionConfig_GpsMode mode)
+{
+	return ((size_t)mode < ARRAY_SIZE(gps_mode_names) && gps_mode_names[mode] != NULL)
+		       ? gps_mode_names[mode]
+		       : "?";
+}
+
+static const char *loc_source_name(meshtastic_Position_LocSource src)
+{
+	switch (src) {
+	case meshtastic_Position_LocSource_LOC_MANUAL:
+		return "fixed";
+	case meshtastic_Position_LocSource_LOC_INTERNAL:
+		return "gnss";
+	case meshtastic_Position_LocSource_LOC_EXTERNAL:
+		return "phone";
+	default:
+		return "unset";
+	}
+}
+
+static int cmd_position_show(const struct shell *sh, size_t argc, char **argv)
+{
+	meshtastic_Config cfg;
+	meshtastic_Position pos;
+	bool stored;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	stored = meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg) == 0 &&
+		 cfg.which_payload_variant == meshtastic_Config_position_tag &&
+		 cfg.payload_variant.position.position_broadcast_secs != 0U;
+
+	shell_print(sh, "gps_mode: %s", gps_mode_name(meshtastic_position_gps_mode()));
+#if defined(CONFIG_MESHTASTIC_GNSS)
+	{
+		struct meshtastic_gnss_status st;
+
+		if (meshtastic_gnss_status_get(&st) == 0) {
+			shell_print(sh, "receiver: %s", st.enabled ? "on" : "off");
+		} else {
+			shell_print(sh, "receiver: none in this build's devicetree");
+		}
+	}
+#else
+	shell_print(sh, "receiver: GNSS not compiled in");
+#endif
+	shell_print(sh, "interval: %u s%s", meshtastic_position_broadcast_secs(),
+		    stored ? "" : " (compiled default; position_broadcast_secs unset)");
+	if (meshtastic_position_get_current(&pos) == 0) {
+		shell_print(sh, "position: lat=%d lon=%d alt=%d (%s)", pos.latitude_i,
+			    pos.longitude_i, pos.altitude,
+			    loc_source_name(pos.location_source));
+	} else {
+		shell_print(sh, "position: none");
+	}
+	return 0;
+}
+
+/* Bare `meshtastic position` shows. Anything else reaching here is a subcommand
+ * this build does not have -- the write forms, when config writes are compiled
+ * out -- and must fail rather than print the status and report success. */
+static int cmd_position_root(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc > 1U) {
+		shell_error(sh, "unknown subcommand: %s", argv[1]);
+		return -EINVAL;
+	}
+	return cmd_position_show(sh, argc, argv);
+}
+
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+static int cmd_position_interval(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long secs;
+	char *end;
+	int ret;
+
+	if (argc == 1U) {
+		return cmd_position_show(sh, argc, argv);
+	}
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+	secs = strtoul(argv[1], &end, 10);
+	if (*end != '\0' || secs > UINT32_MAX) {
+		shell_error(sh, "invalid seconds value: %s", argv[1]);
+		return -EINVAL;
+	}
+	ret = meshtastic_position_set_broadcast_secs((uint32_t)secs);
+	if (ret < 0) {
+		shell_error(sh, "interval set failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "interval -> %u s%s (persisted; applies now, no reboot)",
+		    meshtastic_position_broadcast_secs(),
+		    (secs == 0UL) ? " (compiled default)" : "");
+	return 0;
+}
+
+static int cmd_position_gps_mode(const struct shell *sh, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1U) {
+		return cmd_position_show(sh, argc, argv);
+	}
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+	for (size_t i = 0U; i < ARRAY_SIZE(gps_mode_names); i++) {
+		if (gps_mode_names[i] != NULL && strcmp(argv[1], gps_mode_names[i]) == 0) {
+			ret = meshtastic_position_set_gps_mode(
+				(meshtastic_Config_PositionConfig_GpsMode)i);
+			if (ret < 0) {
+				shell_error(sh, "gps_mode set failed: %d", ret);
+				return ret;
+			}
+			shell_print(sh, "gps_mode -> %s (persisted; applies now, no reboot)",
+				    gps_mode_names[i]);
+			return 0;
+		}
+	}
+	shell_error(sh, "usage: meshtastic position gps_mode [enabled|disabled|not_present]");
+	return -EINVAL;
+}
+#endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	meshtastic_position_cmds,
+	SHELL_CMD(show, NULL, SHELL_HELP("gps_mode, broadcast interval, current position.", NULL),
+		  cmd_position_show),
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	SHELL_CMD_ARG(interval, NULL,
+		      SHELL_HELP("Show/set position_broadcast_secs (0 = compiled default).",
+				 "[secs]"),
+		      cmd_position_interval, 1, 1),
+	SHELL_CMD_ARG(gps_mode, NULL,
+		      SHELL_HELP("Show/set PositionConfig.gps_mode.",
+				 "[enabled|disabled|not_present]"),
+		      cmd_position_gps_mode, 1, 1),
+#endif
+	SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_POSITION */
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 /* `meshtastic airtime` — the two questions the accounting answers, kept apart.
@@ -6868,6 +7028,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #endif
 #if defined(CONFIG_MESHTASTIC_NODEDB)
 	SHELL_CMD(nodedb, &meshtastic_nodedb_cmds, SHELL_HELP("NodeDB commands.", NULL), NULL),
+#endif
+#if defined(CONFIG_MESHTASTIC_POSITION)
+	SHELL_CMD(position, &meshtastic_position_cmds,
+		  SHELL_HELP("Position: gps_mode, broadcast interval.", NULL), cmd_position_root),
 #endif
 #if defined(CONFIG_MESHTASTIC_GNSS)
 	SHELL_CMD(gnss, &meshtastic_gnss_cmds, SHELL_HELP("GNSS commands.", NULL), NULL),

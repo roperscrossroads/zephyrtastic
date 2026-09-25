@@ -17,14 +17,9 @@ config MESHTASTIC_GNSS_AUTO_SEND
 	default y
 	help
 	  Send a Position payload whenever a valid GNSS fix is published and
-	  the configured interval has elapsed.
-
-config MESHTASTIC_GNSS_SEND_INTERVAL_SEC
-	int "GNSS position send interval in seconds"
-	default 300
-	range 5 86400
-	help
-	  Minimum interval between successful automatic Position packets.
+	  the broadcast interval has elapsed. The interval is
+	  PositionConfig.position_broadcast_secs, falling back to
+	  MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC (agents-t2hb.2).
 
 config MESHTASTIC_GNSS_RETRY_INTERVAL_SEC
 	int "Minimum seconds between failed position send attempts"
