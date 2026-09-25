@@ -1,0 +1,15 @@
+description: |
+  Fake Bluetooth LE controller for native_sim tests (tests/common/fake_hci).
+  Answers the host's HCI commands from a small state model instead of a radio.
+
+compatible: "zephyr,bt-hci-fake"
+
+include: bt-hci.yaml
+
+properties:
+  bt-hci-name:
+    default: "fake"
+  bt-hci-bus:
+    default: "virtual"
+  bt-hci-quirks:
+    default: ["no-reset"]

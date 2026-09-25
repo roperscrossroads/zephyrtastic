@@ -1,0 +1,24 @@
+common:
+  tags:
+    - meshtastic
+    - ble
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # ESP32-S3 shape: public identity, stock host config. Pins the bug.
+  meshtastic.ble_hci_addr.public: {}
+  # The fix: scan with the identity address.
+  meshtastic.ble_hci_addr.public_scan_identity:
+    extra_configs:
+      - CONFIG_BT_SCAN_WITH_IDENTITY=y
+  # XIAO shape: static random identity. Works either way.
+  meshtastic.ble_hci_addr.random:
+    extra_configs:
+      - CONFIG_TEST_RANDOM_IDENTITY=y
+  meshtastic.ble_hci_addr.random_scan_identity:
+    extra_configs:
+      - CONFIG_TEST_RANDOM_IDENTITY=y
+      - CONFIG_BT_SCAN_WITH_IDENTITY=y

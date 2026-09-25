@@ -1,0 +1,16 @@
+/* Route the Bluetooth host to the fake controller instead of native_sim's
+ * default user-channel driver (which needs a real Linux HCI adapter). */
+/ {
+	chosen {
+		zephyr,bt-hci = &bt_hci_fake;
+	};
+
+	bt_hci_fake: bt_hci_fake {
+		compatible = "zephyr,bt-hci-fake";
+		status = "okay";
+	};
+};
+
+&bt_hci_userchan {
+	status = "disabled";
+};

@@ -1,0 +1,7 @@
+config TEST_RANDOM_IDENTITY
+	bool "Controller reports no public address (nRF52 / XIAO shape)"
+	help
+	  The host then makes a static random identity, the case that has
+	  always worked on the XIAOs.
+
+source "Kconfig.zephyr"
