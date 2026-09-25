@@ -136,6 +136,7 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_FLEET meshtastic_fleet.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_OTA_AUTOCONFIRM meshtastic_ota_confirm.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE
+    meshtastic_backoff.c
     meshtastic_ble.c
     meshtastic_ble_name.c
     meshtastic_ble_registry.c

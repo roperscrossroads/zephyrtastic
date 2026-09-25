@@ -120,6 +120,12 @@ bool meshtastic_ble_peer_scan_admits(uint32_t target, uint32_t last, uint32_t no
 	return true;
 }
 
+bool meshtastic_ble_peer_bringup_expired(int64_t started_ms, int64_t now_ms,
+					 int64_t timeout_ms)
+{
+	return started_ms != 0 && now_ms - started_ms >= timeout_ms;
+}
+
 void meshtastic_ble_peer_rx_reset(struct meshtastic_ble_peer_rx *st)
 {
 	memset(st, 0, sizeof(*st));

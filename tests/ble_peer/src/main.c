@@ -574,3 +574,14 @@ ZTEST(ble_peer_frame, test_frame_chunker_rejects_tiny_buffer)
 	/* The refusal consumed nothing: the frame still chunks cleanly. */
 	zassert_true(meshtastic_ble_peer_chunker_next(&ck, buf, sizeof(buf)) > 0);
 }
+
+/* A connected-but-never-ready outbound link is torn down once bring-up has
+ * run past its budget; a ready link (started 0) never expires. */
+ZTEST(ble_peer_codec, test_bringup_expiry)
+{
+	zassert_false(meshtastic_ble_peer_bringup_expired(0, 999999, 10000), "not in bring-up");
+	zassert_false(meshtastic_ble_peer_bringup_expired(5000, 5000, 10000));
+	zassert_false(meshtastic_ble_peer_bringup_expired(5000, 14999, 10000));
+	zassert_true(meshtastic_ble_peer_bringup_expired(5000, 15000, 10000));
+	zassert_true(meshtastic_ble_peer_bringup_expired(5000, 99999, 10000));
+}

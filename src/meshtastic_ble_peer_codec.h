@@ -127,6 +127,16 @@ bool meshtastic_ble_peer_scan_admits(uint32_t target, uint32_t last, uint32_t no
 				     int64_t since_ms, int64_t sticky_ms);
 
 /*
+ * Has an outbound link's bring-up (connect -> discovery -> subscribe) run out
+ * of time? Pure. @p started_ms is when the connection came up (0 = no
+ * bring-up in progress: the link is ready, or there is none). Without this a
+ * peer that connected but never answered discovery held the one outbound
+ * slot forever: the link was up, never ready, and blocked every rescan.
+ */
+bool meshtastic_ble_peer_bringup_expired(int64_t started_ms, int64_t now_ms,
+					 int64_t timeout_ms);
+
+/*
  * Receive-side accounting for one link. seq gaps are LOSS (proven, not
  * guessed); a HELLO — or the first beat ever — resyncs; a seq at or below the
  * last one seen without HELLO is treated as a peer restart (resync, counted).
