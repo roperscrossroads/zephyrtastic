@@ -5354,6 +5354,10 @@ static int cmd_blepeer_status(const struct shell *sh, size_t argc, char **argv)
 	}
 	shell_print(sh, "connects      : attempted=%u failed=%u discovery_failures=%u",
 		    ps.connects_attempted, ps.connects_failed, ps.discovery_failures);
+	shell_print(sh, "retries       : scan_start_failures=%u last_scan_err=%d "
+			"already_linked=%u bringup_timeouts=%u",
+		    ps.scan_start_failures, meshtastic_ble_peer_last_scan_err(),
+		    ps.already_linked, ps.bringup_timeouts);
 	if (link.connected) {
 		shell_print(sh, "outbound      : 0x%08x %s (slot %u, tx beats %u, frames %s)",
 			    link.node_num, link.ready ? "READY" : "connecting", link.index,

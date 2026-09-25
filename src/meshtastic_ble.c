@@ -97,6 +97,13 @@ static struct {
  * hardware; see git history / docs/KNOWN-ISSUES.md.) Internal RAM only. */
 static K_THREAD_STACK_DEFINE(ble_work_stack, CONFIG_MESHTASTIC_BLE_WORK_STACK_SIZE);
 
+/* FromRadio staging. Touched from the BT RX thread (the read handler, and
+ * disconnected() through ble_invalidate_delivery()) AND from ble.work_q
+ * (fromradio_work_handler): a work-queue restage could overwrite
+ * fromradio_staged while a read was copying it. fromradio_lock covers all
+ * four; it is taken before ble.api.lock, never after (the phoneapi calls
+ * ble_invalidate_delivery() with its own lock already released). */
+static K_MUTEX_DEFINE(fromradio_lock);
 static struct meshtastic_phoneapi_frame fromradio_staged;
 static uint8_t fromradio_buf[MESHTASTIC_API_FRAME_MAX];
 static uint16_t fromradio_len;
@@ -140,9 +147,11 @@ static void ble_invalidate_delivery(struct meshtastic_phoneapi *api)
 {
 	ARG_UNUSED(api);
 
+	k_mutex_lock(&fromradio_lock, K_FOREVER);
 	fromradio_ready = false;
 	fromradio_len = 0U;
 	meshtastic_phoneapi_current_frame_reset(&ble.api);
+	k_mutex_unlock(&fromradio_lock);
 }
 
 static void ble_data_ready(struct meshtastic_phoneapi *api)
@@ -157,7 +166,7 @@ static void ble_data_ready(struct meshtastic_phoneapi *api)
  * available. Returns true if a frame is now ready. Called both from the read
  * handler (so a phone draining FromRadio in a tight loop gets back-to-back
  * frames, like stock Meshtastic firmware) and from the work queue (initial
- * kick / re-notify).
+ * kick / re-notify). Caller holds fromradio_lock.
  */
 static bool stage_fromradio(void)
 {
@@ -181,9 +190,14 @@ static bool stage_fromradio(void)
 
 static void fromradio_work_handler(struct k_work *work)
 {
+	bool staged;
+
 	ARG_UNUSED(work);
 
-	if (stage_fromradio()) {
+	k_mutex_lock(&fromradio_lock, K_FOREVER);
+	staged = stage_fromradio();
+	k_mutex_unlock(&fromradio_lock);
+	if (staged) {
 		notify_fromnum();
 	}
 }
@@ -236,12 +250,14 @@ static ssize_t read_fromnum(struct bt_conn *conn, const struct bt_gatt_attr *att
 static ssize_t read_fromradio(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
 			      uint16_t len, uint16_t offset)
 {
+	bool notify = false;
 	ssize_t ret;
 
 	ARG_UNUSED(attr);
 
 	ble_note_phone_traffic(conn);
 
+	k_mutex_lock(&fromradio_lock, K_FOREVER);
 	if (offset == 0U) {
 		/*
 		 * Stage synchronously here so a phone draining FromRadio in a tight
@@ -269,11 +285,13 @@ static ssize_t read_fromradio(struct bt_conn *conn, const struct bt_gatt_attr *a
 		 * draining even if it waits on a FromNum notification between reads.
 		 * A dropped notify is now self-healing: the next read re-stages.
 		 */
-		if (stage_fromradio()) {
-			notify_fromnum();
-		}
+		notify = stage_fromradio();
 	}
+	k_mutex_unlock(&fromradio_lock);
 
+	if (notify) {
+		notify_fromnum();
+	}
 	return ret;
 }
 
@@ -730,7 +748,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
  * with no BLE peer link) the phone's own request, which every Meshtastic
  * client sends, is what raises the MTU. */
 #if defined(CONFIG_BT_GATT_CLIENT)
-static struct bt_gatt_exchange_params mtu_exchange;
+/* One per connection: a request's params belong to the stack until its
+ * callback runs, and two links reaching encryption together used to
+ * resubmit the one shared struct while it was still in flight. */
+static struct bt_gatt_exchange_params mtu_exchange[CONFIG_BT_MAX_CONN];
 
 static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
 			    struct bt_gatt_exchange_params *params)
@@ -757,6 +778,12 @@ static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_
 			 * Stale phone bond after reflash (official nrf54l15 path).
 			 * Do not bt_unpair on generic failures — that races SMP and
 			 * triggers "The in-progress pairing has been deleted!".
+			 *
+			 * Deliberately for peer links too (reviewed 2026-09-25):
+			 * the only security a peer link ever carries is the SMP
+			 * client's Just Works pairing, and a stale bond there is
+			 * the same reflash story — forgetting it is what lets the
+			 * next job pair afresh.
 			 */
 			LOG_WRN("BLE stale bond (key missing); forget device in Meshtastic app");
 			(void)bt_unpair(BT_ID_DEFAULT, bt_conn_get_dst(conn));
@@ -767,8 +794,10 @@ static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_
 	LOG_INF("BLE security level %u", (unsigned int)level);
 
 #if defined(CONFIG_BT_GATT_CLIENT)
-	mtu_exchange.func = mtu_exchange_cb;
-	if (bt_gatt_exchange_mtu(conn, &mtu_exchange) < 0) {
+	struct bt_gatt_exchange_params *mtu = &mtu_exchange[bt_conn_index(conn)];
+
+	mtu->func = mtu_exchange_cb;
+	if (bt_gatt_exchange_mtu(conn, mtu) < 0) {
 		LOG_WRN("BLE MTU exchange request failed");
 	}
 #endif
@@ -1071,16 +1100,19 @@ int meshtastic_ble_radio_enable(void)
 		return 0;
 	}
 	ret = bt_enable(NULL);
-	/* -EALREADY means something else (most likely MCUmgr's own, separate
-	 * Bluetooth transport, which enables the controller independently and
-	 * can win a boot-time race against this call) already brought the
-	 * radio up between our bt_is_ready() check above and this bt_enable()
-	 * call -- not a real failure. Every caller here wants "is BT usable
-	 * now", and it is; treating this as an error left meshtastic_ble_init()
-	 * aborting its ENTIRE BLE service (no phone, no peer link) whenever the
-	 * race went the other way (agents-t2hb.11) -- confirmed nondeterministic
-	 * on real hardware: a clean reboot of the same board reproduced it,
-	 * then didn't. */
+	/* -EALREADY means bt_enable() already ran — not a failure. Every
+	 * caller wants "is BT usable now", and it is (agents-t2hb.11: treating
+	 * this as fatal aborted the ENTIRE BLE service — no phone, no peer
+	 * link, no error anywhere a session would look).
+	 *
+	 * Why bt_is_ready() above does not catch it: with CONFIG_BT_SETTINGS,
+	 * bt_enable() leaves BT_DEV_READY clear until settings_load() supplies
+	 * the identity (host bt_init(): "No ID address. App must call
+	 * settings_load()"). On ESP32, meshtastic_init()'s early warm-up enables
+	 * BT before that load, so the second call here meets ENABLE-set,
+	 * READY-clear — and returns -EALREADY on every such boot. (This
+	 * comment used to blame MCUmgr's BT transport winning a race; that
+	 * transport never calls bt_enable().) */
 	return (ret == -EALREADY) ? 0 : ret;
 }
 
