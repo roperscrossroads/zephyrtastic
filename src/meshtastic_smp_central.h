@@ -25,7 +25,11 @@ extern "C" {
  * Connect to (or ADOPT — Zephyr keeps one bt_conn per address, so if the peer
  * already holds a link to us, this rides it) the peer's SMP GATT service and
  * subscribe. Blocks up to `timeout` for the link to become SMP-ready.
- * -EBUSY if a link is already held; -ETIMEDOUT / the connect error otherwise.
+ * 0 if ready — including when the same target's link is already held and
+ * ready; -EALREADY if a link to a different target (or one not yet ready) is
+ * held; -ETIMEDOUT if bring-up ran out of time (an adopted link is released,
+ * never disconnected); -EIO if the link came up but not SMP-ready; the
+ * connect error otherwise.
  */
 int meshtastic_smpc_connect(const bt_addr_le_t *addr, k_timeout_t timeout);
 

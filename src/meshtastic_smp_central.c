@@ -136,6 +136,23 @@ enum smpc_job_kind {
 BUILD_ASSERT((int)SMPC_JOB_UPDATE_NOCONFIRM == (int)MESHTASTIC_SMPC_JOB_UPDATE_NOCONFIRM,
 	     "public and internal job-kind enums must agree");
 
+/* One name per kind, for the log and the shell alike: the two used to guess
+ * with different ternaries, so the courier's own jobs (UPDATE_NOCONFIRM)
+ * logged as "update" and showed in `smpc status` as "push". */
+static const char *smpc_job_kind_str(enum smpc_job_kind kind)
+{
+	switch (kind) {
+	case SMPC_JOB_PUSH:
+		return "push";
+	case SMPC_JOB_UPDATE:
+		return "update";
+	case SMPC_JOB_UPDATE_NOCONFIRM:
+		return "update-noconfirm";
+	default:
+		return "none";
+	}
+}
+
 static struct {
 	struct k_mutex lock;
 
@@ -583,9 +600,22 @@ static void smpc_bringup(struct bt_conn *conn)
 	}
 }
 
+/* Is @p conn the link this client holds? smpc.conn is written by connect()
+ * and disconnect() on the caller's thread and read here on the BT RX thread,
+ * so the comparison takes the lock. */
+static bool smpc_is_mine(struct bt_conn *conn)
+{
+	bool mine;
+
+	k_mutex_lock(&smpc.lock, K_FOREVER);
+	mine = (conn != NULL && conn == smpc.conn);
+	k_mutex_unlock(&smpc.lock);
+	return mine;
+}
+
 static void smpc_connected(struct bt_conn *conn, uint8_t err)
 {
-	if (conn != smpc.conn) {
+	if (!smpc_is_mine(conn)) {
 		return;
 	}
 
@@ -637,7 +667,7 @@ static void smpc_connected(struct bt_conn *conn, uint8_t err)
 static void smpc_security_changed(struct bt_conn *conn, bt_security_t level,
 				  enum bt_security_err err)
 {
-	if (conn != smpc.conn) {
+	if (!smpc_is_mine(conn)) {
 		return;
 	}
 	if (err != BT_SECURITY_ERR_SUCCESS || level < BT_SECURITY_L2) {
@@ -662,12 +692,13 @@ static void smpc_disconnected(struct bt_conn *conn, uint8_t reason)
 		smpc.release_conn = NULL;
 		atomic_clear(&smpc.unsub_pending);
 	}
+	k_mutex_lock(&smpc.lock, K_FOREVER);
 	if (conn != smpc.conn) {
+		k_mutex_unlock(&smpc.lock);
 		return;
 	}
 
 	LOG_INF("SMPC link down (0x%02x)", reason);
-	k_mutex_lock(&smpc.lock, K_FOREVER);
 	bt_conn_unref(smpc.conn);
 	smpc.conn = NULL;
 	smpc.last_disconnect = reason;
@@ -788,10 +819,16 @@ int meshtastic_smpc_connect(const bt_addr_le_t *addr, k_timeout_t timeout)
 	 * central, so adopt the link that exists and run SMP over it. */
 	smpc.conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr);
 	if (smpc.conn != NULL) {
+		/* A ref of our own for the call: the link can drop, and the
+		 * disconnected callback clear smpc.conn, the moment the lock
+		 * is released. */
+		struct bt_conn *adopted = bt_conn_ref(smpc.conn);
+
 		smpc.adopted = true;
 		k_mutex_unlock(&smpc.lock);
 		LOG_INF("SMPC adopting the existing link to the target");
-		smpc_connected(smpc.conn, 0U);
+		smpc_connected(adopted, 0U);
+		bt_conn_unref(adopted);
 	} else {
 		rc = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN,
 				       BT_LE_CONN_PARAM(SMPC_CONN_INT_MIN, SMPC_CONN_INT_MAX,
@@ -805,16 +842,29 @@ int meshtastic_smpc_connect(const bt_addr_le_t *addr, k_timeout_t timeout)
 	}
 
 	if (k_sem_take(&smpc.ready_sem, timeout) != 0) {
+		bool adopted;
+
 		LOG_WRN("SMPC connect timed out");
 		k_mutex_lock(&smpc.lock, K_FOREVER);
-		if (smpc.conn != NULL) {
+		adopted = smpc.conn != NULL && smpc.adopted;
+		if (smpc.conn != NULL && !adopted) {
 			(void)bt_conn_disconnect(smpc.conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 		}
 		k_mutex_unlock(&smpc.lock);
+		if (adopted) {
+			/* Not ours to drop: an adopted link is the peer link or
+			 * the phone's, and tearing it down (as this did) cost the
+			 * node that link for a failed SMP bring-up. Let go of it
+			 * the way a finished job does. */
+			(void)meshtastic_smpc_disconnect();
+		}
 		return -ETIMEDOUT;
 	}
 
-	return smpc.ready ? 0 : -EIO;
+	k_mutex_lock(&smpc.lock, K_FOREVER);
+	rc = smpc.ready ? 0 : -EIO;
+	k_mutex_unlock(&smpc.lock);
+	return rc;
 }
 
 int meshtastic_smpc_disconnect(void)
@@ -1357,7 +1407,7 @@ out:
 	smpc.job_fail_stage = rc == 0 ? "" : smpc.job_stage; /* where it died — the courier reads it */
 	smpc.job_stage = rc == 0 ? "done" : "failed";
 	k_mutex_unlock(&smpc.lock);
-	LOG_INF("SMPC job %s: %s", kind == SMPC_JOB_PUSH ? "push" : "update",
+	LOG_INF("SMPC job %s: %s", smpc_job_kind_str(kind),
 		rc == 0 ? "OK" : mgmt_err_str(rc));
 }
 
@@ -1666,7 +1716,7 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	if (smpc.job_kind != SMPC_JOB_NONE) {
 		int64_t el = k_uptime_get() - smpc.job_t0;
 
-		shell_print(sh, "job: %s %s %s", smpc.job_kind == SMPC_JOB_UPDATE ? "update" : "push",
+		shell_print(sh, "job: %s %s %s", smpc_job_kind_str(smpc.job_kind),
 			    smpc.job_running ? "running" : "idle", smpc.job_stage);
 		if (smpc.job_total != 0U) {
 			shell_print(sh, "  %u/%u bytes (%u%%) %s%lld ms%s", smpc.job_off,
