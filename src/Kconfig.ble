@@ -98,6 +98,13 @@ menuconfig MESHTASTIC_BLE_PEER
 	default n
 	select BT_CENTRAL
 	select BT_GATT_CLIENT
+	# Scan on the identity address, not an NRPA: with legacy advertising the
+	# scanner and the advertiser share ONE random-address register, and the
+	# host's NRPA default made a scan-while-advertising ask for an address
+	# that was never written on a public identity (ESP32: HCI 0x200c status
+	# 0x12, agents-f5f2), or collide with the advert on a random one (nRF).
+	# The scan is passive, so it never transmits the identity it carries.
+	imply BT_SCAN_WITH_IDENTITY
 	help
 	  Expose this port's own peer GATT service (deliberately separate from
 	  the Meshtastic phone service, with its own UUID namespace) carrying a

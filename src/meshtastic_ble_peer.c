@@ -688,12 +688,14 @@ static void scan_work_fn(struct k_work *work)
 		return;
 	}
 
-	/* BT_LE_SCAN_PASSIVE minus BT_LE_SCAN_OPT_FILTER_DUPLICATE: the ESP32-S3
-	 * controller rejects LE Set Scan Enable with the duplicate filter on
-	 * (opcode 0x200c, status 0x12 -> -EINVAL; found on the a4it.8 bench node,
-	 * where the Nordic controller had accepted it). Controller-side dedup was
-	 * only ever an optimization here — the seen table dedups matched adverts
-	 * itself — so scanning without it costs extra callbacks, not correctness. */
+	/* BT_LE_SCAN_PASSIVE minus BT_LE_SCAN_OPT_FILTER_DUPLICATE. The filter
+	 * was dropped on 2026-08-24 because the ESP32-S3 refused LE Set Scan
+	 * Enable (0x200c, status 0x12) — but that refusal was never the filter:
+	 * it was the host asking for own-address RANDOM with none written, on a
+	 * public identity, while the phone advert ran (agents-f5f2; see
+	 * BT_SCAN_WITH_IDENTITY in Kconfig.ble and tests/ble_hci_addr). Left
+	 * off anyway: the seen table dedups matched adverts itself, so the
+	 * controller filter would only ever have saved callbacks. */
 	static const struct bt_le_scan_param peer_scan_param = {
 		.type = BT_LE_SCAN_TYPE_PASSIVE,
 		.options = BT_LE_SCAN_OPT_NONE,

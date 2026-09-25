@@ -888,6 +888,19 @@ const char *meshtastic_ble_adv_name(void)
 	return adv_name;
 }
 
+/*
+ * BT_LE_ADV_CONN_FAST_1 plus USE_IDENTITY. On the air this changes nothing:
+ * privacy is off, so a connectable advert always uses the identity address.
+ * What it changes is what the HOST believes. Without the flag, a scan started
+ * while this advert runs assumes the advert owns a random address and asks
+ * for own-address RANDOM — on a PUBLIC identity (every ESP32: the eFuse MAC)
+ * none was ever written, and the controller refuses LE Set Scan Enable with
+ * 0x12 (agents-f5f2, agents-t2hb.12; reproduced in tests/ble_hci_addr).
+ */
+static const struct bt_le_adv_param adv_param =
+	BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY,
+			     BT_GAP_ADV_FAST_INT_MIN_1, BT_GAP_ADV_FAST_INT_MAX_1, NULL);
+
 static int start_advertising(void)
 {
 	static const uint8_t flags[] = {
@@ -957,7 +970,7 @@ static int start_advertising(void)
 	}
 	k_mutex_unlock(&ble.lock);
 
-	ret = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+	ret = bt_le_adv_start(&adv_param, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
 	if (ret == 0 || ret == -EALREADY) {
 		k_mutex_lock(&ble.lock, K_FOREVER);
 		ble.adv_active = true;
