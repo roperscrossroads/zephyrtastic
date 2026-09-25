@@ -1,0 +1,17 @@
+# The position module on the whole stack with the sim radio, driven through the
+# PhoneAPI the way a phone drives it: a position the phone hands the node about
+# itself (Android "provide location", addressed to the node) is adopted locally
+# and never transmitted; a phone broadcast is adopted and sent; a unicast to a
+# peer is sent and not adopted (agents-t2hb.13).
+common:
+  tags:
+    - meshtastic
+    - position
+    - lora_sim
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.position.native_sim: {}

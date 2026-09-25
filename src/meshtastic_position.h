@@ -103,6 +103,25 @@ void meshtastic_position_clear_fixed(void);
  */
 int meshtastic_position_sanitise_tx(meshtastic_MeshPacket *mesh);
 
+/**
+ * @brief Take a POSITION_APP packet the phone handed us (agents-t2hb.13).
+ *
+ * Addressed to us (Android's "provide phone location") or broadcast, it is the
+ * node's own position: adopted as the current position unless a fixed position
+ * is set (then only its time is used), and its time sets the clock at NTP
+ * quality when it came on the primary channel. A unicast to a peer is ignored.
+ *
+ * @return true when the packet was addressed to us and is now consumed -- the
+ *         caller must NOT transmit it; false when it should go out as usual
+ *         (including a broadcast, which is adopted AND sent).
+ */
+bool meshtastic_position_handle_from_phone(const meshtastic_MeshPacket *mesh);
+
+#if defined(CONFIG_ZTEST)
+/** @brief Test hook: forget the source position and the reply throttle. */
+void meshtastic_position_test_reset(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

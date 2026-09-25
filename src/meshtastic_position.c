@@ -309,6 +309,17 @@ void meshtastic_position_set_current(const meshtastic_Position *position)
 	k_mutex_unlock(&pos_lock);
 }
 
+#if defined(CONFIG_ZTEST)
+void meshtastic_position_test_reset(void)
+{
+	k_mutex_lock(&pos_lock, K_FOREVER);
+	pos_state.has_current = false;
+	pos_state.current = (meshtastic_Position)meshtastic_Position_init_zero;
+	pos_state.reply_time_valid = false;
+	k_mutex_unlock(&pos_lock);
+}
+#endif
+
 /* Periodic re-broadcast of a fixed position. A GNSS-less node has no data
  * callback to drive sends, so a static fixed position needs its own timer. It
  * self-reschedules only while a fixed position remains set. Runs on the system
@@ -513,6 +524,59 @@ static void meshtastic_module_position_on_packet(const struct meshtastic_packet 
 				position.time, from);
 		}
 	}
+}
+
+/* agents-t2hb.13: a position the phone hands us about ourselves. Reference:
+ * PositionModule::handleReceivedProtobuf's isFromUs branch -- the phone's fix
+ * becomes the node's own (only its time while a fixed position is set), and its
+ * time sets the clock at NTP quality when it came on the primary channel
+ * (trySetRtc, isLocal). The reference reaches that branch by loopback through
+ * Router::sendLocal, for a packet addressed to us and for a broadcast; a unicast
+ * to a peer is not looped back, so it says nothing about where WE are.
+ *
+ * One deliberate divergence: a packet with no coordinates updates the time only.
+ * Upstream would store its (0,0), and this port would then advertise it; the
+ * Android app applies the same filter on its side (NodeManagerImpl). */
+bool meshtastic_position_handle_from_phone(const meshtastic_MeshPacket *mesh)
+{
+	meshtastic_Position position = meshtastic_Position_init_zero;
+	uint32_t me = meshtastic_get_node_id();
+	bool to_self;
+
+	if (mesh == NULL || mesh->which_payload_variant != meshtastic_MeshPacket_decoded_tag ||
+	    (uint32_t)mesh->decoded.portnum != MESHTASTIC_PORT_POSITION) {
+		return false;
+	}
+
+	to_self = (mesh->to == me);
+	if (!to_self && mesh->to != MESHTASTIC_NODE_BROADCAST && mesh->to != 0U) {
+		return false;
+	}
+
+	if (!packet_decode_position(mesh->decoded.payload.bytes, mesh->decoded.payload.size,
+				    &position)) {
+		/* Still ours to consume: upstream's local delivery would drop it too,
+		 * and it must not go on the air addressed to ourselves. */
+		return to_self;
+	}
+
+	if (position.time != 0U && mesh->channel == meshtastic_channels_primary_index()) {
+		meshtastic_clock_set_epoch(position.time, MESHTASTIC_CLOCK_QUALITY_NTP);
+	}
+
+	k_mutex_lock(&pos_lock, K_FOREVER);
+	if (!pos_state.fixed_valid &&
+	    ((position.has_latitude_i && position.latitude_i != 0) ||
+	     (position.has_longitude_i && position.longitude_i != 0))) {
+		pos_state.current = position;
+		pos_state.has_current = true;
+	}
+	k_mutex_unlock(&pos_lock);
+
+	LOG_DBG("Position from phone (to %s): lat=%d lon=%d time=%u",
+		to_self ? "self" : "broadcast", position.latitude_i, position.longitude_i,
+		position.time);
+	return to_self;
 }
 
 static bool interval_elapsed(bool valid, int64_t last_ms, int64_t now_ms, int64_t interval_ms)

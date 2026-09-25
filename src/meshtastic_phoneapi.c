@@ -24,6 +24,9 @@
 #if IS_ENABLED(CONFIG_MESHTASTIC_NODEINFO)
 #include <zephyr/meshtastic/nodeinfo.h>
 #endif
+#if IS_ENABLED(CONFIG_MESHTASTIC_POSITION)
+#include "meshtastic_position.h"
+#endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -584,6 +587,14 @@ toradio_decoded:
 		/* An admin getter for a remote node: remember it, so the remote's
 		 * response is delivered back here rather than refused (agents-dnr4.33). */
 		meshtastic_admin_note_outgoing_request(&to->packet);
+#endif
+#if IS_ENABLED(CONFIG_MESHTASTIC_POSITION)
+		/* The phone's own fix (agents-t2hb.13): addressed to us it is local
+		 * delivery, never airtime; a broadcast is adopted and still sent. */
+		if (meshtastic_position_handle_from_phone(&to->packet)) {
+			meshtastic_phoneapi_enqueue_queue_status(api, 0, to->packet.id);
+			break;
+		}
 #endif
 		ret = meshtastic_send_mesh_pb(&to->packet);
 		meshtastic_phoneapi_enqueue_queue_status(api, ret, to->packet.id);
