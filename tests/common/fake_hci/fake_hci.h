@@ -69,7 +69,8 @@ struct fake_hci_state {
 	uint32_t create_conn_cancel_count;
 
 	/* Links. */
-	uint32_t conns_up;
+	uint32_t conns_up;     /* connections ever established */
+	uint32_t conns_active; /* connections up now */
 	uint32_t disconnect_cmds;
 	uint32_t att_requests;
 };
@@ -81,7 +82,8 @@ void fake_hci_set_public_addr(const bt_addr_t *addr);
 /* A copy of the controller's state, taken under its lock. */
 void fake_hci_get_state(struct fake_hci_state *out);
 
-/* Fail the next @p count commands with @p opcode, answering @p status. */
+/* Fail the next @p count commands with @p opcode, answering @p status.
+ * @p count 0 clears any pending failure for @p opcode. */
 void fake_hci_fail(uint16_t opcode, uint8_t status, uint32_t count);
 
 /* LE Create Connection: complete it automatically after @p delay_ms with
@@ -89,7 +91,9 @@ void fake_hci_fail(uint16_t opcode, uint8_t status, uint32_t count);
 void fake_hci_set_auto_connect(bool on, uint32_t delay_ms);
 
 /* Complete the pending LE Create Connection. @p status 0 = success; returns
- * the new handle, or -1 if nothing was initiating. */
+ * the new handle, or -1 if nothing was initiating. 0x3E (failed to be
+ * established) is delivered as a real legacy controller does it: a
+ * connection that completes and at once drops with reason 0x3E. */
 int fake_hci_complete_create(uint8_t status);
 
 /* An incoming connection from @p peer (we are peripheral); stops legacy
@@ -98,6 +102,9 @@ int fake_hci_incoming_conn(const bt_addr_le_t *peer);
 
 /* The remote end drops link @p handle. */
 void fake_hci_remote_disconnect(uint16_t handle, uint8_t reason);
+
+/* The remote end drops every link (test teardown). */
+void fake_hci_remote_disconnect_all(uint8_t reason);
 
 /* Deliver one legacy advertising report, if scanning. Returns false if the
  * controller is not scanning (a real one would not have heard it). */

@@ -215,6 +215,7 @@ static int conn_new(uint8_t role, const bt_addr_le_t *peer)
 			conns[i].role = role;
 			bt_addr_le_copy(&conns[i].peer, peer);
 			st.conns_up++;
+			st.conns_active++;
 			return conns[i].handle;
 		}
 	}
@@ -299,6 +300,13 @@ static void handle_cmd(uint16_t opcode, struct net_buf *cp)
 
 	key = k_spin_lock(&lock);
 	status = injected_status(opcode);
+	if (status != 0U && opcode == BT_HCI_OP_LE_SET_ADV_ENABLE) {
+		st.adv_enable_rejected++;
+		st.adv_enable_last_status = status;
+	} else if (status != 0U && opcode == BT_HCI_OP_LE_SET_SCAN_ENABLE) {
+		st.scan_enable_rejected++;
+		st.scan_enable_last_status = status;
+	}
 	k_spin_unlock(&lock, key);
 	if (status != 0U) {
 		if (is_status_command(opcode)) {
@@ -478,6 +486,7 @@ static void handle_cmd(uint16_t opcode, struct net_buf *cp)
 		fc = conn_find(handle);
 		if (fc != NULL) {
 			fc->in_use = false;
+			st.conns_active--;
 			st.disconnect_cmds++;
 		}
 		k_spin_unlock(&lock, key);
@@ -690,11 +699,20 @@ void fake_hci_fail(uint16_t opcode, uint8_t status, uint32_t count)
 {
 	k_spinlock_key_t key = k_spin_lock(&lock);
 
+	struct fake_fail *slot = NULL;
+
+	/* The entry for this opcode if there is one, else a spent one. */
 	for (size_t i = 0; i < ARRAY_SIZE(fails); i++) {
-		if (fails[i].count == 0U || fails[i].opcode == opcode) {
-			fails[i] = (struct fake_fail){opcode, status, count};
+		if (fails[i].count > 0U && fails[i].opcode == opcode) {
+			slot = &fails[i];
 			break;
 		}
+		if (slot == NULL && fails[i].count == 0U) {
+			slot = &fails[i];
+		}
+	}
+	if (slot != NULL) {
+		*slot = (struct fake_fail){opcode, status, count};
 	}
 	k_spin_unlock(&lock, key);
 }
@@ -710,6 +728,18 @@ void fake_hci_set_auto_connect(bool on, uint32_t delay_ms)
 
 int fake_hci_complete_create(uint8_t status)
 {
+	if (status == BT_HCI_ERR_CONN_FAIL_TO_ESTAB) {
+		/* With legacy initiating a controller never reports 0x3E in
+		 * the connection complete: the link "completes", then drops
+		 * within six connection intervals with reason 0x3E. */
+		int h = fake_hci_complete_create(0U);
+
+		if (h > 0) {
+			fake_hci_remote_disconnect((uint16_t)h, BT_HCI_ERR_CONN_FAIL_TO_ESTAB);
+		}
+		return -1;
+	}
+
 	k_spinlock_key_t key = k_spin_lock(&lock);
 	bt_addr_le_t peer;
 	int handle = 0;
@@ -762,11 +792,26 @@ void fake_hci_remote_disconnect(uint16_t handle, uint8_t reason)
 
 	if (fc != NULL) {
 		fc->in_use = false;
+		st.conns_active--;
 	}
 	k_spin_unlock(&lock, key);
 
 	if (fc != NULL) {
 		queue_disconn_complete(handle, reason);
+	}
+}
+
+void fake_hci_remote_disconnect_all(uint8_t reason)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(conns); i++) {
+		k_spinlock_key_t key = k_spin_lock(&lock);
+		bool up = conns[i].in_use;
+		uint16_t handle = conns[i].handle;
+
+		k_spin_unlock(&lock, key);
+		if (up) {
+			fake_hci_remote_disconnect(handle, reason);
+		}
 	}
 }
 

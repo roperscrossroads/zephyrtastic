@@ -1,0 +1,24 @@
+common:
+  tags:
+    - meshtastic
+    - ble
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+  timeout: 120
+tests:
+  # ESP32-S3 (Heltec) shape: public identity.
+  meshtastic.ble_sim.public: {}
+  meshtastic.ble_sim.public_armed:
+    extra_configs:
+      - CONFIG_TEST_BOOT_ARMED=y
+  # nRF52840 (XIAO) shape: static random identity.
+  meshtastic.ble_sim.random:
+    extra_configs:
+      - CONFIG_TEST_RANDOM_IDENTITY=y
+  meshtastic.ble_sim.random_armed:
+    extra_configs:
+      - CONFIG_TEST_RANDOM_IDENTITY=y
+      - CONFIG_TEST_BOOT_ARMED=y

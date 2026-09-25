@@ -1,0 +1,7 @@
+config TEST_RANDOM_IDENTITY
+	bool "Controller reports no public address (nRF52 / XIAO shape)"
+
+config TEST_BOOT_ARMED
+	bool "Boot with a persisted peer-scan arm (blepeer/central scan_on=1)"
+
+source "Kconfig.zephyr"
