@@ -153,6 +153,17 @@ config MESHTASTIC_BLE_PEER_STICKY_MS
 	  courier was mid-swap (~30 s) fell back to the other kit and then
 	  REMEMBERED it. 0 disables the preference.
 
+config MESHTASTIC_BLE_PEER_BRINGUP_TIMEOUT_MS
+	int "Outbound link bring-up budget (ms)"
+	default 10000
+	range 1000 120000
+	help
+	  An outbound peer link that has connected but not finished discovery
+	  and subscribe within this long is disconnected and the hunt resumes.
+	  Without a bound, a peer that connected and then never answered (or
+	  answered without the peer service) held the one outbound slot
+	  forever, blocking every rescan.
+
 config MESHTASTIC_BLE_PEER_SEEN_MAX
 	int "Peer advert table size"
 	default 8

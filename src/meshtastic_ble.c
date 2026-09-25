@@ -12,9 +12,11 @@
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/kernel.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include "meshtastic_backoff.h"
 #include "meshtastic_ble_name.h"
 #include "meshtastic_ble_peer.h"
 #include "meshtastic_ble_registry.h"
@@ -388,6 +390,31 @@ BT_GATT_SERVICE_DEFINE(meshtastic_svc, BT_GATT_PRIMARY_SERVICE(&meshtastic_servi
  */
 static int start_advertising(void);
 
+/*
+ * A refused start is retried on a backoff ladder rather than left for the next
+ * connection event: with a phone holding a slot there may never be one, and
+ * a node that is not advertising gets no connection event to recover on — so
+ * a single refusal used to mean "undiscoverable until reboot". The ladder is
+ * touched only here and in meshtastic_ble_init(), both on ble.work_q's
+ * timeline (init runs before the queue has anything to do), so it needs no
+ * lock.
+ */
+#define ADV_RETRY_BASE_MS 250U
+#define ADV_RETRY_CAP_MS  30000U
+static struct meshtastic_backoff adv_backoff;
+
+static void adv_restart_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(adv_restart_work, adv_restart_fn);
+
+static void adv_retry_later(int err)
+{
+	uint32_t delay = meshtastic_backoff_next_ms(&adv_backoff, sys_rand32_get());
+
+	LOG_WRN("BLE advertising failed (%d); retry %u in %u ms", err, adv_backoff.attempts,
+		delay);
+	(void)k_work_reschedule_for_queue(&ble.work_q, &adv_restart_work, K_MSEC(delay));
+}
+
 static void adv_restart_fn(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -398,11 +425,18 @@ static void adv_restart_fn(struct k_work *work)
 
 	int ret = start_advertising();
 
-	if (ret != 0 && ret != -EALREADY) {
-		LOG_ERR("BLE re-advertise after disconnect failed (%d)", ret);
+	if (ret == 0 || ret == -EALREADY) {
+		meshtastic_backoff_reset(&adv_backoff);
+	} else {
+		adv_retry_later(ret);
 	}
 }
-static K_WORK_DEFINE(adv_restart_work, adv_restart_fn);
+
+/* Re-arm now (a connection came or went); supersedes any pending retry. */
+static void adv_restart_now(void)
+{
+	(void)k_work_reschedule_for_queue(&ble.work_q, &adv_restart_work, K_NO_WAIT);
+}
 
 /*
  * Classification (a4it.5): whether the phone PM inhibitor was charged is
@@ -641,7 +675,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	slots_free = meshtastic_ble_reg_active() < MESHTASTIC_BLE_REG_SLOTS;
 	k_mutex_unlock(&ble.lock);
 	if (slots_free && IS_ENABLED(CONFIG_MESHTASTIC_BLE_ADV)) {
-		(void)k_work_submit_to_queue(&ble.work_q, &adv_restart_work);
+		adv_restart_now();
 	}
 
 	/*
@@ -688,7 +722,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	/* Re-arm connectable advertising so the phone can reconnect without a reboot
 	 * (see adv_restart_fn). Deferred off the BT callback context. */
-	(void)k_work_submit_to_queue(&ble.work_q, &adv_restart_work);
+	adv_restart_now();
 }
 
 #if defined(CONFIG_BT_SMP)
@@ -964,8 +998,12 @@ static int start_advertising(void)
 	if (meshtastic_ble_reg_active() >= MESHTASTIC_BLE_REG_SLOTS) {
 		/* Every conn slot is taken: a connectable advert could only be
 		 * accepted into -ENOMEM. The next disconnect re-arms. */
+		/* An INBOUND connection already ended the advert, but an
+		 * outbound one (our peer central) did not: stop it explicitly
+		 * rather than report "not advertising" with one on the air. */
 		ble.adv_active = false;
 		k_mutex_unlock(&ble.lock);
+		(void)bt_le_adv_stop();
 		return 0;
 	}
 	k_mutex_unlock(&ble.lock);
@@ -1094,13 +1132,21 @@ int meshtastic_ble_init(void)
 	// 	LOG_INF("BLE fixed PIN %06u", (unsigned int)CONFIG_MESHTASTIC_BLE_PASSKEY);
 	// #endif
 
+	/* Advertise BEFORE the peer scanner restarts (a restored arm used to
+	 * start from inside settings_load() above, racing this). A refused
+	 * start no longer fails init: the GATT service and the PhoneAPI are
+	 * already registered, so the service is up — only undiscoverable until
+	 * the retry lands. Returning the error here used to leave it
+	 * undiscoverable for good (agents-selv's adv_starts=0). */
+	meshtastic_backoff_init(&adv_backoff, ADV_RETRY_BASE_MS, ADV_RETRY_CAP_MS);
 	if (IS_ENABLED(CONFIG_MESHTASTIC_BLE_ADV)) {
 		ret = start_advertising();
 		if (ret < 0 && ret != -EALREADY) {
-			LOG_ERR("Meshtastic BLE advertising failed (%d)", ret);
-			return ret;
+			adv_retry_later(ret);
 		}
 	}
+
+	meshtastic_ble_peer_start();
 
 	LOG_INF("Meshtastic BLE service ready");
 	return 0;

@@ -11,6 +11,8 @@
 
 #include "meshtastic_ble_peer_codec.h"
 
+struct bt_conn;
+
 /*
  * The node-to-node BLE peer link (agents-a4it.3/.5): this port's own peer
  * GATT service (peripheral half) plus the passive scanner, central role and
@@ -154,9 +156,21 @@ struct meshtastic_ble_peer_stats {
 	uint32_t frame_rx_rejected;  /* chunk-writes the reassembler refused */
 	uint32_t frame_tx_frames;    /* frames fully notified to the central */
 	uint32_t frame_tx_failed;    /* frames abandoned on a notify error */
+	uint32_t scan_start_failures; /* scan starts refused (each retried on a backoff) */
+	uint32_t already_linked;     /* adverts from a node we hold a link to, not dialled */
+	uint32_t bringup_timeouts;   /* outbound links released by the bring-up watchdog */
 };
 
+/* The last scan-start error (0 = the last start succeeded). */
+int meshtastic_ble_peer_last_scan_err(void);
+
 void meshtastic_ble_peer_stats_get(struct meshtastic_ble_peer_stats *out);
+
+/* Start the central half: restart a scan restored from settings. Called by
+ * meshtastic_ble_init() once the phone advert is up — never from the settings
+ * commit itself, which runs first (an advertiser and a scanner started in that
+ * order collide on a random identity's address). */
+void meshtastic_ble_peer_start(void);
 
 /* ---- provided by meshtastic_ble.c ---- */
 
@@ -200,6 +214,10 @@ uint32_t meshtastic_ble_adv_starts(void);
 static inline void meshtastic_ble_peer_conn_down(unsigned int index)
 {
 	(void)index;
+}
+
+static inline void meshtastic_ble_peer_start(void)
+{
 }
 
 /* No peer link in this image: every frame goes on the air. */

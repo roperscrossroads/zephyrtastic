@@ -32,12 +32,14 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 #include <zephyr/settings/settings.h>
 #endif
 
 #include <zephyr/sys/byteorder.h>
 
+#include "meshtastic_backoff.h"
 #include "meshtastic_ble_peer.h"
 #include "meshtastic_ble_registry.h"
 #include "meshtastic_build.h"
@@ -91,10 +93,13 @@ BUILD_ASSERT(MESHTASTIC_BLE_PEER_FRAME_MAX == MESHTASTIC_PKT_MAX,
  * never from ISR. One mutex covers both directions' state. */
 static K_MUTEX_DEFINE(peer_lock);
 
-/* Central-half work (defined with the central code below): the scan restarter
- * and the beat engine, both on the SYSTEM workqueue. */
+/* Central-half work (defined with the central code below): the scan restarter,
+ * the bring-up watchdog and the beat engine, all on the SYSTEM workqueue. The
+ * restarter is delayable so a failure can come back later instead of at once. */
 static void scan_work_fn(struct k_work *work);
-static K_WORK_DEFINE(scan_work, scan_work_fn);
+static K_WORK_DELAYABLE_DEFINE(scan_work, scan_work_fn);
+static void bringup_work_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(bringup_work, bringup_work_fn);
 static void beat_work_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(beat_work, beat_work_fn);
 
@@ -509,8 +514,34 @@ static struct {
 	uint16_t frame_value_handle;
 	uint32_t tx_seq;
 	bool hello_pending;
+	/* Uptime the outbound link came up; 0 once it is ready (or when there
+	 * is none). The bring-up watchdog reads it. */
+	int64_t bringup_started_ms;
+	/* Two retry ladders, reset separately: a scan that starts must not
+	 * reset the connect ladder, or a peer that accepts and at once drops
+	 * every connection would be redialled at the base delay forever. An
+	 * operator arm resets both — a fresh hunt, a fresh ladder. */
+	struct meshtastic_backoff scan_backoff;
+	struct meshtastic_backoff connect_backoff;
+	int last_scan_err;
 	struct meshtastic_ble_peer_seen seen[CONFIG_MESHTASTIC_BLE_PEER_SEEN_MAX];
-} central;
+} central = {
+	.scan_backoff = {.base_ms = 500U, .cap_ms = 30000U},
+	.connect_backoff = {.base_ms = 1000U, .cap_ms = 60000U},
+};
+
+/* (Re)run the scan restarter after @p delay_ms; supersedes a pending run. */
+static void scan_kick(uint32_t delay_ms)
+{
+	(void)k_work_reschedule(&scan_work, K_MSEC(delay_ms));
+}
+
+/* A connect attempt, or a link's bring-up, failed: come back later. Caller
+ * holds peer_lock. */
+static uint32_t connect_retry_delay_locked(void)
+{
+	return meshtastic_backoff_next_ms(&central.connect_backoff, sys_rand32_get());
+}
 
 /* Persisted central intent (defined with the settings handler below). */
 static void peer_intent_save(void);
@@ -639,9 +670,30 @@ static void peer_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 		return;
 	}
 
+	/* The beat-based guard above only knows peers that have BEATEN to us.
+	 * A link to this address in any other state — inbound and still
+	 * unclassified, classified as the phone, or opened by the SMP client —
+	 * would make bt_conn_le_create() refuse ("found valid connection"),
+	 * and an immediate rescan turned that into a spin. Ask the host. */
+	struct bt_conn *existing = bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr);
+
+	if (existing != NULL) {
+		bt_conn_unref(existing);
+		k_mutex_lock(&peer_lock, K_FOREVER);
+		peer.stats.already_linked++;
+		k_mutex_unlock(&peer_lock);
+		return;
+	}
+
 	err = bt_le_scan_stop();
-	if (err != 0) {
+	if (err != 0 && err != -EALREADY) {
+		/* The scanner's state is now unknown: assume stopped, and let
+		 * the restarter find out, later. */
 		LOG_WRN("BLE peer scan stop failed (%d)", err);
+		k_mutex_lock(&peer_lock, K_FOREVER);
+		central.scanning = false;
+		k_mutex_unlock(&peer_lock);
+		scan_kick(central.scan_backoff.base_ms);
 		return;
 	}
 
@@ -651,16 +703,28 @@ static void peer_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 	peer.stats.connects_attempted++;
 	k_mutex_unlock(&peer_lock);
 
-	err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN, BT_LE_CONN_PARAM_DEFAULT,
-				&central.conn);
+	/* Created into a local and published under the lock. This callback and
+	 * the connected/disconnected callbacks all run on the BT RX thread, so
+	 * none of them can observe the gap; the shell and the workqueue read
+	 * central.conn under peer_lock. */
+	struct bt_conn *conn = NULL;
+
+	err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN, BT_LE_CONN_PARAM_DEFAULT, &conn);
 	if (err != 0) {
-		LOG_WRN("BLE peer connect to 0x%08x failed to start (%d)", m.node_num, err);
+		uint32_t delay;
+
 		k_mutex_lock(&peer_lock, K_FOREVER);
 		peer.stats.connects_failed++;
+		delay = connect_retry_delay_locked();
 		k_mutex_unlock(&peer_lock);
-		(void)k_work_submit(&scan_work);
+		LOG_WRN("BLE peer connect to 0x%08x failed to start (%d); rescan in %u ms",
+			m.node_num, err, delay);
+		scan_kick(delay);
 		return;
 	}
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	central.conn = conn;
+	k_mutex_unlock(&peer_lock);
 
 	LOG_INF("BLE peer connecting to 0x%08x (RSSI %d)", m.node_num, rssi);
 }
@@ -705,12 +769,31 @@ static void scan_work_fn(struct k_work *work)
 
 	err = bt_le_scan_start(&peer_scan_param, peer_scan_cb);
 	if (err != 0 && err != -EALREADY) {
-		LOG_ERR("BLE peer scan start failed (%d)", err);
+		uint32_t delay;
+
+		k_mutex_lock(&peer_lock, K_FOREVER);
+		central.last_scan_err = err;
+		peer.stats.scan_start_failures++;
+		delay = meshtastic_backoff_next_ms(&central.scan_backoff, sys_rand32_get());
+		k_mutex_unlock(&peer_lock);
+		/* Used to be terminal: logged once, the hunt dead until an
+		 * operator re-armed it, while `blepeer status` still said armed. */
+		LOG_WRN("BLE peer scan start failed (%d); retry in %u ms", err, delay);
+		scan_kick(delay);
 		return;
 	}
 
 	k_mutex_lock(&peer_lock, K_FOREVER);
+	if (!central.scan_on) {
+		/* Disarmed while the start was in flight (scan_set(false) ran
+		 * its stop before this start landed): honour the disarm. */
+		k_mutex_unlock(&peer_lock);
+		(void)bt_le_scan_stop();
+		return;
+	}
 	central.scanning = true;
+	central.last_scan_err = 0;
+	meshtastic_backoff_reset(&central.scan_backoff);
 	k_mutex_unlock(&peer_lock);
 	LOG_INF("BLE peer scan running (passive)");
 }
@@ -782,6 +865,46 @@ static uint8_t central_frame_notify_cb(struct bt_conn *conn,
 	return BT_GATT_ITER_CONTINUE;
 }
 
+/*
+ * The outbound link's bring-up failed (a discovery stage found nothing, or a
+ * discover/subscribe call was refused). Release the link: held, it was
+ * connected but never ready, and central.conn != NULL blocked every rescan
+ * until the REMOTE dropped it. The disconnected callback resumes the hunt,
+ * on the connect ladder, since this link never became useful.
+ */
+static void central_bringup_failed(struct bt_conn *conn, const char *what, int err)
+{
+	LOG_WRN("BLE peer 0x%08x bring-up failed: %s (%d); releasing the link",
+		central.conn_node, what, err);
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	peer.stats.discovery_failures++;
+	k_mutex_unlock(&peer_lock);
+	(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+}
+
+static void bringup_work_fn(struct k_work *work)
+{
+	struct bt_conn *conn = NULL;
+
+	ARG_UNUSED(work);
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	if (central.conn != NULL &&
+	    meshtastic_ble_peer_bringup_expired(central.bringup_started_ms, k_uptime_get(),
+						CONFIG_MESHTASTIC_BLE_PEER_BRINGUP_TIMEOUT_MS)) {
+		conn = bt_conn_ref(central.conn);
+		peer.stats.bringup_timeouts++;
+	}
+	k_mutex_unlock(&peer_lock);
+
+	if (conn != NULL) {
+		LOG_WRN("BLE peer 0x%08x not ready after %u ms; releasing the link",
+			central.conn_node, CONFIG_MESHTASTIC_BLE_PEER_BRINGUP_TIMEOUT_MS);
+		(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		bt_conn_unref(conn);
+	}
+}
+
 static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				   struct bt_gatt_discover_params *params)
 {
@@ -795,11 +918,9 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 			LOG_WRN("BLE peer 0x%08x has no frame channel (stage %u)",
 				central.conn_node, params->type);
 		} else {
-			LOG_WRN("BLE peer discovery: attribute not found (stage %u)",
-				params->type);
-			k_mutex_lock(&peer_lock, K_FOREVER);
-			peer.stats.discovery_failures++;
-			k_mutex_unlock(&peer_lock);
+			(void)memset(params, 0, sizeof(*params));
+			central_bringup_failed(conn, "attribute not found", -ENOENT);
+			return BT_GATT_ITER_STOP;
 		}
 		(void)memset(params, 0, sizeof(*params));
 		return BT_GATT_ITER_STOP;
@@ -812,7 +933,7 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 		central_disc.type = BT_GATT_DISCOVER_CHARACTERISTIC;
 		err = bt_gatt_discover(conn, &central_disc);
 		if (err != 0) {
-			LOG_WRN("BLE peer char discover failed (%d)", err);
+			central_bringup_failed(conn, "characteristic discovery", err);
 		}
 	} else if (params->type == BT_GATT_DISCOVER_CHARACTERISTIC) {
 		memcpy(&central_disc_uuid16, BT_UUID_GATT_CCC, sizeof(central_disc_uuid16));
@@ -825,8 +946,10 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 			central_sub.value_handle = bt_gatt_attr_value_handle(attr);
 		}
 		err = bt_gatt_discover(conn, &central_disc);
-		if (err != 0) {
-			LOG_WRN("BLE peer CCC discover failed (%d)", err);
+		if (err != 0 && !central_disc_frame) {
+			central_bringup_failed(conn, "CCC discovery", err);
+		} else if (err != 0) {
+			LOG_WRN("BLE peer frame CCC discover failed (%d)", err);
 		}
 	} else if (!central_disc_frame) {
 		central_sub.notify = central_notify_cb;
@@ -834,10 +957,7 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 		central_sub.ccc_handle = attr->handle;
 		err = bt_gatt_subscribe(conn, &central_sub);
 		if (err != 0 && err != -EALREADY) {
-			LOG_WRN("BLE peer subscribe failed (%d)", err);
-			k_mutex_lock(&peer_lock, K_FOREVER);
-			peer.stats.discovery_failures++;
-			k_mutex_unlock(&peer_lock);
+			central_bringup_failed(conn, "subscribe", err);
 		} else {
 			bool remember;
 
@@ -847,6 +967,8 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 			central.tx_seq = 0U;
 			central.hello_pending = true;
 			central.looking_since_ms = 0;
+			central.bringup_started_ms = 0;
+			meshtastic_backoff_reset(&central.connect_backoff);
 			/* First link ever: remember it. Otherwise wait for its beats —
 			 * a COURIER flag promotes it (central_notify_cb). */
 			remember = (central.last_node == 0U);
@@ -955,25 +1077,49 @@ static void beat_work_fn(struct k_work *work)
 
 static void peer_central_connected(struct bt_conn *conn, uint8_t err)
 {
+	uint32_t delay;
+	bool mine;
 	int ret;
 
-	if (conn != central.conn) {
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	mine = (conn == central.conn);
+	k_mutex_unlock(&peer_lock);
+	if (!mine) {
 		return;
 	}
 
 	if (err != 0U) {
-		LOG_WRN("BLE peer connect to 0x%08x failed (0x%02x)", central.conn_node, err);
-		bt_conn_unref(central.conn);
 		k_mutex_lock(&peer_lock, K_FOREVER);
 		central.conn = NULL;
 		peer.stats.connects_failed++;
+		delay = connect_retry_delay_locked();
 		k_mutex_unlock(&peer_lock);
-		(void)k_work_submit(&scan_work);
+		bt_conn_unref(conn);
+		LOG_WRN("BLE peer connect to 0x%08x failed (0x%02x); rescan in %u ms",
+			central.conn_node, err, delay);
+		scan_kick(delay);
 		return;
 	}
 
 	/* Outbound role CENTRAL: meshtastic_ble.c's connected() has already
-	 * registered this slot as a peer. Start the discovery chain. */
+	 * registered this slot as a peer. Start the discovery chain, on a clock. */
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	central.bringup_started_ms = k_uptime_get();
+	k_mutex_unlock(&peer_lock);
+	(void)k_work_reschedule(&bringup_work,
+				K_MSEC(CONFIG_MESHTASTIC_BLE_PEER_BRINGUP_TIMEOUT_MS));
+
+	/* Fresh subscribe params per link, VOLATILE. Zephyr keeps a BONDED
+	 * peer's subscription across a disconnect unless the params say
+	 * volatile, and then answers the next link's bt_gatt_subscribe() on
+	 * the same params with -EALREADY without writing the CCC — the class
+	 * of bug that cost three bench cycles on the SMP client (agents-wjns);
+	 * meshtastic_smp_central.c already sets it. */
+	(void)memset(&central_sub, 0, sizeof(central_sub));
+	(void)memset(&central_frame_sub, 0, sizeof(central_frame_sub));
+	atomic_set_bit(central_sub.flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE);
+	atomic_set_bit(central_frame_sub.flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE);
+
 	central_disc_frame = false;
 	memcpy(&central_disc_uuid128, &peer_service_uuid, sizeof(central_disc_uuid128));
 	central_disc.uuid = &central_disc_uuid128.uuid;
@@ -984,32 +1130,46 @@ static void peer_central_connected(struct bt_conn *conn, uint8_t err)
 
 	ret = bt_gatt_discover(conn, &central_disc);
 	if (ret != 0) {
-		LOG_WRN("BLE peer discovery failed to start (%d)", ret);
-		k_mutex_lock(&peer_lock, K_FOREVER);
-		peer.stats.discovery_failures++;
-		k_mutex_unlock(&peer_lock);
+		central_bringup_failed(conn, "primary discovery", ret);
 	}
 }
 
 static void peer_central_disconnected(struct bt_conn *conn, uint8_t reason)
 {
+	uint32_t delay = 0U;
+	uint32_t node;
+	bool was_ready;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
 	if (conn != central.conn) {
+		k_mutex_unlock(&peer_lock);
 		return;
 	}
-
-	LOG_INF("BLE peer link to 0x%08x down (0x%02x)", central.conn_node, reason);
-	bt_conn_unref(central.conn);
-	k_mutex_lock(&peer_lock, K_FOREVER);
+	node = central.conn_node;
+	was_ready = central.link_ready;
+	if (!was_ready) {
+		/* Never became useful (dropped mid-bring-up, released by the
+		 * watchdog, or an establishment failure — 0x3E reaches us as a
+		 * link that completes and at once drops): a failed attempt. */
+		peer.stats.connects_failed++;
+		delay = connect_retry_delay_locked();
+	}
 	central.conn = NULL;
 	central.link_ready = false;
+	central.bringup_started_ms = 0;
 	central.value_handle = 0U;
 	central.frame_ready = false;
 	central.frame_value_handle = 0U;
 	central.conn_node = 0U;
 	k_mutex_unlock(&peer_lock);
+	bt_conn_unref(conn);
+	(void)k_work_cancel_delayable(&bringup_work);
+
+	LOG_INF("BLE peer link to 0x%08x down (0x%02x)%s", node, reason,
+		was_ready ? "" : " before it was ready");
 
 	/* Resume the hunt off the BT callback context. */
-	(void)k_work_submit(&scan_work);
+	scan_kick(delay);
 }
 
 BT_CONN_CB_DEFINE(peer_conn_callbacks) = {
@@ -1073,36 +1233,50 @@ static int peer_intent_settings_set(const char *key, size_t len, settings_read_c
 	return 0;
 }
 
-static int peer_intent_settings_commit(void)
-{
-	/* meshtastic_ble_init()'s settings_load() runs after bt_enable(), so a
-	 * restored arm can start immediately; a subtree load from anywhere
-	 * earlier just leaves the intent staged for that later commit. */
-	if (!bt_is_ready()) {
-		return 0;
-	}
-	if (central.scan_on) {
-		if (central.target_node != 0U) {
-			LOG_INF("BLE peer: restored scan intent, target 0x%08x",
-				central.target_node);
-		} else if (central.last_node != 0U) {
-			LOG_INF("BLE peer: restored scan intent (any peer, preferring 0x%08x)",
-				central.last_node);
-		} else {
-			LOG_INF("BLE peer: restored scan intent (any peer)");
-		}
-		(void)k_work_submit(&scan_work);
-	}
-	return 0;
-}
-
-SETTINGS_STATIC_HANDLER_DEFINE(mt_blepeer, "blepeer", NULL, peer_intent_settings_set,
-			       peer_intent_settings_commit, NULL);
+/* No commit handler: a restored arm is only STAGED here, and started by
+ * meshtastic_ble_peer_start() once meshtastic_ble_init() has the phone advert
+ * up. Starting it from the commit (inside settings_load()) put the scan ahead
+ * of the advert — on a random identity the advert then could not reclaim the
+ * shared address register and never started (tests/ble_sim random_armed) —
+ * and depended on BT's own commit having run first (bt_is_ready()). */
+SETTINGS_STATIC_HANDLER_DEFINE(mt_blepeer, "blepeer", NULL, peer_intent_settings_set, NULL,
+			       NULL);
 #else
 static void peer_intent_save(void)
 {
 }
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
+
+void meshtastic_ble_peer_start(void)
+{
+	bool on;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	on = central.scan_on;
+	k_mutex_unlock(&peer_lock);
+	if (!on) {
+		return;
+	}
+	if (central.target_node != 0U) {
+		LOG_INF("BLE peer: restored scan intent, target 0x%08x", central.target_node);
+	} else if (central.last_node != 0U) {
+		LOG_INF("BLE peer: restored scan intent (any peer, preferring 0x%08x)",
+			central.last_node);
+	} else {
+		LOG_INF("BLE peer: restored scan intent (any peer)");
+	}
+	scan_kick(0U);
+}
+
+/* An operator arm: a fresh hunt, with its full sticky window and fresh
+ * retry ladders. Caller holds peer_lock. */
+static void fresh_hunt_locked(void)
+{
+	central.looking_since_ms = 0;
+	central.last_scan_err = 0;
+	meshtastic_backoff_reset(&central.scan_backoff);
+	meshtastic_backoff_reset(&central.connect_backoff);
+}
 
 int meshtastic_ble_peer_scan_set(bool on)
 {
@@ -1113,13 +1287,14 @@ int meshtastic_ble_peer_scan_set(bool on)
 	if (!on) {
 		central.target_node = 0U;
 	}
-	central.looking_since_ms = 0; /* arm = a fresh hunt, with its full window */
+	fresh_hunt_locked();
 	k_mutex_unlock(&peer_lock);
 	peer_intent_save();
 
 	if (on) {
-		(void)k_work_submit(&scan_work);
+		scan_kick(0U);
 	} else {
+		(void)k_work_cancel_delayable(&scan_work);
 		err = bt_le_scan_stop();
 		if (err == -EALREADY) {
 			err = 0;
@@ -1169,10 +1344,11 @@ int meshtastic_ble_peer_connect(uint32_t node_num)
 	}
 	central.target_node = node_num;
 	central.scan_on = true;
+	fresh_hunt_locked();
 	k_mutex_unlock(&peer_lock);
 	peer_intent_save();
 
-	(void)k_work_submit(&scan_work);
+	scan_kick(0U);
 	return 0;
 }
 
@@ -1343,4 +1519,14 @@ void meshtastic_ble_peer_stats_get(struct meshtastic_ble_peer_stats *out)
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	*out = peer.stats;
 	k_mutex_unlock(&peer_lock);
+}
+
+int meshtastic_ble_peer_last_scan_err(void)
+{
+	int err;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	err = central.last_scan_err;
+	k_mutex_unlock(&peer_lock);
+	return err;
 }
