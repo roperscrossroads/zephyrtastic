@@ -1,0 +1,17 @@
+# Twister platform metadata. Without this file twister does not recognize the board
+# ("unrecognized platform") and rejects any sample.yaml that names it.
+identifier: sensecap_indicator_d1l/esp32s3/procpu
+name: SenseCAP Indicator D1L PROCPU
+type: mcu
+arch: xtensa
+toolchain:
+  - zephyr
+supported:
+  - gpio
+  - uart
+  - i2c
+  - spi
+  - entropy
+  - lora
+  - nvs
+vendor: seeed
