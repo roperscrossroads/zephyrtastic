@@ -640,7 +640,15 @@ static void peer_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	peer.stats.adverts_matched++;
-	if (central.conn == NULL && central.scanning &&
+	/* scan_on, not only scanning: `blepeer scan off` clears the target to
+	 * "any peer" (and saves the intent to flash) BEFORE its scan stop lands,
+	 * so an advert in that window saw scanning=true, target=0 and dialled
+	 * whoever it came from. Bench 2026-09-26: the courier, targeted at rzr1,
+	 * linked to rzr6 the moment it was disarmed. scan_on is cleared under
+	 * this lock first, which closes the window whatever the ordering. The sim
+	 * cannot open it (no preemption inside the flash write), so this is
+	 * pinned by the bench, not by ble_sim. */
+	if (central.scan_on && central.conn == NULL && central.scanning &&
 	    meshtastic_ble_peer_scan_admits(central.target_node, central.last_node, m.node_num,
 					    k_uptime_get() - central.looking_since_ms,
 					    CONFIG_MESHTASTIC_BLE_PEER_STICKY_MS)) {
@@ -658,7 +666,8 @@ static void peer_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 				break;
 			}
 		}
-	} else if (central.conn == NULL && central.scanning && central.target_node == 0U &&
+	} else if (central.scan_on && central.conn == NULL && central.scanning &&
+		   central.target_node == 0U &&
 		   central.last_node != 0U && m.node_num != central.last_node) {
 		/* Passed over inside the sticky window; counted so a bench can
 		 * see the preference doing its work. */
