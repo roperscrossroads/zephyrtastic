@@ -5578,6 +5578,80 @@ ZTEST(protocol_stack, test_phone_config_handshake_full)
 		      "state machine returns to IDLE after complete");
 }
 
+/*
+ * DeviceMetadata.excluded_modules tells the app which module config screens to
+ * hide (Meshtastic-Android ModuleRoute: a set bit hides the screen). A module
+ * the build carries must NOT be excluded, or the app hides a working module --
+ * which is what NeighborInfo suffered from agents-dnr4.19 (built, 09-07) until
+ * agents-dnr4.34: its bit sat in the "no handler" list. The two tables below are
+ * the decision record, written independently of meshtastic.c's expression, so a
+ * module that gains a handler has to be moved in both places.
+ */
+ZTEST(protocol_stack, test_excluded_modules_track_the_build)
+{
+	static const struct {
+		uint32_t bit;
+		bool built;
+		const char *name;
+	} gated[] = {
+		{meshtastic_ExcludedModules_MQTT_CONFIG, IS_ENABLED(CONFIG_MESHTASTIC_MQTT), "mqtt"},
+		{meshtastic_ExcludedModules_TELEMETRY_CONFIG,
+		 IS_ENABLED(CONFIG_MESHTASTIC_DEVICE_METRICS) ||
+			 IS_ENABLED(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS),
+		 "telemetry"},
+		{meshtastic_ExcludedModules_BLUETOOTH_CONFIG, IS_ENABLED(CONFIG_MESHTASTIC_BLE),
+		 "bluetooth"},
+		{meshtastic_ExcludedModules_NETWORK_CONFIG,
+		 IS_ENABLED(CONFIG_WIFI) || IS_ENABLED(CONFIG_NET_L2_ETHERNET), "network"},
+		{meshtastic_ExcludedModules_EXTNOTIF_CONFIG, IS_ENABLED(CONFIG_MESHTASTIC_EXTNOTIFY),
+		 "external notification"},
+		{meshtastic_ExcludedModules_NEIGHBORINFO_CONFIG,
+		 IS_ENABLED(CONFIG_MESHTASTIC_NEIGHBORINFO), "neighbor info"},
+	};
+	static const struct {
+		uint32_t bit;
+		const char *name;
+	} no_handler[] = {
+		{meshtastic_ExcludedModules_SERIAL_CONFIG, "serial"},
+		{meshtastic_ExcludedModules_STOREFORWARD_CONFIG, "store & forward"},
+		{meshtastic_ExcludedModules_RANGETEST_CONFIG, "range test"},
+		{meshtastic_ExcludedModules_CANNEDMSG_CONFIG, "canned message"},
+		{meshtastic_ExcludedModules_AUDIO_CONFIG, "audio"},
+		{meshtastic_ExcludedModules_REMOTEHARDWARE_CONFIG, "remote hardware"},
+		{meshtastic_ExcludedModules_AMBIENTLIGHTING_CONFIG, "ambient lighting"},
+		{meshtastic_ExcludedModules_DETECTIONSENSOR_CONFIG, "detection sensor"},
+		{meshtastic_ExcludedModules_PAXCOUNTER_CONFIG, "paxcounter"},
+	};
+	meshtastic_DeviceMetadata md;
+	uint32_t covered = 0U;
+
+	meshtastic_fill_device_metadata(&md);
+
+	for (size_t i = 0; i < ARRAY_SIZE(gated); i++) {
+		bool excluded = (md.excluded_modules & gated[i].bit) != 0U;
+
+		zassert_equal(excluded, !gated[i].built, "%s: built=%d but excluded=%d",
+			      gated[i].name, gated[i].built, excluded);
+		covered |= gated[i].bit;
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(no_handler); i++) {
+		zassert_true((md.excluded_modules & no_handler[i].bit) != 0U,
+			     "%s has no handler but is advertised as available", no_handler[i].name);
+		covered |= no_handler[i].bit;
+	}
+	/* Every bit the metadata carries is decided by one of the tables: a new
+	 * ExcludedModules member cannot slip in unexamined. */
+	zassert_equal(md.excluded_modules & ~covered, 0U,
+		      "excluded_modules carries bits no table accounts for: 0x%x",
+		      md.excluded_modules & ~covered);
+
+	/* The regression itself, in the configuration this suite runs. */
+	zassert_true(IS_ENABLED(CONFIG_MESHTASTIC_NEIGHBORINFO),
+		     "suite precondition: neighbor info built");
+	zassert_equal(md.excluded_modules & meshtastic_ExcludedModules_NEIGHBORINFO_CONFIG, 0U,
+		      "neighbor info is built, so the app must be allowed to show its screen");
+}
+
 /* agents-dnr4.28: my_info carries the boot counter, as the reference's does. A
  * client reads a rise in it as "the node rebooted"; the port used to send 0. */
 ZTEST(protocol_stack, test_phone_config_my_info_carries_the_reboot_count)

@@ -371,17 +371,22 @@ void meshtastic_fill_device_metadata(meshtastic_DeviceMetadata *md)
 		((IS_ENABLED(CONFIG_WIFI) || IS_ENABLED(CONFIG_NET_L2_ETHERNET))
 			 ? 0U
 			 : meshtastic_ExcludedModules_NETWORK_CONFIG) |
-		/* No handler in the port — always excluded. Note MESHTASTIC_SERIAL is
-		 * the PhoneAPI transport, not the on-mesh Serial module. */
-		meshtastic_ExcludedModules_SERIAL_CONFIG |
 		(IS_ENABLED(CONFIG_MESHTASTIC_EXTNOTIFY) ? 0U
 							: meshtastic_ExcludedModules_EXTNOTIF_CONFIG) |
+		(IS_ENABLED(CONFIG_MESHTASTIC_NEIGHBORINFO)
+			 ? 0U
+			 : meshtastic_ExcludedModules_NEIGHBORINFO_CONFIG) |
+		/* No handler in the port — always excluded. Building one of these
+		 * means moving its bit up into the gated group above; the protocol
+		 * suite's test_excluded_modules_track_the_build holds both lists.
+		 * Note MESHTASTIC_SERIAL is the PhoneAPI transport, not the on-mesh
+		 * Serial module. */
+		meshtastic_ExcludedModules_SERIAL_CONFIG |
 		meshtastic_ExcludedModules_STOREFORWARD_CONFIG |
 		meshtastic_ExcludedModules_RANGETEST_CONFIG |
 		meshtastic_ExcludedModules_CANNEDMSG_CONFIG |
 		meshtastic_ExcludedModules_AUDIO_CONFIG |
 		meshtastic_ExcludedModules_REMOTEHARDWARE_CONFIG |
-		meshtastic_ExcludedModules_NEIGHBORINFO_CONFIG |
 		meshtastic_ExcludedModules_AMBIENTLIGHTING_CONFIG |
 		meshtastic_ExcludedModules_DETECTIONSENSOR_CONFIG |
 		meshtastic_ExcludedModules_PAXCOUNTER_CONFIG;
