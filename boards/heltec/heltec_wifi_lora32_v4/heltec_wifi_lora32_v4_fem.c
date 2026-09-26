@@ -902,9 +902,16 @@ static int cmd_gps_pps(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "last edge %lld ms ago — USABLE as a clock anchor",
 			    (long long)age_ms);
 	} else {
+#if defined(CONFIG_MESHTASTIC_GNSS)
 		shell_warn(sh, "no usable edge right now: the clock falls back to NMEA "
 			       "arrival (%d ms assumed)",
 			   CONFIG_MESHTASTIC_GNSS_FIX_LATENCY_MS);
+#else
+		/* The latency knob lives under MESHTASTIC_GNSS; without it nothing reads
+		 * NMEA, so there is no fallback to describe (agents-zo3o.8). */
+		shell_warn(sh, "no usable edge right now (GNSS module not built: nothing "
+			       "sets the clock from this receiver)");
+#endif
 	}
 	return 0;
 }
