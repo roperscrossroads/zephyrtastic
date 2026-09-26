@@ -175,6 +175,20 @@ static uint32_t position_precision_for_channel(uint8_t index)
 	return precision;
 }
 
+/* The reference's findPositionChannel: our position is broadcast on the
+ * lowest-numbered channel that shares one at all (on-wire precision > 0) -- not
+ * necessarily the primary. False when no channel shares a position. */
+static bool position_channel(uint8_t *index)
+{
+	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
+		if (position_precision_for_channel(i) != 0U) {
+			*index = i;
+			return true;
+		}
+	}
+	return false;
+}
+
 /* TX-side sanitisation (the C1 send-path hook, for POSITION): mask a Position we are
  * about to transmit to the sharing precision of the channel it will actually go out
  * on — exactly what position_build_packet() does for a self-generated position. The
@@ -331,8 +345,17 @@ static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want
 	 * request channel's precision, claiming more precision than it carried). Computed
 	 * before touching pos_state so a sharing-disabled channel neither burns a sequence
 	 * number nor leaks. */
-	send_index = meshtastic_channels_resolve_send_index(
-		dest, (channel_index == MESHTASTIC_CHANNEL_INDEX_INVALID) ? 0U : channel_index, 0U);
+	if (channel_index == MESHTASTIC_CHANNEL_INDEX_INVALID) {
+		if (dest == MESHTASTIC_NODE_BROADCAST) {
+			/* Our own broadcast goes on the position channel. */
+			if (!position_channel(&channel_index)) {
+				return -ENODATA;
+			}
+		} else {
+			channel_index = 0U;
+		}
+	}
+	send_index = meshtastic_channels_resolve_send_index(dest, channel_index, 0U);
 	precision = position_precision_for_channel(send_index);
 	if (precision == 0U) {
 		/* Sharing disabled / fail-closed on this channel: emit no position. */
@@ -386,6 +409,7 @@ static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want
 		.payload_len = stream.bytes_written,
 		.want_response = want_response,
 		.request_id = response_to_id,
+		.channel_index = send_index,
 	};
 
 	return 0;
@@ -473,8 +497,7 @@ static void bcast_cfg_load(struct bcast_cfg *c)
 {
 	meshtastic_Config cfg;
 	const meshtastic_Channel *ch;
-	uint8_t send_index = meshtastic_channels_resolve_send_index(MESHTASTIC_NODE_BROADCAST,
-								      0U, 0U);
+	uint8_t send_index = 0U;
 
 	*c = (struct bcast_cfg){
 		.interval_ms = (int64_t)meshtastic_position_broadcast_secs() * MSEC_PER_SEC,
@@ -501,6 +524,11 @@ static void bcast_cfg_load(struct bcast_cfg *c)
 		c->role = cfg.payload_variant.device.role;
 	}
 
+	/* The grid is the channel we broadcast on (the reference's `precision`,
+	 * set from findPositionChannel in sendOurPosition). */
+	if (!position_channel(&send_index)) {
+		send_index = 0U;
+	}
 	c->wire_precision = position_precision_for_channel(send_index);
 	ch = meshtastic_channels_get(send_index);
 	c->configured_precision = (ch != NULL && ch->has_settings &&

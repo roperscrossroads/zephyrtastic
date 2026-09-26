@@ -181,6 +181,16 @@ static void set_role(meshtastic_Config_DeviceConfig_Role role)
 	zassert_ok(meshtastic_config_store_set_config(&cfg));
 }
 
+static void set_primary_precision(uint32_t bits)
+{
+	uint8_t primary = meshtastic_channels_primary_index();
+	meshtastic_Channel ch = *meshtastic_channels_get(primary);
+
+	ch.settings.module_settings.position_precision = bits;
+	zassert_ok(meshtastic_config_store_set_channel(primary, &ch), "");
+	zassert_ok(meshtastic_channels_set_slot(primary, &ch), "");
+}
+
 static void position_before(void *fixture)
 {
 	struct meshtastic_phoneapi_frame f;
@@ -194,6 +204,7 @@ static void position_before(void *fixture)
 	set_smart(true, 100U, 300U); /* the seed: the reference's defaults */
 	set_flags(SEED_FLAGS);
 	set_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	set_primary_precision(PRECISION); /* a failed test must not leave sharing off */
 	meshtastic_position_test_reset();
 	meshtastic_clock_test_reset();
 	drain_radio();
@@ -1166,4 +1177,40 @@ ZTEST(position, test_unstamped_section_follows_the_seed_after_a_load)
 	zassert_ok(meshtastic_config_store_apply_core());
 	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
 	zassert_equal(cfg.payload_variant.position.position_flags, 0U, "a written 0 stays 0");
+}
+
+/* ---- the broadcast channel: the reference's findPositionChannel ----------------- */
+
+
+/* Our position goes on the lowest-numbered channel that shares one -- here the
+ * secondary, since the primary shares none. It used to be "the primary or
+ * nothing", so this node never broadcast at all. */
+ZTEST(position, test_broadcast_goes_on_the_first_channel_that_shares)
+{
+	meshtastic_Position fixed = fix_at(PHONE_LAT, PHONE_LON);
+	meshtastic_Position got;
+	struct meshtastic_packet pkt;
+	int32_t lat = PHONE_LAT, lon = PHONE_LON;
+
+	set_primary_precision(0U);
+	meshtastic_position_set_fixed(&fixed);
+	zassert_true(take_position_frame(1000U, &pkt, &got),
+		     "a node whose primary shares nothing still broadcasts on the secondary");
+	zassert_equal(pkt.channel_index, SECONDARY_SLOT, "on the secondary");
+	zassert_equal(got.precision_bits, SECONDARY_PRECISION, "at its precision");
+	meshtastic_position_truncate_latlon(&lat, &lon, SECONDARY_PRECISION);
+	zassert_equal(got.latitude_i, lat, "");
+}
+
+/* With the primary sharing again, it is the first -- the broadcast moves back. */
+ZTEST(position, test_broadcast_prefers_the_lowest_sharing_channel)
+{
+	meshtastic_Position fixed = fix_at(PHONE_LAT, PHONE_LON);
+	meshtastic_Position got;
+	struct meshtastic_packet pkt;
+
+	meshtastic_position_set_fixed(&fixed);
+	zassert_true(take_position_frame(1000U, &pkt, &got), "");
+	zassert_equal(pkt.channel_index, meshtastic_channels_primary_index(), "");
+	zassert_equal(got.precision_bits, PRECISION, "");
 }
