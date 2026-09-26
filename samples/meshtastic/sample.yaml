@@ -133,6 +133,18 @@ tests:
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
     extra_configs:
       - CONFIG_MESHTASTIC_DISPLAY=n
+  sample.meshtastic.fleet.c4.no_gnss:
+    # MESHTASTIC_GNSS=n (and no overlay-gnss.conf): the V4 board file printed a
+    # GNSS-only Kconfig value in its `gps pps` shell, so a GNSS-less V4/R8 image did
+    # not compile (agents-zo3o.8). A gateway/bridge image drops GNSS to fit.
+    tags: [meshtastic, fleet]
+    platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    extra_args:
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf"
+      - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+    extra_configs:
+      - CONFIG_MESHTASTIC_GNSS=n
   sample.meshtastic.fleet.c4.terse_asserts:
     # The diagnostic tier's field rung: ASSERT_VERBOSE=n keeps every check, drops the text.
     tags: [meshtastic, fleet]
