@@ -14,4 +14,13 @@ common:
   platform_allow:
     - native_sim/native/64
 tests:
-  meshtastic.position.native_sim: {}
+  # The B1 cadence tests re-send one coordinate, i.e. a stationary node: the
+  # floor is off here so they pin the interval, not the floor.
+  meshtastic.position.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC=0
+  # The stationary floor, shrunk from 6 h to something simulated time can wait
+  # out (agents-t2hb.3). Tests that need the other scenario skip themselves.
+  meshtastic.position.stationary_floor.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC=24

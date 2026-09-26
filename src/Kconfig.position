@@ -27,6 +27,20 @@ config MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC
 	  two defaults preserve what each build shape did before the two
 	  intervals were merged (GNSS 300 s, fixed-position beacon 900 s).
 
+config MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC
+	int "Minimum broadcast interval while stationary, in seconds"
+	default 21600
+	range 0 604800
+	help
+	  The reference's default_position_stationary_broadcast_secs (6 h):
+	  while the node is stationary -- a fixed position, or still in the
+	  precision cell of its last broadcast -- the periodic broadcast is held
+	  to at least this. A real move still goes out early through smart
+	  broadcast. LOST_AND_FOUND is exempt. It is 1 h longer than the
+	  traffic module's 5 h position dedup window on purpose, so a
+	  neighbour does not dedup the refresh away (agents-t2hb.3). 0 disables
+	  the floor.
+
 config MESHTASTIC_POSITION_REPLY_SUPPRESS_SEC
 	int "Minimum seconds between Position want_response replies"
 	default 180

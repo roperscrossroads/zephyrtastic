@@ -575,6 +575,12 @@ static void seed_config_defaults(const struct meshtastic_config *cfg)
 		IS_ENABLED(CONFIG_MESHTASTIC_GNSS)
 			? meshtastic_Config_PositionConfig_GpsMode_ENABLED
 			: meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT;
+	/* The reference's installDefaultConfig (NodeDB.cpp): smart broadcast on,
+	 * 100 m, 300 s (agents-t2hb.3). A stored record keeps whatever it holds;
+	 * 0 in the two numbers means the same defaults anyway. */
+	store.configs[idx].payload_variant.position.position_broadcast_smart_enabled = true;
+	store.configs[idx].payload_variant.position.broadcast_smart_minimum_distance = 100U;
+	store.configs[idx].payload_variant.position.broadcast_smart_minimum_interval_secs = 300U;
 
 	idx = index_for_config_tag(meshtastic_Config_lora_tag);
 	store.configs[idx].payload_variant.lora.use_preset = true;

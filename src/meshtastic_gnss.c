@@ -168,7 +168,6 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 {
 	meshtastic_Position position;
 	int64_t now;
-	int64_t send_interval_ms;
 	int64_t retry_interval_ms;
 	bool due;
 	bool can_retry;
@@ -301,16 +300,15 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 	fill_position(data, &position);
 	meshtastic_position_set_current(&position);
 
-	/* Read at every fix, so a position_broadcast_secs write reaches the very
-	 * next decision (agents-t2hb.2). */
-	send_interval_ms = (int64_t)meshtastic_position_broadcast_secs() * MSEC_PER_SEC;
+	/* Periodic or smart -- the position module owns the decision, since it
+	 * also knows where we last broadcast from (agents-t2hb.3). */
+	due = meshtastic_position_broadcast_due(true);
 	retry_interval_ms = (int64_t)CONFIG_MESHTASTIC_GNSS_RETRY_INTERVAL_SEC * MSEC_PER_SEC;
 
 	k_mutex_lock(&gnss_lock, K_FOREVER);
 	gnss_state.has_fix = true;
 	now = k_uptime_get();
 
-	due = (now - gnss_state.last_sent_ms) >= send_interval_ms;
 	can_retry = (now - gnss_state.last_attempt_ms) >= retry_interval_ms;
 
 	/* #if, not IS_ENABLED(): IS_ENABLED keeps both arms COMPILED so the

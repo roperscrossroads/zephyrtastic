@@ -37,6 +37,7 @@
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_clock.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_gnss.h"
 #include "meshtastic_packet.h"
@@ -166,6 +167,18 @@ static uint32_t drain_position_tx(k_timeout_t first_wait)
 	return n;
 }
 
+/* Read-modify-write of the smart-broadcast trio (agents-t2hb.3). */
+static void set_smart(bool enabled, uint32_t distance_m, uint32_t min_interval_s)
+{
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
+	cfg.payload_variant.position.position_broadcast_smart_enabled = enabled;
+	cfg.payload_variant.position.broadcast_smart_minimum_distance = distance_m;
+	cfg.payload_variant.position.broadcast_smart_minimum_interval_secs = min_interval_s;
+	zassert_ok(meshtastic_config_store_set_config(&cfg));
+}
+
 static void *gnss_setup(void)
 {
 	static struct meshtastic_config cfg = {
@@ -199,6 +212,7 @@ static void gnss_before(void *fixture)
 	zassert_ok(meshtastic_position_set_gps_mode(
 		meshtastic_Config_PositionConfig_GpsMode_ENABLED));
 	zassert_ok(meshtastic_position_set_broadcast_secs(0U));
+	set_smart(true, 100U, 300U);
 
 	/* Stop the emulator republishing the previous test's fix: cleared data
 	 * reads as NO_FIX, which the module ignores. Do this FIRST, so the quiesce
@@ -233,6 +247,7 @@ static void gnss_before(void *fixture)
 	lora_sim_reset(lora_dev);
 	meshtastic_clock_test_reset();
 	meshtastic_gnss_test_reset();
+	meshtastic_position_test_reset(); /* the last-broadcast stamp lives there now */
 	k_sem_reset(&fix_published);
 }
 
@@ -630,7 +645,6 @@ ZTEST(gnss, test_broadcast_secs_governs_the_gate)
 	meshtastic_Position pos;
 
 	zassert_ok(meshtastic_position_set_broadcast_secs(15U));
-	meshtastic_gnss_test_reset(); /* the first-fix stamp, re-derived from 15 s */
 
 	publish_canonical_fix();
 	zassert_equal(drain_position_tx(K_MSEC(2000)), 1U, "precondition: first fix sent");
@@ -643,5 +657,41 @@ ZTEST(gnss, test_broadcast_secs_governs_the_gate)
 
 	k_msleep(3 * EMUL_FIX_INTERVAL_MS);
 	zassert_true(drain_position_tx(K_NO_WAIT) >= 1U, "and it reopens on the stored interval");
+#endif
+}
+
+/* A fix that moved triggers a smart broadcast from the fix path itself -- even
+ * with position_broadcast_smart_enabled OFF, because the reference's
+ * handleNewPosition() (called by GPS.cpp for every published fix) never looks at
+ * that flag (agents-t2hb.3). The interval is 60 s, so a send well before that is
+ * the smart path's doing. */
+ZTEST(gnss, test_a_moved_fix_broadcasts_early_even_with_smart_off)
+{
+#if !defined(CONFIG_MESHTASTIC_GNSS_AUTO_SEND)
+	ztest_test_skip();
+#else
+	struct navigation_data nav;
+	struct gnss_info info;
+	int64_t start;
+	uint32_t n = 0U;
+
+	zassert_ok(meshtastic_position_set_broadcast_secs(60U));
+	set_smart(false, 100U, 5U);
+
+	publish_canonical_fix();
+	zassert_equal(drain_position_tx(K_MSEC(2000)), 1U, "precondition: first fix sent");
+	start = k_uptime_get();
+
+	/* 0.5 deg north: many 13-bit cells away. Fixes keep coming at 1 Hz. */
+	canonical_fix(&nav, &info);
+	nav.latitude += 500000000LL;
+	publish_fix_at(FIX_EPOCH_SEC, &nav, &info);
+
+	while (n == 0U && k_uptime_get() - start < 40 * MSEC_PER_SEC) {
+		n = drain_position_tx(K_MSEC(500));
+	}
+	zassert_true(n >= 1U, "a moved fix must go out before the 60 s interval");
+	zassert_true(k_uptime_get() - start >= 4 * MSEC_PER_SEC,
+		     "but not inside the 5 s smart minimum");
 #endif
 }

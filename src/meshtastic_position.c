@@ -12,6 +12,7 @@
  */
 
 #include <errno.h>
+#include <math.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -41,6 +42,15 @@ static struct {
 	uint32_t seq;
 	int64_t last_reply_ms;
 	bool reply_time_valid;
+	/* The last periodic/smart broadcast of our own position (agents-t2hb.3):
+	 * when, and where we were -- at full precision, the reference's
+	 * lastGpsSend / lastGpsLatitude / lastGpsLongitude. Manual sends and
+	 * request replies do not stamp it, as in the reference. */
+	bool sent_valid;
+	int64_t last_sent_ms;
+	int32_t last_sent_lat;
+	int32_t last_sent_lon;
+	bool announce_now;           /* set_fixed: send on the next beacon run */
 } pos_state;
 
 /* Pick the position to send: the fixed position wins over any live source,
@@ -318,6 +328,245 @@ int meshtastic_send_position(uint32_t dest)
 	return position_send(dest, K_FOREVER);
 }
 
+/* ---- when to broadcast: the reference's PositionModule::runOnce +
+ * handleNewPosition, as one decision both senders consult (agents-t2hb.3) ---- */
+
+/* GeoCoord::latLongToMeter under MESHTASTIC_TRIG_APPROX (the reference's
+ * default): an equirectangular projection with the longitude difference wrapped
+ * across the antimeridian, cos() replaced by the same minimax polynomial, and the
+ * same Earth radius -- so a threshold decision lands where the reference's does.
+ * Inputs in 1e-7 degrees. */
+static double cos_latitude_approx(double lat_rad)
+{
+	const double c1 = 0.9999932946, c2 = -0.4999124376, c3 = 0.0414877472,
+		     c4 = -0.0012712095;
+	double x2 = lat_rad * lat_rad;
+
+	return c1 + x2 * (c2 + x2 * (c3 + c4 * x2));
+}
+
+float meshtastic_position_distance_m(int32_t lat_a_i, int32_t lon_a_i, int32_t lat_b_i,
+				     int32_t lon_b_i)
+{
+	const double deg_to_rad = 3.14159265358979323846 / 180.0;
+	const double pi = 3.14159265358979323846;
+	double a1, a2, b1, b2, d_lng, x, y;
+
+	if (lat_a_i == lat_b_i && lon_a_i == lon_b_i) {
+		return 0.0f;
+	}
+
+	a1 = (lat_a_i * 1e-7) * deg_to_rad;
+	a2 = (lon_a_i * 1e-7) * deg_to_rad;
+	b1 = (lat_b_i * 1e-7) * deg_to_rad;
+	b2 = (lon_b_i * 1e-7) * deg_to_rad;
+
+	d_lng = b2 - a2;
+	if (d_lng > pi) {
+		d_lng -= 2.0 * pi;
+	} else if (d_lng < -pi) {
+		d_lng += 2.0 * pi;
+	}
+	x = d_lng * cos_latitude_approx((a1 + b1) / 2.0);
+	y = b1 - a1;
+
+	return (float)(6366000.0 * sqrt(x * x + y * y));
+}
+
+/* Everything the decision reads, resolved once per decision from the store:
+ * 0 means "the reference's default" for each numeric field
+ * (Default::getConfiguredOrDefault). */
+struct bcast_cfg {
+	int64_t interval_ms;
+	bool smart_enabled;
+	uint32_t smart_distance_m;   /* broadcast_smart_minimum_distance, 0 -> 100 */
+	int64_t smart_min_ms;        /* broadcast_smart_minimum_interval_secs, 0 -> 300 */
+	meshtastic_Config_DeviceConfig_Role role;
+	uint32_t wire_precision;     /* on-wire (public-clamped) bits of the broadcast channel */
+	uint32_t configured_precision; /* the same channel, unclamped (trackers) */
+};
+
+static void bcast_cfg_load(struct bcast_cfg *c)
+{
+	meshtastic_Config cfg;
+	const meshtastic_Channel *ch;
+	uint8_t send_index = meshtastic_channels_resolve_send_index(MESHTASTIC_NODE_BROADCAST,
+								      0U, 0U);
+
+	*c = (struct bcast_cfg){
+		.interval_ms = (int64_t)meshtastic_position_broadcast_secs() * MSEC_PER_SEC,
+		.smart_distance_m = 100U,
+		.smart_min_ms = 300 * MSEC_PER_SEC,
+		.role = meshtastic_Config_DeviceConfig_Role_CLIENT,
+	};
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg) == 0 &&
+	    cfg.which_payload_variant == meshtastic_Config_position_tag) {
+		const meshtastic_Config_PositionConfig *pc = &cfg.payload_variant.position;
+
+		c->smart_enabled = pc->position_broadcast_smart_enabled;
+		if (pc->broadcast_smart_minimum_distance != 0U) {
+			c->smart_distance_m = pc->broadcast_smart_minimum_distance;
+		}
+		if (pc->broadcast_smart_minimum_interval_secs != 0U) {
+			c->smart_min_ms =
+				(int64_t)pc->broadcast_smart_minimum_interval_secs * MSEC_PER_SEC;
+		}
+	}
+	if (meshtastic_config_store_get_config(meshtastic_Config_device_tag, &cfg) == 0 &&
+	    cfg.which_payload_variant == meshtastic_Config_device_tag) {
+		c->role = cfg.payload_variant.device.role;
+	}
+
+	c->wire_precision = position_precision_for_channel(send_index);
+	ch = meshtastic_channels_get(send_index);
+	c->configured_precision = (ch != NULL && ch->has_settings &&
+				   ch->settings.has_module_settings)
+					  ? ch->settings.module_settings.position_precision
+					  : 0U;
+}
+
+enum bcast_decision {
+	BCAST_NONE,
+	BCAST_PERIODIC,
+	BCAST_SMART,
+};
+
+/* PositionModule::positionUnchangedSinceLastSend: still inside the precision
+ * cell we last broadcast from. Never true before a first broadcast, nor at
+ * precision 0 (not shared) or >= 32 (no coarse cell to hold within). */
+static bool unchanged_since_last_send_locked(const meshtastic_Position *pos, uint32_t precision)
+{
+	int32_t a_lat = pos->latitude_i, a_lon = pos->longitude_i;
+	int32_t b_lat = pos_state.last_sent_lat, b_lon = pos_state.last_sent_lon;
+
+	if (!pos_state.sent_valid || precision == 0U || precision >= 32U) {
+		return false;
+	}
+	meshtastic_position_truncate_latlon(&a_lat, &a_lon, precision);
+	meshtastic_position_truncate_latlon(&b_lat, &b_lon, precision);
+	return a_lat == b_lat && a_lon == b_lon;
+}
+
+/*
+ * The reference's decision, in its order:
+ *
+ *  1. Periodic: never sent, or the interval has elapsed. The interval is held to
+ *     the stationary floor (6 h) while the node is stationary -- a fixed
+ *     position, or still in the precision cell of the last broadcast -- except
+ *     for LOST_AND_FOUND; a TRACKER judges "same cell" at its configured,
+ *     unclamped precision.
+ *  2. Otherwise smart: moved at least smart_distance_m since the last broadcast,
+ *     both points first snapped to the on-wire precision grid (so a move inside
+ *     one cell is no move), and smart_min_ms since the last broadcast.
+ *
+ * @p smart_allowed is position_broadcast_smart_enabled for the periodic path --
+ * and true on a fresh GNSS fix, because the reference's handleNewPosition()
+ * runs the distance test without looking at that flag (GPS.cpp calls it on
+ * every published fix while gps_mode is ENABLED). Replicated, not endorsed.
+ *
+ * @p next_ms: the uptime at which the answer could next change without a new
+ * position arriving -- the periodic deadline, or when a pending smart move
+ * clears its time throttle. The beacon sleeps until then instead of polling on
+ * the reference's 5 s tick.
+ */
+static enum bcast_decision bcast_decide_locked(const struct bcast_cfg *c,
+					       const meshtastic_Position *pos, int64_t now,
+					       bool smart_allowed, int64_t *next_ms)
+{
+	bool stationary;
+	int64_t effective_ms = c->interval_ms;
+	int64_t since;
+
+	*next_ms = INT64_MAX;
+	if (!pos_state.sent_valid) {
+		return BCAST_PERIODIC;
+	}
+
+	if (pos_state.fixed_valid) {
+		stationary = true;
+	} else if (c->role == meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND) {
+		stationary = false;
+	} else {
+		bool tracker = c->role == meshtastic_Config_DeviceConfig_Role_TRACKER ||
+			       c->role == meshtastic_Config_DeviceConfig_Role_TAK_TRACKER;
+
+		stationary = unchanged_since_last_send_locked(
+			pos, tracker ? c->configured_precision : c->wire_precision);
+	}
+	if (stationary &&
+	    (int64_t)CONFIG_MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC * MSEC_PER_SEC > effective_ms) {
+		effective_ms = (int64_t)CONFIG_MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC * MSEC_PER_SEC;
+	}
+
+	since = now - pos_state.last_sent_ms;
+	if (since >= effective_ms) {
+		return BCAST_PERIODIC;
+	}
+	*next_ms = pos_state.last_sent_ms + effective_ms;
+
+	if (smart_allowed) {
+		int32_t a_lat = pos_state.last_sent_lat, a_lon = pos_state.last_sent_lon;
+		int32_t b_lat = pos->latitude_i, b_lon = pos->longitude_i;
+
+		meshtastic_position_truncate_latlon(&a_lat, &a_lon, c->wire_precision);
+		meshtastic_position_truncate_latlon(&b_lat, &b_lon, c->wire_precision);
+		if (meshtastic_position_distance_m(a_lat, a_lon, b_lat, b_lon) >=
+		    (float)c->smart_distance_m) {
+			if (since >= c->smart_min_ms) {
+				return BCAST_SMART;
+			}
+			*next_ms = MIN(*next_ms, pos_state.last_sent_ms + c->smart_min_ms);
+		}
+	}
+	return BCAST_NONE;
+}
+
+/* Broadcast our position now and stamp it as the last broadcast. A send the
+ * channel refuses outright (precision 0, -ENODATA) is not a broadcast and does
+ * not stamp; one the airtime gate drops under congestion does -- the reference
+ * stamps lastGpsSend before it sends, too. */
+static int position_broadcast_stamped(void)
+{
+	meshtastic_Position pos;
+	int ret;
+
+	ret = position_send(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
+	if (ret == -ENODATA) {
+		return ret;
+	}
+
+	k_mutex_lock(&pos_lock, K_FOREVER);
+	if (select_position_locked(&pos)) {
+		pos_state.sent_valid = true;
+		pos_state.last_sent_ms = k_uptime_get();
+		pos_state.last_sent_lat = pos.latitude_i;
+		pos_state.last_sent_lon = pos.longitude_i;
+	}
+	k_mutex_unlock(&pos_lock);
+	return ret;
+}
+
+bool meshtastic_position_broadcast_due(bool on_fix)
+{
+	struct bcast_cfg c;
+	meshtastic_Position pos;
+	enum bcast_decision d = BCAST_NONE;
+	int64_t next_ms;
+
+	bcast_cfg_load(&c);
+	k_mutex_lock(&pos_lock, K_FOREVER);
+	if (!beacon_owns_locked() && select_position_locked(&pos)) {
+		d = bcast_decide_locked(&c, &pos, k_uptime_get(), on_fix || c.smart_enabled,
+					&next_ms);
+	}
+	k_mutex_unlock(&pos_lock);
+	if (d == BCAST_SMART) {
+		LOG_DBG("Position: smart broadcast (moved)");
+	}
+	return d != BCAST_NONE;
+}
+
 int meshtastic_send_position_periodic(void)
 {
 	/* G-5: a periodic auto-broadcast is a background beacon — fire-and-forget
@@ -337,7 +586,7 @@ int meshtastic_send_position_periodic(void)
 		return -ENODATA;
 	}
 
-	return position_send(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
+	return position_broadcast_stamped();
 }
 
 int meshtastic_position_get_current(meshtastic_Position *position)
@@ -374,6 +623,8 @@ void meshtastic_position_test_reset(void)
 	pos_state.has_current = false;
 	pos_state.current = (meshtastic_Position)meshtastic_Position_init_zero;
 	pos_state.reply_time_valid = false;
+	pos_state.sent_valid = false;
+	pos_state.announce_now = false;
 	k_mutex_unlock(&pos_lock);
 	(void)k_work_cancel_delayable(&beacon_work);
 }
@@ -387,20 +638,48 @@ void meshtastic_position_test_reset(void)
  * is fine for a periodic beacon). */
 static void beacon_work_fn(struct k_work *work)
 {
-	bool owned;
+	struct bcast_cfg c;
+	meshtastic_Position pos;
+	enum bcast_decision d;
+	int64_t now, next_ms;
+	bool announce;
 
 	ARG_UNUSED(work);
 
+	bcast_cfg_load(&c);
 	k_mutex_lock(&pos_lock, K_FOREVER);
-	owned = beacon_owns_locked();
-	k_mutex_unlock(&pos_lock);
-
-	if (!owned) {
+	if (!beacon_owns_locked() || !select_position_locked(&pos)) {
+		k_mutex_unlock(&pos_lock);
 		return;
 	}
+	announce = pos_state.announce_now;
+	pos_state.announce_now = false;
+	now = k_uptime_get();
+	d = bcast_decide_locked(&c, &pos, now, c.smart_enabled, &next_ms);
+	k_mutex_unlock(&pos_lock);
 
-	(void)position_send(MESHTASTIC_NODE_BROADCAST, K_NO_WAIT);
-	k_work_reschedule(&beacon_work, K_SECONDS(meshtastic_position_broadcast_secs()));
+	if (announce || d != BCAST_NONE) {
+		if (d == BCAST_SMART) {
+			LOG_DBG("Position: smart broadcast (moved)");
+		}
+		(void)position_broadcast_stamped();
+		/* Re-decide against the new stamp for the next deadline. Still due
+		 * means the send did not stamp -- the channel shares no position right
+		 * now -- so look again in one interval rather than stopping for good
+		 * or spinning on it. */
+		k_mutex_lock(&pos_lock, K_FOREVER);
+		now = k_uptime_get();
+		if (bcast_decide_locked(&c, &pos, now, c.smart_enabled, &next_ms) != BCAST_NONE) {
+			next_ms = now + c.interval_ms;
+		}
+		k_mutex_unlock(&pos_lock);
+	}
+
+	/* Never closer than a second: a deadline that is somehow already past
+	 * would otherwise re-run this at once, forever, on the system workqueue. */
+	if (next_ms != INT64_MAX) {
+		k_work_reschedule(&beacon_work, K_MSEC(MAX(next_ms - now, (int64_t)MSEC_PER_SEC)));
+	}
 }
 
 void meshtastic_position_set_fixed(const meshtastic_Position *position)
@@ -431,7 +710,11 @@ void meshtastic_position_set_fixed(const meshtastic_Position *position)
 	/* Persist the coordinates so the fixed position survives a reboot. */
 	(void)meshtastic_config_store_set_fixed_position(&pos);
 
-	/* Announce immediately, then let the work re-arm the periodic beacon. */
+	/* Announce immediately -- the reference's set_fixed_position sends at once
+	 * whatever the cadence says -- then let the work re-arm the beacon. */
+	k_mutex_lock(&pos_lock, K_FOREVER);
+	pos_state.announce_now = true;
+	k_mutex_unlock(&pos_lock);
 	k_work_reschedule(&beacon_work, K_NO_WAIT);
 }
 
@@ -630,18 +913,24 @@ bool meshtastic_position_handle_from_phone(const meshtastic_MeshPacket *mesh)
 		pos_state.current = position;
 		pos_state.has_current = true;
 		adopted = true;
+		/* A phone BROADCAST is on its way out right now: that is our
+		 * broadcast, from here, so stamp it rather than repeat it. */
+		if (!to_self) {
+			pos_state.sent_valid = true;
+			pos_state.last_sent_ms = k_uptime_get();
+			pos_state.last_sent_lat = position.latitude_i;
+			pos_state.last_sent_lon = position.longitude_i;
+		}
 	}
 	k_mutex_unlock(&pos_lock);
 
-	/* The first adopted position is announced at once -- the reference's
-	 * runOnce sends as soon as hasLocalPositionSinceBoot() turns true -- and the
-	 * beacon then keeps its own cadence; the phone's 30 s refreshes find it
-	 * pending and only update what it will send. A phone BROADCAST has just been
-	 * sent by the phone itself, so its beacon starts one interval out. */
-	if (adopted && !k_work_delayable_is_pending(&beacon_work)) {
-		k_work_reschedule(&beacon_work,
-				  to_self ? K_NO_WAIT
-					  : K_SECONDS(meshtastic_position_broadcast_secs()));
+	/* Let the beacon decide on the new position now. It sends only if the
+	 * cadence says so -- the first position ever (the reference's runOnce sends
+	 * once hasLocalPositionSinceBoot() turns true), a due periodic, or a smart
+	 * move -- and otherwise re-arms for its existing deadline, so the phone's
+	 * 30 s refreshes never push a broadcast back. */
+	if (adopted) {
+		k_work_reschedule(&beacon_work, K_NO_WAIT);
 	}
 
 	LOG_DBG("Position from phone (to %s): lat=%d lon=%d time=%u",
@@ -661,7 +950,7 @@ void meshtastic_position_config_changed(void)
 	k_mutex_unlock(&pos_lock);
 
 	if (owned) {
-		k_work_reschedule(&beacon_work, K_SECONDS(meshtastic_position_broadcast_secs()));
+		k_work_reschedule(&beacon_work, K_NO_WAIT);
 	}
 
 #if defined(CONFIG_MESHTASTIC_GNSS)

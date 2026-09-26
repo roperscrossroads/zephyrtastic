@@ -12,6 +12,10 @@ common:
     # Kconfig minimum for both, so these are real settable values, not test-only
     # escapes.
     - CONFIG_MESHTASTIC_POSITION_BROADCAST_INTERVAL_SEC=5
+    # The emulator re-publishes one fixed coordinate, which is a stationary node:
+    # with the 6 h stationary floor on, every gate test here would be pinning
+    # the floor instead of the gate. The floor is tested in tests/position.
+    - CONFIG_MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC=0
 tests:
   # Send-dominated: the retry window is the same size, so the send interval is
   # what the gate expresses. This is the shape of the shipped defaults (300 s

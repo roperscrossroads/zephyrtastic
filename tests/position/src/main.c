@@ -109,6 +109,28 @@ static void drain_radio(void)
 	}
 }
 
+/* Read-modify-write of the smart-broadcast trio (agents-t2hb.3). */
+static void set_smart(bool enabled, uint32_t distance_m, uint32_t min_interval_s)
+{
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
+	cfg.payload_variant.position.position_broadcast_smart_enabled = enabled;
+	cfg.payload_variant.position.broadcast_smart_minimum_distance = distance_m;
+	cfg.payload_variant.position.broadcast_smart_minimum_interval_secs = min_interval_s;
+	zassert_ok(meshtastic_config_store_set_config(&cfg));
+	meshtastic_position_config_changed();
+}
+
+static void set_role(meshtastic_Config_DeviceConfig_Role role)
+{
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_device_tag, &cfg));
+	cfg.payload_variant.device.role = role;
+	zassert_ok(meshtastic_config_store_set_config(&cfg));
+}
+
 static void position_before(void *fixture)
 {
 	struct meshtastic_phoneapi_frame f;
@@ -119,6 +141,9 @@ static void position_before(void *fixture)
 	 * the next test's capture. */
 	meshtastic_position_test_reset();
 	(void)meshtastic_position_set_broadcast_secs(0U);
+	set_smart(true, 100U, 300U); /* the seed: the reference's defaults */
+	set_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	meshtastic_position_test_reset();
 	meshtastic_clock_test_reset();
 	drain_radio();
 	meshtastic_phoneapi_reset(&phone);
@@ -401,6 +426,15 @@ static int64_t ms_to_next_broadcast(uint32_t max_ms)
 								     : -1;
 }
 
+/* The B1 cadence tests re-send one coordinate -- a stationary node -- so under
+ * the stationary floor they would be pinning the floor. */
+#define SKIP_UNDER_FLOOR()                                                                         \
+	do {                                                                                       \
+		if (CONFIG_MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC != 0) {                        \
+			ztest_test_skip();                                                         \
+		}                                                                                  \
+	} while (0)
+
 /* Frame timing on the sim radio carries airtime and a contention window, so a
  * cadence is asserted to within a few seconds, never to the millisecond. */
 #define SLACK_MS 3000
@@ -429,6 +463,7 @@ ZTEST(position, test_beacon_unset_interval_is_the_compiled_default)
 ZTEST(position, test_beacon_follows_the_stored_interval)
 {
 	meshtastic_Position pos = phone_fix();
+	SKIP_UNDER_FLOOR();
 
 	zassert_ok(meshtastic_position_set_broadcast_secs(10U));
 	phone_send_position(me, me, &pos);
@@ -444,6 +479,7 @@ ZTEST(position, test_phone_refreshes_do_not_restart_the_beacon)
 {
 	meshtastic_Position pos = phone_fix();
 	int64_t start;
+	SKIP_UNDER_FLOOR();
 
 	zassert_ok(meshtastic_position_set_broadcast_secs(10U));
 	phone_send_position(me, me, &pos);
@@ -460,6 +496,7 @@ ZTEST(position, test_phone_refreshes_do_not_restart_the_beacon)
 ZTEST(position, test_interval_write_rearms_the_beacon_live)
 {
 	meshtastic_Position pos = phone_fix();
+	SKIP_UNDER_FLOOR();
 
 	zassert_ok(meshtastic_position_set_broadcast_secs(120U));
 	phone_send_position(me, me, &pos);
@@ -473,6 +510,7 @@ ZTEST(position, test_interval_write_rearms_the_beacon_live)
 ZTEST(position, test_fixed_position_beacon_follows_the_interval)
 {
 	meshtastic_Position fixed = meshtastic_Position_init_zero;
+	SKIP_UNDER_FLOOR();
 
 	fixed.has_latitude_i = true;
 	fixed.latitude_i = 515000000;
@@ -504,6 +542,7 @@ ZTEST(position, test_admin_set_config_position_applies_live)
 	meshtastic_Config cfg;
 	meshtastic_Position pos = phone_fix();
 	pb_ostream_t os;
+	SKIP_UNDER_FLOOR();
 
 	zassert_ok(meshtastic_position_set_broadcast_secs(120U));
 	phone_send_position(me, me, &pos);
@@ -529,4 +568,217 @@ ZTEST(position, test_admin_set_config_position_applies_live)
 
 	zassert_equal(meshtastic_position_broadcast_secs(), 9U, "the admin write reached the store");
 	assert_next_broadcast_in(9U, "and the beacon, without a reboot");
+}
+
+/* ---- smart broadcast and the stationary floor (agents-t2hb.3) --------------------
+ *
+ * The reference: PositionModule::runOnce / handleNewPosition /
+ * getDistanceTraveledSinceLastSend / positionUnchangedSinceLastSend. Positions
+ * arrive the way a phone supplies them (to self), so each test controls exactly
+ * where the node is and when it moved. PRECISION is 13 bits here -- a cell about
+ * 5.8 km tall -- so "moved" means "crossed into another cell", as it does on the
+ * air: both ends of the distance are snapped to that grid first. */
+
+/* One degree of latitude at the reference's Earth radius, and the antimeridian
+ * wrap: 179.9 E to 179.9 W is 0.2 deg, not 359.8. */
+ZTEST(position, test_distance_matches_the_reference)
+{
+	float d;
+
+	zassert_equal(meshtastic_position_distance_m(0, 0, 0, 0), 0.0f, "");
+	d = meshtastic_position_distance_m(0, 0, 10000000, 0);
+	zassert_within(d, 111106.9f, 2.0f, "1 deg of latitude = %f m", (double)d);
+	d = meshtastic_position_distance_m(0, 1799000000, 0, -1799000000);
+	zassert_within(d, 22221.4f, 5.0f, "across the antimeridian = %f m", (double)d);
+	/* 60 N: a degree of longitude is about half as long. */
+	d = meshtastic_position_distance_m(600000000, 0, 600000000, 10000000);
+	zassert_within(d, 55553.0f, 60.0f, "1 deg of longitude at 60 N = %f m", (double)d);
+}
+
+static meshtastic_Position fix_at(int32_t lat, int32_t lon)
+{
+	meshtastic_Position pos = phone_fix();
+
+	pos.latitude_i = lat;
+	pos.longitude_i = lon;
+	pos.time = 0U; /* the clock is not what these tests are about */
+	return pos;
+}
+
+/* A cell centre at PRECISION, so small moves stay inside it. */
+static void cell_centre(int32_t *lat, int32_t *lon)
+{
+	*lat = PHONE_LAT;
+	*lon = PHONE_LON;
+	meshtastic_position_truncate_latlon(lat, lon, PRECISION);
+}
+
+/* 0.2 deg of latitude: ~22 km, several cells away. */
+#define FAR (2000000)
+
+ZTEST(position, test_smart_move_broadcasts_early)
+{
+	meshtastic_Position a = fix_at(PHONE_LAT, PHONE_LON);
+	meshtastic_Position b = fix_at(PHONE_LAT + FAR, PHONE_LON);
+	int64_t ms;
+
+	zassert_ok(meshtastic_position_set_broadcast_secs(120U));
+	set_smart(true, 100U, 5U);
+	phone_send_position(me, me, &a);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "the first position goes out at once");
+
+	k_msleep(6000);
+	phone_send_position(me, me, &b);
+	ms = ms_to_next_broadcast(SLACK_MS);
+	zassert_true(ms >= 0, "a 22 km move past the 5 s minimum must go out now, not in 120 s");
+}
+
+/* The move happens 3 s in; the smart minimum is 20 s. The reference's 5 s tick
+ * sends at the first tick past 20 s; this port's beacon sleeps until exactly then. */
+ZTEST(position, test_smart_move_waits_out_the_minimum_interval)
+{
+	meshtastic_Position a = fix_at(PHONE_LAT, PHONE_LON);
+	meshtastic_Position b = fix_at(PHONE_LAT + FAR, PHONE_LON);
+	int64_t start;
+
+	zassert_ok(meshtastic_position_set_broadcast_secs(120U));
+	set_smart(true, 100U, 20U);
+	phone_send_position(me, me, &a);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "");
+	start = k_uptime_get();
+
+	k_msleep(3000);
+	phone_send_position(me, me, &b);
+	zassert_equal(ms_to_next_broadcast(12000U), -1, "throttled until 20 s after the last send");
+	zassert_true(position_frame_to(MESHTASTIC_NODE_BROADCAST, 8000U),
+		     "sent when the throttle clears, without waiting for another position");
+	zassert_within(k_uptime_get() - start, 20 * MSEC_PER_SEC, SLACK_MS, "");
+}
+
+ZTEST(position, test_smart_disabled_waits_for_the_interval)
+{
+	meshtastic_Position a = fix_at(PHONE_LAT, PHONE_LON);
+	meshtastic_Position b = fix_at(PHONE_LAT + FAR, PHONE_LON);
+
+	zassert_ok(meshtastic_position_set_broadcast_secs(30U));
+	set_smart(false, 100U, 5U);
+	phone_send_position(me, me, &a);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "");
+
+	k_msleep(3000);
+	phone_send_position(me, me, &b);
+	zassert_equal(ms_to_next_broadcast(20000U), -1,
+		      "smart off: a move waits for the periodic broadcast");
+	zassert_true(ms_to_next_broadcast(10000U) >= 0, "which still comes at 30 s");
+}
+
+/* Both ends are snapped to the channel's grid before measuring, so 100 m inside
+ * one 5.8 km cell is no move at all -- the air would show the same cell anyway. */
+ZTEST(position, test_a_move_inside_one_cell_is_no_move)
+{
+	int32_t lat, lon;
+	meshtastic_Position a, b;
+
+	cell_centre(&lat, &lon);
+	a = fix_at(lat, lon);
+	b = fix_at(lat + 10000, lon); /* 0.001 deg, ~111 m */
+	zassert_ok(meshtastic_position_set_broadcast_secs(120U));
+	set_smart(true, 100U, 5U);
+	phone_send_position(me, me, &a);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "");
+
+	k_msleep(6000);
+	phone_send_position(me, me, &b);
+	zassert_equal(ms_to_next_broadcast(8000U), -1, "");
+}
+
+ZTEST(position, test_smart_distance_threshold_is_configurable)
+{
+	meshtastic_Position a = fix_at(PHONE_LAT, PHONE_LON);
+	meshtastic_Position b = fix_at(PHONE_LAT + FAR, PHONE_LON);
+
+	zassert_ok(meshtastic_position_set_broadcast_secs(120U));
+	set_smart(true, 100000U, 5U); /* 100 km */
+	phone_send_position(me, me, &a);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "");
+
+	k_msleep(6000);
+	phone_send_position(me, me, &b);
+	zassert_equal(ms_to_next_broadcast(8000U), -1, "22 km is under a 100 km threshold");
+}
+
+/* ---- the stationary floor (scenario stationary_floor: 24 s) ---- */
+
+#define SKIP_WITHOUT_FLOOR()                                                                       \
+	do {                                                                                       \
+		if (CONFIG_MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC == 0) {                        \
+			ztest_test_skip();                                                         \
+		}                                                                                  \
+	} while (0)
+
+ZTEST(position, test_stationary_holds_the_floor)
+{
+	meshtastic_Position a = fix_at(PHONE_LAT, PHONE_LON);
+	int64_t start;
+
+	SKIP_WITHOUT_FLOOR();
+	zassert_ok(meshtastic_position_set_broadcast_secs(8U));
+	phone_send_position(me, me, &a);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "");
+	start = k_uptime_get();
+
+	k_msleep(4000);
+	phone_send_position(me, me, &a); /* the phone keeps saying "still here" */
+	zassert_equal(ms_to_next_broadcast(12000U), -1,
+		      "unchanged since the last broadcast: the 8 s interval is held to the floor");
+	zassert_true(position_frame_to(MESHTASTIC_NODE_BROADCAST, 14000U), "");
+	zassert_within(k_uptime_get() - start, CONFIG_MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC *
+						       MSEC_PER_SEC, SLACK_MS, "");
+}
+
+ZTEST(position, test_leaving_the_cell_lifts_the_floor)
+{
+	meshtastic_Position a = fix_at(PHONE_LAT, PHONE_LON);
+	meshtastic_Position b = fix_at(PHONE_LAT + FAR, PHONE_LON);
+	int64_t start;
+
+	SKIP_WITHOUT_FLOOR();
+	zassert_ok(meshtastic_position_set_broadcast_secs(8U));
+	set_smart(false, 100U, 5U); /* isolate the periodic path */
+	phone_send_position(me, me, &a);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "");
+	start = k_uptime_get();
+
+	k_msleep(3000);
+	phone_send_position(me, me, &b);
+	zassert_true(position_frame_to(MESHTASTIC_NODE_BROADCAST, 8000U), "");
+	zassert_within(k_uptime_get() - start, 8 * MSEC_PER_SEC, SLACK_MS,
+		       "moved: the plain interval applies again");
+}
+
+/* The reference: fixed_position holds the floor for every role -- pinning
+ * yourself forfeits the exceptions. */
+ZTEST(position, test_fixed_position_holds_the_floor)
+{
+	meshtastic_Position fixed = fix_at(515000000, -1000000);
+
+	SKIP_WITHOUT_FLOOR();
+	zassert_ok(meshtastic_position_set_broadcast_secs(8U));
+	set_role(meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND);
+	meshtastic_position_set_fixed(&fixed);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "set_fixed announces at once");
+	assert_next_broadcast_in(CONFIG_MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC,
+				 "then only at the floor, even for LOST_AND_FOUND");
+}
+
+ZTEST(position, test_lost_and_found_is_exempt_from_the_floor)
+{
+	meshtastic_Position a = fix_at(PHONE_LAT, PHONE_LON);
+
+	SKIP_WITHOUT_FLOOR();
+	zassert_ok(meshtastic_position_set_broadcast_secs(8U));
+	set_role(meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND);
+	phone_send_position(me, me, &a);
+	zassert_true(ms_to_next_broadcast(1000U) >= 0, "");
+	assert_next_broadcast_in(8U, "a lost node keeps its interval though it has not moved");
 }

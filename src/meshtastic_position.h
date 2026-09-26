@@ -113,6 +113,28 @@ int meshtastic_position_sanitise_tx(meshtastic_MeshPacket *mesh);
 uint32_t meshtastic_position_broadcast_secs(void);
 
 /**
+ * @brief Should the GNSS source broadcast now? (agents-t2hb.3)
+ *
+ * The reference's cadence decision: periodic (interval, held to the stationary
+ * floor while the node has not left its precision cell), else smart (moved at
+ * least broadcast_smart_minimum_distance, at least
+ * broadcast_smart_minimum_interval_secs since the last broadcast). False while
+ * the beacon owns the position (a fixed one is set).
+ *
+ * @param on_fix true when called for a fresh GNSS fix: the smart test then runs
+ *               even with position_broadcast_smart_enabled off, as the
+ *               reference's handleNewPosition() does.
+ */
+bool meshtastic_position_broadcast_due(bool on_fix);
+
+/**
+ * @brief Distance in metres between two 1e-7-degree points, computed as the
+ *        reference's GeoCoord::latLongToMeter (MESHTASTIC_TRIG_APPROX).
+ */
+float meshtastic_position_distance_m(int32_t lat_a_i, int32_t lon_a_i, int32_t lat_b_i,
+				     int32_t lon_b_i);
+
+/**
  * @brief Re-apply the position section after a write (admin set_config, shell).
  *
  * Re-arms the beacon on the current interval and applies gps_mode to the GNSS
