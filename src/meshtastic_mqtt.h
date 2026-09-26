@@ -6,12 +6,26 @@
 #define ZEPHYR_SUBSYS_MESHTASTIC_MQTT_H_
 
 #include "meshtastic_core.h"
+#include "meshtastic/mesh.pb.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-int meshtastic_mqtt_init(void);
+/**
+ * Start the bridge if ModuleConfig.mqtt enables it. @p network says whether this
+ * boot brought up a network transport: the direct broker back end needs one, the
+ * client proxy does not, so a BLE-only boot still starts a proxying bridge.
+ */
+int meshtastic_mqtt_init(bool network);
+
+/**
+ * A ToRadio.mqttClientProxyMessage from the connected client: something the
+ * broker delivered on a topic the client subscribed to. Decoded and injected as a
+ * downlink exactly as a direct broker delivery would be -- and ignored unless the
+ * bridge is running in proxy mode (reference PhoneAPI.cpp).
+ */
+void meshtastic_mqtt_proxy_receive(const meshtastic_MqttClientProxyMessage *msg);
 
 /** True while the MQTT client has a live broker connection. */
 bool meshtastic_mqtt_is_connected(void);

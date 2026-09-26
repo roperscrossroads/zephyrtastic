@@ -125,9 +125,15 @@ if(CONFIG_MESHTASTIC)
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN
     meshtastic_admin.c
-    meshtastic_mqtt_config.c
     meshtastic_admin_session.c
   )
+  # The bridge resolves its settings here as well as the admin path validating
+  # them. Until the bridge started on every boot (agents-kx8d) a build with MQTT
+  # but no admin linked only because meshtastic_mqtt_init() was dead code there,
+  # garbage-collected along with its reference to this file.
+  if(CONFIG_MESHTASTIC_ADMIN OR CONFIG_MESHTASTIC_MQTT)
+    zephyr_library_sources(meshtastic_mqtt_config.c)
+  endif()
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_ADMIN_CLIENT meshtastic_admin_client.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_CLUSTER
     meshtastic_cluster.c
@@ -197,6 +203,7 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_TRACEROUTE meshtastic_traceroute.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_RELIABLE_DELIVERY meshtastic_reliable.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_MQTT meshtastic_mqtt.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_MQTT_BROKER meshtastic_mqtt_broker.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_WIFI_AUTOCONNECT meshtastic_wifi_auto.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SNTP meshtastic_sntp.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_PKI meshtastic_pki.c)

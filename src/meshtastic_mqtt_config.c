@@ -146,5 +146,19 @@ int meshtastic_mqtt_config_validate(const meshtastic_ModuleConfig_MQTTConfig *cf
 		return -ENOTSUP;
 	}
 
+	/* Back ends (agents-kx8d): only when the bridge is built at all, so a build
+	 * without MQTT keeps accepting the section as the inert bytes it always was. */
+	if (IS_ENABLED(CONFIG_MESHTASTIC_MQTT)) {
+		if (cfg->proxy_to_client_enabled && !IS_ENABLED(CONFIG_MESHTASTIC_MQTT_PROXY)) {
+			return -EPROTONOSUPPORT;
+		}
+		if (cfg->enabled && !cfg->proxy_to_client_enabled &&
+		    !IS_ENABLED(CONFIG_MESHTASTIC_MQTT_BROKER)) {
+			/* The reference refuses the same: "proxy_to_client_enabled must
+			 * be enabled on nodes that do not have a network". */
+			return -ENETUNREACH;
+		}
+	}
+
 	return 0;
 }

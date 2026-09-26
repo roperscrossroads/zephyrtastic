@@ -167,6 +167,15 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 					  const meshtastic_FromRadio *from);
 /**
+ * MQTT client proxy (CONFIG_MESHTASTIC_MQTT_PROXY): hand one publish to every
+ * authorized client as a FromRadio.mqttClientProxyMessage, for the client to
+ * deliver to the broker. Returns how many transports took it, -ENAMETOOLONG for a
+ * topic the message cannot carry (60 bytes including the terminator), -EMSGSIZE
+ * for a payload over 435 bytes.
+ */
+int meshtastic_phoneapi_enqueue_mqtt_proxy(const char *topic, const uint8_t *payload, size_t len);
+
+/**
  * @brief Fan a ClientNotification out to every registered transport as a
  *        FromRadio.clientNotification (the reference's sendClientNotification).
  *        A prompt the user must act on (a key-verification number, a final

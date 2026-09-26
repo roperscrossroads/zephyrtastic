@@ -843,11 +843,11 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 #endif
 
 #if defined(CONFIG_MESHTASTIC_MQTT)
-	if (use_wifi) {
-		ret = meshtastic_mqtt_init();
-		if (ret < 0) {
-			return ret;
-		}
+	/* Always: a proxying bridge needs no network, and init leaves a broker bridge
+	 * idle on a boot without one. */
+	ret = meshtastic_mqtt_init(use_wifi);
+	if (ret < 0) {
+		return ret;
 	}
 #endif
 

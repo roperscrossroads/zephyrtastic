@@ -3,18 +3,48 @@
 
 menuconfig MESHTASTIC_MQTT
 	bool "Meshtastic MQTT gateway bridge"
-	depends on NETWORKING && MQTT_LIB && NET_TCP && NET_SOCKETS && DNS_RESOLVER
+	depends on MESHTASTIC_PHONEAPI || (NETWORKING && MQTT_LIB && NET_TCP && NET_SOCKETS && DNS_RESOLVER)
 	select NANOPB_ENABLE_MALLOC
-	select ZVFS_EVENTFD	# wakes the MQTT thread's blocking poll() cross-thread
 	help
 	  Bridge LoRa mesh packets to a Meshtastic-compatible MQTT broker using
 	  ServiceEnvelope protobuf on msh/.../2/e/... topics.
 
-	  Requires a network interface (Wi-Fi, Ethernet, etc.) in addition to LoRa.
+	  The bridge itself (topics, envelopes, the uplink consent gate, downlink
+	  decode, map reports) needs no network. It reaches the broker through one of
+	  two back ends, chosen at run time by ModuleConfig.mqtt.proxy_to_client_enabled:
+	  MESHTASTIC_MQTT_BROKER (a direct connection; needs a network stack) and
+	  MESHTASTIC_MQTT_PROXY (through the connected client over the PhoneAPI, as the
+	  reference does; needs no network at all).
 
 	  Select NANOPB_ENABLE_MALLOC as ServiceEnvelope is dynamically allocated.
 
 if MESHTASTIC_MQTT
+
+config MESHTASTIC_MQTT_BROKER
+	bool "Connect to the MQTT broker directly"
+	default y
+	depends on NETWORKING && MQTT_LIB && NET_TCP && NET_SOCKETS && DNS_RESOLVER
+	select ZVFS_EVENTFD	# wakes the MQTT thread's blocking poll() cross-thread
+	help
+	  The native broker client: its own thread, socket, TLS and reconnect
+	  backoff. Used when ModuleConfig.mqtt.proxy_to_client_enabled is off.
+	  Without it (a build with no network stack), a section that enables MQTT
+	  must also enable the proxy, or it is refused at set time -- the reference
+	  refuses the same ("proxy_to_client_enabled must be enabled on nodes that
+	  do not have a network").
+
+config MESHTASTIC_MQTT_PROXY
+	bool "Reach the broker through the connected client (client proxy)"
+	default y
+	depends on MESHTASTIC_PHONEAPI
+	help
+	  The reference's MQTT client proxy: with
+	  ModuleConfig.mqtt.proxy_to_client_enabled set, the node makes no broker
+	  connection. Every publish goes to the connected client as a
+	  FromRadio.mqttClientProxyMessage, and the client hands back what the broker
+	  delivers as a ToRadio.mqttClientProxyMessage. The Meshtastic apps do this,
+	  so a node with no network (an nRF52 kit) can still be an MQTT gateway
+	  through a phone.
 
 # Broker / credentials / root topic / encryption / map-report interval+precision
 # are FIRST-BOOT DEFAULTS, not the runtime authority. The config store is seeded
@@ -51,6 +81,7 @@ config MESHTASTIC_MQTT_PASSWORD
 
 config MESHTASTIC_MQTT_TLS
 	bool "Connect to the MQTT broker over TLS"
+	depends on MESHTASTIC_MQTT_BROKER
 	depends on MQTT_LIB_TLS && NET_SOCKETS_SOCKOPT_TLS && TLS_CREDENTIALS
 	help
 	  Compile the TLS transport in. Whether a given connection USES it is
@@ -135,10 +166,12 @@ config MESHTASTIC_MQTT_IGNORE_MQTT
 config MESHTASTIC_MQTT_THREAD_STACK_SIZE
 	int "MQTT worker thread stack size"
 	default 4096
+	depends on MESHTASTIC_MQTT_BROKER
 
 config MESHTASTIC_MQTT_THREAD_PRIORITY
 	int "MQTT worker thread priority"
 	default 10
+	depends on MESHTASTIC_MQTT_BROKER
 	help
 	  Priority for the MQTT broker worker. This should normally be lower
 	  priority than LoRa packet processing and local command workers so
@@ -146,6 +179,7 @@ config MESHTASTIC_MQTT_THREAD_PRIORITY
 
 config MESHTASTIC_MQTT_PUBLISH_QUEUE_SIZE
 	int "Offline MQTT publish queue depth"
+	default 4 if !MESHTASTIC_MQTT_BROKER
 	default 32
 	range 4 64
 	help
@@ -153,6 +187,10 @@ config MESHTASTIC_MQTT_PUBLISH_QUEUE_SIZE
 	  broker immediately are retained here and retried on the MQTT worker
 	  thread. When full, the oldest envelope is dropped so newer mesh
 	  traffic can continue to make progress.
+
+	  Through the client proxy an entry is handed to the PhoneAPI as soon as it
+	  is queued, so the queue only ever holds one in flight; a proxy-only build
+	  therefore defaults to the minimum.
 
 config MESHTASTIC_MQTT_UPLINK_QUEUE_SIZE
 	int "Deferred MQTT uplink encode queue depth"
@@ -174,11 +212,18 @@ config MESHTASTIC_MQTT_RX_BUFFER_SIZE
 	int "MQTT client RX buffer size"
 	default 1024
 	range 256 4096
+	depends on MESHTASTIC_MQTT_BROKER
 
 config MESHTASTIC_MQTT_TX_BUFFER_SIZE
 	int "MQTT client TX buffer size"
+	default 435 if !MESHTASTIC_MQTT_BROKER
 	default 1024
 	range 256 4096
+	help
+	  Also the size of one encoded ServiceEnvelope in the publish queue. The
+	  client proxy carries at most 435 bytes of payload
+	  (MqttClientProxyMessage.data, mesh.options), which is the proxy-only
+	  default; an envelope is far smaller than either in practice.
 
 config MESHTASTIC_MQTT_MAP_REPORT
 	bool "Publish MapReport to MQTT map topic"

@@ -714,6 +714,12 @@ static void seed_module_defaults(void)
 		IS_ENABLED(CONFIG_MESHTASTIC_MQTT_ENCRYPTION_ENABLED);
 	store.modules[idx].payload_variant.mqtt.map_reporting_enabled =
 		IS_ENABLED(CONFIG_MESHTASTIC_MQTT_MAP_REPORT);
+	/* A build whose only way to a broker is the client proxy (no network stack)
+	 * seeds the proxy on; otherwise the seed would be a section the build refuses
+	 * (enabled, not proxying, no broker) and the bridge could never start. Safe:
+	 * nothing is uplinked until a channel's uplink_enabled is set, seeded off. */
+	store.modules[idx].payload_variant.mqtt.proxy_to_client_enabled =
+		IS_ENABLED(CONFIG_MESHTASTIC_MQTT_PROXY) && !IS_ENABLED(CONFIG_MESHTASTIC_MQTT_BROKER);
 #if defined(CONFIG_MESHTASTIC_MQTT_MAP_REPORT)
 	store.modules[idx].payload_variant.mqtt.has_map_report_settings = true;
 	store.modules[idx].payload_variant.mqtt.map_report_settings.publish_interval_secs =

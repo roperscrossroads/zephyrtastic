@@ -586,8 +586,11 @@ int meshtastic_admin_prepare_module_config_write(meshtastic_ModuleConfig *module
 	int ret = meshtastic_mqtt_config_validate(mqtt);
 
 	if (ret < 0) {
-		LOG_WRN("admin: mqtt config refused (%d): tls_enabled without a TLS transport",
-			ret);
+		LOG_WRN("admin: mqtt config refused (%d): %s", ret,
+			ret == -EPROTONOSUPPORT ? "proxy_to_client_enabled without a client proxy"
+			: ret == -ENETUNREACH   ? "enabled without proxy_to_client_enabled on a "
+						  "build with no network stack"
+						: "tls_enabled without a TLS transport");
 		return ret;
 	}
 

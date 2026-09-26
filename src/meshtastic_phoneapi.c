@@ -27,6 +27,9 @@
 #if IS_ENABLED(CONFIG_MESHTASTIC_POSITION)
 #include "meshtastic_position.h"
 #endif
+#if IS_ENABLED(CONFIG_MESHTASTIC_MQTT_PROXY)
+#include "meshtastic_mqtt.h"
+#endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -267,6 +270,12 @@ static uint8_t fromradio_evict_rank(const meshtastic_FromRadio *from)
 	}
 	if (from->which_payload_variant == meshtastic_FromRadio_log_record_tag) {
 		return MT_PHONE_RANK_LOG;
+	}
+	if (from->which_payload_variant == meshtastic_FromRadio_mqttClientProxyMessage_tag) {
+		/* The broker's copy of a packet the phone also receives as a packet of
+		 * its own: losing it costs the broker one uplink, never the mesh or the
+		 * phone a message. So it yields to identity and to real traffic. */
+		return MT_PHONE_RANK_SAMPLE;
 	}
 	if (from->which_payload_variant == meshtastic_FromRadio_packet_tag &&
 	    from->packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
@@ -615,6 +624,26 @@ toradio_decoded:
 			api->disconnect(api);
 		}
 		break;
+#if IS_ENABLED(CONFIG_MESHTASTIC_MQTT_PROXY)
+	case meshtastic_ToRadio_mqttClientProxyMessage_tag:
+		/* The client is this node's MQTT proxy, handing back a broker delivery
+		 * (reference PhoneAPI.cpp). Two gates before the bridge's own: lockdown
+		 * (an unauthorized client may not inject into the mesh by any route),
+		 * and the config handshake (the reference ignores it until the client
+		 * is past the config stream). */
+		if (!meshtastic_phoneapi_authorized(api)) {
+			LOG_DBG("%s MQTT proxy message from an unauthorized client dropped",
+				api->name);
+			break;
+		}
+		if (config_active(api)) {
+			LOG_WRN("%s MQTT proxy message ignored during the config handshake",
+				api->name);
+			break;
+		}
+		meshtastic_mqtt_proxy_receive(&to->mqttClientProxyMessage);
+		break;
+#endif
 	case meshtastic_ToRadio_heartbeat_tag:
 		LOG_DBG("%s ToRadio heartbeat nonce=%u", api->name, to->heartbeat.nonce);
 		meshtastic_phoneapi_enqueue_queue_status(api, 0, 0U);
@@ -726,6 +755,61 @@ int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, u
 }
 
 #endif /* CONFIG_MESHTASTIC_PHONELOG */
+
+#if IS_ENABLED(CONFIG_MESHTASTIC_MQTT_PROXY)
+/* Scratch for the MQTT proxy fan-out, under phoneapi_lock like the others. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR meshtastic_FromRadio mqtt_proxy_scratch;
+
+int meshtastic_phoneapi_enqueue_mqtt_proxy(const char *topic, const uint8_t *payload, size_t len)
+{
+	struct meshtastic_phoneapi *transports[MESHTASTIC_PHONEAPI_MAX_TRANSPORTS];
+	meshtastic_FromRadio *from = &mqtt_proxy_scratch;
+	meshtastic_MqttClientProxyMessage *msg;
+	uint8_t count;
+	int sent = 0;
+
+	if (topic == NULL || payload == NULL) {
+		return -EINVAL;
+	}
+	if (strlen(topic) >= sizeof(from->mqttClientProxyMessage.topic)) {
+		return -ENAMETOOLONG;
+	}
+	if (len > sizeof(from->mqttClientProxyMessage.payload_variant.data.bytes)) {
+		return -EMSGSIZE;
+	}
+
+	k_mutex_lock(&phoneapi_lock, K_FOREVER);
+
+	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+	from->id = meshtastic_next_fromradio_id();
+	from->which_payload_variant = meshtastic_FromRadio_mqttClientProxyMessage_tag;
+	msg = &from->mqttClientProxyMessage;
+	strncpy(msg->topic, topic, sizeof(msg->topic) - 1U);
+	msg->which_payload_variant = meshtastic_MqttClientProxyMessage_data_tag;
+	msg->payload_variant.data.size = (pb_size_t)len;
+	memcpy(msg->payload_variant.data.bytes, payload, len);
+	msg->retained = false;
+
+	count = phoneapi.count;
+	memcpy(transports, phoneapi.transports, count * sizeof(transports[0]));
+
+	/* Every authorized transport, like a mesh packet: the reference has one
+	 * proxy queue and whichever client reads first publishes, where this delivers
+	 * to each client -- the same with one client attached (the case the apps
+	 * make), a duplicate publish with two. */
+	for (uint8_t i = 0; i < count; i++) {
+		if (!meshtastic_phoneapi_authorized(transports[i])) {
+			continue; /* lockdown: an uplink is mesh traffic, i.e. content */
+		}
+		if (meshtastic_phoneapi_enqueue_fromradio(transports[i], from) == 0) {
+			sent++;
+		}
+	}
+
+	k_mutex_unlock(&phoneapi_lock);
+	return sent;
+}
+#endif /* CONFIG_MESHTASTIC_MQTT_PROXY */
 
 void meshtastic_phoneapi_on_packet(const struct meshtastic_packet *packet,
 				   const meshtastic_MeshPacket *decoded_mesh)

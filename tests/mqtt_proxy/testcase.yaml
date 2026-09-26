@@ -1,0 +1,14 @@
+# MQTT client proxy (agents-kx8d): the bridge on a build with no network stack,
+# reaching the broker through the connected client. Real FromRadio/ToRadio frames
+# on a registered transport, real channel-encrypted wire frames, the sim radio.
+common:
+  tags:
+    - meshtastic
+    - mqtt
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.mqtt_proxy.native_sim: {}

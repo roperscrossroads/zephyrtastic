@@ -129,6 +129,10 @@ void meshtastic_mqtt_settings_resolve(const meshtastic_ModuleConfig_MQTTConfig *
  * @return 0 when acceptable; -ENOTSUP when tls_enabled is set but the image has no
  *         TLS transport compiled in (CONFIG_MESHTASTIC_MQTT_TLS) — a config that
  *         asks for TLS must never be silently downgraded to plaintext.
+ *         On a build with the bridge (CONFIG_MESHTASTIC_MQTT): -EPROTONOSUPPORT
+ *         when proxy_to_client_enabled is set but there is no client proxy, and
+ *         -ENETUNREACH when the bridge is enabled without the proxy on a build
+ *         with no direct broker back end (no network stack).
  *         -EINVAL on a NULL section.
  */
 int meshtastic_mqtt_config_validate(const meshtastic_ModuleConfig_MQTTConfig *cfg);
