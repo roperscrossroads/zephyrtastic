@@ -25,6 +25,9 @@
 #include "meshtastic_packet.h"
 
 #include "meshtastic_mqtt.h"
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+#include "meshtastic_cluster.h"
+#endif
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_reliable.h"
 #if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
@@ -452,7 +455,15 @@ static void deliver_packet(const struct meshtastic_packet *packet,
 	}
 
 	meshtastic_emit_event(MESHTASTIC_EVENT_PACKET_RECEIVED, 0, packet);
-	meshtastic_phoneapi_on_packet(packet, decoded_mesh);
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+	/* The cluster's broadcasts are fleet protocol, not messages: keep them off
+	 * the phone queue (see meshtastic_cluster_is_internal_frame). The module
+	 * still gets them through dispatch; only the phone hand-off is skipped. */
+	if (!meshtastic_cluster_is_internal_frame(packet))
+#endif
+	{
+		meshtastic_phoneapi_on_packet(packet, decoded_mesh);
+	}
 
 	/* Light-sleep governor: a packet delivered to us is activity, so refresh the
 	 * min_wake_secs wake window. This is the single delivery choke point; it counts

@@ -6091,6 +6091,129 @@ ZTEST(mesh_sim, test_duty_cycle_refuses_all_egress_and_tells_the_phone)
 	meshtastic_duty_stats_reset();
 }
 
+#if defined(CONFIG_MESHTASTIC_CLUSTER)
+/* Count the frames queued for the phone that carry `port`, draining the queue. */
+static unsigned int phone_take_port(uint32_t port)
+{
+	struct meshtastic_phoneapi_frame frame;
+	unsigned int n = 0U;
+
+	while (meshtastic_phoneapi_pop_frame(&duty_api, &frame)) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t stream = pb_istream_from_buffer(frame.data, frame.len);
+
+		if (pb_decode(&stream, meshtastic_FromRadio_fields, &from) &&
+		    from.which_payload_variant == meshtastic_FromRadio_packet_tag &&
+		    from.packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
+		    from.packet.decoded.portnum == port) {
+			n++;
+		}
+	}
+	return n;
+}
+
+/*
+ * The cluster's broadcasts stay off the phone queue (bench, 2026-09-26). A node
+ * decoding several digests a minute handed each one to the 8-deep FromRadio
+ * queue at the protected rank, so with no phone attached the queue held nothing
+ * but digests and a text received meanwhile was evicted within minutes. The
+ * gate is port 256 AND the cluster channel: the same payload on the primary
+ * channel is a user's PRIVATE_APP traffic and must still reach the phone.
+ */
+ZTEST(mesh_sim, test_cluster_digest_stays_off_the_phone)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	struct meshtastic_cluster_stats before_st, after_st;
+	uint8_t cbuf[64];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	pb_ostream_t os = pb_ostream_from_buffer(cbuf, sizeof(cbuf));
+	uint8_t ch_index;
+
+	if (!duty_api_registered) {
+		meshtastic_phoneapi_init(&duty_api, "duty-test", duty_q, DUTY_TEST_QUEUE, NULL,
+					 NULL, NULL, NULL, &duty_to_scratch,
+					 &duty_from_scratch);
+		meshtastic_phoneapi_register(&duty_api);
+		duty_api_registered = true;
+	}
+
+	{
+		meshtastic_Channel ch = meshtastic_Channel_init_zero;
+
+		ch.role = meshtastic_Channel_Role_SECONDARY;
+		ch.has_settings = true;
+		strncpy(ch.settings.name, CONFIG_MESHTASTIC_CLUSTER_CHANNEL_NAME,
+			sizeof(ch.settings.name) - 1U);
+		ch.settings.psk.size = 16U;
+		ch.settings.psk.bytes[0] = 0x42U;
+		zassert_ok(meshtastic_channels_set_slot(2U, &ch), "cluster channel set failed");
+	}
+	zassert_true(meshtastic_cluster_channel_resolved(&ch_index), "module must bind");
+
+	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
+	msg.variant.digest.doc_hash = 0xC0FFEE01U;
+	msg.variant.digest.entry_count = 1U;
+	msg.variant.digest.has_max_stamp = true;
+	msg.variant.digest.max_stamp.physical_ms = 424242;
+	msg.variant.digest.max_stamp.node_id = PEER_NODE_ID;
+	zassert_true(pb_encode(&os, zephyrtastic_ClusterMessage_fields, &msg), "encode failed");
+
+	wait_rx_armed();
+	meshtastic_phoneapi_reset(&duty_api);
+	meshtastic_cluster_stats_get(&before_st);
+
+	/* 1. A digest on the cluster channel: the module takes it, the phone never sees it. */
+	{
+		struct meshtastic_packet pkt = {
+			.from = PEER_NODE_ID,
+			.to = MESHTASTIC_NODE_BROADCAST,
+			.id = 0x5A01U,
+			.portnum = MESHTASTIC_PORT_PRIVATE,
+			.payload = cbuf,
+			.payload_len = os.bytes_written,
+			.hop_limit = 3U,
+			.hop_start = 3U,
+			.channel_index = ch_index,
+		};
+
+		zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "encode failed");
+	}
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	k_sleep(K_MSEC(200));
+
+	meshtastic_cluster_stats_get(&after_st);
+	zassert_equal(after_st.digest_rx_match + after_st.digest_rx_mismatch,
+		      before_st.digest_rx_match + before_st.digest_rx_mismatch + 1U,
+		      "the cluster module must still receive the digest");
+	zassert_equal(phone_take_port(MESHTASTIC_PORT_PRIVATE), 0U,
+		      "a cluster digest must not be queued for the phone");
+	wait_rx_armed();
+
+	/* 2. The same bytes on the primary channel are ordinary PRIVATE_APP traffic. */
+	{
+		struct meshtastic_packet pkt = {
+			.from = PEER_NODE_ID,
+			.to = MESHTASTIC_NODE_BROADCAST,
+			.id = 0x5A02U,
+			.portnum = MESHTASTIC_PORT_PRIVATE,
+			.payload = cbuf,
+			.payload_len = os.bytes_written,
+			.hop_limit = 3U,
+			.hop_start = 3U,
+			.channel_index = meshtastic_channels_primary_index(),
+		};
+
+		zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "encode failed");
+	}
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	k_sleep(K_MSEC(200));
+	zassert_equal(phone_take_port(MESHTASTIC_PORT_PRIVATE), 1U,
+		      "PRIVATE_APP on a user channel must still reach the phone");
+	wait_rx_armed();
+}
+#endif /* CONFIG_MESHTASTIC_CLUSTER */
+
 /* The harm agents-tosb actually named: an unconfigured node relaying a
  * stranger's packet on the public mesh.
  *

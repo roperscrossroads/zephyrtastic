@@ -306,6 +306,16 @@ const char *meshtastic_cluster_sync_state(uint32_t *peer);
 /* Snapshot for the shell: entry count, doc hash, whether the cluster channel
  * currently resolves (index in *ch_index when true). */
 bool meshtastic_cluster_channel_resolved(uint8_t *ch_index);
+
+/* True for the cluster's own broadcast traffic (digests, pushes): port 256 on
+ * the cluster channel, not PKC. The router keeps these off the phone queue:
+ * they are fleet protocol, not messages, and at several a minute they filled
+ * the 8-deep FromRadio queue at the protected rank, evicting any text a node
+ * received while no phone was attached (bench, 2026-09-26). Port 256 alone is
+ * NOT the test: it is also PRIVATE_APP, which a user's own app may use on any
+ * channel, and that traffic still reaches the phone. */
+struct meshtastic_packet;
+bool meshtastic_cluster_is_internal_frame(const struct meshtastic_packet *pkt);
 uint16_t meshtastic_cluster_entry_count(void);
 uint32_t meshtastic_cluster_doc_hash_now(void);
 

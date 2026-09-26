@@ -652,6 +652,18 @@ bool meshtastic_cluster_channel_resolved(uint8_t *ch_index)
 	return ok;
 }
 
+bool meshtastic_cluster_is_internal_frame(const struct meshtastic_packet *pkt)
+{
+	uint8_t idx;
+
+	/* PKC unicasts (the walk) are deliberately NOT matched: they carry no
+	 * channel, so the only test would be "port 256 to me", which would also
+	 * swallow a user's PRIVATE_APP direct message. The walk is occasional; the
+	 * flood this exists for is the broadcast digests. */
+	return pkt != NULL && pkt->portnum == MESHTASTIC_PORT_PRIVATE && !pkt->pki_encrypted &&
+	       cluster_channel_index(&idx) && pkt->channel_index == idx;
+}
+
 /* ---- NVS persistence ------------------------------------------------------ */
 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
