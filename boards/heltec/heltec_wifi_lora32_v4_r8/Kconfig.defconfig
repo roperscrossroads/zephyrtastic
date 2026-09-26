@@ -62,6 +62,16 @@ endchoice
 config ESP_SPIRAM_HEAP_SIZE
 	default 4194304
 
+# WiFi's adapter heap goes to PSRAM whenever PSRAM is on (2026-09-26, agents-zo3o.7).
+# It was CONFIG_ESP_WIFI_HEAP_SPIRAM=y in overlay-v4-unified.conf, whose comment says
+# the option depends on ESP_SPIRAM. It does not: on the V3 (no PSRAM) the WiFi adapter
+# then linked against shared_multi_heap_*() with no SHARED_MULTI_HEAP, and failed. Why
+# PSRAM at all: the display's framebuffer allocation races WiFi for the kernel heap
+# (the "scrambled screen", see the profile's display block).
+choice ESP_WIFI_HEAP
+	default ESP_WIFI_HEAP_SPIRAM
+endchoice
+
 endif # ESP_SPIRAM
 
 if LVGL

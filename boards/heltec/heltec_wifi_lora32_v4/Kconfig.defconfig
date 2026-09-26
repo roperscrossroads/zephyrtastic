@@ -20,6 +20,15 @@ config POWER_DOMAIN_GPIO
 #
 # Values below are exactly what the overlay set, so this is a no-op refactor
 # for the V4 — hardware-verified previously ("Found 2MB PSRAM @ 40MHz").
+#
+# The enable itself is here too, as on the R8 (2026-09-26, agents-zo3o.7). It used to
+# be CONFIG_ESP_SPIRAM=y in overlay-v4-unified.conf, which is also the V3's profile --
+# and the V3 has no PSRAM, so its link failed with "External SPIRAM overflowed". The
+# part is soldered on; no V4 app image should omit it. MCUboot must never touch PSRAM,
+# hence the guard (a board default outranks the SoC's `default n if MCUBOOT`).
+config ESP_SPIRAM
+	default y if !MCUBOOT
+
 if ESP_SPIRAM
 
 choice SPIRAM_MODE
@@ -42,6 +51,16 @@ endchoice
 # shared-multi-heap (which is where ESP_WIFI_HEAP_SPIRAM sends WiFi allocations)
 # and still leave ~450 KB of BSS headroom. Not done here only because the V4 is
 # the proven bench platform and this would be an unverified change to it.
+# WiFi's adapter heap goes to PSRAM whenever PSRAM is on (2026-09-26, agents-zo3o.7).
+# It was CONFIG_ESP_WIFI_HEAP_SPIRAM=y in overlay-v4-unified.conf, whose comment says
+# the option depends on ESP_SPIRAM. It does not: on the V3 (no PSRAM) the WiFi adapter
+# then linked against shared_multi_heap_*() with no SHARED_MULTI_HEAP, and failed. Why
+# PSRAM at all: the display's framebuffer allocation races WiFi for the kernel heap
+# (the "scrambled screen", see the profile's display block).
+choice ESP_WIFI_HEAP
+	default ESP_WIFI_HEAP_SPIRAM
+endchoice
+
 endif # ESP_SPIRAM
 
 if LVGL
