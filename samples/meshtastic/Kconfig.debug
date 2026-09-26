@@ -32,7 +32,8 @@
 #                                  Class 1 had ~17.5 KB free at 4b9fb8c.
 #   Numbers are what turning the item OFF gives back ("-") or ON costs ("+"),
 #   measured one at a time on the class-4 (V4) and class-1 (XIAO) recipes at
-#   main 4b9fb8c, unless marked [H] (history) or (E) (estimate). Subtract-one
+#   main 4b9fb8c (72f5593 for the second batch, [S4]), unless marked [H]
+#   (history) or (E) (estimate). Subtract-one
 #   deltas do not simply add up. Source tables, method and raw data:
 #     ~/lab/dev/zephyrtastic-tooling/docs/scratch/FEATURE-COSTS-AND-ZEPHYR-MODULES.md
 #   (the one size reference -- measure a new knob with its sweep script and add
@@ -42,18 +43,22 @@
 #   Shell (all of it)          on  | 35.4 KB | 131.9 KB
 #   Asserts (ASSERT)           on  | 17.1 KB |  58.6 KB  (strings only, ASSERT_VERBOSE: 11.2 | 37.9)
 #   Log text above ERR         on  |  0.5 KB |  56.9 KB  (SET ELSEWHERE: log level choice)
+#   Extra exception info (nRF) on  |   -     |  34.3 KB  [S4] -- verify before relying on it
+#   Tracing (CTF, RAM buffer)  off | +14.0 KB | +19.3 KB (+12.3 KB RAM)
+#   Spinlock validation        on  |  9.4 KB (+9.0 iram) | 13.3 KB   [S4]
 #   Thread analyzer (+super-
 #     visor, thread summary)   on  |  8.6 KB |   4.0 KB (+8.0 KB RAM)
-#   Tracing (CTF, RAM buffer)  off | (measuring)
-#   Second UART shell          on  |  7.4 KB | (measuring)
-#   Log ring                   on  |  4.2 KB |   2.4 KB (+8.3 KB RAM)
-#   Shell help text            on  | (measuring) | 8.1 KB [H]
+#   Second UART shell          on  |  7.4 KB |   0 (no uart0 shell on the XIAO)
+#   Shell help text            on  |  0 (7.1 KB flash) | 7.7 KB
 #   Bootlog                    on  |  0.5 KB |   6.8 KB
-#   Coredump                   on/XIAO off | 1.2 KB | (sysbuild only)
+#   Supervisor                 on  |  5.0 KB |   1.6 KB (+5.2 KB RAM)
+#   Log ring                   on  |  4.2 KB |   2.4 KB (+8.3 KB RAM)
 #   Phone log                  on  |  0.8 KB |   2.2 KB
+#   Shell log backend          on  |  1.6 KB |   2.1 KB (+1.0 KB RAM)
+#   Thread runtime stats       on  |  1.5 KB |   1.6 KB
+#   Coredump                   on/XIAO off | 1.2 KB | (sysbuild only)
 #   Task watchdog              on/XIAO off | 0.7 KB | -
-#   Stats, heap stats, names   on  | (measuring)
-#   Everything else below is < 1 KB or off.
+#   Everything else below is < 1 KB, off, or forced on by something else.
 # ============================================================================
 
 # ---------------------------------------------------------------------------
@@ -114,20 +119,23 @@ configdefault XTENSA_BREAK_ON_UNRECOVERABLE_EXCEPTIONS
 # the CPU before it is checked). Also selects STACK_USAGE + INIT_STACKS, which the
 # high-water numbers need. Do NOT write CONFIG_STACK_SENTINEL=y anywhere: Kconfig
 # silently discards it on boards with an MPU. See src/Kconfig.diagnostics.
+# INIT_STACKS, STACK_SENTINEL and the MPU guard are SELECTED by this, so they
+# cannot be switched off on their own (tried [S4]: no change).
 # Cost: (E) small; the MPU guard costs a region, the sentinel a word per stack.
 configdefault MESHTASTIC_STACK_PROTECTION
 	default y
 
 # Compiler stack canaries: SET ELSEWHERE -- CONFIG_STACK_CANARIES_STRONG=y in
-# prj.conf (a choice). STRONG = a canary in every function with a local array or
+# prj.conf (a choice; overriding it from the command line did not take, so the
+# cost is still unmeasured). STRONG = a canary in every function with a local array or
 # an address-taken local. Added after a double exception with healthy
 # thread-analyzer numbers 3 minutes earlier (2026-08-08): a canary is checked at
 # every return, the analyzer only on a timer.
-# Cost: (measuring).
+# Cost: unmeasured (E: a few % of code size).
 
 # nRF: record a fixed-address fault mark a reverted MCUboot test image leaves
 # behind (shell: faultmark), for a test image that dies before its console.
-# Cost: (measuring). (nRF52840 only.)
+# Cost: -0.9 KB XIAO flash [S4]. (nRF52840 only.)
 configdefault MESHTASTIC_FAULTMARK
 	default y if SOC_NRF52840
 
@@ -143,6 +151,7 @@ configdefault MESHTASTIC_BOOTLOG
 	default y
 configdefault MESHTASTIC_BOOTLOG_DURABLE
 	default y
+# (Durable copy alone: -0.3 KB dram0 on V4 | -1.6 KB XIAO flash [S4].)
 
 # Health report: a periodic compact health message (reboots, RX counts, heap,
 # stacks) on a health channel. Class images turn it on with overlay-health.conf.
@@ -164,7 +173,7 @@ configdefault MESHTASTIC_WATCHDOG
 
 # `meshtastic crashtest` (deliberate faults, to prove the coredump path). Class
 # images get it with overlay-coredump-flash.conf.
-# Cost: (measuring).
+# Cost: -8 B dram0, -0.5 KB flash on V4 [S4].
 configdefault MESHTASTIC_SHELL_CRASHTEST
 	default n
 
@@ -184,13 +193,14 @@ configdefault THREAD_ANALYZER
 	default y
 
 # Condensed periodic stack%/cpu% summary (needs THREAD_ANALYZER).
-# Cost: (measuring).
+# Cost: -0.15 KB dram0 on V4 | -0.5 KB XIAO flash, -0.3 KB RAM [S4].
 configdefault MESHTASTIC_THREAD_SUMMARY
 	default y
 
 # Supervisor: watches stack headroom, heap floor and CPU hogs, alerts on
-# thresholds, and forwards alerts to the phone.
-# Cost: (measuring).
+# thresholds, and forwards alerts to the phone. Most of its RAM is its alert
+# thread's stack. It SELECTS STATS.
+# Cost: -5.0 KB dram0 on V4 | -1.6 KB XIAO flash, -5.2 KB RAM [S4].
 configdefault MESHTASTIC_SUPERVISOR
 	default y
 configdefault MESHTASTIC_SUPERVISOR_TO_PHONE
@@ -200,24 +210,38 @@ configdefault MESHTASTIC_SUPERVISOR_TO_PHONE
 # CANNOT be switched off while MESHTASTIC_WATCHDOG is on: meshtastic_watchdog.c
 # calls it unguarded, so =n fails to link (found by the cost sweep, 2026-09-26;
 # agents-zo3o.7).
-# Cost: (measuring, XIAO only -- see above).
+# Cost: unmeasurable until the watchdog stops depending on it.
 configdefault SYS_HEAP_RUNTIME_STATS
 	default y
 
 # Heap allocation tracing (meshtastic_heap_trace.c): every alloc/free logged.
 # Floods the log (15% survived last time) -- a one-off tool, off.
-# Cost: (measuring).
+# Cost to turn on: +48 B dram0 on V4 | +1.4 KB XIAO flash [S4].
 configdefault MESHTASTIC_HEAP_TRACE
 	default n
 
 # Power monitor: periodic power-state/current lines. The V4 profile turns it on
 # (overlay-v4-unified.conf, SET ELSEWHERE); off elsewhere.
-# Cost: (measuring).
+# Cost: -24 B dram0, -0.2 KB flash on V4 [S4].
 configdefault MESHTASTIC_POWERMON
 	default n
 
 # Kernel tracing (CTF into a RAM buffer): overlay-tracing.conf. Off.
-# Cost: (measuring).
+# Cost to turn on: +14.0 KB dram0 (+1.9 KB iram) on V4 | +19.3 KB XIAO flash,
+# +12.3 KB RAM [S4]. Would not fit class 4's 16 KB headroom with much to spare.
+#
+# Thread runtime stats (per-thread CPU cycles; the analyzer's cpu% and the
+# supervisor's CPU-hog check need it; Zephyr default, not set here).
+# Cost: -1.5 KB dram0 (-1.0 KB iram) on V4 | -1.6 KB XIAO flash, -0.4 KB RAM [S4].
+#
+# Spinlock validation (SPIN_VALIDATE, a Zephyr default that follows ASSERT):
+# checks lock/unlock pairing on every spinlock. Surprisingly large.
+# Cost: -9.4 KB dram0 (-9.0 KB iram) on V4 | -13.3 KB XIAO flash, -0.4 KB RAM [S4].
+#
+# Extra exception info (nRF, EXTRA_EXCEPTION_INFO: a fuller register dump on a
+# fault). Measured at -34.3 KB XIAO flash [S4] -- far more than the feature
+# itself should cost, so something else probably rides on it; verify before
+# trading it away. Exception stack trace (EXCEPTION_STACK_TRACE): -0.2 KB.
 
 # ---------------------------------------------------------------------------
 # 3. Logging
@@ -247,7 +271,7 @@ configdefault LOG_PROCESS_THREAD_STACK_SIZE
 # CONFIG_LOG_OUTPUT_FORMAT_DATE_TIMESTAMP=y in prj.conf.
 
 # Epoch-based log timestamps once the clock is seeded (instead of uptime).
-# Cost: (measuring).
+# Cost: -56 B dram0 on V4 | -0.2 KB XIAO flash [S4].
 configdefault MESHTASTIC_LOG_WALLCLOCK
 	default y
 
@@ -255,7 +279,7 @@ configdefault MESHTASTIC_LOG_WALLCLOCK
 # (RTC/noinit), read after a crash with `meshtastic logring`. The filter keeps
 # chatty modules (powermon, RX lines) from filling its ~3-minute window.
 # Cost: -4.2 KB dram0 on V4 (4.3 KB of the 8 KB RTC segment) | -2.4 KB XIAO
-# flash, -8.3 KB RAM. Filter: (measuring).
+# flash, -8.3 KB RAM. Filter: -24 B dram0 on V4 | -0.4 KB XIAO flash [S4].
 configdefault MESHTASTIC_LOGRING
 	default y
 configdefault MESHTASTIC_LOGRING_FILTER
@@ -270,13 +294,16 @@ configdefault MESHTASTIC_PHONELOG
 # Hex dump of every TX/RX packet: the deepest formatter on the log path; can
 # overflow the log thread. Wire-level debugging only (raise
 # LOG_PROCESS_THREAD_STACK_SIZE with it).
-# Cost: (measuring).
+# Cost to turn on: 0 on V4 | +0.6 KB XIAO flash [S4] (plus the stack it needs).
 configdefault MESHTASTIC_PACKET_HEXDUMP
 	default n
 
 # GNSS timing: `gnsst` lines per NMEA callback (cycle/uptime/UTC/fix) and one
 # per 1PPS edge. overlay-gnsstime.conf turns both on (and a 7 KB log ring).
-# Cost: (measuring). (GNSS images only.)
+# WARNING: overlay-gnsstime.conf does NOT fit class 4 -- its 7 KB log ring
+# overflows the RTC slow segment by 44 B [S4]; use it on a lighter image.
+# overlay-gnssdump.conf (per-satellite dump): +1.3 KB dram0, +1.2 KB flash on
+# class 4 [S4]. (GNSS images only.)
 configdefault MESHTASTIC_GNSS_TIME_DEBUG
 	default n
 configdefault MESHTASTIC_GNSS_PPS_LOG_EDGES
@@ -299,24 +326,27 @@ configdefault MESHTASTIC_WIFI_DIAG
 
 # Second shell on the header UART0 pins (early-boot capture when USB-CDC is
 # unreliable). One more shell instance = its own stack and buffers.
-# Cost: -7.4 KB dram0 on V4 (the R8 has none) | XIAO (measuring).
+# Cost: -7.4 KB dram0 on V4 (the R8 has none) | 0 on the XIAO (no uart0 shell
+# node in its devicetree, so the option builds nothing there) [S4].
 configdefault MESHTASTIC_SHELL_UART0
 	default y
 
 # Shell help strings; the host tool could carry them instead.
-# Cost: (measuring) on V4 | -8.1 KB XIAO flash [H].
+# Cost: flash only -- -7.1 KB on V4 | -7.7 KB XIAO [S4] (8.1 KB [H]).
 configdefault SHELL_HELP
 	default y
 
 # Wildcards in shell commands.
-# Cost: (measuring) on V4 | -2.2 KB XIAO flash [H].
+# Cost: -0.1 KB flash on V4 | -2.1 KB XIAO flash [S4].
 configdefault SHELL_WILDCARD
 	default y
 
 # Named counter groups (`stats list`): task-WDT feed counts, CAD/AGC counters.
 # The supervisor selects STATS. MCUmgr's stat and taskstat groups are SET
-# ELSEWHERE (overlay-ota-ble.conf).
-# Cost: (measuring).
+# ELSEWHERE (overlay-ota-ble.conf; -32 B dram0 on V4 [S4]). STATS itself
+# cannot be turned off while the supervisor is on (it selects STATS).
+# Cost of the names + shell part: -32 B dram0, -0.5 KB flash on V4 | -0.8 KB
+# XIAO flash [S4].
 configdefault STATS
 	default y
 configdefault STATS_NAMES
