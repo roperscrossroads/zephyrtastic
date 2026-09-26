@@ -208,7 +208,7 @@ static void page_nodes(void)
 
 	for (uint8_t i = 0; i < list_rows && (size_t)(first + i) < n; i++) {
 		struct meshtastic_nodedb_node node;
-		char mark, cur, agebuf[6];
+		char mark, cur, agebuf[8]; /* "24855d" (INT32_MAX s) + NUL */
 		int32_t age;
 
 		if (meshtastic_nodedb_get_by_index((size_t)(first + i), &node) != 0) {
