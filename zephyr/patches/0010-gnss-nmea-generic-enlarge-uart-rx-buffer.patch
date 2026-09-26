@@ -24,7 +24,7 @@ index bef7989828..9ac0b9004c 100644
 + * overlay-gnss.conf only silenced the WRN-flood *consequence* of an overrun, not the
 + * overrun itself. Local patch to this vendored Zephyr driver, uncommitted in this
 + * west-managed repo per this workspace's existing convention (see the sibling
-+ * drivers/lora/native/sx126x/*.c and drivers/adc/adc_esp32.c local patches).
++ * drivers/lora/native/sx126x/ sources and drivers/adc/adc_esp32.c local patches).
 + */
 +#define UART_RX_BUF_SZ (1024 + IS_ENABLED(CONFIG_GNSS_SATELLITES) * 512)
  #define UART_TX_BUF_SZ 64
