@@ -95,10 +95,14 @@ tests:
   # change it here. Heltec scenarios are app builds (flash does not bind on a Heltec, and
   # dram0 is the same either way); XIAO scenarios are sysbuild, because the XIAO binds on
   # its MCUboot app slot and only a sysbuild measures that. ~3 min per image.
+  # Each scenario repeats its board as integration_platforms: the `common:` list above names
+  # other boards, and twister reports every scenario x board pair outside platform_allow as
+  # an error.
   sample.meshtastic.fleet.c4:
     # Class 4, V4 cluster member (the plain-V4 image).
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
@@ -107,6 +111,7 @@ tests:
     # function unguarded, and native_sim compiles none of them.
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
@@ -117,6 +122,7 @@ tests:
     # the module left a framebuffer with no font ("cfb_font not defined").
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
@@ -126,6 +132,7 @@ tests:
     # The diagnostic tier's field rung: ASSERT_VERBOSE=n keeps every check, drops the text.
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
@@ -135,6 +142,7 @@ tests:
     # Class 2, the V4-R8 courier (depot, SMP central). The tightest dram0 in the fleet.
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-ota-shell.conf;overlay-smp-central.conf;overlay-depot.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf"
       - "EXTRA_DTC_OVERLAY_FILE=depot.overlay"
@@ -142,6 +150,7 @@ tests:
     # Class 6, V4-R8 cluster member.
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4r8-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
@@ -149,6 +158,7 @@ tests:
     # Class 8, V4-R8 RF listener (preset scanner, transmit refused).
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-scanner.conf;overlay-listener.conf;overlay-v4r8-listener.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
@@ -156,6 +166,7 @@ tests:
     # Class 1, XIAO cluster member. Binds on the MCUboot app slot (733,034 B).
     tags: [meshtastic, fleet]
     platform_allow: [xiao_ble/nrf52840]
+    integration_platforms: [xiao_ble/nrf52840]
     sysbuild: true
     extra_args:
       - SHIELD=wio_sx1262_xiao
@@ -165,6 +176,7 @@ tests:
     # prove on hardware. It only fits because ASSERT_VERBOSE=n frees ~39 KB of flash.
     tags: [meshtastic, fleet]
     platform_allow: [xiao_ble/nrf52840]
+    integration_platforms: [xiao_ble/nrf52840]
     sysbuild: true
     extra_args:
       - SHIELD=wio_sx1262_xiao
@@ -175,6 +187,7 @@ tests:
     # Class 9, XIAO RF listener.
     tags: [meshtastic, fleet]
     platform_allow: [xiao_ble/nrf52840]
+    integration_platforms: [xiao_ble/nrf52840]
     sysbuild: true
     extra_args:
       - SHIELD=wio_sx1262_xiao
@@ -183,6 +196,7 @@ tests:
     # The WiFi gateway (net, no BT) with plaintext MQTT, as measured in FEATURE-COSTS §6.1.
     tags: [meshtastic, fleet, net, mqtt]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nobt.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf"
     extra_configs:
@@ -194,6 +208,7 @@ tests:
     # Zephyr's TLS sockets need.
     tags: [meshtastic, fleet, net, mqtt]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nobt.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-mqtt-tls.conf"
   sample.meshtastic.fleet.v3_net:
@@ -201,5 +216,6 @@ tests:
     # PSRAM and put WiFi's heap there. Both now belong to the V4 board files.
     tags: [meshtastic, fleet, net]
     platform_allow: [heltec_wifi_lora32_v3/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v3/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nobt.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf"
