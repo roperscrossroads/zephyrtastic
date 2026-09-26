@@ -198,15 +198,13 @@ tests:
       - SHIELD=wio_sx1262_xiao
       - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-scanner.conf;overlay-listener.conf;overlay-xiao-listener.conf"
   sample.meshtastic.fleet.gateway:
-    # The WiFi gateway (net, no BT) with plaintext MQTT, as measured in FEATURE-COSTS §6.1.
+    # The WiFi gateway (net, no BT) with plaintext MQTT, as measured in FEATURE-COSTS §6.1:
+    # what the justfile builds for PROFILE=v4-unified MQTT=1 (overlay-mqtt.conf last).
     tags: [meshtastic, fleet, net, mqtt]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
     extra_args:
-      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nobt.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf"
-    extra_configs:
-      - CONFIG_MQTT_LIB=y
-      - CONFIG_MESHTASTIC_MQTT=y
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nobt.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-mqtt.conf"
   sample.meshtastic.fleet.gateway_tls:
     # The same gateway with MQTT over TLS. Before overlay-mqtt-tls.conf existed, TLS could
     # not be turned back on: the profile's plaintext block drops the mbedTLS SSL layer that
