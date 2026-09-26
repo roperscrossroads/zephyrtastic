@@ -89,7 +89,8 @@ static uint32_t hdop_to_centidop(uint32_t hdop_milli)
 	return hdop_milli / 10U;
 }
 
-static void fill_position(const struct gnss_data *data, meshtastic_Position *position)
+static void fill_position(const struct gnss_data *data, int64_t fix_epoch,
+			  meshtastic_Position *position)
 {
 	*position = (meshtastic_Position)meshtastic_Position_init_zero;
 
@@ -125,7 +126,34 @@ static void fill_position(const struct gnss_data *data, meshtastic_Position *pos
 		position->has_altitude_geoidal_separation = true;
 		position->altitude_geoidal_separation = data->info.geoid_separation / 1000;
 	}
+
+	/* The two the reference fills that position_flags can select (agents-t2hb):
+	 * the fix's own UTC (TIMESTAMP -- when the fix was true, as opposed to
+	 * `time`, the clock at send), and height above the ellipsoid (ALTITUDE
+	 * without ALTITUDE_MSL): MSL + geoid separation, as GPS.cpp computes it. */
+	if (fix_epoch > 0 && fix_epoch <= UINT32_MAX) {
+		position->timestamp = (uint32_t)fix_epoch;
+	}
+	position->has_altitude_hae = true;
+	position->altitude_hae = position->altitude + (data->info.geoid_separation / 1000);
 }
+
+/* A fix that is not renewed is forgotten (reference GPS.cpp: a search that times
+ * out without a lock clears the position and publishes the loss). Re-armed on
+ * every fix, so it also catches a receiver that has gone silent altogether --
+ * which a check in the data callback never could. */
+static void fix_lost_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	k_mutex_lock(&gnss_lock, K_FOREVER);
+	gnss_state.has_fix = false;
+	k_mutex_unlock(&gnss_lock);
+	meshtastic_position_forget_source(meshtastic_Position_LocSource_LOC_INTERNAL);
+	LOG_WRN("GNSS: no fix for %d s, position dropped", CONFIG_MESHTASTIC_GNSS_FIX_LOST_SEC);
+}
+
+static K_WORK_DELAYABLE_DEFINE(fix_lost_work, fix_lost_work_fn);
 
 /* The whole automatic-send apparatus — queue, stack, work item and handler —
  * lives under one guard. Leaving any of it outside is not merely dead code: the
@@ -171,6 +199,7 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 	int64_t retry_interval_ms;
 	bool due;
 	bool can_retry;
+	int64_t fix_epoch = 0;
 
 #if defined(CONFIG_MESHTASTIC_GNSS_TIME_DEBUG)
 	/* Stamp FIRST, and before the no-fix gate. Everything below this point —
@@ -243,6 +272,8 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 			.tm_sec = (int)(data->utc.millisecond / MSEC_PER_SEC),
 		};
 		int64_t epoch = timeutil_timegm64(&gnss_tm);
+
+		fix_epoch = epoch;
 		int64_t edge_uptime_ms;
 		int64_t edge_age_ms;
 
@@ -297,7 +328,8 @@ static void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 	}
 
 	/* Hand the fresh fix to the Position module before deciding to broadcast. */
-	fill_position(data, &position);
+	fill_position(data, fix_epoch, &position);
+	k_work_reschedule(&fix_lost_work, K_SECONDS(CONFIG_MESHTASTIC_GNSS_FIX_LOST_SEC));
 	meshtastic_position_set_current(&position);
 
 	/* Periodic or smart -- the position module owns the decision, since it
@@ -432,6 +464,7 @@ int meshtastic_gnss_apply_mode(void)
 		k_mutex_lock(&gnss_lock, K_FOREVER);
 		gnss_state.has_fix = false;
 		k_mutex_unlock(&gnss_lock);
+		(void)k_work_cancel_delayable(&fix_lost_work);
 		meshtastic_position_forget_source(meshtastic_Position_LocSource_LOC_INTERNAL);
 	}
 	LOG_INF("GNSS %s (gps_mode)", enable ? "enabled" : "off");

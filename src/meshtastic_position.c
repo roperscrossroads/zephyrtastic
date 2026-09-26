@@ -281,9 +281,14 @@ static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want
 	k_mutex_unlock(&pos_lock);
 
 	position.seq_number = seq;
-	/* Refresh the timestamp on every emission so a static fixed position still
-	 * carries a current time (0 until the clock is seeded). */
-	position.time = meshtastic_clock_now_epoch();
+	/* The clock at send, refreshed every emission -- but only a clock good
+	 * enough to vouch for: NTP (phone/operator) or GPS. Below that -- unset,
+	 * mesh-relayed, or restored from flash -- the reference strips it to 0
+	 * rather than hand the mesh a guess (allocPositionPacket; its I2C-RTC
+	 * exception has no counterpart on any port board). */
+	position.time = (meshtastic_clock_get_quality() >= MESHTASTIC_CLOCK_QUALITY_NTP)
+				? meshtastic_clock_now_epoch()
+				: 0U;
 
 	/* Truncate the on-wire coordinates and stamp the precision actually applied
 	 * so peers/apps render the coarsened location correctly. The cached position

@@ -354,6 +354,12 @@ ZTEST(gnss, test_fix_populates_the_advertised_position)
 	zassert_equal(pos.precision_bits, 32U);
 	/* The clock was seeded from this same fix, so the stamp is real. */
 	zassert_true(pos.time >= FIX_EPOCH_SEC, "position not stamped with the fix time");
+	/* The fix's own UTC (TIMESTAMP), within one emulator interval, and height
+	 * above the ellipsoid = 120 m MSL + 48 m geoid separation (GPS.cpp). */
+	zassert_true(pos.timestamp >= FIX_EPOCH_SEC && pos.timestamp <= FIX_EPOCH_SEC + 2,
+		     "timestamp %u is not the fix's UTC", pos.timestamp);
+	zassert_true(pos.has_altitude_hae, "");
+	zassert_equal(pos.altitude_hae, 168, "hae = MSL + geoid separation");
 }
 
 ZTEST(gnss, test_differential_fix_reports_fix_type_3)
@@ -694,4 +700,26 @@ ZTEST(gnss, test_a_moved_fix_broadcasts_early_even_with_smart_off)
 	zassert_true(k_uptime_get() - start >= 4 * MSEC_PER_SEC,
 		     "but not inside the 5 s smart minimum");
 #endif
+}
+
+/* A fix that is not renewed is dropped, not advertised on with a fresh `time`
+ * (reference: a search that times out without a lock clears the position). The
+ * emulator stops publishing fixes once its data is cleared -- a receiver that
+ * lost lock. The timeout is 10 s in this image. */
+ZTEST(gnss, test_a_lost_fix_is_forgotten)
+{
+	struct meshtastic_gnss_status st;
+	meshtastic_Position pos;
+
+	publish_canonical_fix();
+	zassert_ok(meshtastic_position_get_current(&pos), "precondition: a fix is held");
+
+	gnss_emul_clear_data(gnss_dev);
+	k_msleep((CONFIG_MESHTASTIC_GNSS_FIX_LOST_SEC - 3) * MSEC_PER_SEC);
+	zassert_ok(meshtastic_position_get_current(&pos), "still held inside the timeout");
+	k_msleep(5 * MSEC_PER_SEC);
+	zassert_equal(meshtastic_position_get_current(&pos), -ENODATA,
+		      "dropped once no fix has come for the timeout");
+	zassert_ok(meshtastic_gnss_status_get(&st));
+	zassert_false(st.has_fix, "and status says so");
 }

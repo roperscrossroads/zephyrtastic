@@ -30,6 +30,16 @@ config MESHTASTIC_GNSS_RETRY_INTERVAL_SEC
 	  long before trying again. Prevents hammering the radio when the GNSS
 	  driver publishes fixes frequently.
 
+config MESHTASTIC_GNSS_FIX_LOST_SEC
+	int "Forget the GNSS position after this long without a fix"
+	default 900
+	range 5 86400
+	help
+	  With no new fix for this long -- the receiver lost lock, or went
+	  silent -- the GNSS position is dropped instead of being advertised
+	  on with a current timestamp. 900 s is the reference's longest search
+	  before it gives up and clears the position (GPSUpdateScheduling).
+
 if MESHTASTIC_GNSS_AUTO_SEND
 
 config MESHTASTIC_GNSS_SEND_WORK_STACK_SIZE

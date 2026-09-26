@@ -16,6 +16,9 @@ common:
     # with the 6 h stationary floor on, every gate test here would be pinning
     # the floor instead of the gate. The floor is tested in tests/position.
     - CONFIG_MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC=0
+    # Shrunk from 900 s so test_a_lost_fix_is_forgotten can wait it out. Every
+    # other test keeps the emulator publishing, which re-arms it.
+    - CONFIG_MESHTASTIC_GNSS_FIX_LOST_SEC=10
 tests:
   # Send-dominated: the retry window is the same size, so the send interval is
   # what the gate expresses. This is the shape of the shipped defaults (300 s

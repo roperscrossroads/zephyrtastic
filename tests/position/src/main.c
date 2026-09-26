@@ -999,3 +999,27 @@ ZTEST(position, test_a_request_carrying_a_position_is_also_a_position)
 	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_NET,
 		      "its time is mesh time");
 }
+
+/* `time` is the clock at send, but only a clock worth vouching for: NTP or GPS.
+ * Unset, mesh-relayed (NET) or restored-from-flash time goes out as 0, as the
+ * reference strips it (allocPositionPacket). */
+ZTEST(position, test_position_time_needs_an_ntp_or_better_clock)
+{
+	meshtastic_Position fixed = fix_at(515000000, -1000000);
+	meshtastic_Position got;
+	struct meshtastic_packet pkt;
+
+	meshtastic_position_set_fixed(&fixed);
+	zassert_true(take_position_frame(1000U, &pkt, &got), "");
+	zassert_equal(got.time, 0U, "no clock: no time");
+
+	meshtastic_clock_set_epoch(PHONE_EPOCH, MESHTASTIC_CLOCK_QUALITY_NET);
+	meshtastic_position_set_fixed(&fixed);
+	zassert_true(take_position_frame(1000U, &pkt, &got), "");
+	zassert_equal(got.time, 0U, "mesh-relayed time is not ours to repeat");
+
+	meshtastic_clock_set_epoch(PHONE_EPOCH, MESHTASTIC_CLOCK_QUALITY_NTP);
+	meshtastic_position_set_fixed(&fixed);
+	zassert_true(take_position_frame(1000U, &pkt, &got), "");
+	zassert_within(got.time, PHONE_EPOCH, 3U, "an NTP-quality clock is sent");
+}
