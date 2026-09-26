@@ -17,17 +17,6 @@ extern "C" {
 #endif
 
 /**
- * @brief Send the latest GNSS position if one is available.
- *
- * @param dest Destination node ID, or @ref MESHTASTIC_NODE_BROADCAST.
- *
- * @retval 0        Success.
- * @retval -ENODATA No GNSS fix is available yet.
- * @retval -ENOMEM  Protobuf encoding failed.
- * @retval -EIO     Crypto or radio transmission failed.
- * @retval -ENOTSUP GNSS support is not compiled in.
- */
-/**
  * @brief What the GNSS receiver is doing, for `meshtastic gnss status`.
  *
  * Read-only. Ages are milliseconds since the event, or -1 if it never
@@ -59,6 +48,19 @@ struct meshtastic_gnss_status {
  */
 int meshtastic_gnss_status_get(struct meshtastic_gnss_status *out);
 
+/**
+ * @brief Send our current position now (manual send: blocking, not airtime-gated).
+ *
+ * The position is the fixed one if set, else the latest from any source (GNSS or
+ * the phone), masked to the precision of the channel it goes out on.
+ *
+ * @param dest Destination node ID, or @ref MESHTASTIC_NODE_BROADCAST.
+ *
+ * @retval 0        Success.
+ * @retval -ENODATA No position is available, or the channel shares none.
+ * @retval -ENOMEM  Protobuf encoding failed.
+ * @retval -EIO     Crypto or radio transmission failed.
+ */
 int meshtastic_send_position(uint32_t dest);
 
 /**

@@ -7035,12 +7035,14 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #endif
 #if defined(CONFIG_MESHTASTIC_GNSS)
 	SHELL_CMD(gnss, &meshtastic_gnss_cmds, SHELL_HELP("GNSS commands.", NULL), NULL),
+#endif
+	/* Not a GNSS command: it used to sit inside that guard, so a GNSS=n build
+	 * lost it and left cmd_netlog an unused static under -Werror. */
 #if defined(CONFIG_LOG_BACKEND_NET) && !defined(CONFIG_LOG_BACKEND_NET_AUTOSTART)
 	SHELL_CMD(netlog, NULL,
 		  SHELL_HELP("Start the remote syslog backend for this boot.",
 			     "netlog on"),
 		  cmd_netlog),
-#endif
 #endif
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 	SHELL_CMD(airtime, NULL,
