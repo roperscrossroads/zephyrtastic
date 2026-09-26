@@ -605,6 +605,85 @@ static int scanner_init(void)
 	return 0;
 }
 
+#if defined(CONFIG_MESHTASTIC_SCANNER_AUTOSTART) && CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESET < 0
+/* Case-insensitive match of the token [tok, tok+len) against a whole name. */
+static bool name_matches(const char *tok, size_t len, const char *name)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		char a = tok[i];
+		char b = name[i];
+
+		if (b == '\0') {
+			return false;
+		}
+		if (a >= 'A' && a <= 'Z') {
+			a = (char)(a - 'A' + 'a');
+		}
+		if (b >= 'A' && b <= 'Z') {
+			b = (char)(b - 'A' + 'a');
+		}
+		if (a != b) {
+			return false;
+		}
+	}
+	return name[i] == '\0';
+}
+
+/* A survey's preset list from the build (CONFIG_..._AUTOSTART_PRESETS). Names
+ * resolve against scan_presets_all, not a general preset parser: a name the
+ * scanner would not visit is exactly the one to refuse here. */
+static void autostart_apply_list(const char *spec)
+{
+	meshtastic_Config_LoRaConfig_ModemPreset list[MESHTASTIC_SCANNER_MAX_PRESETS];
+	size_t n = 0U;
+	const char *p = spec;
+
+	while (*p != '\0') {
+		const char *tok;
+		size_t len;
+		bool found = false;
+
+		while (*p == ' ' || *p == ',') {
+			p++;
+		}
+		tok = p;
+		while (*p != '\0' && *p != ' ' && *p != ',') {
+			p++;
+		}
+		len = (size_t)(p - tok);
+		if (len == 0U) {
+			continue;
+		}
+		for (size_t i = 0; i < SCAN_N_ALL; i++) {
+			if (name_matches(tok, len,
+					 meshtastic_preset_display_name(scan_presets_all[i], true))) {
+				found = true;
+				if (n < ARRAY_SIZE(list)) {
+					list[n++] = scan_presets_all[i];
+				}
+				break;
+			}
+		}
+		if (!found) {
+			LOG_WRN("scanner: autostart preset '%.*s' is not a scanned preset — skipped",
+				(int)len, tok);
+		}
+	}
+
+	if (n == 0U) {
+		if (spec[0] != '\0') {
+			LOG_WRN("scanner: no autostart preset matched — sweeping all");
+		}
+		return;
+	}
+	if (meshtastic_scanner_set_presets(list, n) != 0) {
+		LOG_WRN("scanner: autostart preset list rejected — sweeping all");
+	}
+}
+#endif
+
 void meshtastic_scanner_autostart(void)
 {
 #if defined(CONFIG_MESHTASTIC_SCANNER_AUTOSTART)
@@ -621,6 +700,8 @@ void meshtastic_scanner_autostart(void)
 		LOG_WRN("scanner: autostart preset %d rejected — sweeping all",
 			CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESET);
 	}
+#else
+	autostart_apply_list(CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESETS);
 #endif
 	if (meshtastic_scanner_start() == 0) {
 		LOG_INF("scanner: autostarted — this node is an instrument, not a participant");

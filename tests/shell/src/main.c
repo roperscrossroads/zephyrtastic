@@ -1242,4 +1242,27 @@ ZTEST(meshtastic_shell, test_scanner_autostart_b_gate_can_be_reopened)
 	zassert_ok(run_cmd("meshtastic scan status", &out), "scan status failed");
 	zassert_not_null(strstr(out, "allowed"), "and say so");
 }
+
+/*
+ * A survey's preset list comes from the build, because the runtime list is
+ * RAM-only and a power-cycled listener must resume the SAME survey. The
+ * scenario (testcase.yaml, scanner_autostart_list) spells the names in mixed
+ * case with a bogus one in the middle: matching is case-insensitive, and an
+ * unknown name is skipped rather than failing the whole list.
+ */
+ZTEST(meshtastic_shell, test_scanner_autostart_c_list_from_build)
+{
+	meshtastic_Config_LoRaConfig_ModemPreset got[MESHTASTIC_SCANNER_MAX_PRESETS];
+	int n;
+
+	if (CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESETS[0] == '\0') {
+		ztest_test_skip();
+	}
+
+	n = meshtastic_scanner_get_presets(got, ARRAY_SIZE(got));
+	zassert_equal(n, 3, "three names resolve, the bogus one is skipped (got %d)", n);
+	zassert_equal(got[0], meshtastic_Config_LoRaConfig_ModemPreset_LONG_TURBO);
+	zassert_equal(got[1], meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_TURBO);
+	zassert_equal(got[2], meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO);
+}
 #endif /* CONFIG_MESHTASTIC_SCANNER_AUTOSTART */

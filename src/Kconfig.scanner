@@ -105,6 +105,20 @@ config MESHTASTIC_SCANNER_AUTOSTART_PRESET
 
 	  -1 keeps the old behaviour (the full sweep).
 
+config MESHTASTIC_SCANNER_AUTOSTART_PRESETS
+	string "Presets to sweep at autostart (names, space-separated)"
+	default ""
+	depends on MESHTASTIC_SCANNER_AUTOSTART
+	help
+	  A survey's preset list, persisted the only way the scanner persists
+	  anything: at build time. Names as `meshtastic scan presets` prints them,
+	  e.g. "LongFast LongTurbo MediumFast MediumTurbo ShortTurbo".
+
+	  Only read when MESHTASTIC_SCANNER_AUTOSTART_PRESET is -1 (a single parked
+	  preset is a tap, and it wins). Empty means the full set. A name that does
+	  not match a scanned preset is logged and skipped; if none match, the node
+	  sweeps the full set and says so, rather than measuring nothing.
+
 config MESHTASTIC_SCANNER_STACK_SIZE
 	int "Sweep thread stack"
 	default 1536

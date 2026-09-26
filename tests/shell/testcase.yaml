@@ -45,6 +45,15 @@ tests:
       - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
       - CONFIG_MESHTASTIC_SCANNER_AUTOSTART=y
 
+  # The build-time survey list: mixed case, comma and space separators, and one
+  # name that is not a preset (skipped, the rest still apply).
+  meshtastic.shell.scanner_autostart_list.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SCANNER=y
+      - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
+      - CONFIG_MESHTASTIC_SCANNER_AUTOSTART=y
+      - CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESETS="longturbo, NotAPreset MediumTurbo,ShortTurbo"
+
   # `meshtastic rf`. native_sim has no board FEM override, so this scenario is
   # also the only place the "[--] not on this hardware" branch compiles AND runs
   # — on the bench boards that row is always the controllable one.
