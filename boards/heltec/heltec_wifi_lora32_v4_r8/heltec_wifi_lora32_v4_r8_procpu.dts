@@ -19,11 +19,26 @@
  */
 /dts-v1/;
 
-#include <espressif/esp32s3/esp32s3_wroom_n16r8.dtsi>
+#include <espressif/esp32s3/esp32s3.dtsi>
 #include "../heltec_wifi_lora32_v4/heltec_wifi_lora32_v4-pinctrl.dtsi"
 #include <zephyr/dt-bindings/pwm/pwm.h>
 #include "../heltec_wifi_lora32_v4/heltec_partitions_16M.dtsi"
 #include "../heltec_wifi_lora32_v4/heltec_wifi_lora32_v4-common.dtsi"
+
+/*
+ * The module's two facts, stated by the board. Until upstream Zephyr 8094e61
+ * (2026-08-23) these came from espressif/esp32s3/esp32s3_wroom_n16r8.dtsi, which
+ * that commit deleted along with every per-module dtsi. esp32s3.dtsi sets neither.
+ * PSRAM *mode* and speed are in Kconfig.defconfig; only the size is here.
+ */
+&flash0 {
+	reg = <0x0 DT_SIZE_M(16)>;
+	ranges = <0x0 0x0 DT_SIZE_M(16)>;
+};
+
+&psram0 {
+	size = <DT_SIZE_M(8)>;
+};
 
 / {
 	model = "Heltec WiFi LoRa 32 V4 R8 PROCPU";

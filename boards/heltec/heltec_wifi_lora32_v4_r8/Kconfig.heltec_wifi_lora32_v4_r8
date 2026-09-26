@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 config BOARD_HELTEC_WIFI_LORA32_V4_R8
-	# 16MB flash + 8MB octal PSRAM.
-	select SOC_ESP32S3_WROOM_N16R8
+	# 16MB flash + 8MB octal PSRAM. The plain SoC symbol, not the retired module one
+	# (SOC_ESP32S3_WROOM_N16R8): the sizes live in the board dts now.
+	select SOC_ESP32S3
 	select SOC_ESP32S3_PROCPU if BOARD_HELTEC_WIFI_LORA32_V4_R8_ESP32S3_PROCPU
 	select SOC_ESP32S3_APPCPU if BOARD_HELTEC_WIFI_LORA32_V4_R8_ESP32S3_APPCPU

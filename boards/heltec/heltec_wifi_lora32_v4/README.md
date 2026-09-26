@@ -241,7 +241,7 @@ Source: `firmware/variants/esp32s3/heltec_v4/variant.h`. ESP32-S3 GPIO→bank:
 ```
 boards/heltec/heltec_wifi_lora32_v4/
   board.yml                         # single image, no revisions
-  Kconfig* / board.cmake            # SoC select (WROOM_N16R2), boot, heap
+  Kconfig* / board.cmake            # SoC select (plain ESP32S3), boot, heap
   CMakeLists.txt                    # compiles the FEM init C file
   heltec_wifi_lora32_v4_fem.c       # runtime FEM detect + config + logs
   heltec_wifi_lora32_v4-pinctrl.dtsi   # radio SPI, OLED I2C, console + GPS uart1

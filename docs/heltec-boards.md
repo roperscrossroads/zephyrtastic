@@ -49,7 +49,7 @@ meaningful only if this firmware is ever built for a 433 MHz Heltec variant.
 | MT hardware model | **110** | **110** | **132** |
 | Zephyr target | `heltec_wifi_lora32_v4/esp32s3/procpu` | `heltec_wifi_lora32_v4/esp32s3/procpu` | `heltec_wifi_lora32_v4_r8/esp32s3/procpu` |
 | BOARD_TAG (flasher) | `heltec-v4` | `heltec-v4` | `heltec-v4r8` |
-| SoC dtsi | `esp32s3_wroom_n16r2` | `esp32s3_wroom_n16r2` | `esp32s3_wroom_n16r8` |
+| SoC dtsi | `esp32s3.dtsi` + board-stated 16 MB flash, 2 MB PSRAM | same | `esp32s3.dtsi` + board-stated 16 MB flash, **8 MB** PSRAM |
 | Partition table | `..._16M.dtsi` | `..._16M.dtsi` | `..._16M.dtsi` |
 | slot0 / slot1 | `0x20000` / `0x5F0000` | `0x20000` / `0x5F0000` | `0x20000` / `0x5F0000` |
 | NVS/storage | **`0xFB0000`** | **`0xFB0000`** | **`0xFB0000`** |
@@ -112,3 +112,10 @@ from the `psram0` devicetree node so it was correctly 8 MB, and the
 so it correctly resolved to `ESPPSRAM64` — but **`SPIRAM_MODE` has no guard
 against the devicetree at all**, so "octal part, quad mode" linked cleanly and
 produced a normal-looking image.
+
+**The size is now ours to state too.** Until 2026-09-26 the `psram0` size came from
+Espressif's per-module dtsi (`esp32s3_wroom_n16r2` / `n16r8`). Upstream Zephyr deleted those
+files (`8094e61`), so each board's `_procpu.dts` now sets `&flash0` and `&psram0` itself on
+top of the plain `esp32s3.dtsi`, and selects the plain `SOC_ESP32S3`. A wrong number there
+is the same class of silent mismatch as the mode was: `ESP_SPIRAM_SIZE` follows the node,
+whatever it says. The port was proven byte-identical apart from the build stamp.
