@@ -155,6 +155,23 @@ static void set_smart(bool enabled, uint32_t distance_m, uint32_t min_interval_s
 	meshtastic_position_config_changed();
 }
 
+#define SEED_FLAGS                                                                                 \
+	(meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE |                                 \
+	 meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE_MSL |                             \
+	 meshtastic_Config_PositionConfig_PositionFlags_SPEED |                                    \
+	 meshtastic_Config_PositionConfig_PositionFlags_HEADING |                                  \
+	 meshtastic_Config_PositionConfig_PositionFlags_DOP |                                      \
+	 meshtastic_Config_PositionConfig_PositionFlags_SATINVIEW)
+
+static void set_flags(uint32_t flags)
+{
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
+	cfg.payload_variant.position.position_flags = flags;
+	zassert_ok(meshtastic_config_store_set_config(&cfg));
+}
+
 static void set_role(meshtastic_Config_DeviceConfig_Role role)
 {
 	meshtastic_Config cfg;
@@ -175,6 +192,7 @@ static void position_before(void *fixture)
 	meshtastic_position_test_reset();
 	(void)meshtastic_position_set_broadcast_secs(0U);
 	set_smart(true, 100U, 300U); /* the seed: the reference's defaults */
+	set_flags(SEED_FLAGS);
 	set_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 	meshtastic_position_test_reset();
 	meshtastic_clock_test_reset();
@@ -1022,4 +1040,130 @@ ZTEST(position, test_position_time_needs_an_ntp_or_better_clock)
 	meshtastic_position_set_fixed(&fixed);
 	zassert_true(take_position_frame(1000U, &pkt, &got), "");
 	zassert_within(got.time, PHONE_EPOCH, 3U, "an NTP-quality clock is sent");
+}
+
+/* ---- position_flags: which optional fields go out ------------------------------- */
+
+/* A phone fix carrying every field the flags can select, each a distinct value. */
+static meshtastic_Position rich_fix(void)
+{
+	meshtastic_Position pos = phone_fix();
+
+	pos.has_altitude = true;
+	pos.altitude = 101;
+	pos.has_altitude_hae = true;
+	pos.altitude_hae = 149;
+	pos.has_altitude_geoidal_separation = true;
+	pos.altitude_geoidal_separation = 48;
+	pos.PDOP = 170;
+	pos.HDOP = 120;
+	pos.VDOP = 130;
+	pos.sats_in_view = 9;
+	pos.timestamp = PHONE_EPOCH - 5U;
+	pos.has_ground_speed = true;
+	pos.ground_speed = 7;
+	pos.has_ground_track = true;
+	pos.ground_track = 12340;
+	pos.fix_quality = 1;
+	pos.fix_type = 3;
+	return pos;
+}
+
+static meshtastic_Position broadcast_with_flags(uint32_t flags)
+{
+	meshtastic_Position pos = rich_fix();
+	meshtastic_Position got;
+	struct meshtastic_packet pkt;
+
+	set_flags(flags);
+	phone_send_position(me, me, &pos);
+	zassert_true(take_position_frame(1000U, &pkt, &got), "the first position is announced");
+	zassert_equal(pkt.to, MESHTASTIC_NODE_BROADCAST, "");
+	zassert_true(got.has_latitude_i && got.has_longitude_i, "lat/lon always");
+	zassert_equal(got.precision_bits, PRECISION, "precision always");
+	zassert_equal(got.location_source, meshtastic_Position_LocSource_LOC_EXTERNAL,
+		      "source always");
+	zassert_equal(got.fix_quality, 0U, "never flag-selected, never sent");
+	zassert_equal(got.fix_type, 0U, "");
+	return got;
+}
+
+/* The reference's default: ALTITUDE|ALTITUDE_MSL|SPEED|HEADING|DOP|SATINVIEW. */
+ZTEST(position, test_default_flags_select_the_reference_default_fields)
+{
+	meshtastic_Position got = broadcast_with_flags(SEED_FLAGS);
+
+	zassert_true(got.has_altitude && got.altitude == 101, "MSL altitude");
+	zassert_false(got.has_altitude_hae, "not HAE when MSL is asked for");
+	zassert_false(got.has_altitude_geoidal_separation, "");
+	zassert_equal(got.PDOP, 170U, "DOP without HVDOP is PDOP");
+	zassert_equal(got.HDOP, 0U, "");
+	zassert_equal(got.sats_in_view, 9U, "");
+	zassert_true(got.has_ground_speed && got.ground_speed == 7, "");
+	zassert_true(got.has_ground_track && got.ground_track == 12340, "");
+	zassert_equal(got.timestamp, 0U, "TIMESTAMP not asked for");
+	zassert_equal(got.seq_number, 0U, "SEQ_NO not asked for");
+}
+
+ZTEST(position, test_zero_flags_send_only_the_unconditional_fields)
+{
+	meshtastic_Position got = broadcast_with_flags(0U);
+
+	zassert_false(got.has_altitude || got.has_altitude_hae, "");
+	zassert_equal(got.PDOP + got.HDOP + got.VDOP, 0U, "");
+	zassert_equal(got.sats_in_view, 0U, "");
+	zassert_false(got.has_ground_speed || got.has_ground_track, "");
+}
+
+ZTEST(position, test_the_other_flag_branches)
+{
+	meshtastic_Position got = broadcast_with_flags(
+		meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE |
+		meshtastic_Config_PositionConfig_PositionFlags_GEOIDAL_SEPARATION |
+		meshtastic_Config_PositionConfig_PositionFlags_DOP |
+		meshtastic_Config_PositionConfig_PositionFlags_HVDOP |
+		meshtastic_Config_PositionConfig_PositionFlags_TIMESTAMP |
+		meshtastic_Config_PositionConfig_PositionFlags_SEQ_NO);
+
+	zassert_false(got.has_altitude, "ALTITUDE without MSL is HAE...");
+	zassert_true(got.has_altitude_hae && got.altitude_hae == 149, "");
+	zassert_true(got.has_altitude_geoidal_separation && got.altitude_geoidal_separation == 48,
+		     "");
+	zassert_equal(got.HDOP, 120U, "HVDOP: HDOP and VDOP");
+	zassert_equal(got.VDOP, 130U, "");
+	zassert_equal(got.PDOP, 0U, "... not PDOP");
+	zassert_equal(got.timestamp, PHONE_EPOCH - 5U, "");
+	zassert_true(got.seq_number != 0U, "");
+	zassert_equal(got.sats_in_view, 0U, "");
+}
+
+/* A node flashed from a build that never read these fields carries them as
+ * zeros. A position section nobody ever wrote (no write-stamp) follows the
+ * seed after the load; a written one keeps what was written, 0 included. */
+ZTEST(position, test_unstamped_section_follows_the_seed_after_a_load)
+{
+	uint8_t rec[256];
+	int rec_len;
+	meshtastic_Config cfg;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
+	cfg.payload_variant.position.position_flags = 0U;
+	cfg.payload_variant.position.position_broadcast_smart_enabled = false;
+	zassert_ok(meshtastic_config_store_set_config(&cfg));
+	rec_len = meshtastic_config_store_setting_get("config/position", rec, sizeof(rec));
+	zassert_true(rec_len > 0, "record encode (%d)", rec_len);
+
+	/* The load on an upgraded node: the zeroed record lands, its stamp absent. */
+	zassert_ok(meshtastic_config_store_setting_set("config/position", rec, (size_t)rec_len));
+	zassert_ok(meshtastic_config_store_setting_set("hlc/config/position", rec, 0U));
+	zassert_ok(meshtastic_config_store_apply_core());
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
+	zassert_equal(cfg.payload_variant.position.position_flags, SEED_FLAGS, "seeded");
+	zassert_true(cfg.payload_variant.position.position_broadcast_smart_enabled, "seeded");
+
+	/* Written (stamped) zeros survive the same apply. */
+	set_flags(0U);
+	zassert_ok(meshtastic_config_store_apply_core());
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
+	zassert_equal(cfg.payload_variant.position.position_flags, 0U, "a written 0 stays 0");
 }

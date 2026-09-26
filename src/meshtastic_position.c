@@ -241,11 +241,82 @@ int meshtastic_position_sanitise_tx(meshtastic_MeshPacket *mesh)
 	return 0;
 }
 
+/* PositionConfig.position_flags -> the outgoing Position (reference
+ * allocPositionPacket). Unconditional: lat/lon (masked by the caller), time,
+ * location_source, precision_bits. Everything else only if its flag is set:
+ *   ALTITUDE          altitude (with ALTITUDE_MSL) else altitude_hae;
+ *                     GEOIDAL_SEPARATION adds altitude_geoidal_separation
+ *   DOP               HDOP + VDOP (with HVDOP) else PDOP
+ *   SATINVIEW / TIMESTAMP / SEQ_NO / HEADING / SPEED  the field of that name
+ * Nothing else -- fix_quality, fix_type, next_update, altitude_source -- goes out,
+ * as in the reference. A fixed position sends LOC_MANUAL. */
+static void position_apply_flags(const meshtastic_Position *src, uint32_t flags,
+				 meshtastic_Position *out)
+{
+	*out = (meshtastic_Position)meshtastic_Position_init_zero;
+	out->has_latitude_i = src->has_latitude_i;
+	out->latitude_i = src->latitude_i;
+	out->has_longitude_i = src->has_longitude_i;
+	out->longitude_i = src->longitude_i;
+	out->location_source = src->location_source;
+
+	if ((flags & meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE) != 0U) {
+		if ((flags & meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE_MSL) != 0U) {
+			out->has_altitude = src->has_altitude;
+			out->altitude = src->altitude;
+		} else {
+			out->has_altitude_hae = src->has_altitude_hae;
+			out->altitude_hae = src->altitude_hae;
+		}
+		if ((flags & meshtastic_Config_PositionConfig_PositionFlags_GEOIDAL_SEPARATION) != 0U) {
+			out->has_altitude_geoidal_separation = src->has_altitude_geoidal_separation;
+			out->altitude_geoidal_separation = src->altitude_geoidal_separation;
+		}
+	}
+	if ((flags & meshtastic_Config_PositionConfig_PositionFlags_DOP) != 0U) {
+		if ((flags & meshtastic_Config_PositionConfig_PositionFlags_HVDOP) != 0U) {
+			out->HDOP = src->HDOP;
+			out->VDOP = src->VDOP;
+		} else {
+			out->PDOP = src->PDOP;
+		}
+	}
+	if ((flags & meshtastic_Config_PositionConfig_PositionFlags_SATINVIEW) != 0U) {
+		out->sats_in_view = src->sats_in_view;
+	}
+	if ((flags & meshtastic_Config_PositionConfig_PositionFlags_TIMESTAMP) != 0U) {
+		out->timestamp = src->timestamp;
+	}
+	if ((flags & meshtastic_Config_PositionConfig_PositionFlags_SEQ_NO) != 0U) {
+		out->seq_number = src->seq_number;
+	}
+	if ((flags & meshtastic_Config_PositionConfig_PositionFlags_HEADING) != 0U) {
+		out->has_ground_track = src->has_ground_track;
+		out->ground_track = src->ground_track;
+	}
+	if ((flags & meshtastic_Config_PositionConfig_PositionFlags_SPEED) != 0U) {
+		out->has_ground_speed = src->has_ground_speed;
+		out->ground_speed = src->ground_speed;
+	}
+}
+
+static uint32_t position_flags(void)
+{
+	meshtastic_Config cfg;
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg) == 0 &&
+	    cfg.which_payload_variant == meshtastic_Config_position_tag) {
+		return cfg.payload_variant.position.position_flags;
+	}
+	return 0U;
+}
+
 static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want_response,
 				 uint32_t response_to_id, uint8_t *payload,
 				 struct meshtastic_packet *packet)
 {
 	meshtastic_Position position;
+	meshtastic_Position source;
 	pb_ostream_t stream;
 	uint32_t seq;
 	uint8_t send_index;
@@ -272,7 +343,7 @@ static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want
 	}
 
 	k_mutex_lock(&pos_lock, K_FOREVER);
-	if (!select_position_locked(&position)) {
+	if (!select_position_locked(&source)) {
 		k_mutex_unlock(&pos_lock);
 		return -ENODATA;
 	}
@@ -280,7 +351,8 @@ static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want
 	seq = pos_state.seq;
 	k_mutex_unlock(&pos_lock);
 
-	position.seq_number = seq;
+	source.seq_number = seq;
+	position_apply_flags(&source, position_flags(), &position);
 	/* The clock at send, refreshed every emission -- but only a clock good
 	 * enough to vouch for: NTP (phone/operator) or GPS. Below that -- unset,
 	 * mesh-relayed, or restored from flash -- the reference strips it to 0

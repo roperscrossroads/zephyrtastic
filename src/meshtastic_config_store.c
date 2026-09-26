@@ -30,6 +30,8 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
+static void seed_position_broadcast(void);
+
 #define STORE_RECORD_VERSION     1U
 #define STORE_RECORD_VERSION_MIN 1U /* oldest record version still accepted on load */
 #define STORE_RECORD_HEADER_LEN  4U
@@ -575,12 +577,7 @@ static void seed_config_defaults(const struct meshtastic_config *cfg)
 		IS_ENABLED(CONFIG_MESHTASTIC_GNSS)
 			? meshtastic_Config_PositionConfig_GpsMode_ENABLED
 			: meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT;
-	/* The reference's installDefaultConfig (NodeDB.cpp): smart broadcast on,
-	 * 100 m, 300 s (agents-t2hb.3). A stored record keeps whatever it holds;
-	 * 0 in the two numbers means the same defaults anyway. */
-	store.configs[idx].payload_variant.position.position_broadcast_smart_enabled = true;
-	store.configs[idx].payload_variant.position.broadcast_smart_minimum_distance = 100U;
-	store.configs[idx].payload_variant.position.broadcast_smart_minimum_interval_secs = 300U;
+	seed_position_broadcast();
 
 	idx = index_for_config_tag(meshtastic_Config_lora_tag);
 	store.configs[idx].payload_variant.lora.use_preset = true;
@@ -636,6 +633,27 @@ static void seed_config_defaults(const struct meshtastic_config *cfg)
  * device metrics until the user enables them); this port's Kconfig default is
  * ON, and that is the one documented divergence -- flip the Kconfig for
  * parity. Intervals stay 0 and coalesce to the role-aware default at read. */
+/* The reference's installDefaultConfig (NodeDB.cpp) for the position fields
+ * this port consumes: smart broadcast on, 100 m, 300 s (agents-t2hb.3), and
+ * position_flags ALTITUDE|ALTITUDE_MSL|SPEED|HEADING|DOP|SATINVIEW. Caller
+ * holds the store lock (or is the single-threaded seed). */
+static void seed_position_broadcast(void)
+{
+	meshtastic_Config_PositionConfig *pc =
+		&store.configs[index_for_config_tag(meshtastic_Config_position_tag)]
+			 .payload_variant.position;
+
+	pc->position_broadcast_smart_enabled = true;
+	pc->broadcast_smart_minimum_distance = 100U;
+	pc->broadcast_smart_minimum_interval_secs = 300U;
+	pc->position_flags = meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE |
+			     meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE_MSL |
+			     meshtastic_Config_PositionConfig_PositionFlags_SPEED |
+			     meshtastic_Config_PositionConfig_PositionFlags_HEADING |
+			     meshtastic_Config_PositionConfig_PositionFlags_DOP |
+			     meshtastic_Config_PositionConfig_PositionFlags_SATINVIEW;
+}
+
 static void seed_telemetry_flags(void)
 {
 	int idx = index_for_module_tag(meshtastic_ModuleConfig_telemetry_tag);
@@ -804,6 +822,16 @@ int meshtastic_config_store_apply_core(void)
 	if (meshtastic_hlc_stamp_is_unset(
 		    &store.module_stamps[index_for_module_tag(meshtastic_ModuleConfig_telemetry_tag)])) {
 		seed_telemetry_flags();
+	}
+	/* Same for the position section: every node flashed before these fields
+	 * had a consumer carries them as zeros -- smart broadcast off and no
+	 * optional position fields at all, which would strip altitude and
+	 * satellites from the fleet's positions at the next flash. Only a section
+	 * nobody ever wrote follows the seed; a written 0 stays 0 (the
+	 * reference's meaning, and what the app shows). agents-t2hb.3 / flags. */
+	if (meshtastic_hlc_stamp_is_unset(
+		    &store.config_stamps[index_for_config_tag(meshtastic_Config_position_tag)])) {
+		seed_position_broadcast();
 	}
 
 	mt.long_name = store.long_name;
