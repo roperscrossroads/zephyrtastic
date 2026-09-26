@@ -15,4 +15,9 @@ config MESHTASTIC_SAMPLE_USB_PHONE_CDC
 	  and points zephyr,meshtastic-uart at it. Replaces
 	  CDC_ACM_SERIAL_INITIALIZE_AT_BOOT, which must be off.
 
+# Every debug/diagnostic default, with its cost per board. Must come before
+# Kconfig.zephyr: a `configdefault` only wins when it is parsed ahead of the
+# symbol's own defaults.
+rsource "Kconfig.debug"
+
 source "Kconfig.zephyr"
