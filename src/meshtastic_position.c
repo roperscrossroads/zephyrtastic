@@ -26,6 +26,9 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_modules.h"
 #include "meshtastic_position.h"
+#if defined(CONFIG_MESHTASTIC_POSITION_TO_PHONE)
+#include "meshtastic_phoneapi.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_GNSS)
 #include "meshtastic_gnss.h"
 #endif
@@ -325,45 +328,16 @@ static uint32_t position_flags(void)
 	return 0U;
 }
 
-static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want_response,
-				 uint32_t response_to_id, uint8_t *payload,
-				 struct meshtastic_packet *packet)
+/* Our position as it goes out at @p precision (1..32): the selected position,
+ * a fresh sequence number, position_flags applied, `time` from a trusted clock,
+ * the coordinates masked and the precision stamped. Shared by the mesh senders
+ * (at a channel's precision) and the phone push (at 32). */
+static int position_encode_at(uint32_t precision, uint8_t *payload, size_t *len)
 {
 	meshtastic_Position position;
 	meshtastic_Position source;
 	pb_ostream_t stream;
 	uint32_t seq;
-	uint8_t send_index;
-	uint32_t precision;
-
-	/* G-1: clamp the position to the precision of the channel it will actually
-	 * be transmitted on. The send path resolves the channel from (to, channel_index), so
-	 * mirror that exact resolution here: @p channel_index is the slot the packet will
-	 * carry -- MESHTASTIC_CHANNEL_INDEX_INVALID for the send default (primary), or the
-	 * request's slot for a reply, which set_reply_to installs at dispatch (POS-3: the
-	 * reply used to be masked for slot 0 and then relabelled by sanitise_tx with the
-	 * request channel's precision, claiming more precision than it carried). Computed
-	 * before touching pos_state so a sharing-disabled channel neither burns a sequence
-	 * number nor leaks. */
-	if (channel_index == MESHTASTIC_CHANNEL_INDEX_INVALID) {
-		if (dest == MESHTASTIC_NODE_BROADCAST) {
-			/* Our own broadcast goes on the position channel. */
-			if (!position_channel(&channel_index)) {
-				return -ENODATA;
-			}
-		} else {
-			channel_index = 0U;
-		}
-	}
-	send_index = meshtastic_channels_resolve_send_index(dest, channel_index, 0U);
-	precision = position_precision_for_channel(send_index);
-	if (precision == 0U) {
-		/* Sharing disabled / fail-closed on this channel: emit no position. */
-		return -ENODATA;
-	}
-	if (precision > 32U) {
-		precision = 32U;
-	}
 
 	k_mutex_lock(&pos_lock, K_FOREVER);
 	if (!select_position_locked(&source)) {
@@ -402,11 +376,58 @@ static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want
 		return -ENOMEM;
 	}
 
+	*len = stream.bytes_written;
+	return 0;
+}
+
+static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want_response,
+				 uint32_t response_to_id, uint8_t *payload,
+				 struct meshtastic_packet *packet)
+{
+	size_t len;
+	uint8_t send_index;
+	int ret;
+	uint32_t precision;
+
+	/* G-1: clamp the position to the precision of the channel it will actually
+	 * be transmitted on. The send path resolves the channel from (to, channel_index), so
+	 * mirror that exact resolution here: @p channel_index is the slot the packet will
+	 * carry -- MESHTASTIC_CHANNEL_INDEX_INVALID for the send default (primary), or the
+	 * request's slot for a reply, which set_reply_to installs at dispatch (POS-3: the
+	 * reply used to be masked for slot 0 and then relabelled by sanitise_tx with the
+	 * request channel's precision, claiming more precision than it carried). Computed
+	 * before touching pos_state so a sharing-disabled channel neither burns a sequence
+	 * number nor leaks. */
+	if (channel_index == MESHTASTIC_CHANNEL_INDEX_INVALID) {
+		if (dest == MESHTASTIC_NODE_BROADCAST) {
+			/* Our own broadcast goes on the position channel. */
+			if (!position_channel(&channel_index)) {
+				return -ENODATA;
+			}
+		} else {
+			channel_index = 0U;
+		}
+	}
+	send_index = meshtastic_channels_resolve_send_index(dest, channel_index, 0U);
+	precision = position_precision_for_channel(send_index);
+	if (precision == 0U) {
+		/* Sharing disabled / fail-closed on this channel: emit no position. */
+		return -ENODATA;
+	}
+	if (precision > 32U) {
+		precision = 32U;
+	}
+
+	ret = position_encode_at(precision, payload, &len);
+	if (ret < 0) {
+		return ret;
+	}
+
 	*packet = (struct meshtastic_packet){
 		.to = dest,
 		.portnum = MESHTASTIC_PORT_POSITION,
 		.payload = payload,
-		.payload_len = stream.bytes_written,
+		.payload_len = len,
 		.want_response = want_response,
 		.request_id = response_to_id,
 		.channel_index = send_index,
@@ -414,6 +435,54 @@ static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want
 
 	return 0;
 }
+
+#if defined(CONFIG_MESHTASTIC_POSITION_TO_PHONE)
+/* POS-5, the reference's sendOurPositionToPhone: our own position, at full
+ * precision, straight to the attached phone transports -- the local-only path
+ * LocalStats uses (meshtastic_phoneapi_on_packet), so it never reaches the radio
+ * and ignores channel sharing. POSITION frames are "droppable samples" in the
+ * phone queue, so a phone that is not reading cannot starve real traffic. The
+ * reference also waits for an empty queue; the droppable rank does that job
+ * here. Runs while a position exists and stops by itself when there is none;
+ * position_phone_kick() restarts it when one appears. */
+static void phone_push_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(phone_push_work, phone_push_fn);
+
+static void phone_push_fn(struct k_work *work)
+{
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	struct meshtastic_packet pkt = {0};
+	size_t len;
+
+	ARG_UNUSED(work);
+
+	if (position_encode_at(32U, payload, &len) < 0) {
+		return;
+	}
+	pkt.portnum = MESHTASTIC_PORT_POSITION;
+	pkt.from = meshtastic_get_node_id();
+	pkt.to = MESHTASTIC_NODE_BROADCAST;
+	pkt.id = meshtastic_allocate_packet_id();
+	pkt.payload = payload;
+	pkt.payload_len = (uint16_t)len;
+	meshtastic_phoneapi_on_packet(&pkt, NULL);
+
+	k_work_reschedule(&phone_push_work, K_SECONDS(CONFIG_MESHTASTIC_POSITION_TO_PHONE_SEC));
+}
+
+/* A position just appeared: push it now if the cadence is not already running
+ * (the reference pushes on the first tick that has a valid position). */
+static void position_phone_kick(void)
+{
+	if (!k_work_delayable_is_pending(&phone_push_work)) {
+		k_work_reschedule(&phone_push_work, K_NO_WAIT);
+	}
+}
+#else
+static inline void position_phone_kick(void)
+{
+}
+#endif
 
 static int position_send(uint32_t dest, k_timeout_t wait)
 {
@@ -725,6 +794,7 @@ void meshtastic_position_set_current(const meshtastic_Position *position)
 	pos_state.current = *position;
 	pos_state.has_current = true;
 	k_mutex_unlock(&pos_lock);
+	position_phone_kick();
 }
 
 #if defined(CONFIG_ZTEST)
@@ -738,6 +808,9 @@ void meshtastic_position_test_reset(void)
 	pos_state.announce_now = false;
 	k_mutex_unlock(&pos_lock);
 	(void)k_work_cancel_delayable(&beacon_work);
+#if defined(CONFIG_MESHTASTIC_POSITION_TO_PHONE)
+	(void)k_work_cancel_delayable(&phone_push_work);
+#endif
 }
 #endif
 
@@ -827,6 +900,7 @@ void meshtastic_position_set_fixed(const meshtastic_Position *position)
 	pos_state.announce_now = true;
 	k_mutex_unlock(&pos_lock);
 	k_work_reschedule(&beacon_work, K_NO_WAIT);
+	position_phone_kick();
 }
 
 void meshtastic_position_clear_fixed(void)
@@ -865,6 +939,7 @@ static int position_restore_fixed(void)
 		pos.has_longitude_i ? pos.longitude_i : 0, pos.has_altitude ? pos.altitude : 0);
 
 	k_work_reschedule(&beacon_work, K_SECONDS(meshtastic_position_broadcast_secs()));
+	position_phone_kick();
 	return 0;
 }
 
@@ -1041,6 +1116,7 @@ bool meshtastic_position_handle_from_phone(const meshtastic_MeshPacket *mesh)
 	 * 30 s refreshes never push a broadcast back. */
 	if (adopted) {
 		k_work_reschedule(&beacon_work, K_NO_WAIT);
+		position_phone_kick();
 	}
 
 	LOG_DBG("Position from phone (to %s): lat=%d lon=%d time=%u",

@@ -1214,3 +1214,68 @@ ZTEST(position, test_broadcast_prefers_the_lowest_sharing_channel)
 	zassert_equal(pkt.channel_index, meshtastic_channels_primary_index(), "");
 	zassert_equal(got.precision_bits, PRECISION, "");
 }
+
+/* ---- our own position to the phone (POS-5) --------------------------------------- */
+
+/* The next POSITION_APP packet FROM US in the phone queue within @p ms. */
+static bool take_phone_position(uint32_t ms, meshtastic_Position *pos)
+{
+	int64_t deadline = k_uptime_get() + ms;
+	struct meshtastic_phoneapi_frame f;
+
+	while (k_uptime_get() < deadline) {
+		while (meshtastic_phoneapi_pop_frame(&phone, &f)) {
+			static meshtastic_FromRadio from;
+			pb_istream_t is = pb_istream_from_buffer(f.data, f.len);
+
+			from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+			if (!pb_decode(&is, meshtastic_FromRadio_fields, &from) ||
+			    from.which_payload_variant != meshtastic_FromRadio_packet_tag ||
+			    from.packet.which_payload_variant != meshtastic_MeshPacket_decoded_tag ||
+			    from.packet.decoded.portnum != meshtastic_PortNum_POSITION_APP ||
+			    from.packet.from != me) {
+				continue;
+			}
+			*pos = (meshtastic_Position)meshtastic_Position_init_zero;
+			is = pb_istream_from_buffer(from.packet.decoded.payload.bytes,
+						    from.packet.decoded.payload.size);
+			zassert_true(pb_decode(&is, meshtastic_Position_fields, pos), "");
+			return true;
+		}
+		k_msleep(20);
+	}
+	return false;
+}
+
+ZTEST(position, test_own_position_is_pushed_to_the_phone_at_full_precision)
+{
+	meshtastic_Position fixed = fix_at(PHONE_LAT, PHONE_LON);
+	meshtastic_Position got;
+	struct meshtastic_packet pkt;
+	int64_t start;
+
+	meshtastic_position_set_fixed(&fixed);
+	zassert_true(take_phone_position(1000U, &got), "pushed as soon as there is a position");
+	start = k_uptime_get();
+	zassert_equal(got.precision_bits, 32U, "at full precision -- it never leaves the node");
+	zassert_equal(got.latitude_i, PHONE_LAT, "unmasked");
+	zassert_equal(got.longitude_i, PHONE_LON, "");
+
+	zassert_true(take_phone_position(CONFIG_MESHTASTIC_POSITION_TO_PHONE_SEC * MSEC_PER_SEC +
+						 SLACK_MS, &got), "and again on the cadence");
+	zassert_within(k_uptime_get() - start, CONFIG_MESHTASTIC_POSITION_TO_PHONE_SEC * MSEC_PER_SEC,
+		       SLACK_MS, "");
+
+	/* The air saw the channel-masked broadcast only; nothing at 32 bits. */
+	while (take_position_frame(200U, &pkt, &got)) {
+		zassert_equal(got.precision_bits, PRECISION, "the phone copy never reaches the radio");
+	}
+}
+
+ZTEST(position, test_no_position_nothing_pushed_to_the_phone)
+{
+	meshtastic_Position got;
+
+	zassert_false(take_phone_position((CONFIG_MESHTASTIC_POSITION_TO_PHONE_SEC + 2) *
+						  MSEC_PER_SEC, &got), "");
+}

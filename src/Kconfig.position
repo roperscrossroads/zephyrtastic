@@ -41,6 +41,25 @@ config MESHTASTIC_POSITION_STATIONARY_FLOOR_SEC
 	  neighbour does not dedup the refresh away (agents-t2hb.3). 0 disables
 	  the floor.
 
+config MESHTASTIC_POSITION_TO_PHONE
+	bool "Push our own position to a connected phone periodically"
+	default y
+	depends on MESHTASTIC_PHONEAPI
+	help
+	  The reference's sendOurPositionToPhone (POS-5): our position, at full
+	  precision, handed to the phone every MESHTASTIC_POSITION_TO_PHONE_SEC --
+	  never to the mesh, so it costs no airtime and ignores channel sharing
+	  (mesh sharing is opt-in in 2.8; the local view should not go dark
+	  because of it). Same path as the LocalStats and DeviceMetrics pushes.
+
+config MESHTASTIC_POSITION_TO_PHONE_SEC
+	int "Own-position to-phone interval in seconds"
+	default 60
+	range 10 3600
+	depends on MESHTASTIC_POSITION_TO_PHONE
+	help
+	  The reference's sendToPhoneIntervalMs (60 s).
+
 config MESHTASTIC_POSITION_REPLY_SUPPRESS_SEC
 	int "Minimum seconds between Position want_response replies"
 	default 180

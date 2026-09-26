@@ -42,6 +42,11 @@ tests:
   meshtastic.variants.no_gnss.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_GNSS=n
+  # The own-position phone push off (POS-5, agents-t2hb): the stub kick must
+  # still compile and link.
+  meshtastic.variants.no_position_to_phone.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_POSITION_TO_PHONE=n
   meshtastic.variants.no_position.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_GNSS=n
