@@ -348,4 +348,47 @@ ZTEST(relay, test_existing_predicates_do_not_define_public_class)
 			  "a simple key must hash apart from the default key");
 }
 
+/* H30 in the translating mode: the channel hash is one byte, so a stranger's
+ * channel can collide with the one we read the far tier through. Here the
+ * stranger holds "LongFast" with the default key's bytes 0 and 1 swapped: the
+ * XOR of the key is unchanged, so the hash is 0x08 exactly like the public
+ * LongFast channel, but the key is different. Its frame, forwarded by the ear,
+ * must not surface as a message: decrypting with the wrong key yields bytes
+ * that must fail to parse as Data. AES-CTR has no MAC, so the parse is the only
+ * admission test the relay inherits from the router.
+ *
+ * One frame is one sample. A throwaway probe of 64 colliding frames (different
+ * ids and texts) delivered none, which bounds the admission rate below ~5% at
+ * 95% confidence (rule of three), not at zero. A relay that re-originates what
+ * it admits multiplies any leak onto a second tier, so the relay may want its
+ * own sanity check on top (e.g. valid UTF-8 text). */
+ZTEST(relay, test_colliding_foreign_channel_not_admitted)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint8_t stranger_psk[16];
+
+	memcpy(stranger_psk, meshtastic_default_psk, sizeof(stranger_psk));
+	stranger_psk[0] = meshtastic_default_psk[1];
+	stranger_psk[1] = meshtastic_default_psk[0];
+	zassert_false(memcmp(stranger_psk, meshtastic_default_psk, sizeof(stranger_psk)) == 0,
+		      "the stranger's key must differ from the default key");
+
+	set_slot(SPARE_SLOT, meshtastic_Channel_Role_SECONDARY, MESHTASTIC_CHANNEL_LONGFAST,
+		 stranger_psk, sizeof(stranger_psk));
+	zassert_equal(meshtastic_channels_get_hash(SPARE_SLOT), 0x08U,
+		      "the stranger's channel must collide with LongFast's hash");
+	build_far_text(SPARE_SLOT, 0x5104U, "not your channel", wire, &wire_len);
+
+	/* Now we hold the real public LongFast channel in that slot. */
+	set_default_slot(SPARE_SLOT, meshtastic_Channel_Role_SECONDARY,
+			 MESHTASTIC_CHANNEL_LONGFAST, 0x01U);
+	zassert_equal(meshtastic_channels_get_hash(SPARE_SLOT), 0x08U, "same hash");
+
+	ear_forwards(wire, wire_len);
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN,
+		      "a colliding stranger's frame surfaced as a message");
+	assert_not_relayed(0x5104U);
+}
+
 ZTEST_SUITE(relay, NULL, relay_setup, relay_before, relay_after, NULL);
