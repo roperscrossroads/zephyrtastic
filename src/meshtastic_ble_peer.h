@@ -199,6 +199,13 @@ struct bt_conn *meshtastic_ble_slot_conn(unsigned int index);
 /* Advertiser state, tracked in meshtastic_ble.c (a4it.2). */
 bool meshtastic_ble_adv_active(void);
 
+/* Stop the phone advert so its reserved connection object is free for a dial
+ * out. True if an advert was running and is now stopped. It re-arms itself
+ * after the dial (see meshtastic_ble.c); meshtastic_ble_adv_resume() is for a
+ * dial that could not even be started. */
+bool meshtastic_ble_adv_pause_for_dial(void);
+void meshtastic_ble_adv_resume(void);
+
 /**
  * @brief The name this node advertises: <prefix><owner short name>, or
  *        <prefix><node id suffix> when the short name is unset.

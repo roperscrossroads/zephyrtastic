@@ -636,6 +636,13 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 	if (err != 0U) {
 		LOG_WRN("BLE connection failed: 0x%02x", err);
+		/* A failed OUTBOUND attempt may have been made with the advert
+		 * paused (meshtastic_ble_adv_pause_for_dial()); no connection
+		 * came of it, so nothing else will re-arm it. Harmless when the
+		 * advert is already up (-EALREADY). */
+		if (IS_ENABLED(CONFIG_MESHTASTIC_BLE_ADV)) {
+			adv_restart_now();
+		}
 		return;
 	}
 
@@ -1047,6 +1054,39 @@ static int start_advertising(void)
 		k_mutex_unlock(&ble.lock);
 	}
 	return ret;
+}
+
+/*
+ * A connectable legacy advert keeps a connection object in reserve for the
+ * central that may answer it. On a two-slot build (every image but the
+ * courier) that reservation plus one link already in fills the pool, so a dial
+ * OUT fails with -ENOMEM on every attempt: rzr5 on 2026-09-26, kit1 linked in,
+ * 1516 failed dials in two minutes. The peer central calls this on -ENOMEM to
+ * release the reservation and dials again. The advert comes back by itself:
+ * connected() re-arms it when a slot is still free (and on a failed dial),
+ * disconnected() always does.
+ */
+bool meshtastic_ble_adv_pause_for_dial(void)
+{
+	bool was;
+
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	was = ble.adv_active;
+	ble.adv_active = false;
+	k_mutex_unlock(&ble.lock);
+	if (!was) {
+		return false;
+	}
+	/* A pending retry would take the reservation straight back. */
+	(void)k_work_cancel_delayable(&adv_restart_work);
+	return bt_le_adv_stop() == 0;
+}
+
+void meshtastic_ble_adv_resume(void)
+{
+	if (IS_ENABLED(CONFIG_MESHTASTIC_BLE_ADV)) {
+		adv_restart_now();
+	}
 }
 
 bool meshtastic_ble_is_connected(void)

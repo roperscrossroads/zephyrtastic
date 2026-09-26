@@ -710,6 +710,16 @@ static void peer_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type
 	struct bt_conn *conn = NULL;
 
 	err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN, BT_LE_CONN_PARAM_DEFAULT, &conn);
+	if (err == -ENOMEM && meshtastic_ble_adv_pause_for_dial()) {
+		/* The pool was full only because the phone advert holds a
+		 * connection object in reserve: one link in on a two-slot build.
+		 * Release it and dial again; the advert re-arms after the dial. */
+		err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN, BT_LE_CONN_PARAM_DEFAULT,
+					&conn);
+		if (err != 0) {
+			meshtastic_ble_adv_resume();
+		}
+	}
 	if (err != 0) {
 		uint32_t delay;
 
