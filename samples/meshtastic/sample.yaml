@@ -6,15 +6,17 @@ sample:
     greeting every 30 seconds.
 common:
   build_only: true
-  integration_platforms:
-    - twatch_s3/esp32s3/procpu
-    - heltec_wifi_lora32_v4/esp32s3/procpu
-    - arduino_giga_r1/stm32h747xx/m7
+  # No integration_platforms here: twister MERGES a common list into every scenario, and a
+  # board outside a scenario's platform_allow is then an error. Each scenario names its own.
 tests:
   sample.meshtastic:
     tags:
       - lora
       - meshtastic
+    integration_platforms:
+      - twatch_s3/esp32s3/procpu
+      - heltec_wifi_lora32_v4/esp32s3/procpu
+      - arduino_giga_r1/stm32h747xx/m7
     platform_allow:
       - twatch_s3/esp32s3/procpu
       - heltec_wifi_lora32_v4/esp32s3/procpu
@@ -32,6 +34,9 @@ tests:
       - lora
       - meshtastic
       - settings
+    integration_platforms:
+      - twatch_s3/esp32s3/procpu
+      - arduino_giga_r1/stm32h747xx/m7
     platform_allow:
       - twatch_s3/esp32s3/procpu
       - arduino_giga_r1/stm32h747xx/m7
@@ -52,6 +57,8 @@ tests:
       - wifi
       - ble
       - mqtt
+    integration_platforms:
+      - heltec_wifi_lora32_v4/esp32s3/procpu
     platform_allow:
       - heltec_wifi_lora32_v4/esp32s3/procpu
     extra_args:
@@ -95,9 +102,7 @@ tests:
   # change it here. Heltec scenarios are app builds (flash does not bind on a Heltec, and
   # dram0 is the same either way); XIAO scenarios are sysbuild, because the XIAO binds on
   # its MCUboot app slot and only a sysbuild measures that. ~3 min per image.
-  # Each scenario repeats its board as integration_platforms: the `common:` list above names
-  # other boards, and twister reports every scenario x board pair outside platform_allow as
-  # an error.
+  # Each scenario repeats its board as integration_platforms (see the note under common:).
   sample.meshtastic.fleet.c4:
     # Class 4, V4 cluster member (the plain-V4 image).
     tags: [meshtastic, fleet]
