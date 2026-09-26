@@ -171,7 +171,7 @@ ZTEST_SUITE(ble_sim, NULL, setup, NULL, after, NULL);
 /* Boot: the phone advertiser comes up — and with a restored peer-scan arm,
  * the scanner too. On a random identity, a scan restored before the advert
  * made the advert's start collide on the shared random address. */
-ZTEST(ble_sim, test_1_boot_advertises_and_restores_scan)
+ZTEST(ble_sim, test_01_boot_advertises_and_restores_scan)
 {
 	zassert_true(UNTIL(hci().adv_enabled, 2000), "phone advert never started");
 	zassert_true(meshtastic_ble_adv_starts() >= 1U, "adv_starts %u",
@@ -185,7 +185,7 @@ ZTEST(ble_sim, test_1_boot_advertises_and_restores_scan)
 }
 
 /* `blepeer connect` while the phone advert is up: the Heltec failure. */
-ZTEST(ble_sim, test_2_scan_starts_while_advertising)
+ZTEST(ble_sim, test_02_scan_starts_while_advertising)
 {
 	zassert_true(hci().adv_enabled);
 	CONNECT_OK();
@@ -195,7 +195,7 @@ ZTEST(ble_sim, test_2_scan_starts_while_advertising)
 }
 
 /* A matching advert makes the central stop scanning and initiate. */
-ZTEST(ble_sim, test_3_advert_starts_a_connect)
+ZTEST(ble_sim, test_03_advert_starts_a_connect)
 {
 	uint32_t before = hci().create_conn_count;
 
@@ -212,7 +212,7 @@ ZTEST(ble_sim, test_3_advert_starts_a_connect)
 /* The link comes up, but the remote has no peer service: discovery fails.
  * The link must be released and the hunt must resume — not held, not ready,
  * blocking every rescan. */
-ZTEST(ble_sim, test_4_failed_discovery_releases_the_link)
+ZTEST(ble_sim, test_04_failed_discovery_releases_the_link)
 {
 	uint32_t disc_before = hci().disconnect_cmds;
 
@@ -231,7 +231,7 @@ ZTEST(ble_sim, test_4_failed_discovery_releases_the_link)
 
 /* The remote connects and then never answers: bounded by the bring-up
  * watchdog, not by the remote's goodwill. */
-ZTEST(ble_sim, test_5_silent_peer_is_released)
+ZTEST(ble_sim, test_05_silent_peer_is_released)
 {
 	uint32_t disc_before = hci().disconnect_cmds;
 
@@ -247,7 +247,7 @@ ZTEST(ble_sim, test_5_silent_peer_is_released)
 
 /* Every connect attempt fails while the peer keeps advertising. The retry
  * must back off, not redial on every advert. */
-ZTEST(ble_sim, test_6_failed_connects_back_off)
+ZTEST(ble_sim, test_06_failed_connects_back_off)
 {
 	uint32_t before;
 	int64_t end;
@@ -271,7 +271,7 @@ ZTEST(ble_sim, test_6_failed_connects_back_off)
 }
 
 /* The controller refuses one scan start: it must be retried. */
-ZTEST(ble_sim, test_7_refused_scan_start_is_retried)
+ZTEST(ble_sim, test_07_refused_scan_start_is_retried)
 {
 	fake_hci_fail(BT_HCI_OP_LE_SET_SCAN_ENABLE, BT_HCI_ERR_CMD_DISALLOWED, 1U);
 	CONNECT_OK();
@@ -282,7 +282,7 @@ ZTEST(ble_sim, test_7_refused_scan_start_is_retried)
 /* A phone connects; the controller refuses the advert restart once. The
  * phone advert must come back without waiting for another connection event
  * (with one phone link held, there may never be another). */
-ZTEST(ble_sim, test_8_refused_advert_restart_is_retried)
+ZTEST(ble_sim, test_08_refused_advert_restart_is_retried)
 {
 	int handle;
 
@@ -296,7 +296,7 @@ ZTEST(ble_sim, test_8_refused_advert_restart_is_retried)
 /* The peer is already linked to us inbound (it dialled first). Its adverts
  * must not make us dial it again — the host refuses a second link to one
  * address, and an immediate rescan turns that into a spin. */
-ZTEST(ble_sim, test_9_inbound_peer_is_not_redialled)
+ZTEST(ble_sim, test_09_inbound_peer_is_not_redialled)
 {
 	uint32_t attempts, scans;
 	int handle = fake_hci_incoming_conn(&peer_addr);
@@ -314,4 +314,33 @@ ZTEST(ble_sim, test_9_inbound_peer_is_not_redialled)
 	zassert_equal(peer_stats().connects_attempted, attempts, "redialled an existing link");
 	zassert_true(hci().scan_enable_ok - scans <= 1U, "scanner churned %u times",
 		     hci().scan_enable_ok - scans);
+}
+
+/* One peer has already connected IN; now this node must dial OUT, while still
+ * advertising (one slot is free, so it re-armed the advert). Zephyr holds a
+ * connection object in reserve for a connectable advert, so on a two-slot
+ * build (every XIAO, Heltec classes 4/6) there was none left to dial with:
+ * bt_conn_le_create() answered -ENOMEM on every attempt. Found on the bench
+ * 2026-09-26: rzr5, kit1 linked in, 1516 failed dials to the courier in two
+ * minutes. The dial must get through, and the advert must come back if it
+ * does not end in a link. */
+ZTEST(ble_sim, test_10_dial_out_with_one_link_in)
+{
+	int handle = fake_hci_incoming_conn(&phone_addr);
+	uint32_t creates;
+
+	zassert_true(handle > 0);
+	zassert_true(UNTIL(hci().conns_active == 1U && hci().adv_enabled, 3000),
+		     "advert not re-armed after the inbound link");
+	creates = hci().create_conn_count;
+
+	CONNECT_OK();
+	zassert_true(UNTIL(hci().scan_enabled, 3000));
+	zassert_true(peer_advert(&peer_addr, PEER_NODE));
+	zassert_true(UNTIL(hci().initiating, 3000), "dial never reached the controller");
+	zassert_equal(hci().create_conn_count, creates + 1U);
+
+	/* The attempt fails: the advert must be restored for the free slot. */
+	(void)fake_hci_complete_create(BT_HCI_ERR_UNKNOWN_CONN_ID);
+	zassert_true(UNTIL(hci().adv_enabled, 3000), "advert not restored after the dial");
 }
