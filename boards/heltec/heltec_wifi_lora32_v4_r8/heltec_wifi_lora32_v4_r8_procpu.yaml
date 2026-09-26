@@ -1,0 +1,20 @@
+# Twister platform metadata. Without this file twister does not recognize the board at
+# all ("unrecognized platform"), so no sample.yaml scenario on it could ever run.
+identifier: heltec_wifi_lora32_v4_r8/esp32s3/procpu
+name: Heltec WiFi LoRa 32 (V4, R8 8 MB PSRAM) PROCPU
+type: mcu
+arch: xtensa
+toolchain:
+  - zephyr
+supported:
+  - gpio
+  - uart
+  - i2c
+  - spi
+  - watchdog
+  - entropy
+  - lora
+  - nvs
+  - display
+  - gnss
+vendor: heltec
