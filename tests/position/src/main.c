@@ -44,10 +44,13 @@
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_position.h"
+#include "meshtastic/portnums.pb.h"
 
 #define TEST_NODE_ID 0x0B0B0B0BU
 #define PEER_ID      0x0C0C0C0CU
 #define PRECISION    13U
+#define SECONDARY_SLOT      1U
+#define SECONDARY_PRECISION 20U
 
 /* Well past the clock's pre-2020 floor, and distinct per test where it matters. */
 #define PHONE_EPOCH 1790000000U
@@ -95,10 +98,39 @@ static void *position_setup(void)
 	zassert_ok(meshtastic_config_store_set_channel(primary, &ch), "");
 	zassert_ok(meshtastic_channels_set_slot(primary, &ch), "");
 
+	/* A second, private channel at a finer precision: a request arriving on it
+	 * must be answered at ITS precision (POS-3). Private key, so no public clamp. */
+	{
+		static const uint8_t psk[16] = {0x5a, 0x11, 0x7e, 0x02, 0x9c, 0x44, 0xd1, 0x38,
+						0x0f, 0xa6, 0x71, 0xe2, 0x53, 0x8b, 0x2d, 0xc4};
+		meshtastic_Channel sec = meshtastic_Channel_init_zero;
+
+		sec.index = SECONDARY_SLOT;
+		sec.role = meshtastic_Channel_Role_SECONDARY;
+		sec.has_settings = true;
+		strcpy(sec.settings.name, "fine");
+		memcpy(sec.settings.psk.bytes, psk, sizeof(psk));
+		sec.settings.psk.size = sizeof(psk);
+		sec.settings.has_module_settings = true;
+		sec.settings.module_settings.position_precision = SECONDARY_PRECISION;
+		zassert_ok(meshtastic_config_store_set_channel(SECONDARY_SLOT, &sec), "");
+		zassert_ok(meshtastic_channels_set_slot(SECONDARY_SLOT, &sec), "");
+	}
+
 	meshtastic_phoneapi_init(&phone, "phone", phone_q, PHONE_Q, NULL, NULL, NULL, NULL,
 				 &phone_to, &phone_from);
 	meshtastic_phoneapi_register(&phone);
 	return NULL;
+}
+
+/* Wait for the sim radio to be back in receive: a frame injected while it is
+ * still transmitting is refused. */
+static void wait_rx_armed(void)
+{
+	for (int i = 0; i < 200 && !lora_sim_rx_armed(lora_dev); i++) {
+		k_msleep(10);
+	}
+	zassert_true(lora_sim_rx_armed(lora_dev), "the sim radio never returned to receive");
 }
 
 static void drain_radio(void)
@@ -107,6 +139,7 @@ static void drain_radio(void)
 
 	while (lora_sim_take_tx(lora_dev, &f, K_MSEC(50)) == 0) {
 	}
+	wait_rx_armed();
 }
 
 /* Read-modify-write of the smart-broadcast trio (agents-t2hb.3). */
@@ -781,4 +814,188 @@ ZTEST(position, test_lost_and_found_is_exempt_from_the_floor)
 	phone_send_position(me, me, &a);
 	zassert_true(ms_to_next_broadcast(1000U) >= 0, "");
 	assert_next_broadcast_in(8U, "a lost node keeps its interval though it has not moved");
+}
+
+/* ---- answering a peer's request (POS-3, POS-11, POS-13) --------------------------- */
+
+static uint32_t req_id = 0x0B5E0001U;
+
+/* A peer's POSITION_APP want_response unicast to us, on @p slot, as it arrives
+ * over the air. @p pos NULL sends the Python CLI's empty Position. */
+static uint32_t peer_request(uint8_t slot, const meshtastic_Position *pos)
+{
+	static uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_Position empty = meshtastic_Position_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(payload, sizeof(payload));
+	uint32_t wire_len;
+	struct meshtastic_packet pkt;
+
+	zassert_true(pb_encode(&os, meshtastic_Position_fields, pos ? pos : &empty), "");
+	pkt = (struct meshtastic_packet){
+		.from = PEER_ID,
+		.to = me,
+		.id = req_id++,
+		.portnum = MESHTASTIC_PORT_POSITION,
+		.payload = payload,
+		.payload_len = os.bytes_written,
+		.want_response = true,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.channel_index = slot,
+	};
+	zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "");
+	wait_rx_armed();
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -60, 8), "");
+	return pkt.id;
+}
+
+/* The next frame to PEER_ID on @p port within @p ms, decoded; its payload is
+ * left in @p payload. */
+static bool take_frame_to_peer(uint32_t port, uint32_t ms, struct meshtastic_packet *pkt,
+			       uint8_t *payload, size_t payload_size)
+{
+	int64_t deadline = k_uptime_get() + ms;
+	struct lora_sim_frame f;
+
+	while (true) {
+		int64_t left = deadline - k_uptime_get();
+
+		if (left <= 0 || lora_sim_take_tx(lora_dev, &f, K_MSEC(left)) != 0) {
+			return false;
+		}
+		if (meshtastic_decode_wire_packet(f.data, f.len, 0, 0, pkt, payload,
+						  payload_size) == 0 &&
+		    pkt->to == PEER_ID && pkt->portnum == port) {
+			return true;
+		}
+	}
+}
+
+static bool take_position_reply(uint32_t ms, uint32_t request_id, meshtastic_Position *pos)
+{
+	static uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	struct meshtastic_packet pkt;
+	pb_istream_t is;
+
+	if (!take_frame_to_peer(MESHTASTIC_PORT_POSITION, ms, &pkt, payload, sizeof(payload))) {
+		return false;
+	}
+	zassert_equal(pkt.request_id, request_id, "the reply must name the request");
+	*pos = (meshtastic_Position)meshtastic_Position_init_zero;
+	is = pb_istream_from_buffer(pkt.payload, pkt.payload_len);
+	zassert_true(pb_decode(&is, meshtastic_Position_fields, pos), "");
+	return true;
+}
+
+/* -1 when no ROUTING frame to the peer arrives, else its error_reason. */
+static int take_routing_error(uint32_t ms, uint32_t request_id)
+{
+	static uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	struct meshtastic_packet pkt;
+	meshtastic_Routing r = meshtastic_Routing_init_zero;
+	pb_istream_t is;
+
+	if (!take_frame_to_peer(MESHTASTIC_PORT_ROUTING, ms, &pkt, payload, sizeof(payload))) {
+		return -1;
+	}
+	zassert_equal(pkt.request_id, request_id, "the NAK must name the request");
+	is = pb_istream_from_buffer(pkt.payload, pkt.payload_len);
+	zassert_true(pb_decode(&is, meshtastic_Routing_fields, &r), "");
+	return (int)r.error_reason;
+}
+
+static void have_a_fixed_position(void)
+{
+	meshtastic_Position fixed = fix_at(PHONE_LAT, PHONE_LON);
+
+	meshtastic_position_set_fixed(&fixed);
+	drain_radio(); /* its own announcement */
+}
+
+/* POS-3: the reply goes back on the request's channel and must be masked for it.
+ * It used to be masked for slot 0 (13 bits) and then relabelled 20 on the way out,
+ * so the app drew a 20-bit accuracy circle round a 13-bit cell. */
+ZTEST(position, test_reply_is_masked_for_the_request_channel)
+{
+	meshtastic_Position got;
+	int32_t lat = PHONE_LAT, lon = PHONE_LON;
+	uint32_t id;
+
+	have_a_fixed_position();
+	id = peer_request(SECONDARY_SLOT, NULL);
+	zassert_true(take_position_reply(2000U, id, &got), "a request with a position is answered");
+	zassert_equal(got.precision_bits, SECONDARY_PRECISION, "labelled for the request's channel");
+	meshtastic_position_truncate_latlon(&lat, &lon, SECONDARY_PRECISION);
+	zassert_equal(got.latitude_i, lat, "and actually masked to it, not to slot 0's 13 bits");
+	zassert_equal(got.longitude_i, lon, "");
+}
+
+/* Nothing to share: NO_RESPONSE, which the Python CLI's --request-position waits
+ * for (reference MeshModule: no module replied, none asked to ignore). */
+ZTEST(position, test_request_without_a_position_gets_no_response)
+{
+	uint32_t id = peer_request(meshtastic_channels_primary_index(), NULL);
+
+	zassert_equal(take_routing_error(2000U, id), meshtastic_Routing_Error_NO_RESPONSE, "");
+}
+
+/* POS-11: that unanswerable request must not use up the reply window. */
+ZTEST(position, test_an_unanswered_request_does_not_consume_the_window)
+{
+	meshtastic_Position got;
+	uint32_t id;
+
+	id = peer_request(meshtastic_channels_primary_index(), NULL);
+	zassert_equal(take_routing_error(2000U, id), meshtastic_Routing_Error_NO_RESPONSE, "");
+
+	have_a_fixed_position();
+	id = peer_request(meshtastic_channels_primary_index(), NULL);
+	zassert_true(take_position_reply(2000U, id, &got),
+		     "the next request, now answerable, is answered at once");
+}
+
+/* A second answerable request inside the window is IGNORED: no reply and no NAK
+ * (the reference sets ignoreRequest). */
+ZTEST(position, test_a_throttled_request_is_ignored_silently)
+{
+	meshtastic_Position got;
+	uint32_t id;
+
+	have_a_fixed_position();
+	id = peer_request(meshtastic_channels_primary_index(), NULL);
+	zassert_true(take_position_reply(2000U, id, &got), "");
+
+	id = peer_request(meshtastic_channels_primary_index(), NULL);
+	zassert_false(take_position_reply(1500U, id, &got), "throttled");
+	zassert_equal(take_routing_error(500U, id), -1, "and not NAKed");
+}
+
+ZTEST(position, test_lost_and_found_answers_every_request)
+{
+	meshtastic_Position got;
+	uint32_t id;
+
+	set_role(meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND);
+	have_a_fixed_position();
+	id = peer_request(meshtastic_channels_primary_index(), NULL);
+	zassert_true(take_position_reply(2000U, id, &got), "");
+	id = peer_request(meshtastic_channels_primary_index(), NULL);
+	zassert_true(take_position_reply(2000U, id, &got), "a lost node is never throttled");
+}
+
+/* POS-13: Android's request carries the requester's fix and time. A GNSS-sourced
+ * one on the primary is mesh time like any other position; it used to be dropped
+ * before decode because it was a request. */
+ZTEST(position, test_a_request_carrying_a_position_is_also_a_position)
+{
+	meshtastic_Position theirs = fix_at(PHONE_LAT, PHONE_LON);
+
+	theirs.time = PHONE_EPOCH;
+	theirs.location_source = meshtastic_Position_LocSource_LOC_INTERNAL;
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_NONE, "");
+	(void)peer_request(meshtastic_channels_primary_index(), &theirs);
+	k_msleep(500);
+	zassert_equal(meshtastic_clock_get_quality(), MESHTASTIC_CLOCK_QUALITY_NET,
+		      "its time is mesh time");
 }

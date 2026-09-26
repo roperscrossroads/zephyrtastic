@@ -5,6 +5,8 @@
 #include <errno.h>
 
 #include "meshtastic_modules.h"
+#include "meshtastic_packet.h" /* struct meshtastic_wire_header, for the router API */
+#include "meshtastic_router.h"
 #if defined(CONFIG_MESHTASTIC_POSITION)
 #include "meshtastic_position.h"
 #endif
@@ -77,6 +79,16 @@ void meshtastic_dispatch_modules(const struct meshtastic_packet *packet,
 		return;
 	}
 
+	if (ret == -ENODATA) {
+		/* The module has nothing to answer with (e.g. no position to share):
+		 * tell the requester, as the reference's MeshModule does when no
+		 * module replied and none asked to ignore the request. -ENOENT above
+		 * is the "ignore" (no NAK) answer. */
+		(void)meshtastic_routing_answer(packet->from, packet->id, packet->channel_index,
+						packet->hop_limit, packet->hop_start, packet->want_ack,
+						meshtastic_Routing_Error_NO_RESPONSE);
+		return;
+	}
 	if (ret < 0) {
 		LOG_WRN("Module '%s' alloc_reply failed (%d)", handler->name, ret);
 		return;

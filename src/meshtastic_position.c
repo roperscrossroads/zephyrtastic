@@ -241,8 +241,9 @@ int meshtastic_position_sanitise_tx(meshtastic_MeshPacket *mesh)
 	return 0;
 }
 
-static int position_build_packet(uint32_t dest, bool want_response, uint32_t response_to_id,
-				 uint8_t *payload, struct meshtastic_packet *packet)
+static int position_build_packet(uint32_t dest, uint8_t channel_index, bool want_response,
+				 uint32_t response_to_id, uint8_t *payload,
+				 struct meshtastic_packet *packet)
 {
 	meshtastic_Position position;
 	pb_ostream_t stream;
@@ -251,12 +252,16 @@ static int position_build_packet(uint32_t dest, bool want_response, uint32_t res
 	uint32_t precision;
 
 	/* G-1: clamp the position to the precision of the channel it will actually
-	 * be transmitted on. The send path resolves the channel from (to, channel_index)
-	 * and this packet carries channel_index 0 (the send default → primary; a reply's
-	 * channel is installed by set_reply_to at dispatch), so mirror that exact resolution
-	 * here. Computed before touching pos_state so a sharing-disabled channel neither burns
-	 * a sequence number nor leaks. */
-	send_index = meshtastic_channels_resolve_send_index(dest, 0U, 0U);
+	 * be transmitted on. The send path resolves the channel from (to, channel_index), so
+	 * mirror that exact resolution here: @p channel_index is the slot the packet will
+	 * carry -- MESHTASTIC_CHANNEL_INDEX_INVALID for the send default (primary), or the
+	 * request's slot for a reply, which set_reply_to installs at dispatch (POS-3: the
+	 * reply used to be masked for slot 0 and then relabelled by sanitise_tx with the
+	 * request channel's precision, claiming more precision than it carried). Computed
+	 * before touching pos_state so a sharing-disabled channel neither burns a sequence
+	 * number nor leaks. */
+	send_index = meshtastic_channels_resolve_send_index(
+		dest, (channel_index == MESHTASTIC_CHANNEL_INDEX_INVALID) ? 0U : channel_index, 0U);
 	precision = position_precision_for_channel(send_index);
 	if (precision == 0U) {
 		/* Sharing disabled / fail-closed on this channel: emit no position. */
@@ -315,7 +320,8 @@ static int position_send(uint32_t dest, k_timeout_t wait)
 	struct meshtastic_packet packet;
 	int ret;
 
-	ret = position_build_packet(dest, false, 0U, payload, &packet);
+	ret = position_build_packet(dest, MESHTASTIC_CHANNEL_INDEX_INVALID, false, 0U, payload,
+				    &packet);
 	if (ret < 0) {
 		return ret;
 	}
@@ -821,13 +827,12 @@ static void meshtastic_module_position_on_packet(const struct meshtastic_packet 
 		return;
 	}
 
-	/*
-	 * want_response Position packets are requests (often empty payload), not
-	 * position updates — stock clients must not treat them as lat/lon data.
-	 */
-	if (want_response) {
-		return;
-	}
+	/* POS-13: a want_response Position is a request, and it is ALSO a
+	 * position -- Android's "request position" carries the requester's own
+	 * fix and time. The reference's handleReceivedProtobuf takes both; the
+	 * reply is the module framework's business (alloc_reply). An empty request
+	 * (the Python CLI's) decodes to no time and is inert below. */
+	ARG_UNUSED(want_response);
 
 	if (!packet_decode_position(mesh ? mesh->decoded.payload.bytes : packet->payload,
 				    mesh ? mesh->decoded.payload.size : packet->payload_len,
@@ -1031,6 +1036,8 @@ static int meshtastic_module_position_alloc_reply(const struct meshtastic_packet
 						  struct meshtastic_packet *reply)
 {
 	static uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	meshtastic_Config cfg;
+	bool lost_and_found = false;
 	int64_t now_ms;
 	int ret;
 
@@ -1041,25 +1048,43 @@ static int meshtastic_module_position_alloc_reply(const struct meshtastic_packet
 		return -EINVAL;
 	}
 
+	if (meshtastic_config_store_get_config(meshtastic_Config_device_tag, &cfg) == 0 &&
+	    cfg.which_payload_variant == meshtastic_Config_device_tag) {
+		lost_and_found = cfg.payload_variant.device.role ==
+				 meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND;
+	}
+
+	/* Reference PositionModule::allocReply: one reply per window, except a
+	 * LOST_AND_FOUND node, which answers everyone. A throttled request is
+	 * IGNORED -- -ENOENT, no NAK (the reference sets ignoreRequest). */
 	now_ms = k_uptime_get();
 	k_mutex_lock(&pos_lock, K_FOREVER);
-	if (!interval_elapsed(pos_state.reply_time_valid, pos_state.last_reply_ms, now_ms,
+	if (!lost_and_found &&
+	    !interval_elapsed(pos_state.reply_time_valid, pos_state.last_reply_ms, now_ms,
 			      (int64_t)CONFIG_MESHTASTIC_POSITION_REPLY_SUPPRESS_SEC *
 				      MSEC_PER_SEC)) {
 		k_mutex_unlock(&pos_lock);
+		LOG_DBG("Position request from 0x%08x throttled", req->from);
 		return -ENOENT;
 	}
-	pos_state.reply_time_valid = true;
-	pos_state.last_reply_ms = now_ms;
 	k_mutex_unlock(&pos_lock);
 
-	ret = position_build_packet(req->from, false, req->id, payload, reply);
+	/* Built for the channel the reply goes out on -- the request's (POS-3). */
+	ret = position_build_packet(req->from, req->channel_index, false, req->id, payload,
+				    reply);
 	if (ret == -ENODATA) {
-		LOG_DBG("Position request from 0x%08x ignored (no position)", req->from);
-		return -ENOENT;
+		/* No position, or the channel shares none: the requester is told
+		 * NO_RESPONSE (reference MeshModule: no module replied and none asked
+		 * to ignore), and the window is NOT consumed -- it is stamped only for
+		 * a reply actually built (POS-11). */
+		LOG_DBG("Position request from 0x%08x: nothing to share", req->from);
+		return -ENODATA;
 	}
-
 	if (ret == 0) {
+		k_mutex_lock(&pos_lock, K_FOREVER);
+		pos_state.reply_time_valid = true;
+		pos_state.last_reply_ms = now_ms;
+		k_mutex_unlock(&pos_lock);
 		LOG_INF("Position request from 0x%08x, sending response", req->from);
 	}
 
