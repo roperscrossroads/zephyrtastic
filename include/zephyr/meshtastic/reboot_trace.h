@@ -85,8 +85,19 @@ struct meshtastic_reboot_trace {
  * Call immediately before sys_reboot(). Safe from any context; it only writes retained RAM.
  * @param reason enum meshtastic_reboot_reason
  * @param detail short free text, or NULL
+ *
+ * A no-op when CONFIG_MESHTASTIC_REBOOT_TRACE is off, so the sites that reboot need no guard.
  */
+#if defined(CONFIG_MESHTASTIC_REBOOT_TRACE)
 void meshtastic_reboot_trace_note(enum meshtastic_reboot_reason reason, const char *detail);
+#else
+static inline void meshtastic_reboot_trace_note(enum meshtastic_reboot_reason reason,
+						const char *detail)
+{
+	(void)reason;
+	(void)detail;
+}
+#endif
 
 /**
  * @brief Read the previous boot's record, if there is one.
