@@ -710,6 +710,11 @@ static void smpc_disconnected(struct bt_conn *conn, uint8_t reason)
 	k_sem_give(&smpc.ready_sem);
 }
 
+/* Named through the config: the queue's `thread` member is deprecated. */
+static const struct k_work_queue_config smpc_job_q_cfg = {
+	.name = "smpc_job",
+};
+
 BT_CONN_CB_DEFINE(smpc_conn_cb) = {
 	.connected = smpc_connected,
 	.disconnected = smpc_disconnected,
@@ -759,8 +764,7 @@ static int smpc_client_init(void)
 	smpc.sub.subscribe = smpc_subscribed_cb;
 
 	k_work_queue_start(&smpc_job_q, smpc_job_stack, K_THREAD_STACK_SIZEOF(smpc_job_stack),
-			   CONFIG_MESHTASTIC_SMP_CENTRAL_JOB_PRIORITY, NULL);
-	k_thread_name_set(&smpc_job_q.thread, "smpc_job");
+			   CONFIG_MESHTASTIC_SMP_CENTRAL_JOB_PRIORITY, &smpc_job_q_cfg);
 
 	smpc_client_ready = true;
 	return 0;
@@ -1499,8 +1503,11 @@ static int depot_rescan_locked(void)
 		}
 		old = depot_prev_row(prev, prev_n, &ent);
 		if (old == NULL) {
-			(void)snprintf(path, sizeof(path), "/depot/%s", ent.name);
-			if (meshtastic_smpc_local_image(path, &img) != 0) {
+			int n = snprintf(path, sizeof(path), "/depot/%s", ent.name);
+
+			/* A name too long for the path would open a different, truncated file. */
+			if (n < 0 || (size_t)n >= sizeof(path) ||
+			    meshtastic_smpc_local_image(path, &img) != 0) {
 				depot.skipped++;
 				continue; /* not a signed image, or unreadable */
 			}
