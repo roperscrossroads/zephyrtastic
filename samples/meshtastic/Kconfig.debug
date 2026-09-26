@@ -140,7 +140,8 @@ configdefault MESHTASTIC_FAULTMARK
 	default y if SOC_NRF52840
 
 # Why the node last rebooted, kept across the reset (`meshtastic resets`).
-# Cannot currently be turned off: =n does not link (agents-zo3o.7).
+# Can be turned off since 658863f (the note became a no-op when the trace is
+# off, agents-zo3o.7); the hardware lane builds that arm (fleet.c4.no_reboot_trace).
 configdefault MESHTASTIC_REBOOT_TRACE
 	default y
 
