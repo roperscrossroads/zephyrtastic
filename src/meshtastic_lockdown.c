@@ -1300,6 +1300,22 @@ static void rw_one(const char *name, bool seal)
 	zero(raw.buf, sizeof(raw.buf));
 }
 
+static void (*rewrite_hooks[2])(void);
+
+void meshtastic_lockdown_add_rewrite_hook(void (*hook)(void))
+{
+	for (size_t i = 0U; i < ARRAY_SIZE(rewrite_hooks); i++) {
+		if (rewrite_hooks[i] == hook) {
+			return;
+		}
+		if (rewrite_hooks[i] == NULL) {
+			rewrite_hooks[i] = hook;
+			return;
+		}
+	}
+	LOG_WRN("Lockdown: rewrite hook table full");
+}
+
 static void rewrite_all(bool seal)
 {
 	for (size_t i = 0U; i < ARRAY_SIZE(export_subtrees); i++) {
@@ -1322,6 +1338,12 @@ static void rewrite_all(bool seal)
 			LOG_WRN("Lockdown: '%s' has more than %u records; the rest are rewritten "
 				"at their next save",
 				direct_subtrees[i], (unsigned int)ARRAY_SIZE(rw_names.names));
+		}
+	}	/* Stores outside settings (the bulk store's pages) rewrite themselves in the
+	 * mode now in force: sealed after a provision, clear during a disable. */
+	for (size_t i = 0U; i < ARRAY_SIZE(rewrite_hooks); i++) {
+		if (rewrite_hooks[i] != NULL) {
+			rewrite_hooks[i]();
 		}
 	}
 }

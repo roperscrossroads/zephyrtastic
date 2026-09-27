@@ -113,6 +113,10 @@ ssize_t meshtastic_lockdown_read(const char *name, size_t len, settings_read_cb 
  *  -EBADMSG when sealed on a stock device or tampered. Return the output length. */
 int meshtastic_lockdown_wrap_buf(const char *name, const void *in, size_t len, void *out,
 				 size_t cap);
+/** Stores outside the settings subsystem register here to be rewritten when
+ *  lockdown seals the store (provision) or writes it back in the clear (disable).
+ *  Called on the workqueue after the settings rewrite. Up to two hooks. */
+void meshtastic_lockdown_add_rewrite_hook(void (*hook)(void));
 int meshtastic_lockdown_unwrap_buf(const char *name, const void *in, size_t len, void *out,
 				   size_t cap);
 
@@ -134,6 +138,10 @@ bool meshtastic_lockdown_busy(void);
 
 static inline bool meshtastic_lockdown_store_ready(void) { return true; }
 static inline bool meshtastic_lockdown_locked(void) { return false; }
+static inline void meshtastic_lockdown_add_rewrite_hook(void (*hook)(void))
+{
+	(void)hook;
+}
 static inline int meshtastic_lockdown_wrap_buf(const char *name, const void *in, size_t len,
 					       void *out, size_t cap)
 {

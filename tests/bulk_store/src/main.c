@@ -17,12 +17,25 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/ztest.h>
 #include <psa/crypto.h>
+#include <pb_encode.h>
+#include <zephyr/settings/settings.h>
+#include <zephyr/sys/byteorder.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
+#include <zephyr/meshtastic/nodedb.h>
 
+#include "meshtastic/deviceonly.pb.h"
+#include "meshtastic/mesh.pb.h"
 #include "meshtastic_bulk.h"
+#include "meshtastic_channels.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_lockdown.h"
+
+/* Declared privately by meshtastic.c: the NodeDB's boot, which a staged boot repeats. */
+int meshtastic_nodedb_init(void);
+void meshtastic_handle_inbound_packet(const struct meshtastic_packet *packet, const uint8_t *wire,
+				      size_t wire_len, bool decoded);
 
 static const struct device *const lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 static const uint8_t PP[] = "correct horse";
@@ -230,4 +243,177 @@ ZTEST(bulk_store, test_f_a_garbage_partition_is_reformatted)
 		      "a reformatted store is empty");
 	fill(blob, 32U, 7U);
 	zassert_ok(meshtastic_bulk_write(0x0505U, blob, 32U), "usable after the reformat");
+}
+
+/* ---- node records in the bulk store (Phase 3b) ---------------------------------- */
+
+#define PEER_A 0x0A0A0001U
+#define PEER_B 0x0A0A0002U
+#define PEER_L 0x0A0A00F1U /* a legacy settings record */
+
+static void seed_peer(uint32_t node, const char *name)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet ni = {
+		.from = node,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	(void)snprintk(user.long_name, sizeof(user.long_name), "%s", name);
+	(void)snprintk(user.short_name, sizeof(user.short_name), "pr");
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode");
+	ni.payload = buf;
+	ni.payload_len = os.bytes_written;
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+}
+
+/* A cold boot, staged: config seeded and reloaded, lockdown re-read from flash,
+ * the NodeDB's own boot (which wipes RAM and restores from the bulk store). */
+static void stage_boot(void)
+{
+	zassert_ok(meshtastic_config_store_seed(&cfg), "");
+	meshtastic_lockdown_init();
+	zassert_ok(settings_load_subtree("meshtastic"), "");
+	(void)meshtastic_config_store_apply_core();
+	zassert_ok(meshtastic_nodedb_init(), "");
+	k_sleep(K_MSEC(500));
+}
+
+struct legacy_find {
+	const char *name;
+	bool found;
+};
+
+static int legacy_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		     void *param)
+{
+	struct legacy_find *f = param;
+
+	ARG_UNUSED(len);
+	ARG_UNUSED(read_cb);
+	ARG_UNUSED(cb_arg);
+	if (strcmp(key, f->name) == 0) {
+		f->found = true;
+	}
+	return 0;
+}
+
+static bool legacy_present(uint32_t num)
+{
+	char name[16];
+	struct legacy_find f = {.name = name};
+
+	(void)snprintk(name, sizeof(name), "%08x", num);
+	(void)settings_load_subtree_direct("mtrec", legacy_cb, &f);
+	return f.found;
+}
+
+/* Write a node record the way an image without the bulk store did. */
+static void write_legacy_record(uint32_t num, const char *long_name)
+{
+	meshtastic_NodeInfoLite node = meshtastic_NodeInfoLite_init_zero;
+	uint8_t buf[4U + meshtastic_NodeInfoLite_size];
+	pb_ostream_t os = pb_ostream_from_buffer(buf + 4, sizeof(buf) - 4U);
+	char name[24];
+
+	node.num = num;
+	node.last_heard = 1790000000U;
+	(void)snprintk(node.long_name, sizeof(node.long_name), "%s", long_name);
+	(void)snprintk(node.short_name, sizeof(node.short_name), "lg");
+	zassert_true(pb_encode(&os, meshtastic_NodeInfoLite_fields, &node), "");
+	buf[0] = 2U; /* MTREC_RECORD_VERSION */
+	buf[1] = 0U;
+	sys_put_le16((uint16_t)os.bytes_written, buf + 2);
+	(void)snprintk(name, sizeof(name), "mtrec/%08x", num);
+	zassert_ok(settings_save_one(name, buf, 4U + os.bytes_written), "legacy write");
+}
+
+ZTEST(bulk_store, test_g_node_records_live_in_the_bulk_store)
+{
+	struct meshtastic_nodedb_node node;
+
+	/* The garbage test left a reformatted store with no meta: this boot imports
+	 * (nothing) and marks the migration done. */
+	stage_boot();
+	seed_peer(PEER_A, "alpha");
+	seed_peer(PEER_B, "bravo");
+	k_sleep(K_SECONDS(3)); /* one snapshot */
+
+	zassert_false(legacy_present(PEER_A), "no per-node settings record any more");
+	zassert_true(meshtastic_bulk_read(0x0100U, back, sizeof(back)) > 0,
+		     "the first node page is in the bulk store");
+
+	stage_boot();
+	zassert_ok(meshtastic_nodedb_get(PEER_A, &node), "alpha restored from the bulk store");
+	zassert_equal(strcmp(node.long_name, "alpha"), 0, "");
+	zassert_ok(meshtastic_nodedb_get(PEER_B, &node), "bravo restored");
+}
+
+ZTEST(bulk_store, test_h_an_unchanged_snapshot_writes_nothing)
+{
+	struct meshtastic_bulk_info before, after;
+
+	k_sleep(K_SECONDS(3)); /* let any pending change land */
+	meshtastic_bulk_info_get(&before);
+	k_sleep(K_SECONDS(7)); /* three more snapshots, nothing changed */
+	meshtastic_bulk_info_get(&after);
+	zassert_equal(after.free_bytes, before.free_bytes, "clean pages must not be rewritten");
+
+	/* Sealed: every write would carry a fresh nonce, so only the CRC compare
+	 * keeps this at zero (agents-2dk3.5). */
+	zassert_ok(meshtastic_lockdown_provision(PP, PPLEN, 0U, 0U, 0U), "provision");
+	wait_idle();
+	k_sleep(K_SECONDS(3));
+	meshtastic_bulk_info_get(&before);
+	k_sleep(K_SECONDS(7));
+	meshtastic_bulk_info_get(&after);
+	zassert_equal(after.free_bytes, before.free_bytes,
+		      "sealed clean pages must not be rewritten either");
+}
+
+ZTEST(bulk_store, test_i_a_locked_boot_restores_nothing_and_unlock_brings_them_back)
+{
+	struct meshtastic_nodedb_node node;
+
+	zassert_true(meshtastic_lockdown_active(), "precondition: provisioned by the last test");
+	meshtastic_lockdown_lock_now();
+	stage_boot();
+	zassert_equal(meshtastic_nodedb_get(PEER_A, &node), -ENOENT, "locked: nothing restored");
+	k_sleep(K_SECONDS(3)); /* a snapshot on the locked boot must not clobber the pages */
+
+	zassert_ok(meshtastic_lockdown_unlock(PP, PPLEN, 0U, 0U, 0U), "unlock");
+	wait_idle();
+	zassert_ok(meshtastic_nodedb_get(PEER_A, &node), "alpha back after unlock");
+	zassert_ok(meshtastic_nodedb_get(PEER_B, &node), "bravo back after unlock");
+
+	zassert_ok(meshtastic_lockdown_disable(PP, PPLEN), "disable");
+	wait_idle();
+	stage_boot();
+	zassert_ok(meshtastic_nodedb_get(PEER_A, &node), "readable in the clear after disable");
+}
+
+ZTEST(bulk_store, test_j_legacy_settings_records_are_imported_once_then_deleted)
+{
+	struct meshtastic_nodedb_node node;
+
+	/* An upgrade: the store has no meta yet, and settings hold a record the old
+	 * image wrote. */
+	zassert_ok(meshtastic_bulk_delete(0x00F0U), "drop the migration marker");
+	write_legacy_record(PEER_L, "legacy");
+	zassert_true(legacy_present(PEER_L), "precondition");
+
+	stage_boot();
+	zassert_ok(meshtastic_nodedb_get(PEER_L, &node), "legacy node imported");
+	zassert_equal(strcmp(node.long_name, "legacy"), 0, "");
+	zassert_true(meshtastic_bulk_read(0x00F0U, back, sizeof(back)) > 0, "migration marked");
+
+	k_sleep(K_SECONDS(3)); /* a save: the image is confirmed here, so leftovers go */
+	zassert_false(legacy_present(PEER_L), "the settings copy is deleted after the import");
+
+	stage_boot();
+	zassert_ok(meshtastic_nodedb_get(PEER_L, &node), "and it now comes from the bulk store");
 }

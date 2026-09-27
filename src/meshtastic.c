@@ -103,6 +103,12 @@ int meshtastic_message_init(void);
 #endif
 #if defined(CONFIG_MESHTASTIC_NODEDB)
 int meshtastic_nodedb_init(void);
+#if defined(CONFIG_MESHTASTIC_BULK_STORE)
+#include "meshtastic_bulk.h"
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+int meshtastic_nodedb_bulk_reload(void);
+#endif
+#endif
 #endif
 #if defined(CONFIG_MESHTASTIC_NODEINFO)
 int meshtastic_nodeinfo_init(void);
@@ -467,7 +473,13 @@ static void lockdown_reload(void)
 	(void)settings_load_subtree("mtnode");
 #endif
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+#if defined(CONFIG_MESHTASTIC_BULK_STORE)
+	if (meshtastic_nodedb_bulk_reload() == -ENODEV) {
+		(void)settings_load_subtree("mtrec");
+	}
+#else
 	(void)settings_load_subtree("mtrec");
+#endif
 #endif
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
 	(void)settings_load_subtree("mtclus/scope");
@@ -711,6 +723,15 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	ret = meshtastic_environment_init();
 	if (ret < 0) {
 		return ret;
+	}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_BULK_STORE)
+	/* Before the NodeDB, which restores its records from it. A store that will
+	 * not mount is not fatal: the NodeDB falls back to its settings records. */
+	ret = meshtastic_bulk_init();
+	if (ret < 0) {
+		LOG_WRN("Bulk store unavailable (%d); node records stay in settings", ret);
 	}
 #endif
 
