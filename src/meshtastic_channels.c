@@ -422,6 +422,39 @@ bool meshtastic_channels_is_well_known(uint8_t index)
 	return false;
 }
 
+bool meshtastic_channels_is_public_default(uint8_t index)
+{
+	const meshtastic_Channel *ch = meshtastic_channels_get(index);
+	struct meshtastic_channel_key key;
+	const char *name;
+
+	if (ch == NULL || ch->role == meshtastic_Channel_Role_DISABLED) {
+		return false;
+	}
+
+	/* Exactly the default key: get_key expands the shorthand {0x01}, and the
+	 * simple2..9 shorthands expand to OTHER keys (other meshes), which
+	 * is_well_known() accepts and this must not. */
+	if (meshtastic_channels_get_key(index, &key) < 0 ||
+	    key.len != sizeof(meshtastic_default_psk) ||
+	    memcmp(key.bytes, meshtastic_default_psk, key.len) != 0) {
+		return false;
+	}
+
+	/* Named after ANY preset, not only the active one (is_default's test): a
+	 * LongFast channel held on a MediumFast node is still the public channel. */
+	name = meshtastic_channels_get_name(index);
+	for (int p = 0; p <= (int)_meshtastic_Config_LoRaConfig_ModemPreset_MAX; p++) {
+		const char *preset_name = meshtastic_preset_display_name(
+			(meshtastic_Config_LoRaConfig_ModemPreset)p, true);
+
+		if (preset_name != NULL && strcmp(name, preset_name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 const char *meshtastic_channels_get_name(uint8_t index)
 {
 	const meshtastic_Channel *ch;

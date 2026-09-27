@@ -137,6 +137,13 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_GNSS_TIME_DEBUG=y
 
+  # The cross-preset relay (agents-jbrq.12) is default-N: only the relay's
+  # receiving half carries it. Its behaviour lives in tests/relay; this proves
+  # it still builds and links beside everything else in the baseline.
+  meshtastic.variants.relay.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_RELAY=y
+
   # The MQTT bridge is default-N and depends on a network stack the baseline does
   # not carry, so until 2026-09-07 NO twister config had ever compiled
   # meshtastic_mqtt.c -- 1425 lines, under -Werror, never. The first attempt found

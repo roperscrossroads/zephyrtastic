@@ -20,8 +20,10 @@
  *   - the existing "well known" predicate is too wide to define the relay's
  *     public class (it takes the simple2..9 keys, which are other meshes).
  *
- * The relay's own behaviour gets its tests here too, once it exists. The
- * planned cases are listed in the tooling repo's docs/RELAY-TESTBED.md.
+ * The second half of the file tests the relay itself (meshtastic_relay.c):
+ * the R-cases of the tooling repo's docs/RELAY-TESTBED.md, which landed with
+ * the code, not after it. The premise tests run with the relay OFF (its boot
+ * state), so they still pin the router's behaviour, not the relay's.
  */
 
 #include <string.h>
@@ -40,6 +42,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_preset.h"
+#include "meshtastic_relay.h"
 #include "meshtastic_sched.h"
 
 #define TEST_NODE_ID 0x0A0A0A0AU
@@ -128,21 +131,21 @@ static void switch_preset(meshtastic_Config_LoRaConfig_ModemPreset preset)
 		   (int)preset);
 }
 
-/* A text broadcast from FAR_NODE_ID, encrypted and hashed with OUR channel in
- * `index` as it stands right now. Called after switching this node to the far
- * tier's preset, it produces exactly the frame a far-tier node would send:
- * the build path resolves the channel's name (and so its hash) against the
- * active preset. */
-static void build_far_text(uint8_t index, uint32_t id, const char *text, uint8_t *wire,
-			   uint32_t *wire_len)
+/* A packet from @p from, encrypted and hashed with OUR channel in `index` as
+ * it stands right now. Called after switching this node to the far tier's
+ * preset, it produces exactly the frame a far-tier node would send: the build
+ * path resolves the channel's name (and so its hash) against the active
+ * preset. */
+static void build_far(uint8_t index, uint32_t from, uint32_t to, uint32_t portnum, uint32_t id,
+		      const uint8_t *payload, size_t payload_len, uint8_t *wire, uint32_t *wire_len)
 {
 	struct meshtastic_packet packet = {
-		.from          = FAR_NODE_ID,
-		.to            = MESHTASTIC_NODE_BROADCAST,
+		.from          = from,
+		.to            = to,
 		.id            = id,
-		.portnum       = MESHTASTIC_PORT_TEXT_MESSAGE,
-		.payload       = (const uint8_t *)text,
-		.payload_len   = strlen(text),
+		.portnum       = portnum,
+		.payload       = payload,
+		.payload_len   = payload_len,
 		.hop_limit     = 3U,
 		.hop_start     = 3U,
 		.channel_index = index,
@@ -150,6 +153,14 @@ static void build_far_text(uint8_t index, uint32_t id, const char *text, uint8_t
 
 	zassert_ok(meshtastic_build_wire_packet(&packet, wire, wire_len),
 		   "build_wire_packet failed");
+}
+
+/* A text broadcast from FAR_NODE_ID. */
+static void build_far_text(uint8_t index, uint32_t id, const char *text, uint8_t *wire,
+			   uint32_t *wire_len)
+{
+	build_far(index, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE, id,
+		  (const uint8_t *)text, strlen(text), wire, wire_len);
 }
 
 /* The ear forwards a frame over the BLE peer link. */
@@ -204,6 +215,7 @@ static void relay_before(void *fixture)
 	disable_slot(SPARE_SLOT);
 	switch_preset(PRESET_MF);
 
+	meshtastic_relay_reset();
 	meshtastic_sched_defaults();
 	zassert_ok(meshtastic_sched_set("cw.max", "0"));
 	lora_sim_reset(lora_dev);
@@ -389,6 +401,471 @@ ZTEST(relay, test_colliding_foreign_channel_not_admitted)
 	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN,
 		      "a colliding stranger's frame surfaced as a message");
 	assert_not_relayed(0x5104U);
+}
+
+/* ==========================================================================
+ * The relay itself (meshtastic_relay.c). R-numbers are RELAY-TESTBED.md's.
+ * ========================================================================== */
+
+/* FAR_NODE_ID's low 16 bits, as the prefix spells them. */
+#define FAR_PREFIX "[0d0d] "
+
+struct relayed {
+	struct meshtastic_packet pkt;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+	uint8_t hash;
+	uint8_t flags;
+	uint32_t id;
+};
+
+/* The next text WE put on the air, skipping what else we originate (a NodeInfo
+ * request to an unknown sender). Fails the test on any TX still carrying a far
+ * node's (src,id): that would be the frame itself relayed, not re-originated. */
+static int take_relayed(struct relayed *out, k_timeout_t wait)
+{
+	struct lora_sim_frame f;
+
+	while (lora_sim_take_tx(lora_dev, &f, wait) == 0) {
+		const struct meshtastic_wire_header *h =
+			(const struct meshtastic_wire_header *)f.data;
+
+		zassert_not_equal(sys_le32_to_cpu(h->src), FAR_NODE_ID,
+				  "a far node's frame reached our air verbatim");
+		if (sys_le32_to_cpu(h->src) != TEST_NODE_ID) {
+			continue;
+		}
+		if (meshtastic_decode_wire_packet(f.data, f.len, 0, 0, &out->pkt, out->payload,
+						  sizeof(out->payload)) != 0 ||
+		    out->pkt.portnum != MESHTASTIC_PORT_TEXT_MESSAGE) {
+			continue;
+		}
+		out->hash = h->channel;
+		out->flags = h->flags;
+		out->id = sys_le32_to_cpu(h->id);
+		return 0;
+	}
+	return -EAGAIN;
+}
+
+static void assert_nothing_relayed(void)
+{
+	struct relayed r = {0};
+
+	zassert_equal(take_relayed(&r, K_MSEC(300)), -EAGAIN,
+		      "unexpected relayed text \"%.*s\"", (int)r.pkt.payload_len, r.payload);
+}
+
+static void assert_relayed_text(const struct relayed *r, const char *want)
+{
+	zassert_equal(r->pkt.payload_len, strlen(want), "relayed length %u, want %u (\"%.*s\")",
+		      (unsigned)r->pkt.payload_len, (unsigned)strlen(want),
+		      (int)r->pkt.payload_len, r->payload);
+	zassert_mem_equal(r->payload, want, strlen(want), "relayed text");
+}
+
+static struct meshtastic_relay_stats stats(void)
+{
+	struct meshtastic_relay_stats st;
+
+	meshtastic_relay_stats_get(&st);
+	return st;
+}
+
+/* The public class, as on the bench: LongFast default read through the spare
+ * slot. Built on LongFast, delivered on MediumFast. */
+static void public_setup_and_build(uint32_t id, const char *text, uint8_t *wire,
+				   uint32_t *wire_len)
+{
+	switch_preset(PRESET_LF);
+	build_far_text(0U, id, text, wire, wire_len);
+	switch_preset(PRESET_MF);
+	set_default_slot(SPARE_SLOT, meshtastic_Channel_Role_SECONDARY,
+			 MESHTASTIC_CHANNEL_LONGFAST, 0x01U);
+}
+
+static void relay_inbound(void)
+{
+	zassert_ok(meshtastic_relay_set_direction(MESHTASTIC_RELAY_INBOUND));
+}
+
+/* R8b: the relay is off until someone turns it on. Both directions arm the
+ * loop cases against themselves, so the default is a behaviour, not a doc. */
+ZTEST(relay, test_r8b_default_is_off)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_OFF,
+		      "the relay must boot off");
+	public_setup_and_build(0x5201U, "hello", wire, &wire_len);
+	ear_forwards(wire, wire_len);
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "not delivered locally");
+	assert_nothing_relayed();
+	zassert_equal(stats().dir_off, 1U, "dir_off not counted");
+}
+
+/* R9 (v1): only inbound exists. Outbound needs an ear that transmits. */
+ZTEST(relay, test_r9_outbound_refused_in_v1)
+{
+	zassert_equal(meshtastic_relay_set_direction(MESHTASTIC_RELAY_OUTBOUND), -ENOTSUP);
+	zassert_equal(meshtastic_relay_set_direction(MESHTASTIC_RELAY_BOTH), -ENOTSUP);
+	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_OFF,
+		      "a refused direction must not stick");
+}
+
+/* R1 + R19 + R20: LongFast public text leaves on our MediumFast public
+ * channel as a NEW packet from us, prefixed with the origin, as a fresh packet
+ * (hop_start = hop_limit), and the far frame itself never reaches our air. */
+ZTEST(relay, test_r1_public_text_reoriginated)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct relayed r;
+	uint8_t hop_limit;
+	uint8_t hop_start;
+
+	public_setup_and_build(0x5202U, "Hello World!", wire, &wire_len);
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "nothing relayed");
+	assert_relayed_text(&r, FAR_PREFIX "Hello World!");
+	zassert_equal(r.pkt.from, TEST_NODE_ID, "the relay must be the author");
+	zassert_not_equal(r.id, 0x5202U, "a re-originated packet has its own id");
+	zassert_equal(r.pkt.to, MESHTASTIC_NODE_BROADCAST, "broadcast");
+	zassert_equal(r.hash, 0x1fU, "must go out on MediumFast's public channel");
+	hop_limit = r.flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK;
+	hop_start = (r.flags & MESHTASTIC_FLAGS_HOP_START_MASK) >> MESHTASTIC_FLAGS_HOP_START_SHIFT;
+	zassert_equal(hop_start, hop_limit, "a fresh packet starts at its own hop limit");
+	zassert_equal(stats().relayed, 1U);
+	zassert_equal(stats().sent, 1U);
+}
+
+/* R2: a custom channel leaves on the same channel, which hashes the same here. */
+ZTEST(relay, test_r2_custom_channel_same_channel)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct relayed r;
+
+	set_slot(SPARE_SLOT, meshtastic_Channel_Role_SECONDARY, "pugs-are-great", custom_psk,
+		 sizeof(custom_psk));
+	switch_preset(PRESET_LF);
+	build_far_text(SPARE_SLOT, 0x5203U, "pugs", wire, &wire_len);
+	switch_preset(PRESET_MF);
+
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "nothing relayed");
+	assert_relayed_text(&r, FAR_PREFIX "pugs");
+	zassert_equal(r.hash, meshtastic_channels_get_hash(SPARE_SLOT),
+		      "must go out on the same custom channel");
+}
+
+/* R3: the public class needs a public channel on THIS preset to land on. A
+ * node whose only own channel is custom has none. */
+ZTEST(relay, test_r3_no_mapping_without_local_public_channel)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	public_setup_and_build(0x5204U, "nowhere to go", wire, &wire_len);
+	set_slot(0U, meshtastic_Channel_Role_PRIMARY, "private-primary", custom_psk,
+		 sizeof(custom_psk));
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "not delivered locally");
+	assert_nothing_relayed();
+	zassert_equal(stats().no_mapping, 1U, "no_mapping not counted");
+}
+
+/* R4: LongFast on a simple key is another public mesh: not relayed. */
+ZTEST(relay, test_r4_simple_key_not_public_class)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	set_default_slot(SPARE_SLOT, meshtastic_Channel_Role_SECONDARY,
+			 MESHTASTIC_CHANNEL_LONGFAST, 0x04U);
+	build_far_text(SPARE_SLOT, 0x5205U, "simple3 mesh", wire, &wire_len);
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "not delivered locally");
+	assert_nothing_relayed();
+	zassert_equal(stats().no_mapping, 1U, "no_mapping not counted");
+}
+
+/* R5 + R7: only text crosses. A position in the relay's name would place the
+ * relay at the origin; port 256 is the cluster's. */
+ZTEST(relay, test_r5_r7_only_text_crosses)
+{
+	static const uint8_t junk[] = { 0x08, 0x01 };
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	public_setup_and_build(0x5206U, "unused", wire, &wire_len);
+	relay_inbound();
+
+	switch_preset(PRESET_LF);
+	set_default_slot(0U, meshtastic_Channel_Role_PRIMARY, "", 0x01U);
+	build_far(0U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_POSITION, 0x5207U,
+		  junk, sizeof(junk), wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+
+	switch_preset(PRESET_LF);
+	build_far(0U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_PRIVATE, 0x5208U,
+		  junk, sizeof(junk), wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+	zassert_equal(stats().not_text, 2U, "not_text not counted");
+}
+
+/* R6: a DM never crosses, even one we can read. */
+ZTEST(relay, test_r6_dm_never_crosses)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	const char *msg = "just for you";
+
+	public_setup_and_build(0x5209U, "unused", wire, &wire_len);
+	switch_preset(PRESET_LF);
+	build_far(0U, FAR_NODE_ID, TEST_NODE_ID, MESHTASTIC_PORT_TEXT_MESSAGE, 0x520AU,
+		  (const uint8_t *)msg, strlen(msg), wire, &wire_len);
+	switch_preset(PRESET_MF);
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+	zassert_equal(stats().not_broadcast, 1U, "not_broadcast not counted");
+}
+
+/* Frames heard on OUR air are never relayed in v1 (that is outbound). */
+ZTEST(relay, test_own_air_never_relayed)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	relay_inbound();
+	build_far_text(0U, 0x520BU, "said on MediumFast", wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "not delivered");
+
+	/* The router may flood-relay it (it keeps FAR's src, which take_relayed
+	 * would flag): drain those, then make sure no text of OURS followed. */
+	struct lora_sim_frame f;
+
+	while (lora_sim_take_tx(lora_dev, &f, K_MSEC(300)) == 0) {
+		const struct meshtastic_wire_header *h =
+			(const struct meshtastic_wire_header *)f.data;
+		struct meshtastic_packet p;
+		uint8_t pl[MESHTASTIC_MAX_PAYLOAD_LEN];
+
+		if (sys_le32_to_cpu(h->src) == TEST_NODE_ID &&
+		    meshtastic_decode_wire_packet(f.data, f.len, 0, 0, &p, pl, sizeof(pl)) == 0) {
+			zassert_not_equal(p.portnum, MESHTASTIC_PORT_TEXT_MESSAGE,
+					  "a text heard on our own air was re-originated");
+		}
+	}
+	zassert_equal(stats().considered, 0U, "only ear frames are considered");
+}
+
+/* R12 + R13 (H4): the same (origin, text) under a NEW packet id is relayed
+ * once inside the TTL, and again after it. */
+ZTEST(relay, test_r12_r13_seen_cache_and_ttl)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct relayed r;
+
+	public_setup_and_build(0x520CU, "same words", wire, &wire_len);
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "first copy not relayed");
+
+	switch_preset(PRESET_LF);
+	build_far_text(0U, 0x520DU, "same words", wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+	zassert_equal(stats().seen, 1U, "seen not counted");
+
+	k_sleep(K_SECONDS(CONFIG_MESHTASTIC_RELAY_SEEN_TTL_SEC + 1));
+	switch_preset(PRESET_LF);
+	build_far_text(0U, 0x520EU, "same words", wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "not relayed again after the TTL");
+	assert_relayed_text(&r, FAR_PREFIX "same words");
+}
+
+/* R14 (H26b): ANY relay-style prefix is refused, not only ours, so a relay
+ * nobody listed cannot loop with us. */
+ZTEST(relay, test_r14_any_relay_prefix_refused)
+{
+	static const char *const prefixed[] = {
+		"[c3d4] Hello",         /* our format, someone else's relay */
+		"[rly-2] Hello",        /* another implementation's */
+		"[0a0a] [0d0d] Hello",  /* a double hop */
+	};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	public_setup_and_build(0x5210U, "unused", wire, &wire_len);
+	relay_inbound();
+	for (size_t i = 0U; i < ARRAY_SIZE(prefixed); i++) {
+		switch_preset(PRESET_LF);
+		build_far_text(0U, 0x5211U + i, prefixed[i], wire, &wire_len);
+		switch_preset(PRESET_MF);
+		ear_forwards(wire, wire_len);
+		assert_nothing_relayed();
+	}
+	zassert_equal(stats().prefixed, ARRAY_SIZE(prefixed), "prefixed not counted");
+}
+
+/* The prefix test itself, at the edges. */
+ZTEST(relay, test_prefix_recogniser)
+{
+	struct {
+		const char *s;
+		bool prefix;
+	} cases[] = {
+		{ "[abcd] hi", true },   { "[a] hi", true },       { "[12345678] hi", true },
+		{ "[123456789] hi", false }, { "[] hi", false },   { "[ab cd] hi", false },
+		{ "[abcd]hi", false },   { "abcd] hi", false },    { "[abcd", false },
+		{ "hi [abcd] ", false },
+	};
+
+	for (size_t i = 0U; i < ARRAY_SIZE(cases); i++) {
+		zassert_equal(meshtastic_relay_has_prefix((const uint8_t *)cases[i].s,
+							  strlen(cases[i].s)),
+			      cases[i].prefix, "\"%s\"", cases[i].s);
+	}
+}
+
+/* R15: a listed relay id is never translated, even unprefixed. */
+ZTEST(relay, test_r15_ignore_list)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	public_setup_and_build(0x5220U, "from a known relay", wire, &wire_len);
+	zassert_ok(meshtastic_relay_ignore_add(FAR_NODE_ID));
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+	zassert_equal(stats().ignored, 1U, "ignored not counted");
+}
+
+/* R22 (H26): convergence. We relay FAR's "Hello" once. A second relay on the
+ * same tiers then carries our output back to the ear's tier, with its own
+ * prefix added or with ours kept, and the ear hears it. Either way exactly one
+ * copy of "Hello" ever reaches our tier.
+ *
+ * Limit: a foreign relay that STRIPS prefixes and re-sends under its own id
+ * would pass the prefix test and the seen-cache (new origin). The ignore list
+ * (R15) is the answer for a relay you know; one you don't is why the rate cap
+ * exists. */
+ZTEST(relay, test_r22_two_relays_converge)
+{
+	static const char *const echoes[] = {
+		"[0a0a] " FAR_PREFIX "Hello", /* relay C added its prefix */
+		FAR_PREFIX "Hello",           /* relay C copied our text verbatim */
+	};
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct relayed r;
+
+	public_setup_and_build(0x5230U, "Hello", wire, &wire_len);
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "first copy not relayed");
+
+	for (size_t i = 0U; i < ARRAY_SIZE(echoes); i++) {
+		switch_preset(PRESET_LF);
+		build_far(0U, 0x0A0B0A0AU, MESHTASTIC_NODE_BROADCAST,
+			  MESHTASTIC_PORT_TEXT_MESSAGE, 0x5231U + i, (const uint8_t *)echoes[i],
+			  strlen(echoes[i]), wire, &wire_len);
+		switch_preset(PRESET_MF);
+		ear_forwards(wire, wire_len);
+		assert_nothing_relayed();
+	}
+	zassert_equal(stats().relayed, 1U, "exactly one copy must cross");
+}
+
+/* R17: a text too long for the prefix goes without it, never truncated. */
+ZTEST(relay, test_r17_long_text_unprefixed_not_truncated)
+{
+	char text[MESHTASTIC_MAX_TEXT_LEN - 3U + 1U];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct relayed r;
+
+	memset(text, 'x', sizeof(text) - 1U);
+	text[sizeof(text) - 1U] = '\0';
+	public_setup_and_build(0x5240U, text, wire, &wire_len);
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "long text not relayed");
+	assert_relayed_text(&r, text);
+	zassert_equal(stats().unprefixed, 1U, "unprefixed not counted");
+}
+
+/* R18: the per-direction cap (3 in this suite's prj.conf). */
+ZTEST(relay, test_r18_rate_cap)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct relayed r;
+	char text[16];
+	int got = 0;
+
+	public_setup_and_build(0x5250U, "unused", wire, &wire_len);
+	relay_inbound();
+	for (int i = 0; i <= CONFIG_MESHTASTIC_RELAY_RATE_MAX; i++) {
+		snprintk(text, sizeof(text), "msg %d", i);
+		switch_preset(PRESET_LF);
+		build_far_text(0U, 0x5251U + i, text, wire, &wire_len);
+		switch_preset(PRESET_MF);
+		ear_forwards(wire, wire_len);
+		if (take_relayed(&r, K_MSEC(1000)) == 0) {
+			got++;
+		}
+	}
+	zassert_equal(got, CONFIG_MESHTASTIC_RELAY_RATE_MAX, "cap not applied");
+	zassert_equal(stats().rate_dropped, 1U, "rate_dropped not counted");
+}
+
+/* R21 (H30): a colliding stranger's frame is not re-originated, and text
+ * that is not valid UTF-8 (what a wrong-key decrypt that happened to parse
+ * would look like) is refused by the relay's own check. */
+ZTEST(relay, test_r21_admission)
+{
+	static const uint8_t bad[] = { 'o', 'k', 0xC3, 0x28 }; /* broken UTF-8 */
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	uint8_t stranger_psk[16];
+
+	memcpy(stranger_psk, meshtastic_default_psk, sizeof(stranger_psk));
+	stranger_psk[0] = meshtastic_default_psk[1];
+	stranger_psk[1] = meshtastic_default_psk[0];
+	set_slot(SPARE_SLOT, meshtastic_Channel_Role_SECONDARY, MESHTASTIC_CHANNEL_LONGFAST,
+		 stranger_psk, sizeof(stranger_psk));
+	build_far_text(SPARE_SLOT, 0x5260U, "not your channel", wire, &wire_len);
+	set_default_slot(SPARE_SLOT, meshtastic_Channel_Role_SECONDARY,
+			 MESHTASTIC_CHANNEL_LONGFAST, 0x01U);
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+
+	switch_preset(PRESET_LF);
+	build_far(0U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
+		  0x5261U, bad, sizeof(bad), wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+	zassert_equal(stats().bad_text, 1U, "bad_text not counted");
 }
 
 ZTEST_SUITE(relay, NULL, relay_setup, relay_before, relay_after, NULL);

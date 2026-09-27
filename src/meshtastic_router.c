@@ -27,6 +27,9 @@
 #include "meshtastic_mqtt.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_reliable.h"
+#if defined(CONFIG_MESHTASTIC_RELAY)
+#include "meshtastic_relay.h"
+#endif
 #include "meshtastic_router.h"
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 #include "meshtastic_traffic.h"
@@ -1043,6 +1046,13 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 			meshtastic_routing_on_decoded(pkt, decoded_mesh);
 		}
 		meshtastic_dispatch_modules(pkt, decoded_mesh);
+#if defined(CONFIG_MESHTASTIC_RELAY)
+		/* The cross-preset relay (agents-jbrq.12) is the one deliberate way a
+		 * bearer frame's CONTENT reaches our air: never the frame itself (the
+		 * link-local gate below still holds), only a new text packet from us.
+		 * It needs the bearer, which modules are not given. */
+		meshtastic_relay_on_rx(pkt, bearer);
+#endif
 		/* After module dispatch: the NodeDB has now created/refreshed the
 		 * source entry, so a learned next hop has somewhere to land.
 		 * Phase 4b: pass rx_mesh (NULL on the public inject/test path -> struct

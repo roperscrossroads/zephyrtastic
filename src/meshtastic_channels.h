@@ -187,6 +187,16 @@ bool meshtastic_channels_is_default(uint8_t index);
 bool meshtastic_channels_is_well_known(uint8_t index);
 
 /**
+ * @brief True for "the public channel" of any preset: a channel named after a
+ * preset (LongFast, MediumFast, ...) on EXACTLY the default key.
+ *
+ * Unlike is_default() the name may be any preset's, not only the active one's;
+ * unlike is_well_known() the simple2..9 keys do not qualify (they are other
+ * meshes). The cross-preset relay treats every such channel as one channel.
+ */
+bool meshtastic_channels_is_public_default(uint8_t index);
+
+/**
  * @brief Pick the channel index to use when sending a packet.
  *
  * Resolution order:

@@ -1,0 +1,91 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_RELAY
+	bool "Cross-preset text relay (receiving half)"
+	default n
+	help
+	  The receiving half of a cross-preset relay (agents-jbrq.12). An "ear"
+	  node on another preset forwards the frames it hears over the BLE peer
+	  link. This node reads them through a channel it holds, and
+	  RE-ORIGINATES broadcast text on its own preset as a new packet from
+	  itself, prefixed "[xxxx] " with the origin's id.
+
+	  Only text crosses. A position, NodeInfo or telemetry packet sent in the
+	  relay's name would be the relay's, so those never cross; DMs are
+	  PKC and cannot be read.
+
+	  Channel mapping: every preset-named channel on exactly the default key
+	  is one public channel (a LongFast frame goes out on this node's default
+	  channel); a custom channel goes out on the same channel, which has the
+	  same hash on every preset.
+
+	  Loops are refused, not merely damped: any text already carrying a
+	  relay-style prefix is dropped, a seen-cache keyed on (origin, text)
+	  drops repeats, and a rate cap bounds the damage of anything that
+	  gets past both.
+
+	  Off at boot unless MESHTASTIC_RELAY_INBOUND_AT_BOOT.
+
+if MESHTASTIC_RELAY
+
+config MESHTASTIC_RELAY_INBOUND_AT_BOOT
+	bool "Relay inbound (ear -> this preset) from boot"
+	default n
+	help
+	  Start with the direction set to inbound. The default is off:
+	  enabling a relay is a deliberate act. There is no persisted setting
+	  yet, so a relay image that must work unattended sets this.
+
+config MESHTASTIC_RELAY_SEEN_SIZE
+	int "Seen-cache entries"
+	default 16
+	range 4 128
+	help
+	  Recently relayed (origin, text hash) pairs. A repeat inside the TTL is
+	  dropped. The ear already drops a repeated (origin, packet id); this
+	  catches the same text arriving under a NEW id, which is what a second
+	  relay or a re-send produces.
+
+config MESHTASTIC_RELAY_SEEN_TTL_SEC
+	int "Seen-cache lifetime in seconds"
+	default 300
+	range 10 3600
+	help
+	  Matches the router's duplicate-cache lifetime. The cost of a long TTL
+	  is that an origin sending the same short text twice (e.g. "ok") inside
+	  it is relayed once.
+
+config MESHTASTIC_RELAY_RATE_MAX
+	int "Texts relayed per window"
+	default 10
+	range 1 255
+	help
+	  Token bucket per direction: at most this many texts per
+	  MESHTASTIC_RELAY_RATE_WINDOW_SEC. Set it from the measured source
+	  volume (the testbed's B1). The limit protects the destination tier's
+	  airtime from a chatty or looping source.
+
+config MESHTASTIC_RELAY_RATE_WINDOW_SEC
+	int "Rate window in seconds"
+	default 600
+	range 10 86400
+
+config MESHTASTIC_RELAY_IGNORE_MAX
+	int "Relay ids never translated"
+	default 4
+	range 1 16
+	help
+	  Nodes whose text is never relayed: other relays' destination halves.
+	  The prefix refusal catches relays nobody listed; this catches a
+	  relay that sends unprefixed text.
+
+config MESHTASTIC_RELAY_QUEUE_SIZE
+	int "Pending relayed texts"
+	default 2
+	range 1 16
+	help
+	  Texts accepted by the receive path and waiting for the work queue to
+	  send them. Each slot holds a full text (~240 B).
+
+endif # MESHTASTIC_RELAY
