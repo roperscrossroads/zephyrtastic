@@ -59,6 +59,19 @@
 #   Coredump                   on/XIAO off | 1.2 KB | (sysbuild only)
 #   Task watchdog              on/XIAO off | 0.7 KB | -
 #   Everything else below is < 1 KB, off, or forced on by something else.
+#
+# THE FIELD TIER, MEASURED (2026-09-27, main 8492a11, class-1 XIAO / class-4 V4)
+#   A deployed node does not need: ASSERT_VERBOSE, ARCH_STACKWALK (nRF; the
+#   on-device backtrace -- a coredump still unwinds offline), SPIN_VALIDATE,
+#   SHELL_HELP, SHELL_WILDCARD, MESHTASTIC_SHELL_CRASHTEST,
+#   MESHTASTIC_THREAD_SUMMARY. All =n together:
+#     XIAO class 1:  -89.4 KB flash (12.2 % of the app slot)
+#     V4 class 4:    -15.9 KB dram0 (96.47 % -> 92.30 %), -13.5 KB iram
+#   Adding MESHTASTIC_LOG_LEVEL_WRN + LOG_DEFAULT_LEVEL=2 ("quiet"):
+#     XIAO another -29.2 KB (strings); V4 dram0 -32 B (strings are in flash).
+#   Kept in the field tier on purpose: ASSERT itself, the supervisor and thread
+#   runtime stats (health), the log ring and bootlog (what the node brings back),
+#   coredump. Table + raw data: FEATURE-COSTS-AND-ZEPHYR-MODULES.md [S5].
 # ============================================================================
 
 # ---------------------------------------------------------------------------
