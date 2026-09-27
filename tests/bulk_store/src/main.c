@@ -417,3 +417,98 @@ ZTEST(bulk_store, test_j_legacy_settings_records_are_imported_once_then_deleted)
 	stage_boot();
 	zassert_ok(meshtastic_nodedb_get(PEER_L, &node), "and it now comes from the bulk store");
 }
+
+/* ---- warm keys in the bulk store (Phase 3d) --------------------------------------- */
+
+#define PEER_K 0x0A0A00E1U /* a key-only legacy record: not in the hot store */
+
+static void seed_keyed_peer(uint32_t node, const char *name, uint8_t fill_byte)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	uint8_t buf[128];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	struct meshtastic_packet ni = {
+		.from = node,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_NODEINFO,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	(void)snprintk(user.long_name, sizeof(user.long_name), "%s", name);
+	(void)snprintk(user.short_name, sizeof(user.short_name), "ky");
+	user.public_key.size = 32U;
+	memset(user.public_key.bytes, fill_byte, 32U);
+	zassert_true(pb_encode(&os, meshtastic_User_fields, &user), "User encode");
+	ni.payload = buf;
+	ni.payload_len = os.bytes_written;
+	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+}
+
+static bool page_holds(uint16_t id, uint32_t num, size_t slot_len)
+{
+	ssize_t n = meshtastic_bulk_read(id, back, sizeof(back));
+
+	if (n < 4) {
+		return false;
+	}
+	for (size_t off = 4U; off + 4U <= (size_t)n; off += slot_len) {
+		if (sys_get_le32(back + off) == num) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool legacy_key_present(uint32_t num)
+{
+	char name[16];
+	struct legacy_find f = {.name = name};
+
+	(void)snprintk(name, sizeof(name), "%08x", num);
+	(void)settings_load_subtree_direct("mtnode", legacy_cb, &f);
+	return f.found;
+}
+
+ZTEST(bulk_store, test_k_warm_keys_live_in_the_bulk_store)
+{
+	uint8_t key[32];
+
+	seed_keyed_peer(0x0A0A0003U, "charlie", 0xC3);
+	k_sleep(K_SECONDS(3)); /* the key save and a snapshot */
+
+	zassert_false(legacy_key_present(0x0A0A0003U), "no per-key settings record any more");
+	/* Warm pages: 4 B header, then 42 B slots ([num][38 B record]). */
+	zassert_true(page_holds(0x0200U, 0x0A0A0003U, 42U), "the key is on a bulk warm page");
+
+	stage_boot();
+	zassert_ok(meshtastic_nodedb_copy_pubkey(0x0A0A0003U, key), "key back after a boot");
+	zassert_equal(key[0], 0xC3, "");
+}
+
+ZTEST(bulk_store, test_l_legacy_settings_keys_are_imported_once_then_deleted)
+{
+	uint8_t rec[38];
+	uint8_t key[32];
+	char name[24];
+
+	/* An upgrade: no warm migration marker, and a key an older image persisted
+	 * for a node that is NOT in the hot store (so only the warm tier can serve it). */
+	zassert_ok(meshtastic_bulk_delete(0x00F1U), "drop the key migration marker");
+	sys_put_le32(1790000000U, rec);
+	rec[4] = 0U; /* role */
+	rec[5] = 0U; /* known_signer */
+	memset(rec + 6, 0xE1, 32U);
+	(void)snprintk(name, sizeof(name), "mtnode/%08x", PEER_K);
+	zassert_ok(settings_save_one(name, rec, sizeof(rec)), "legacy key write");
+
+	stage_boot();
+	zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_K, key), "legacy key imported into warm");
+	zassert_equal(key[0], 0xE1, "");
+	zassert_true(meshtastic_bulk_read(0x00F1U, back, sizeof(back)) > 0, "migration marked");
+
+	k_sleep(K_SECONDS(3));
+	zassert_false(legacy_key_present(PEER_K), "the settings copy is deleted after the import");
+
+	stage_boot();
+	zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_K, key), "now served from the bulk pages");
+}

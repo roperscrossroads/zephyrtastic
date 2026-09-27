@@ -105,7 +105,8 @@ int meshtastic_message_init(void);
 int meshtastic_nodedb_init(void);
 #if defined(CONFIG_MESHTASTIC_BULK_STORE)
 #include "meshtastic_bulk.h"
-#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS) || defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+#define NODEDB_IN_BULK 1
 int meshtastic_nodedb_bulk_reload(void);
 #endif
 #endif
@@ -469,15 +470,22 @@ static void lockdown_reload(void)
 	 * not switched at runtime, because the radio, NodeDB and cluster took the id at init. */
 	meshtastic_node_identity_key_reloaded(mt.node_id);
 #endif
+#if defined(NODEDB_IN_BULK)
+	/* The NodeDB tables in the bulk store restore from their pages; the settings
+	 * subtrees are only read when the store is not mounted. */
+	if (meshtastic_nodedb_bulk_reload() == -ENODEV) {
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+		(void)settings_load_subtree("mtnode");
+#endif
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+		(void)settings_load_subtree("mtrec");
+#endif
+	}
+#else
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
 	(void)settings_load_subtree("mtnode");
 #endif
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
-#if defined(CONFIG_MESHTASTIC_BULK_STORE)
-	if (meshtastic_nodedb_bulk_reload() == -ENODEV) {
-		(void)settings_load_subtree("mtrec");
-	}
-#else
 	(void)settings_load_subtree("mtrec");
 #endif
 #endif

@@ -29,16 +29,32 @@
 #include "meshtastic_modules.h"
 #include "meshtastic_sched.h"
 #include "meshtastic_storage.h" /* declarations only; safe unconditionally */
+#if defined(CONFIG_MESHTASTIC_BULK_STORE) && defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+/* The warm key tier lives in the bulk store too (agents-2dk3 Phase 3d). */
+#define NODEDB_WBULK 1
+#endif
 #if defined(CONFIG_MESHTASTIC_BULK_STORE) && defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
 /* Node records live in the bulk store (agents-2dk3 Phase 3), not one settings
  * record per node. The settings path stays for images without the partition, and
  * to import the records an older image left behind. */
 #define NODEDB_BULK 1
+#endif
+#if defined(NODEDB_BULK) || defined(NODEDB_WBULK)
 #include <zephyr/sys/crc.h>
 #include "meshtastic_bulk.h"
 #if defined(CONFIG_MCUBOOT_IMG_MANAGER)
 #include <zephyr/dfu/mcuboot.h>
 #endif
+/* One page buffer for both bulk tables (node records and warm keys), because on the
+ * XIAO (no PSRAM) a second 2 KB buffer is real RAM. What makes sharing it safe is
+ * that both tables take nodedb_page_lock for the whole build-and-write or
+ * read-and-apply of a page. The mutex is recursive, so a future path that held it
+ * mid-page and called into the OTHER table would not deadlock -- it would silently
+ * clobber the page. Keep each table's page work self-contained. PSRAM on ESP32:
+ * CPU-only; the bulk engine copies a page into its own internal-RAM frame before
+ * any flash write. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR uint8_t nodedb_page_buf[MESHTASTIC_BULK_BLOB_MAX];
+static K_MUTEX_DEFINE(nodedb_page_lock); /* the buffer and both tables' state; nodedb_lock nests inside */
 #endif
 #if defined(CONFIG_MESHTASTIC_PKI)
 #include "meshtastic_pki.h"
@@ -125,6 +141,12 @@ static int64_t nodedb_last_sort_ms;
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
 static void nodekeys_schedule_save(void);
+#if defined(NODEDB_WBULK)
+static bool wrec_active(void);
+static void wrec_do_persist(void);
+static int wrec_boot_restore(void);
+static void wrec_rewrite_hook(void);
+#endif
 static void warm_upsert_locked(uint32_t num, const uint8_t *pub, uint8_t role);
 static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
 static bool warm_get_role_locked(uint32_t num, uint8_t *role);
@@ -690,6 +712,7 @@ struct warm_reconcile_ctx {
 	uint32_t orphans[WARM_RECONCILE_BATCH];
 	size_t count;
 	bool overflow;
+	bool all; /* collect every record (the bulk migration's cleanup), not just orphans */
 };
 
 /* Direct-load callback over the mtnode subtree: collect ids that are NOT in the
@@ -715,7 +738,7 @@ static int warm_reconcile_cb(const char *key, size_t len, settings_read_cb read_
 	}
 
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
-	orphan = (warm_find_locked(num) == NULL);
+	orphan = ctx->all || (warm_find_locked(num) == NULL);
 	k_mutex_unlock(&nodedb_lock);
 
 	if (!orphan) {
@@ -744,6 +767,13 @@ static void nodekeys_do_persist(void)
 	if (!meshtastic_lockdown_store_ready()) {
 		return;
 	}
+#if defined(NODEDB_WBULK)
+	if (wrec_active()) {
+		nodekeys_reconcile = false; /* the pages are the whole ring: nothing to prune */
+		wrec_do_persist();
+		return;
+	}
+#endif
 
 	if (nodekeys_reconcile) {
 		struct warm_reconcile_ctx ctx = {.count = 0U, .overflow = false};
@@ -862,6 +892,271 @@ static void nodekeys_purge_foreign(void)
 }
 #endif /* CONFIG_MESHTASTIC_NODEDB_PURGE_FOREIGN_KEYS */
 
+#if defined(NODEDB_WBULK)
+/* ---- the warm key tier in the bulk store ----------------------------------------
+ *
+ * Same scheme as the node-record pages (NREC, below): fixed-slot pages, written only
+ * when a page's plaintext CRC changes. Simpler, because the warm ring is already a
+ * fixed array: ring slot s is slot (s % per-page) of page (s / per-page), and a
+ * restore puts each key back in its own slot, so an unchanged ring rereads to
+ * identical pages and costs no writes.
+ *
+ * Page: [ver][slots per page][used count][0], then per slot [num LE32] followed by
+ * the 38 B mtnode record (last_seen LE32, role, known_signer, public key).
+ */
+#define WREC_SLOT_LEN   (4U + MTNODE_REC_LEN)
+#define WREC_PAGE_HDR   4U
+#define WREC_PER_PAGE   ((MESHTASTIC_BULK_BLOB_MAX - WREC_PAGE_HDR) / WREC_SLOT_LEN)
+#define WREC_PAGES      DIV_ROUND_UP(CONFIG_MESHTASTIC_NODEDB_WARM_KEYS, WREC_PER_PAGE)
+#define WREC_PAGE_LEN   (WREC_PAGE_HDR + WREC_PER_PAGE * WREC_SLOT_LEN)
+#define WREC_PAGE_ID(p) ((uint16_t)(0x0200U + (p)))
+#define WREC_META_ID    0x00F1U
+#define WREC_META_MAGIC 0x434E4B57U /* "WKNC" */
+#define WREC_PAGE_VER   1U
+
+BUILD_ASSERT(WREC_PER_PAGE <= UINT8_MAX, "slot count is stored in a byte");
+BUILD_ASSERT(WREC_PAGES <= 0x100U, "warm pages must stay inside their id range");
+
+static uint32_t wrec_crc[WREC_PAGES];
+static bool wrec_crc_valid[WREC_PAGES];
+static bool wrec_loaded;
+static bool wrec_legacy_pending;
+#define wrec_page nodedb_page_buf
+#define wrec_lock nodedb_page_lock
+BUILD_ASSERT(WREC_PAGE_LEN <= MESHTASTIC_BULK_BLOB_MAX, "warm page too large for a bulk blob");
+
+static bool wrec_active(void)
+{
+	return meshtastic_bulk_ready();
+}
+
+static uint32_t wrec_build_page_locked(size_t p, uint8_t *used_out)
+{
+	uint32_t self = meshtastic_get_node_id();
+	uint8_t used = 0U;
+
+	memset(wrec_page, 0, WREC_PAGE_LEN);
+	wrec_page[0] = WREC_PAGE_VER;
+	wrec_page[1] = (uint8_t)WREC_PER_PAGE;
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	for (size_t i = 0U; i < WREC_PER_PAGE; i++) {
+		size_t s = p * WREC_PER_PAGE + i;
+		uint8_t *slot = wrec_page + WREC_PAGE_HDR + i * WREC_SLOT_LEN;
+		const struct warm_key *w;
+
+		if (s >= ARRAY_SIZE(warm_keys)) {
+			break;
+		}
+		w = &warm_keys[s];
+		if (w->num == 0U || w->num == self) {
+			continue;
+		}
+		sys_put_le32(w->num, slot);
+		sys_put_le32(w->last_seen, slot + 4);
+		slot[8] = w->role;
+		slot[9] = w->known_signer;
+		memcpy(slot + 10, w->pub, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+		used++;
+	}
+	k_mutex_unlock(&nodedb_lock);
+	wrec_page[2] = used;
+	*used_out = used;
+	return crc32_ieee(wrec_page, WREC_PAGE_LEN);
+}
+
+static void wrec_persist(bool force)
+{
+	if (!wrec_active() || !wrec_loaded || !meshtastic_lockdown_store_ready()) {
+		return;
+	}
+	k_mutex_lock(&wrec_lock, K_FOREVER);
+	for (size_t p = 0U; p < WREC_PAGES; p++) {
+		uint8_t used;
+		uint32_t crc = wrec_build_page_locked(p, &used);
+		int ret;
+
+		if (!force && wrec_crc_valid[p] && wrec_crc[p] == crc) {
+			continue;
+		}
+		ret = (used > 0U) ? meshtastic_bulk_write(WREC_PAGE_ID(p), wrec_page,
+							  WREC_PAGE_LEN)
+				  : meshtastic_bulk_delete(WREC_PAGE_ID(p));
+		if (ret == 0 || ret == -ENOENT) {
+			wrec_crc[p] = crc;
+			wrec_crc_valid[p] = true;
+		} else {
+			wrec_crc_valid[p] = false;
+			LOG_WRN("NodeDB: bulk warm page %u write failed (%d)", (unsigned int)p, ret);
+		}
+	}
+	k_mutex_unlock(&wrec_lock);
+}
+
+/* The restore is authoritative: the ring is cleared and each key goes back into
+ * its own slot. Returns the number restored, or -EACCES on a locked boot (the
+ * ring is left as it was). */
+static int wrec_load(void)
+{
+	int restored = 0;
+	bool cleared = false;
+
+	k_mutex_lock(&wrec_lock, K_FOREVER);
+	for (size_t p = 0U; p < WREC_PAGES; p++) {
+		ssize_t n = meshtastic_bulk_read(WREC_PAGE_ID(p), wrec_page, WREC_PAGE_LEN);
+
+		wrec_crc_valid[p] = false;
+		if (n == -EACCES) {
+			k_mutex_unlock(&wrec_lock);
+			return -EACCES;
+		}
+		if (!cleared) {
+			k_mutex_lock(&nodedb_lock, K_FOREVER);
+			memset(warm_keys, 0, sizeof(warm_keys));
+			k_mutex_unlock(&nodedb_lock);
+			cleared = true;
+		}
+		if (n != (ssize_t)WREC_PAGE_LEN || wrec_page[0] != WREC_PAGE_VER ||
+		    wrec_page[1] != (uint8_t)WREC_PER_PAGE) {
+			continue; /* absent, damaged or another layout: rebuilt at the next save */
+		}
+		k_mutex_lock(&nodedb_lock, K_FOREVER);
+		for (size_t i = 0U; i < WREC_PER_PAGE; i++) {
+			const uint8_t *slot = wrec_page + WREC_PAGE_HDR + i * WREC_SLOT_LEN;
+			size_t s = p * WREC_PER_PAGE + i;
+			uint32_t num = sys_get_le32(slot);
+
+			if (num == 0U || num == meshtastic_get_node_id()) {
+				continue;
+			}
+			if (s < ARRAY_SIZE(warm_keys) && warm_keys[s].num == 0U) {
+				struct warm_key *w = &warm_keys[s];
+
+				w->num = num;
+				w->last_seen = sys_get_le32(slot + 4);
+				w->role = slot[8];
+				w->known_signer = slot[9];
+				memcpy(w->pub, slot + 10, MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN);
+			} else {
+				/* A ring built smaller than the pages: LRU placement. */
+				warm_place_locked(num, slot + 10, slot[8], slot[9],
+						  sys_get_le32(slot + 4));
+			}
+			restored++;
+		}
+		k_mutex_unlock(&nodedb_lock);
+		wrec_crc[p] = crc32_ieee(wrec_page, WREC_PAGE_LEN);
+		wrec_crc_valid[p] = true;
+	}
+	wrec_loaded = true;
+	k_mutex_unlock(&wrec_lock);
+	return restored;
+}
+
+static int wrec_count(void)
+{
+	uint32_t self = meshtastic_get_node_id();
+	int n = 0;
+
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	for (size_t i = 0U; i < ARRAY_SIZE(warm_keys); i++) {
+		if (warm_keys[i].num != 0U && warm_keys[i].num != self) {
+			n++;
+		}
+	}
+	k_mutex_unlock(&nodedb_lock);
+	return n;
+}
+
+/* Boot restore plus the one-time import of settings mtnode/ records, with the
+ * node records' commit-after-verify rule. */
+static int wrec_boot_restore(void)
+{
+	uint8_t meta[8];
+	ssize_t n = meshtastic_bulk_read(WREC_META_ID, meta, sizeof(meta));
+	bool migrated = (n == (ssize_t)sizeof(meta) && sys_get_le32(meta) == WREC_META_MAGIC &&
+			 meta[4] == 1U);
+	int restored;
+
+	wrec_loaded = false;
+	if (n == -EACCES) {
+		return -EACCES; /* locked: the unlock's reload runs this again */
+	}
+	if (migrated) {
+		restored = wrec_load();
+		wrec_legacy_pending = true;
+		return restored;
+	}
+
+	/* First boot with a bulk store: bring the settings keys across. */
+	(void)settings_load_subtree(MTNODE_SUBTREE);
+	{
+		int want = wrec_count();
+
+		k_mutex_lock(&wrec_lock, K_FOREVER);
+		memset(wrec_crc_valid, 0, sizeof(wrec_crc_valid));
+		k_mutex_unlock(&wrec_lock);
+		wrec_loaded = true;
+		wrec_persist(true);
+		restored = wrec_load();
+		if (restored < 0 || restored != want) {
+			LOG_WRN("NodeDB: bulk key import read back %d of %d; the settings keys "
+				"stay authoritative until a later boot imports them",
+				restored, want);
+			return restored;
+		}
+	}
+	sys_put_le32(WREC_META_MAGIC, meta);
+	meta[4] = 1U;
+	memset(meta + 5, 0, 3);
+	if (meshtastic_bulk_write(WREC_META_ID, meta, sizeof(meta)) == 0) {
+		wrec_legacy_pending = true;
+		LOG_INF("NodeDB: %d warm key(s) moved to the bulk store", restored);
+	}
+	return restored;
+}
+
+static bool wrec_image_confirmed(void)
+{
+#if defined(CONFIG_MCUBOOT_IMG_MANAGER)
+	/* An MCUboot revert must still find the settings keys the older image reads. */
+	return boot_is_img_confirmed();
+#else
+	return true;
+#endif
+}
+
+/* The save path when the bulk store is up: delete leftover settings keys (in
+ * batches, once confirmed), then write the pages that changed. */
+static void wrec_do_persist(void)
+{
+	if (wrec_legacy_pending && wrec_loaded && wrec_image_confirmed()) {
+		struct warm_reconcile_ctx ctx = {.count = 0U, .overflow = false, .all = true};
+		char name[SETTINGS_MAX_NAME_LEN + 1];
+
+		(void)settings_load_subtree_direct(MTNODE_SUBTREE, warm_reconcile_cb, &ctx);
+		for (size_t i = 0U; i < ctx.count; i++) {
+			(void)snprintk(name, sizeof(name), MTNODE_SUBTREE "/%08x", ctx.orphans[i]);
+			(void)settings_delete(name);
+		}
+		if (ctx.count > 0U) {
+			LOG_INF("NodeDB: deleted %zu settings key(s) now in the bulk store",
+				ctx.count);
+		}
+		wrec_legacy_pending = ctx.overflow;
+		if (ctx.overflow) {
+			nodekeys_schedule_save();
+		}
+	}
+	wrec_persist(false);
+}
+
+/* Lockdown rewrote the store: rewrite every page in the mode now in force. */
+static void wrec_rewrite_hook(void)
+{
+	wrec_persist(true);
+}
+#endif /* NODEDB_WBULK */
+
 static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	uint8_t buf[MTNODE_REC_LEN];
@@ -873,6 +1168,14 @@ static int nodekeys_set(const char *key, size_t len, settings_read_cb read_cb, v
 	const uint8_t *pub;
 	char *endptr;
 	ssize_t read;
+
+#if defined(NODEDB_WBULK)
+	/* Once the bulk pages are loaded, settings keys are leftovers awaiting
+	 * deletion; a later full settings_load() must not re-place them. */
+	if (wrec_active() && wrec_loaded) {
+		return 0;
+	}
+#endif
 
 	/* Only the current 38 B format is accepted (plus lockdown's seal when the
 	 * record is sealed). A stale-format record (a pre-signer 37 B, pre-role 36 B,
@@ -912,6 +1215,12 @@ static int nodekeys_export(int (*export_func)(const char *name, const void *val,
 	char name[SETTINGS_MAX_NAME_LEN + 1];
 	uint32_t self = meshtastic_get_node_id();
 	int ret = 0;
+
+#if defined(NODEDB_WBULK)
+	if (wrec_active()) {
+		return 0; /* the ring lives in the bulk store */
+	}
+#endif
 
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
 	for (size_t i = 0U; i < ARRAY_SIZE(warm_keys); i++) {
@@ -1267,8 +1576,8 @@ static uint32_t nrec_crc[NREC_PAGES];   /* plaintext CRC last written or read */
 static bool nrec_crc_valid[NREC_PAGES];
 static bool nrec_loaded;                /* pages read (or migrated) this boot */
 static bool nrec_legacy_pending;        /* settings mtrec/ records still to delete */
-static MESHTASTIC_EXT_RAM_BSS_ATTR uint8_t nrec_page[NREC_PAGE_LEN];
-static K_MUTEX_DEFINE(nrec_lock);       /* page buffer + slot map; nodedb_lock nests inside */
+#define nrec_page nodedb_page_buf /* shared with the warm pages; see nodedb_page_lock */
+#define nrec_lock nodedb_page_lock
 
 static bool nrec_active(void)
 {
@@ -1319,7 +1628,7 @@ static uint32_t nrec_build_page_locked(size_t p, uint8_t *used_out)
 {
 	uint8_t used = 0U;
 
-	memset(nrec_page, 0, sizeof(nrec_page));
+	memset(nrec_page, 0, NREC_PAGE_LEN);
 	nrec_page[0] = NREC_PAGE_VER;
 	nrec_page[1] = (uint8_t)NREC_PER_PAGE;
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
@@ -1347,7 +1656,7 @@ static uint32_t nrec_build_page_locked(size_t p, uint8_t *used_out)
 	k_mutex_unlock(&nodedb_lock);
 	nrec_page[2] = used;
 	*used_out = used;
-	return crc32_ieee(nrec_page, sizeof(nrec_page));
+	return crc32_ieee(nrec_page, NREC_PAGE_LEN);
 }
 
 /* Write every page whose content changed (every page when `force`). */
@@ -1367,7 +1676,7 @@ static void nrec_persist(bool force)
 			continue;
 		}
 		ret = (used > 0U) ? meshtastic_bulk_write(NREC_PAGE_ID(p), nrec_page,
-							  sizeof(nrec_page))
+							  NREC_PAGE_LEN)
 				  : meshtastic_bulk_delete(NREC_PAGE_ID(p));
 		if (ret == 0 || ret == -ENOENT) {
 			nrec_crc[p] = crc;
@@ -1389,14 +1698,14 @@ static int nrec_load(void)
 	k_mutex_lock(&nrec_lock, K_FOREVER);
 	memset(nrec_slot, 0, sizeof(nrec_slot));
 	for (size_t p = 0U; p < NREC_PAGES; p++) {
-		ssize_t n = meshtastic_bulk_read(NREC_PAGE_ID(p), nrec_page, sizeof(nrec_page));
+		ssize_t n = meshtastic_bulk_read(NREC_PAGE_ID(p), nrec_page, NREC_PAGE_LEN);
 
 		nrec_crc_valid[p] = false;
 		if (n == -EACCES) {
 			k_mutex_unlock(&nrec_lock);
 			return -EACCES;
 		}
-		if (n != (ssize_t)sizeof(nrec_page) || nrec_page[0] != NREC_PAGE_VER ||
+		if (n != (ssize_t)NREC_PAGE_LEN || nrec_page[0] != NREC_PAGE_VER ||
 		    nrec_page[1] != (uint8_t)NREC_PER_PAGE) {
 			continue; /* absent, damaged or another layout: rebuilt at the next save */
 		}
@@ -1415,7 +1724,7 @@ static int nrec_load(void)
 			nrec_slot[p * NREC_PER_PAGE + i] = num;
 			restored++;
 		}
-		nrec_crc[p] = crc32_ieee(nrec_page, sizeof(nrec_page));
+		nrec_crc[p] = crc32_ieee(nrec_page, NREC_PAGE_LEN);
 		nrec_crc_valid[p] = true;
 	}
 	nrec_loaded = true;
@@ -1534,14 +1843,9 @@ static void nrec_rewrite_hook(void)
 	nrec_persist(true);
 }
 
-int meshtastic_nodedb_bulk_reload(void)
-{
-	if (!nrec_active()) {
-		return -ENODEV;
-	}
-	return nrec_boot_restore();
-}
 #endif /* NODEDB_BULK */
+
+
 
 static int mtrec_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
@@ -2709,7 +3013,16 @@ int meshtastic_nodedb_init(void)
 	{
 		uint32_t t0 = k_cycle_get_32();
 
+#if defined(NODEDB_WBULK)
+		if (wrec_active()) {
+			(void)wrec_boot_restore();
+			meshtastic_lockdown_add_rewrite_hook(wrec_rewrite_hook);
+		} else {
+			(void)settings_load_subtree(MTNODE_SUBTREE);
+		}
+#else
 		(void)settings_load_subtree(MTNODE_SUBTREE);
+#endif
 #if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
 		meshtastic_storage_note_load(MESHTASTIC_STORAGE_LOAD_NODE_KEYS,
 					     k_cycle_get_32() - t0);
@@ -2761,3 +3074,24 @@ int meshtastic_nodedb_init(void)
 
 	return (entry == NULL) ? -ENOMEM : 0;
 }
+
+#if defined(NODEDB_BULK) || defined(NODEDB_WBULK)
+/* The unlock's reload: restore whichever NodeDB tables live in the bulk store,
+ * keys first, as at boot. -ENODEV when the store is not mounted (the caller then
+ * reloads the settings subtrees). */
+int meshtastic_nodedb_bulk_reload(void)
+{
+	int ret = 0;
+
+	if (!meshtastic_bulk_ready()) {
+		return -ENODEV;
+	}
+#if defined(NODEDB_WBULK)
+	ret = wrec_boot_restore();
+#endif
+#if defined(NODEDB_BULK)
+	ret = nrec_boot_restore();
+#endif
+	return ret;
+}
+#endif

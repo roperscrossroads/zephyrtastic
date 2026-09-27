@@ -10,4 +10,14 @@ common:
   platform_allow:
     - native_sim/native/64
 tests:
-  meshtastic.bulk_store.native_sim: {}
+  meshtastic.bulk_store.native_sim:
+    extra_configs:
+      # Snapshots every 2 s so the tests see a save without waiting 5 minutes.
+      - CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC=2
+  # Keys in bulk with node records OFF (PERSIST_RECORDS and PERSIST_KEYS are
+  # independent): the unlock reload must still restore the warm pages. Build-only,
+  # because the node-record tests above need records on.
+  meshtastic.bulk_store.keys_without_records.native_sim:
+    build_only: true
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS=n
