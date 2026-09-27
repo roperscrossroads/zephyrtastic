@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "meshtastic_core.h"
+#include "meshtastic/mesh.pb.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,8 +36,12 @@ struct meshtastic_relay_stats {
 	uint32_t dir_off;       /* direction does not include inbound */
 	uint32_t not_broadcast; /* DMs (and PKC) never cross */
 	uint32_t not_text;      /* only TEXT_MESSAGE_APP crosses */
+	uint32_t reaction;      /* a tapback (Data.emoji set): would mean nothing on the other tier */
 	uint32_t ignored;       /* our own, or on the relay-id list */
-	uint32_t bad_text;      /* empty or not valid UTF-8 */
+	uint32_t bad_text;      /* nothing visible, or mostly garbage, after sanitizing */
+	uint32_t sanitized;     /* relayed, but the reference sanitizer changed it */
+	uint32_t origin_limited; /* over the per-origin cap */
+	uint32_t log_suppressed; /* refusal log lines held back by the log limiter */
 	uint32_t prefixed;      /* already carries a relay-style prefix */
 	uint32_t no_mapping;    /* no equivalent channel on this preset */
 	uint32_t seen;          /* same (origin, text) inside the TTL */
@@ -62,8 +67,11 @@ void meshtastic_relay_reset(void);
  * non-space ASCII characters, ']', ' '. Any relay's, not only ours. */
 bool meshtastic_relay_has_prefix(const uint8_t *text, size_t len);
 
-/* The router's hook: every decoded frame, with the bearer it arrived on. */
-void meshtastic_relay_on_rx(const struct meshtastic_packet *pkt, enum meshtastic_bearer bearer);
+/* The router's hook: every decoded frame, with the decoded MeshPacket when the
+ * router has one (for Data.emoji, which the flat struct does not model) and the
+ * bearer it arrived on. */
+void meshtastic_relay_on_rx(const struct meshtastic_packet *pkt, const meshtastic_MeshPacket *mesh,
+			    enum meshtastic_bearer bearer);
 
 /* ---- the ear (MESHTASTIC_RELAY_EAR) ---------------------------------------- */
 
@@ -75,6 +83,7 @@ struct meshtastic_relay_ear_stats {
 	uint32_t no_peer;       /* no receiving half configured */
 	uint32_t queue_full;
 	uint32_t send_failed;   /* the peer link refused (no live link, GATT error) */
+	uint32_t rate_dropped;  /* over the ear's forwarding cap */
 };
 
 /* The receiving half's node id; 0 stops forwarding. Saved with

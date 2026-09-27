@@ -3380,14 +3380,19 @@ static int cmd_relay_show(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "direction: %s", relay_dir_names[dir & 3]);
 	shell_print(sh, "considered %u  relayed %u  sent %u  tx_failed %u", st.considered,
 		    st.relayed, st.sent, st.tx_failed);
-	shell_print(sh, "refused: dir_off %u  not_broadcast %u  not_text %u  ignored %u",
-		    st.dir_off, st.not_broadcast, st.not_text, st.ignored);
+	shell_print(sh, "refused: dir_off %u  not_broadcast %u  not_text %u  reaction %u  ignored %u",
+		    st.dir_off, st.not_broadcast, st.not_text, st.reaction, st.ignored);
 	shell_print(sh, "         bad_text %u  prefixed %u  no_mapping %u  seen %u",
 		    st.bad_text, st.prefixed, st.no_mapping, st.seen);
-	shell_print(sh, "         rate_dropped %u  queue_full %u  (unprefixed sent %u)",
-		    st.rate_dropped, st.queue_full, st.unprefixed);
-	shell_print(sh, "cap %d per %d s, seen TTL %d s", CONFIG_MESHTASTIC_RELAY_RATE_MAX,
-		    CONFIG_MESHTASTIC_RELAY_RATE_WINDOW_SEC, CONFIG_MESHTASTIC_RELAY_SEEN_TTL_SEC);
+	shell_print(sh, "         rate_dropped %u  origin_limited %u  queue_full %u", st.rate_dropped,
+		    st.origin_limited, st.queue_full);
+	shell_print(sh, "relayed-but: sanitized %u  unprefixed %u;  log lines held back %u",
+		    st.sanitized, st.unprefixed, st.log_suppressed);
+	shell_print(sh, "cap %d per %d s, per origin %d per %d s, seen TTL %d s",
+		    CONFIG_MESHTASTIC_RELAY_RATE_MAX, CONFIG_MESHTASTIC_RELAY_RATE_WINDOW_SEC,
+		    CONFIG_MESHTASTIC_RELAY_PER_ORIGIN_MAX,
+		    CONFIG_MESHTASTIC_RELAY_PER_ORIGIN_WINDOW_SEC,
+		    CONFIG_MESHTASTIC_RELAY_SEEN_TTL_SEC);
 	return 0;
 }
 
@@ -3477,8 +3482,10 @@ static int cmd_ear_show(const struct shell *sh, size_t argc, char **argv)
 		    meshtastic_relay_ear_get_peer() == 0U ? " (none: not forwarding)" : "");
 	shell_print(sh, "heard %u  forwarded %u  send_failed %u  queue_full %u", st.heard,
 		    st.forwarded, st.send_failed, st.queue_full);
-	shell_print(sh, "skipped: not_text %u  not_broadcast %u  no_peer %u", st.not_text,
-		    st.not_broadcast, st.no_peer);
+	shell_print(sh, "skipped: not_text %u  not_broadcast %u  no_peer %u  rate_dropped %u",
+		    st.not_text, st.not_broadcast, st.no_peer, st.rate_dropped);
+	shell_print(sh, "cap: %d frames per %d s", CONFIG_MESHTASTIC_RELAY_EAR_RATE_MAX,
+		    CONFIG_MESHTASTIC_RELAY_EAR_RATE_WINDOW_SEC);
 	shell_print(sh, "transmit: %s",
 		    IS_ENABLED(CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY) ? "compiled out" : "possible");
 	return 0;

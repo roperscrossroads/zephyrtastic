@@ -74,6 +74,37 @@ config MESHTASTIC_RELAY_RATE_WINDOW_SEC
 	default 600
 	range 10 86400
 
+config MESHTASTIC_RELAY_PER_ORIGIN_MAX
+	int "Texts relayed per origin per window"
+	default 3
+	range 1 255
+	help
+	  One node -- misbehaving, buggy, or hostile -- may not spend the whole
+	  direction's cap (MESHTASTIC_RELAY_RATE_MAX) and starve everyone else.
+	  Checked after the seen-cache and before the direction's cap.
+
+config MESHTASTIC_RELAY_PER_ORIGIN_WINDOW_SEC
+	int "Per-origin window in seconds"
+	default 60
+	range 10 86400
+
+config MESHTASTIC_RELAY_ORIGIN_SLOTS
+	int "Origins tracked by the per-origin limiter"
+	default 8
+	range 2 64
+	help
+	  A new origin takes the slot whose window started longest ago, so a
+	  flood of invented origins cycles the table rather than growing it.
+
+config MESHTASTIC_RELAY_LOG_INTERVAL_SEC
+	int "At most one refusal log line per this many seconds"
+	default 10
+	range 1 3600
+	help
+	  Refusals worth a look (bad text, a relay prefix, the caps) are logged
+	  with their first 16 bytes in hex; this bounds that log so a flooding
+	  node cannot turn it into the attack. Held-back lines are counted.
+
 config MESHTASTIC_RELAY_IGNORE_MAX
 	int "Relay ids never translated"
 	default 4
@@ -123,6 +154,20 @@ config MESHTASTIC_RELAY_EAR_QUEUE_SIZE
 	help
 	  Each slot holds one wire frame (up to 256 B). Forwarding runs on the
 	  BLE work queue, never on the LoRa receive thread.
+
+config MESHTASTIC_RELAY_EAR_RATE_MAX
+	int "Frames forwarded per window"
+	default 30
+	range 1 1000
+	help
+	  The ear does not judge content (the receiving half does), but a
+	  flood of text frames on its preset must not saturate the peer link
+	  or the receiving half. Excess frames are counted and dropped.
+
+config MESHTASTIC_RELAY_EAR_RATE_WINDOW_SEC
+	int "Ear forwarding window in seconds"
+	default 60
+	range 1 3600
 
 config MESHTASTIC_RELAY_EAR_RX_ONLY
 	bool "Compile the transmit path out"

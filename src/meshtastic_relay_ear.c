@@ -41,6 +41,8 @@ struct ear_frame {
 
 static struct {
 	uint32_t peer;
+	int64_t window_start_ms;
+	uint16_t used;
 	struct meshtastic_relay_ear_stats stats;
 } ear = {
 	.peer = CONFIG_MESHTASTIC_RELAY_EAR_PEER,
@@ -125,6 +127,23 @@ void meshtastic_relay_ear_on_rx(const struct meshtastic_packet *pkt, const uint8
 	if (ear.peer == 0U) {
 		ear.stats.no_peer++;
 		goto out;
+	}
+	/* A flood of text on this preset -- a broken or hostile node -- must not
+	 * saturate the peer link or the receiving half. */
+	{
+		int64_t now = k_uptime_get();
+
+		if (ear.window_start_ms == 0 ||
+		    now - ear.window_start_ms >=
+			    (int64_t)CONFIG_MESHTASTIC_RELAY_EAR_RATE_WINDOW_SEC * 1000) {
+			ear.window_start_ms = (now == 0) ? 1 : now;
+			ear.used = 0U;
+		}
+		if (ear.used >= CONFIG_MESHTASTIC_RELAY_EAR_RATE_MAX) {
+			ear.stats.rate_dropped++;
+			goto out;
+		}
+		ear.used++;
 	}
 	f.len = (uint16_t)wire_len;
 	memcpy(f.wire, wire, wire_len);
@@ -217,6 +236,8 @@ void meshtastic_relay_ear_reset(void)
 	k_mutex_lock(&ear_lock, K_FOREVER);
 	ear.peer = CONFIG_MESHTASTIC_RELAY_EAR_PEER;
 	memset(&ear.stats, 0, sizeof(ear.stats));
+	ear.window_start_ms = 0;
+	ear.used = 0U;
 	k_mutex_unlock(&ear_lock);
 	ear_forget();
 }

@@ -762,6 +762,9 @@ ZTEST(relay, test_r14_any_relay_prefix_refused)
 		assert_nothing_relayed();
 	}
 	zassert_equal(stats().prefixed, ARRAY_SIZE(prefixed), "prefixed not counted");
+	/* Three refusals inside one log interval: one line, two held back. */
+	zassert_equal(stats().log_suppressed, ARRAY_SIZE(prefixed) - 1U,
+		      "refusal log not rate-limited");
 }
 
 /* The prefix test itself, at the edges. */
@@ -863,10 +866,14 @@ ZTEST(relay, test_r18_rate_cap)
 
 	public_setup_and_build(0x5250U, "unused", wire, &wire_len);
 	relay_inbound();
+	/* A different origin each time: the per-origin limit (R26) must not be
+	 * what stops them. */
 	for (int i = 0; i <= CONFIG_MESHTASTIC_RELAY_RATE_MAX; i++) {
 		snprintk(text, sizeof(text), "msg %d", i);
 		switch_preset(PRESET_LF);
-		build_far_text(0U, 0x5251U + i, text, wire, &wire_len);
+		build_far(0U, 0x0D0D0000U + (uint32_t)i, MESHTASTIC_NODE_BROADCAST,
+			  MESHTASTIC_PORT_TEXT_MESSAGE, 0x5251U + i, (const uint8_t *)text,
+			  strlen(text), wire, &wire_len);
 		switch_preset(PRESET_MF);
 		ear_forwards(wire, wire_len);
 		if (take_relayed(&r, K_MSEC(1000)) == 0) {
@@ -877,12 +884,14 @@ ZTEST(relay, test_r18_rate_cap)
 	zassert_equal(stats().rate_dropped, 1U, "rate_dropped not counted");
 }
 
-/* R21 (H30): a colliding stranger's frame is not re-originated, and text
- * that is not valid UTF-8 (what a wrong-key decrypt that happened to parse
- * would look like) is refused by the relay's own check. */
+/* R21 (H30): a colliding stranger's frame is not re-originated, and text with
+ * nothing worth sending after the reference's sanitizer is refused: mostly
+ * replacement characters, or nothing visible once cut at its NUL -- the shape of
+ * the binary frame refused on air on 2026-09-27 (" \r  " then a NUL). */
 ZTEST(relay, test_r21_admission)
 {
-	static const uint8_t bad[] = { 'o', 'k', 0xC3, 0x28 }; /* broken UTF-8 */
+	static const uint8_t garbage[] = { 0xFF, 0xFE, 0xC3, 'a' };      /* "???a": 3 of 4 */
+	static const uint8_t on_air[] = { ' ', '\r', ' ', ' ', 0x00, 'x', 'y', 'z' };
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t wire_len;
 	uint8_t stranger_psk[16];
@@ -901,12 +910,168 @@ ZTEST(relay, test_r21_admission)
 
 	switch_preset(PRESET_LF);
 	build_far(0U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
-		  0x5261U, bad, sizeof(bad), wire, &wire_len);
+		  0x5261U, garbage, sizeof(garbage), wire, &wire_len);
 	switch_preset(PRESET_MF);
 	ear_forwards(wire, wire_len);
 	assert_nothing_relayed();
-	zassert_equal(stats().bad_text, 1U, "bad_text not counted");
+
+	switch_preset(PRESET_LF);
+	build_far(0U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
+		  0x5262U, on_air, sizeof(on_air), wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+	zassert_equal(stats().bad_text, 2U, "bad_text not counted");
 }
+
+/* The sanitizer is the reference's (meshtastic_utf8_sanitize): a sender whose
+ * text needs no repair is relayed byte for byte, CRLF included (R23); a
+ * minority of invalid bytes become '?' and the text is still relayed (R24);
+ * the text ends at its first NUL (R25). */
+ZTEST(relay, test_r23_r24_r25_sanitized_like_the_reference)
+{
+	static const uint8_t crlf[] = "line one\r\nline two";
+	static const uint8_t bad_minority[] = { 'c', 'a', 'f', 0xC3, ' ', 'o', 'k' };
+	static const uint8_t nul_cut[] = { 'h', 'i', 0x00, 'j', 'u', 'n', 'k' };
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct relayed r;
+
+	public_setup_and_build(0x5270U, "unused", wire, &wire_len);
+	relay_inbound();
+
+	switch_preset(PRESET_LF);
+	build_far(0U, 0x0D0D0001U, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
+		  0x5271U, crlf, sizeof(crlf) - 1U, wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "CRLF text not relayed");
+	assert_relayed_text(&r, "[0001] line one\r\nline two");
+
+	switch_preset(PRESET_LF);
+	build_far(0U, 0x0D0D0002U, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
+		  0x5272U, bad_minority, sizeof(bad_minority), wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "minority-bad text not relayed");
+	assert_relayed_text(&r, "[0002] caf? ok");
+
+	switch_preset(PRESET_LF);
+	build_far(0U, 0x0D0D0003U, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
+		  0x5273U, nul_cut, sizeof(nul_cut), wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "NUL-cut text not relayed");
+	assert_relayed_text(&r, "[0003] hi");
+
+	zassert_equal(stats().sanitized, 2U, "sanitized count (CRLF needs no repair)");
+	zassert_equal(stats().bad_text, 0U);
+}
+
+/* R26: one origin may not spend the whole direction's cap. FAR sends three
+ * distinct texts inside the window and only PER_ORIGIN_MAX (2 here) cross;
+ * another origin still gets through on the cap FAR could not spend. */
+ZTEST(relay, test_r26_per_origin_limit)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct relayed r;
+	char text[16];
+	int got = 0;
+
+	public_setup_and_build(0x5280U, "unused", wire, &wire_len);
+	relay_inbound();
+	for (int i = 0; i < 3; i++) {
+		snprintk(text, sizeof(text), "chatty %d", i);
+		switch_preset(PRESET_LF);
+		build_far_text(0U, 0x5281U + i, text, wire, &wire_len);
+		switch_preset(PRESET_MF);
+		ear_forwards(wire, wire_len);
+		if (take_relayed(&r, K_MSEC(1000)) == 0) {
+			got++;
+		}
+	}
+	zassert_equal(got, CONFIG_MESHTASTIC_RELAY_PER_ORIGIN_MAX, "per-origin limit");
+	zassert_equal(stats().origin_limited, 1U);
+
+	switch_preset(PRESET_LF);
+	build_far(0U, 0x0D0D0BEEU, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
+		  0x5290U, (const uint8_t *)"someone else", 12U, wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "another origin was starved");
+}
+/* A reaction (tapback): TEXT_MESSAGE_APP with Data.emoji set and reply_id naming
+ * the message. Re-originated it would be a bare emoji reacting to nothing on the
+ * other tier, so it does not cross; a plain reply (reply_id, no emoji) does. The
+ * flat struct does not model emoji, so the frame is built from a MeshPacket. */
+ZTEST(relay, test_r27_reactions_do_not_cross_replies_do)
+{
+	static const char thumbs[] = "\xF0\x9F\x91\x8D";
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct relayed r;
+
+	public_setup_and_build(0x52A0U, "unused", wire, &wire_len);
+	relay_inbound();
+
+	switch_preset(PRESET_LF);
+	mesh.from = FAR_NODE_ID;
+	mesh.to = MESHTASTIC_NODE_BROADCAST;
+	mesh.id = 0x52A1U;
+	mesh.channel = 0U;
+	mesh.hop_limit = 3U;
+	mesh.hop_start = 3U;
+	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh.decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+	mesh.decoded.payload.size = sizeof(thumbs) - 1U;
+	memcpy(mesh.decoded.payload.bytes, thumbs, sizeof(thumbs) - 1U);
+	mesh.decoded.reply_id = 0x12345678U;
+	mesh.decoded.emoji = 1U;
+	zassert_ok(meshtastic_build_wire_from_mesh(&mesh, wire, &wire_len));
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+	zassert_equal(stats().reaction, 1U, "reaction not counted");
+
+	/* The same shape without emoji is a reply: its text stands alone. */
+	switch_preset(PRESET_LF);
+	mesh.id = 0x52A2U;
+	mesh.decoded.emoji = 0U;
+	mesh.decoded.payload.size = 5U;
+	memcpy(mesh.decoded.payload.bytes, "agree", 5U);
+	zassert_ok(meshtastic_build_wire_from_mesh(&mesh, wire, &wire_len));
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "a reply was not relayed");
+	assert_relayed_text(&r, FAR_PREFIX "agree");
+}
+
+/* R16: a relayed text coming back with any relay's prefix on it -- "[c3d4]
+ * Hello" after "Hello" -- does not cross again. It is refused by the prefix
+ * rule (R14) before the seen-cache is consulted, so the stripped-hash variant the
+ * spec described is not needed: the prefix is never hashed at all. */
+ZTEST(relay, test_r16_prefixed_repeat_refused)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	struct relayed r;
+
+	public_setup_and_build(0x52B0U, "Hello", wire, &wire_len);
+	relay_inbound();
+	ear_forwards(wire, wire_len);
+	zassert_ok(take_relayed(&r, K_MSEC(1000)), "first copy not relayed");
+
+	switch_preset(PRESET_LF);
+	build_far_text(0U, 0x52B1U, "[c3d4] Hello", wire, &wire_len);
+	switch_preset(PRESET_MF);
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+	zassert_equal(stats().prefixed, 1U);
+	zassert_equal(stats().relayed, 1U);
+}
+
 #endif /* CONFIG_MESHTASTIC_RELAY */
 
 #if defined(CONFIG_MESHTASTIC_RELAY_EAR)
@@ -1040,6 +1205,23 @@ ZTEST(relay, test_ear_no_peer_and_send_failure)
 	k_msleep(20);
 	zassert_equal(ear_stats().send_failed, 1U);
 	zassert_equal(ear_stats().forwarded, 0U);
+}
+/* E6: a flood of text on the ear's preset is capped before it reaches the peer
+ * link (EAR_RATE_MAX is 3 in this suite's ear builds). */
+ZTEST(relay, test_e6_ear_forwarding_cap)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	char text[16];
+
+	for (int i = 0; i <= CONFIG_MESHTASTIC_RELAY_EAR_RATE_MAX; i++) {
+		snprintk(text, sizeof(text), "flood %d", i);
+		ear_hears(0x5350U + i, text, wire, &wire_len);
+		k_msleep(20);
+	}
+	k_msleep(200);
+	zassert_equal(ear_sent.count, CONFIG_MESHTASTIC_RELAY_EAR_RATE_MAX, "cap not applied");
+	zassert_equal(ear_stats().rate_dropped, 1U, "rate_dropped not counted");
 }
 #endif /* CONFIG_MESHTASTIC_RELAY_EAR */
 

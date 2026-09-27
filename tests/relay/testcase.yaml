@@ -18,6 +18,7 @@ tests:
       - CONFIG_MESHTASTIC_RELAY=n
       - CONFIG_MESHTASTIC_RELAY_EAR=y
       - CONFIG_MESHTASTIC_RELAY_EAR_PEER=0x0E0E0E0E
+      - CONFIG_MESHTASTIC_RELAY_EAR_RATE_MAX=3
 
   # Persistence (mtrelay/relay, mtear/peer) on real NVS, with both halves in one
   # image so both records are exercised. Transmit stays on: the relay's cases
@@ -26,6 +27,7 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_RELAY_EAR=y
       - CONFIG_MESHTASTIC_RELAY_EAR_PEER=0x0E0E0E0E
+      - CONFIG_MESHTASTIC_RELAY_EAR_RATE_MAX=3
       - CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY=n
       - CONFIG_MESHTASTIC_SETTINGS=y
       - CONFIG_SETTINGS=y

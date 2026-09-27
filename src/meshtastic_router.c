@@ -1062,7 +1062,7 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		 * bearer frame's CONTENT reaches our air: never the frame itself (the
 		 * link-local gate below still holds), only a new text packet from us.
 		 * It needs the bearer, which modules are not given. */
-		meshtastic_relay_on_rx(pkt, bearer);
+		meshtastic_relay_on_rx(pkt, decoded_mesh, bearer);
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY_EAR)
 		/* The relay's ear: a decoded broadcast heard on LoRa goes, byte for

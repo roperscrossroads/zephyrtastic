@@ -33,10 +33,12 @@
 
 #include <zephyr/meshtastic/meshtastic.h>
 
+#include "meshtastic/mesh.pb.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
 #include "meshtastic_region_presets.h"
 #include "meshtastic_relay.h"
+#include "meshtastic_utf8.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -65,6 +67,10 @@ static struct {
 	struct seen_entry seen[CONFIG_MESHTASTIC_RELAY_SEEN_SIZE];
 	uint8_t seen_next;
 	struct rate_bucket inbound;
+	struct {
+		uint32_t origin;
+		struct rate_bucket b;
+	} origins[CONFIG_MESHTASTIC_RELAY_ORIGIN_SLOTS];
 	uint32_t ignore[CONFIG_MESHTASTIC_RELAY_IGNORE_MAX];
 	uint8_t ignore_count;
 	struct meshtastic_relay_stats stats;
@@ -107,48 +113,72 @@ bool meshtastic_relay_has_prefix(const uint8_t *text, size_t len)
 	return false;
 }
 
-/* Strict enough to refuse what a wrong-key decrypt produces: well-formed UTF-8
- * with no C0 control characters other than tab and newline. The router's
- * parse-as-Data is the first admission test; this one stops a rare garbage
- * frame that parsed from being MULTIPLIED onto a second tier (H30/R21). */
-static bool text_is_valid(const uint8_t *s, size_t len)
+/* The text the relay would send, and whether it is worth sending.
+ *
+ * Sanitizing is the reference's own: meshtastic_utf8_sanitize() (its
+ * sanitizeUtf8) cuts at the first NUL and turns every invalid UTF-8 lead byte
+ * into '?'. Control characters, CR included, pass through as the reference
+ * passes them.
+ *
+ * Refusing is ours, because a relay MULTIPLIES what it admits onto a second
+ * tier: a text with nothing visible left (empty or whitespace only after the
+ * NUL cut) or one that is more than a quarter replacement characters is what a
+ * wrong-key decrypt that happened to parse, or a binary payload on the text
+ * port, looks like (H30/R21; seen on air 2026-09-27). */
+static bool text_sanitize(const uint8_t *in, size_t in_len, char *out, size_t *out_len,
+			  bool *changed)
 {
-	size_t i = 0U;
+	size_t len;
+	size_t replaced = 0U;
+	bool visible = false;
 
-	if (len == 0U) {
-		return false;
+	memcpy(out, in, in_len);
+	out[in_len] = '\0';
+	*changed = meshtastic_utf8_sanitize(out, in_len + 1U);
+	len = strlen(out);
+	if (len != in_len) {
+		*changed = true; /* cut at a NUL */
 	}
-	while (i < len) {
-		uint8_t c = s[i];
-		size_t n;
+	for (size_t i = 0U; i < len; i++) {
+		if (out[i] == '?' && in[i] != '?') {
+			replaced++;
+		}
+		if ((uint8_t)out[i] > ' ') {
+			visible = true;
+		}
+	}
+	*out_len = len;
+	return visible && replaced * 4U <= len;
+}
 
-		if (c < 0x80U) {
-			if (c < 0x20U && c != '\t' && c != '\n') {
-				return false;
-			}
-			i++;
-			continue;
-		}
-		if ((c & 0xE0U) == 0xC0U && c >= 0xC2U) {
-			n = 1U;
-		} else if ((c & 0xF0U) == 0xE0U) {
-			n = 2U;
-		} else if ((c & 0xF8U) == 0xF0U && c <= 0xF4U) {
-			n = 3U;
-		} else {
-			return false;
-		}
-		if (i + n >= len) {
-			return false; /* truncated sequence */
-		}
-		for (size_t k = 1U; k <= n; k++) {
-			if ((s[i + k] & 0xC0U) != 0x80U) {
-				return false;
-			}
-		}
-		i += n + 1U;
+/* Refusals worth a line in the log, at most one per
+ * MESHTASTIC_RELAY_LOG_INTERVAL_SEC so a flooding or broken node cannot turn
+ * the log into the attack. The first bytes go in hex: the only way to tell a
+ * key collision from a client sending binary on the text port. */
+static void log_refusal(const char *why, uint32_t from, const uint8_t *payload, size_t len,
+			int64_t now)
+{
+	static int64_t last_ms;
+	static uint32_t suppressed;
+	uint32_t was_suppressed;
+
+	k_mutex_lock(&relay_lock, K_FOREVER);
+	if (last_ms != 0 && now - last_ms < (int64_t)CONFIG_MESHTASTIC_RELAY_LOG_INTERVAL_SEC * 1000) {
+		suppressed++;
+		relay.stats.log_suppressed++;
+		k_mutex_unlock(&relay_lock);
+		return;
 	}
-	return true;
+	last_ms = (now == 0) ? 1 : now;
+	was_suppressed = suppressed;
+	suppressed = 0U;
+	k_mutex_unlock(&relay_lock);
+
+	LOG_INF("relay: refused %s from 0x%08x (%u B)%s", why, from, (unsigned int)len,
+		was_suppressed ? " (+ earlier refusals suppressed)" : "");
+	if (payload != NULL && len > 0U) {
+		LOG_HEXDUMP_INF(payload, MIN(len, 16U), "relay: first bytes");
+	}
 }
 
 static uint32_t fnv1a(const uint8_t *s, size_t len)
@@ -237,6 +267,49 @@ static bool rate_take_locked(struct rate_bucket *b, int64_t now)
 	return true;
 }
 
+/* Per origin, so one node -- misbehaving, buggy, or hostile -- cannot spend the
+ * whole direction's cap and starve everyone else's text. A small table: an
+ * origin not in it takes the slot whose window started longest ago. */
+static bool origin_take_locked(uint32_t origin, int64_t now)
+{
+	size_t pick = 0U;
+	struct rate_bucket *b;
+
+	for (size_t i = 0U; i < ARRAY_SIZE(relay.origins); i++) {
+		if (relay.origins[i].origin == origin && relay.origins[i].b.window_start_ms != 0) {
+			pick = i;
+			goto found;
+		}
+		if (relay.origins[i].b.window_start_ms < relay.origins[pick].b.window_start_ms) {
+			pick = i;
+		}
+	}
+	relay.origins[pick].origin = origin;
+	relay.origins[pick].b.window_start_ms = 0;
+found:
+	b = &relay.origins[pick].b;
+	if (b->window_start_ms == 0 ||
+	    now - b->window_start_ms >= (int64_t)CONFIG_MESHTASTIC_RELAY_PER_ORIGIN_WINDOW_SEC * 1000) {
+		b->window_start_ms = (now == 0) ? 1 : now;
+		b->used = 0U;
+	}
+	if (b->used >= CONFIG_MESHTASTIC_RELAY_PER_ORIGIN_MAX) {
+		return false;
+	}
+	b->used++;
+	return true;
+}
+
+static void origin_give_back_locked(uint32_t origin)
+{
+	for (size_t i = 0U; i < ARRAY_SIZE(relay.origins); i++) {
+		if (relay.origins[i].origin == origin && relay.origins[i].b.used > 0U) {
+			relay.origins[i].b.used--;
+			return;
+		}
+	}
+}
+
 static bool ignored_locked(uint32_t from)
 {
 	if (from == mt.node_id) {
@@ -283,9 +356,14 @@ static void relay_work_fn(struct k_work *work)
 
 /* ---- the receive side ------------------------------------------------------- */
 
-void meshtastic_relay_on_rx(const struct meshtastic_packet *pkt, enum meshtastic_bearer bearer)
+void meshtastic_relay_on_rx(const struct meshtastic_packet *pkt, const meshtastic_MeshPacket *mesh,
+			   enum meshtastic_bearer bearer)
 {
 	struct relay_job job;
+	char text[MESHTASTIC_MAX_TEXT_LEN + 1];
+	size_t text_len = 0U;
+	bool changed = false;
+	const char *refused = NULL;
 	uint32_t text_hash;
 	uint8_t dest;
 	int64_t now;
@@ -312,19 +390,32 @@ void meshtastic_relay_on_rx(const struct meshtastic_packet *pkt, enum meshtastic
 		relay.stats.not_text++;
 		goto out;
 	}
+	/* A reaction (tapback) is a TEXT_MESSAGE_APP packet with Data.emoji set
+	 * and reply_id naming the message it reacts to. Re-originated, it would
+	 * arrive on the other tier as a bare emoji reacting to nothing there, so
+	 * it does not cross (meshtastic-matrix-relay excludes them too, or renders
+	 * them as a sentence). Plain replies do cross: their text stands alone. */
+	if (mesh != NULL && mesh->which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
+	    mesh->decoded.emoji != 0U) {
+		relay.stats.reaction++;
+		goto out;
+	}
 	if (ignored_locked(pkt->from)) {
 		relay.stats.ignored++;
 		goto out;
 	}
-	if (pkt->payload == NULL || pkt->payload_len > MESHTASTIC_MAX_TEXT_LEN ||
-	    !text_is_valid(pkt->payload, pkt->payload_len)) {
+	if (pkt->payload == NULL || pkt->payload_len == 0U ||
+	    pkt->payload_len > MESHTASTIC_MAX_TEXT_LEN ||
+	    !text_sanitize(pkt->payload, pkt->payload_len, text, &text_len, &changed)) {
 		relay.stats.bad_text++;
+		refused = "bad text";
 		goto out;
 	}
 	/* Any relay's prefix, not only ours: a second relay we do not know about
 	 * (someone else's code) would otherwise loop with us forever (H26b). */
-	if (meshtastic_relay_has_prefix(pkt->payload, pkt->payload_len)) {
+	if (meshtastic_relay_has_prefix((const uint8_t *)text, text_len)) {
 		relay.stats.prefixed++;
+		refused = "relay prefix";
 		goto out;
 	}
 
@@ -334,46 +425,66 @@ void meshtastic_relay_on_rx(const struct meshtastic_packet *pkt, enum meshtastic
 		goto out;
 	}
 
-	/* Seen before the rate cap, so a repeat does not spend a token. */
-	text_hash = fnv1a(pkt->payload, pkt->payload_len);
+	/* Seen before any cap, so a repeat does not spend a token; per origin
+	 * before the direction's cap, so one node cannot spend everyone's. */
+	text_hash = fnv1a((const uint8_t *)text, text_len);
 	if (seen_hit_locked(pkt->from, text_hash, now)) {
 		relay.stats.seen++;
 		goto out;
 	}
+	if (!origin_take_locked(pkt->from, now)) {
+		relay.stats.origin_limited++;
+		refused = "per-origin limit";
+		goto out;
+	}
 	if (!rate_take_locked(&relay.inbound, now)) {
 		relay.stats.rate_dropped++;
+		refused = "direction cap";
 		goto out;
 	}
 
 	job.channel_index = dest;
-	if (pkt->payload_len + RELAY_PREFIX_LEN <= MESHTASTIC_MAX_TEXT_LEN) {
+	if (text_len + RELAY_PREFIX_LEN <= MESHTASTIC_MAX_TEXT_LEN) {
 		/* The origin's low 16 bits: the same four hex digits the apps show
 		 * as a node's default short name. */
 		snprintk(job.text, sizeof(job.text), "[%04x] ", (unsigned int)(pkt->from & 0xFFFFU));
-		memcpy(job.text + RELAY_PREFIX_LEN, pkt->payload, pkt->payload_len);
-		job.len = (uint8_t)(pkt->payload_len + RELAY_PREFIX_LEN);
+		memcpy(job.text + RELAY_PREFIX_LEN, text, text_len);
+		job.len = (uint8_t)(text_len + RELAY_PREFIX_LEN);
 	} else {
 		/* Drop the annotation, never the operator's text. */
-		memcpy(job.text, pkt->payload, pkt->payload_len);
-		job.len = (uint8_t)pkt->payload_len;
+		memcpy(job.text, text, text_len);
+		job.len = (uint8_t)text_len;
 		relay.stats.unprefixed++;
 	}
 
 	if (k_msgq_put(&relay_q, &job, K_NO_WAIT) != 0) {
+		/* Nothing was sent, so nothing is spent: give back the tokens the two
+		 * caps took above (agents-jbrq.12.9). */
+		origin_give_back_locked(pkt->from);
+		if (relay.inbound.used > 0U) {
+			relay.inbound.used--;
+		}
 		relay.stats.queue_full++;
+		refused = "send queue full";
 		goto out;
 	}
 	seen_add_locked(pkt->from, text_hash, now);
 	relay.stats.relayed++;
+	if (changed) {
+		relay.stats.sanitized++;
+	}
 	k_mutex_unlock(&relay_lock);
 
 	(void)k_work_submit(&relay_work);
-	LOG_INF("relay: 0x%08x ch %u -> ch %u (%u B)", pkt->from, pkt->channel_index, dest,
-		job.len);
+	LOG_INF("relay: 0x%08x ch %u -> ch %u (%u B%s)", pkt->from, pkt->channel_index, dest,
+		job.len, changed ? ", sanitized" : "");
 	return;
 
 out:
 	k_mutex_unlock(&relay_lock);
+	if (refused != NULL) {
+		log_refusal(refused, pkt->from, pkt->payload, pkt->payload_len, now);
+	}
 }
 
 /* ---- persistence ------------------------------------------------------------ */
@@ -479,7 +590,12 @@ int meshtastic_relay_set_direction(enum meshtastic_relay_dir dir)
 
 enum meshtastic_relay_dir meshtastic_relay_get_direction(void)
 {
-	return relay.dir;
+	enum meshtastic_relay_dir dir;
+
+	k_mutex_lock(&relay_lock, K_FOREVER);
+	dir = relay.dir;
+	k_mutex_unlock(&relay_lock);
+	return dir;
 }
 
 int meshtastic_relay_ignore_add(uint32_t node_id)
@@ -531,6 +647,7 @@ void meshtastic_relay_reset(void)
 	memset(relay.seen, 0, sizeof(relay.seen));
 	relay.seen_next = 0U;
 	memset(&relay.inbound, 0, sizeof(relay.inbound));
+	memset(relay.origins, 0, sizeof(relay.origins));
 	relay.ignore_count = 0U;
 	memset(&relay.stats, 0, sizeof(relay.stats));
 	k_mutex_unlock(&relay_lock);
