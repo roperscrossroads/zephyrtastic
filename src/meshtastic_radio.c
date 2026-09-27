@@ -461,15 +461,16 @@ int meshtastic_radio_retune(void)
 
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 {
-	uint32_t settle;
-	int ret;
-
 #if defined(CONFIG_MESHTASTIC_SCANNER_RX_ONLY)
-	/* Dedicated scanner build: no transmit path at all. */
+	/* Dedicated scanner build: no transmit path at all. (The
+	 * locals below live in the other branch: declared up here, they were
+	 * unused in this one, and no -Werror build had ever compiled it.) */
 	ARG_UNUSED(pkt);
 	ARG_UNUSED(pkt_len);
 	return -EPERM;
 #else
+	uint32_t settle;
+	int ret;
 
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 	/* THE gate. While scanning, the radio is parked on a frequency this node
@@ -669,7 +670,6 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 		LOG_DBG("TX deferred: channel busy at CAD");
 		return MESHTASTIC_TX_DEFER;
 	}
-#endif /* CONFIG_MESHTASTIC_SCANNER_RX_ONLY */
 
 	if (ret < 0) {
 		mt.status.tx_failures++;
@@ -683,6 +683,7 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	}
 
 	return ret;
+#endif /* CONFIG_MESHTASTIC_SCANNER_RX_ONLY */
 }
 
 /*

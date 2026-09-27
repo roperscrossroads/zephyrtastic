@@ -144,6 +144,14 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_RELAY=y
 
+  # The scanner's RX-only build. Its branch in meshtastic_radio_send_wire_now()
+  # had never been compiled under -Werror: this scenario's first run found two
+  # locals unused in it.
+  meshtastic.variants.scanner_rx_only.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SCANNER=y
+      - CONFIG_MESHTASTIC_SCANNER_RX_ONLY=y
+
   # The MQTT bridge is default-N and depends on a network stack the baseline does
   # not carry, so until 2026-09-07 NO twister config had ever compiled
   # meshtastic_mqtt.c -- 1425 lines, under -Werror, never. The first attempt found
