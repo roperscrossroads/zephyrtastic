@@ -2703,14 +2703,15 @@ static int cmd_position_show(const struct shell *sh, size_t argc, char **argv)
 {
 	meshtastic_Config cfg;
 	meshtastic_Position pos;
+	bool have;
 	bool stored;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	stored = meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg) == 0 &&
-		 cfg.which_payload_variant == meshtastic_Config_position_tag &&
-		 cfg.payload_variant.position.position_broadcast_secs != 0U;
+	have = meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg) == 0 &&
+	       cfg.which_payload_variant == meshtastic_Config_position_tag;
+	stored = have && cfg.payload_variant.position.position_broadcast_secs != 0U;
 
 	shell_print(sh, "gps_mode: %s", gps_mode_name(meshtastic_position_gps_mode()));
 #if defined(CONFIG_MESHTASTIC_GNSS)
@@ -2728,6 +2729,28 @@ static int cmd_position_show(const struct shell *sh, size_t argc, char **argv)
 #endif
 	shell_print(sh, "interval: %u s%s", meshtastic_position_broadcast_secs(),
 		    stored ? "" : " (compiled default; position_broadcast_secs unset)");
+	/* The smart trio, the flags and whether anyone ever wrote the section: what
+	 * a bench needs to explain a position that went out without altitude
+	 * (2026-09-27 -- a pre-Track-C client write had stamped zeros into kit1). */
+	if (have) {
+		const meshtastic_Config_PositionConfig *pc = &cfg.payload_variant.position;
+		struct meshtastic_hlc_stamp stamp;
+		bool written = meshtastic_config_store_get_config_stamp(
+				       meshtastic_Config_position_tag, &stamp) == 0 &&
+			       !meshtastic_hlc_stamp_is_unset(&stamp);
+
+		shell_print(sh, "smart: %s (%u m, %u s)",
+			    pc->position_broadcast_smart_enabled ? "on" : "off",
+			    pc->broadcast_smart_minimum_distance != 0U
+				    ? pc->broadcast_smart_minimum_distance : 100U,
+			    pc->broadcast_smart_minimum_interval_secs != 0U
+				    ? pc->broadcast_smart_minimum_interval_secs : 300U);
+		shell_print(sh, "flags: 0x%x%s", pc->position_flags,
+			    pc->position_flags == 0U ? " (lat/lon/time only)" : "");
+		shell_print(sh, "section: %s",
+			    written ? "written (stamped by a client, the shell or a cluster doc)"
+				    : "never written (build seed)");
+	}
 	if (meshtastic_position_get_current(&pos) == 0) {
 		shell_print(sh, "position: lat=%d lon=%d alt=%d (%s)", pos.latitude_i,
 			    pos.longitude_i, pos.altitude,
