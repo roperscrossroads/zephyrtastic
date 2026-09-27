@@ -25,3 +25,11 @@ tests:
   meshtastic.admin_pki.no_keyverify.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_KEYVERIFY=n
+
+  # The warm ring SMALLER than the hot store, as on the XIAO (100 warm, 120 hot).
+  # The default scenario sizes warm above hot so churn cannot push a key out; here
+  # the key of a node evicted from the hot store must still survive, because the
+  # eviction itself puts it into the warm ring (agents-2dk3 Phase 2).
+  meshtastic.admin_pki.warm_below_hot.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEDB_WARM_KEYS=16

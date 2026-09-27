@@ -2278,6 +2278,37 @@ ZTEST(protocol_stack, test_zzz_nodedb_eviction_prefers_keyless_over_keyed)
 	meshtastic_nodedb_reset(false);
 }
 
+/* A manually verified peer is the LAST keyed node evicted (agents-2dk3 Phase 2;
+ * upstream protects key_manually_verified). Not fully protected, so a table of
+ * verified peers can never wedge: it is just the final tier after keyless and
+ * unverified keyed peers. */
+ZTEST(protocol_stack, test_zzz_nodedb_eviction_spares_a_verified_peer_until_last)
+{
+	const size_t max = CONFIG_MESHTASTIC_NODEDB_MAX_NODES;
+	const uint32_t verified = 0x000A0000U;
+	struct meshtastic_nodedb_node snap;
+
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE);
+	meshtastic_nodedb_reset(false);
+
+	/* The oldest peer is keyed and manually verified; the rest are keyed too, so
+	 * the keyless-first rule has nothing to pick. */
+	inject_keyed_peer(verified, 0xE5000000U);
+	zassert_ok(meshtastic_nodedb_set_key_verified(verified, true), "verify");
+	k_sleep(K_MSEC(1100));
+	for (size_t i = 0U; i < max - 2U; i++) {
+		inject_keyed_peer(0x000B0000U + i, 0xE5010000U + (i << 8));
+	}
+	zassert_equal(meshtastic_nodedb_count(), max, "DB should be full before eviction");
+
+	inject_keyed_peer(0x000C0000U, 0xE5020000U);
+	zassert_ok(meshtastic_nodedb_get(0x000C0000U, &snap), "new peer learned");
+	zassert_ok(meshtastic_nodedb_get(verified, &snap),
+		   "the verified peer must outlast unverified keyed peers");
+
+	meshtastic_nodedb_reset(false);
+}
+
 /* An ignored (blocked) node is protected from eviction — it must outlast
  * churn even though it is the oldest keyless entry (the first victim otherwise). */
 ZTEST(protocol_stack, test_zzz_nodedb_eviction_skips_ignored_node)

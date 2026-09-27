@@ -152,6 +152,7 @@ static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUB
 static bool warm_get_role_locked(uint32_t num, uint8_t *role);
 static bool warm_get_known_signer_locked(uint32_t num);
 static void warm_set_known_signer_locked(uint32_t num, bool signer);
+static void warm_absorb_locked(const struct nodedb_entry *entry);
 #endif
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
@@ -446,6 +447,8 @@ static size_t oldest_evictable_index_locked(void)
 	size_t oldest_index = SIZE_MAX;
 	uint32_t oldest_boring = UINT32_MAX; /* oldest keyless ("boring") candidate */
 	size_t oldest_boring_index = SIZE_MAX;
+	uint32_t oldest_verified = UINT32_MAX; /* oldest manually verified candidate */
+	size_t oldest_verified_index = SIZE_MAX;
 
 	for (size_t i = 0U; i < nodedb_entry_count; i++) {
 		const meshtastic_NodeInfoLite *node = &nodedb_entries[i].node;
@@ -455,13 +458,22 @@ static size_t oldest_evictable_index_locked(void)
 			continue;
 		}
 
-		/* Prefer evicting keyless "boring" nodes; a key-verified peer is
-		 * only evicted when no keyless victim exists, so PKC reach survives
-		 * churn (mirrors the reference oldestBoring split). */
+		/* Three tiers, oldest first within each: keyless "boring" nodes, then
+		 * keyed peers, then manually verified peers. A keyed peer goes only when
+		 * no keyless victim exists, so PKC reach survives churn (the reference
+		 * oldestBoring split); a verified peer goes last of all (the reference
+		 * protects key_manually_verified outright; here it is the final tier, so
+		 * a table of verified peers can still learn a new node). An evicted keyed
+		 * peer's key moves to the warm tier (get_or_create_entry_locked). */
 		if (node->public_key.size == 0U) {
 			if (node->last_heard < oldest_boring) {
 				oldest_boring = node->last_heard;
 				oldest_boring_index = i;
+			}
+		} else if (IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT)) {
+			if (node->last_heard < oldest_verified) {
+				oldest_verified = node->last_heard;
+				oldest_verified_index = i;
 			}
 		} else if (node->last_heard < oldest) {
 			oldest = node->last_heard;
@@ -469,7 +481,10 @@ static size_t oldest_evictable_index_locked(void)
 		}
 	}
 
-	return (oldest_boring_index != SIZE_MAX) ? oldest_boring_index : oldest_index;
+	if (oldest_boring_index != SIZE_MAX) {
+		return oldest_boring_index;
+	}
+	return (oldest_index != SIZE_MAX) ? oldest_index : oldest_verified_index;
 }
 
 static struct nodedb_entry *get_or_create_entry_locked(uint32_t node_num)
@@ -496,6 +511,9 @@ static struct nodedb_entry *get_or_create_entry_locked(uint32_t node_num)
 
 		entry = &nodedb_entries[index];
 		LOG_DBG("NodeDB evicting 0x%08x", entry->node.num);
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
+		warm_absorb_locked(entry);
+#endif
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
 		/* The evicted node's persisted record (if any) is now an orphan —
 		 * flag a reconcile so the next snapshot prunes it (NVS == hot store). */
@@ -633,32 +651,42 @@ static void warm_set_known_signer_locked(uint32_t num, bool signer)
  * conversation never loses its PKC key to a burst of new nodes. Only if every
  * entry is protected (warm smaller than the hot store) do we fall back to the
  * global LRU, so a store always succeeds. */
+/* Where a key goes: its own slot, else an empty one, else the least recent key
+ * whose node is still in the hot store (a redundant copy: the hot record holds the
+ * key), else the least recent key of an evicted node. The warm tier's job is the
+ * evicted nodes, as upstream's is (agents-2dk3 Phase 2); hot keys are only cached
+ * while there is room. The hot-store lookup is O(hot) and is done only for a slot
+ * that could still win, so a large ring does not cost warm x hot on every place. */
 static struct warm_key *warm_slot_for_locked(uint32_t num)
 {
 	struct warm_key *slot = warm_find_locked(num);
-	struct warm_key *victim = NULL;   /* LRU among evictable (hot-absent) keys */
-	struct warm_key *fallback = NULL; /* global LRU, used only if all protected */
+	struct warm_key *hot_lru = NULL;  /* LRU among keys still held by the hot store */
+	struct warm_key *cold_lru = NULL; /* LRU among evicted nodes' keys */
 
 	if (slot != NULL) {
 		return slot;
 	}
 
 	for (size_t i = 0U; i < ARRAY_SIZE(warm_keys); i++) {
-		if (warm_keys[i].num == 0U) {
-			return &warm_keys[i];
+		struct warm_key *w = &warm_keys[i];
+
+		if (w->num == 0U) {
+			return w;
 		}
-		if (fallback == NULL || warm_keys[i].last_seen < fallback->last_seen) {
-			fallback = &warm_keys[i];
+		if (hot_lru != NULL && cold_lru != NULL && w->last_seen >= hot_lru->last_seen &&
+		    w->last_seen >= cold_lru->last_seen) {
+			continue; /* newer than both candidates: cannot win either */
 		}
-		if (find_entry_locked(warm_keys[i].num) != NULL) {
-			continue; /* protected: node still active in the hot store */
-		}
-		if (victim == NULL || warm_keys[i].last_seen < victim->last_seen) {
-			victim = &warm_keys[i];
+		if (find_entry_locked(w->num) != NULL) {
+			if (hot_lru == NULL || w->last_seen < hot_lru->last_seen) {
+				hot_lru = w;
+			}
+		} else if (cold_lru == NULL || w->last_seen < cold_lru->last_seen) {
+			cold_lru = w;
 		}
 	}
 
-	return (victim != NULL) ? victim : fallback;
+	return (hot_lru != NULL) ? hot_lru : cold_lru;
 }
 
 static void warm_place_locked(uint32_t num, const uint8_t *pub, uint8_t role, uint8_t known_signer,
@@ -690,6 +718,35 @@ static void warm_upsert_locked(uint32_t num, const uint8_t *pub, uint8_t role)
 	 * first-contact NodeInfo that itself arrived signed re-marks it true right afterward, in
 	 * the same synchronous RX handling -- see meshtastic_nodedb_note_xeddsa_signer's callers. */
 	warm_place_locked(num, pub, role, 0U, warm_now());
+}
+
+/* A keyed node leaving the hot store: keep its key, role, signer bit and recency
+ * in the warm tier, so PKC to it keeps working and a readmission restores them
+ * (upstream warmStore.absorb). Without this a key was lost whenever the warm ring
+ * was smaller than the hot store, as it is on the XIAO (100 warm, 120 hot). */
+static void warm_absorb_locked(const struct nodedb_entry *entry)
+{
+	const meshtastic_NodeInfoLite *n = &entry->node;
+	uint32_t last_seen;
+
+	if (!entry->used || n->num == 0U || n->num == meshtastic_get_node_id() ||
+	    n->public_key.size != MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN) {
+		return;
+	}
+	if (n->last_heard != 0U) {
+		/* Heard this boot: its age in the warm tier's own time base. */
+		uint32_t age = uptime_seconds() - n->last_heard;
+		uint32_t now = warm_now();
+
+		last_seen = (now > age) ? now - age : 0U;
+	} else {
+		last_seen = entry->last_heard_epoch; /* restored, not re-heard */
+	}
+	/* Take the slot BEFORE the entry is overwritten: the caller reuses it. */
+	warm_place_locked(n->num, n->public_key.bytes, (uint8_t)n->role,
+			  IS_BIT_SET(n->bitfield, NODEINFO_BITFIELD_HAS_XEDDSA_SIGNED_BIT) ? 1U : 0U,
+			  last_seen);
+	nodekeys_schedule_save();
 }
 
 static bool warm_copy_key_locked(uint32_t num, uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
@@ -2606,9 +2663,11 @@ static int nodedb_set_bit(uint32_t node_num, int bit, bool value)
 	k_mutex_unlock(&nodedb_lock);
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
-	if (bit == NODEINFO_BITFIELD_IS_FAVORITE_BIT || bit == NODEINFO_BITFIELD_IS_IGNORED_BIT) {
-		/* The curated set changed: setting the bit adds a record, clearing it
-		 * orphans one. Reconcile prunes the orphan; the save writes the rest. */
+	if (bit == NODEINFO_BITFIELD_IS_FAVORITE_BIT || bit == NODEINFO_BITFIELD_IS_IGNORED_BIT ||
+	    bit == NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT) {
+		/* The curated set changed (favorite/ignored), or a key was verified: save
+		 * promptly rather than at the next snapshot, so a verification made just
+		 * before a reboot is not lost (agents-2dk3.4). */
 		mtrec_reconcile = true;
 		mtrec_schedule_save();
 	}
@@ -2651,7 +2710,9 @@ int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
 		nodekeys_schedule_save();
 	}
 #endif
-#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST)
+#if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
+	/* Was guarded by CONFIG_MESHTASTIC_NODEDB_PERSIST, which does not exist, so
+	 * this record save never ran (agents-2dk3.4). */
 	mtrec_reconcile = true;
 	mtrec_schedule_save();
 #endif
