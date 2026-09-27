@@ -269,12 +269,23 @@ configdefault MESHTASTIC_POWERMON
 #                             from the ELF's DWARF, which never needed .ARM.exidx.
 #   CONFIG_EXTRA_EXCEPTION_INFO=n   the above and the 376 B register dump.
 # The biggest single debug lever on the XIAO -- more than shell help (7.7 KB) and
-# spinlock validation (13.3 KB) together. Not changed here: on a bench a backtrace
-# in the fatal banner is worth 34 KB until the slot is actually short.
+# spinlock validation (13.3 KB) together.
 #
 # Exception stack trace (EXCEPTION_STACK_TRACE): -0.2 KB [S4] -- MISLEADING on
 # its own: it removes only the print; the tables stay because ARCH_STACKWALK
 # stays y. Its real cost is the ARCH_STACKWALK line above.
+#
+# DEFAULT OFF since 2026-09-27 (operator's call), on every image: the XIAO slot
+# ran short (the relay's receiving half at 99.34% after the bulk store), and the
+# backtrace is a bench convenience, not something a deployed node needs. Only
+# ARM, ARM64 and RISC-V have ARCH_HAS_STACKWALK, so on this fleet it changes the
+# XIAO (nRF52840) images and nothing on the ESP32-S3 Heltecs.
+# To get the on-device backtrace back for a debugging session:
+#   CONFIG_ARCH_STACKWALK=y  (in an EXTRA_CONF_FILE overlay or with -D)
+# The register dump (EXTRA_EXCEPTION_INFO) stays either way, so a fault still
+# names its PC and LR for addr2line against the build's zephyr.elf.
+configdefault ARCH_STACKWALK
+	default n
 
 # ---------------------------------------------------------------------------
 # 3. Logging
