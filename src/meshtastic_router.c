@@ -27,7 +27,7 @@
 #include "meshtastic_mqtt.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_reliable.h"
-#if defined(CONFIG_MESHTASTIC_RELAY)
+#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
 #include "meshtastic_relay.h"
 #endif
 #include "meshtastic_router.h"
@@ -1052,6 +1052,14 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		 * link-local gate below still holds), only a new text packet from us.
 		 * It needs the bearer, which modules are not given. */
 		meshtastic_relay_on_rx(pkt, bearer);
+#endif
+#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
+		/* The relay's ear: a decoded broadcast heard on LoRa goes, byte for
+		 * byte, to the receiving half over the BLE peer link. Only frames
+		 * that crossed the air: a bearer frame is someone else's hearing. */
+		if (rf && wire != NULL) {
+			meshtastic_relay_ear_on_rx(pkt, wire, wire_len);
+		}
 #endif
 		/* After module dispatch: the NodeDB has now created/refreshed the
 		 * source entry, so a learned next hop has somewhere to land.

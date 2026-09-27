@@ -65,6 +65,32 @@ bool meshtastic_relay_has_prefix(const uint8_t *text, size_t len);
 /* The router's hook: every decoded frame, with the bearer it arrived on. */
 void meshtastic_relay_on_rx(const struct meshtastic_packet *pkt, enum meshtastic_bearer bearer);
 
+/* ---- the ear (MESHTASTIC_RELAY_EAR) ---------------------------------------- */
+
+struct meshtastic_relay_ear_stats {
+	uint32_t heard;         /* decoded broadcast frames heard on LoRa */
+	uint32_t forwarded;     /* handed to the peer link */
+	uint32_t not_text;      /* only text can cross, so only text is forwarded */
+	uint32_t not_broadcast; /* DMs never cross */
+	uint32_t no_peer;       /* no receiving half configured */
+	uint32_t queue_full;
+	uint32_t send_failed;   /* the peer link refused (no live link, GATT error) */
+};
+
+/* The receiving half's node id; 0 stops forwarding. */
+void meshtastic_relay_ear_set_peer(uint32_t node_id);
+uint32_t meshtastic_relay_ear_get_peer(void);
+void meshtastic_relay_ear_stats_get(struct meshtastic_relay_ear_stats *out);
+void meshtastic_relay_ear_reset(void);
+
+/* The router's hook: a decoded frame heard on LoRa, with its wire bytes. */
+void meshtastic_relay_ear_on_rx(const struct meshtastic_packet *pkt, const uint8_t *wire,
+				size_t wire_len);
+
+/* The send seam. The default forwards over the BLE peer link
+ * (meshtastic_ble_peer_frame_send_to); a test overrides it. */
+int meshtastic_relay_ear_send(uint32_t peer, const uint8_t *wire, size_t wire_len);
+
 #ifdef __cplusplus
 }
 #endif

@@ -42,7 +42,9 @@
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_preset.h"
+#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
 #include "meshtastic_relay.h"
+#endif
 #include "meshtastic_sched.h"
 
 #define TEST_NODE_ID 0x0A0A0A0AU
@@ -187,6 +189,34 @@ static void assert_not_relayed(uint32_t id)
 	}
 }
 
+#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
+/* The ear's send seam, captured: what would have gone over the BLE peer link. */
+static struct {
+	struct k_sem sem;
+	uint32_t peer;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	size_t len;
+	uint32_t count;
+	int ret;
+} ear_sent;
+
+int meshtastic_relay_ear_send(uint32_t peer, const uint8_t *wire, size_t wire_len)
+{
+	ear_sent.peer = peer;
+	ear_sent.len = MIN(wire_len, sizeof(ear_sent.wire));
+	memcpy(ear_sent.wire, wire, ear_sent.len);
+	ear_sent.count++;
+	k_sem_give(&ear_sent.sem);
+	return ear_sent.ret;
+}
+
+static void ear_sent_reset(void)
+{
+	memset(&ear_sent, 0, sizeof(ear_sent));
+	k_sem_init(&ear_sent.sem, 0, 8);
+}
+#endif
+
 static void *relay_setup(void)
 {
 	static struct meshtastic_config cfg = {
@@ -215,7 +245,13 @@ static void relay_before(void *fixture)
 	disable_slot(SPARE_SLOT);
 	switch_preset(PRESET_MF);
 
+#if defined(CONFIG_MESHTASTIC_RELAY)
 	meshtastic_relay_reset();
+#endif
+#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
+	meshtastic_relay_ear_reset();
+	ear_sent_reset();
+#endif
 	meshtastic_sched_defaults();
 	zassert_ok(meshtastic_sched_set("cw.max", "0"));
 	lora_sim_reset(lora_dev);
@@ -403,6 +439,7 @@ ZTEST(relay, test_colliding_foreign_channel_not_admitted)
 	assert_not_relayed(0x5104U);
 }
 
+#if defined(CONFIG_MESHTASTIC_RELAY)
 /* ==========================================================================
  * The relay itself (meshtastic_relay.c). R-numbers are RELAY-TESTBED.md's.
  * ========================================================================== */
@@ -867,5 +904,138 @@ ZTEST(relay, test_r21_admission)
 	assert_nothing_relayed();
 	zassert_equal(stats().bad_text, 1U, "bad_text not counted");
 }
+#endif /* CONFIG_MESHTASTIC_RELAY */
+
+#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
+/* ==========================================================================
+ * The ear (meshtastic_relay_ear.c). E-numbers are RELAY-TESTBED.md's. The ear
+ * sits on LongFast's public channel and forwards what it hears.
+ * ========================================================================== */
+
+#define EAR_PEER CONFIG_MESHTASTIC_RELAY_EAR_PEER
+
+static struct meshtastic_relay_ear_stats ear_stats(void)
+{
+	struct meshtastic_relay_ear_stats st;
+
+	meshtastic_relay_ear_stats_get(&st);
+	return st;
+}
+
+/* A text heard on LongFast, as the ear's radio would receive it. */
+static void ear_hears(uint32_t id, const char *text, uint8_t *wire, uint32_t *wire_len)
+{
+	switch_preset(PRESET_LF);
+	build_far_text(0U, id, text, wire, wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)*wire_len, -60, 5), "inject failed");
+}
+
+/* E1: a broadcast text heard on the air goes to the configured receiving half,
+ * byte for byte. */
+ZTEST(relay, test_e1_ear_forwards_verbatim)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	zassert_equal(meshtastic_relay_ear_get_peer(), EAR_PEER, "peer from Kconfig");
+	ear_hears(0x5301U, "heard on LongFast", wire, &wire_len);
+	zassert_ok(k_sem_take(&ear_sent.sem, K_MSEC(1000)), "not forwarded");
+	zassert_equal(ear_sent.peer, EAR_PEER, "wrong peer");
+	zassert_equal(ear_sent.len, wire_len, "length changed");
+	zassert_mem_equal(ear_sent.wire, wire, wire_len, "the ear must not touch the frame");
+	zassert_equal(ear_stats().forwarded, 1U);
+}
+
+/* E2: what can never cross is not forwarded: a frame the ear cannot decrypt,
+ * a DM, a non-text broadcast. */
+ZTEST(relay, test_e2_ear_forwards_only_what_can_cross)
+{
+	static const uint8_t junk[] = { 0x08, 0x01 };
+	const char *msg = "for you";
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	switch_preset(PRESET_LF);
+	set_slot(SPARE_SLOT, meshtastic_Channel_Role_SECONDARY, "pugs-are-great", custom_psk,
+		 sizeof(custom_psk));
+	build_far_text(SPARE_SLOT, 0x5310U, "not our channel", wire, &wire_len);
+	disable_slot(SPARE_SLOT);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -60, 5));
+
+	build_far(0U, FAR_NODE_ID, TEST_NODE_ID, MESHTASTIC_PORT_TEXT_MESSAGE, 0x5311U,
+		  (const uint8_t *)msg, strlen(msg), wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -60, 5));
+
+	build_far(0U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_POSITION, 0x5312U,
+		  junk, sizeof(junk), wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -60, 5));
+
+	zassert_equal(k_sem_take(&ear_sent.sem, K_MSEC(500)), -EAGAIN, "something forwarded");
+	zassert_equal(ear_stats().not_broadcast, 1U, "DM not counted");
+	zassert_equal(ear_stats().not_text, 1U, "position not counted");
+}
+
+/* E3: the same (src, id) heard twice (a neighbour's rebroadcast) is forwarded
+ * once: the router's duplicate cache runs before the ear. */
+ZTEST(relay, test_e3_ear_forwards_once)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	ear_hears(0x5320U, "twice on air", wire, &wire_len);
+	zassert_ok(k_sem_take(&ear_sent.sem, K_MSEC(1000)), "not forwarded");
+	k_msleep(50);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -60, 5));
+	zassert_equal(k_sem_take(&ear_sent.sem, K_MSEC(500)), -EAGAIN, "forwarded twice");
+	zassert_equal(ear_sent.count, 1U);
+}
+
+/* E4: the ear image cannot key the radio (MESHTASTIC_RELAY_EAR_RX_ONLY), so an
+ * ear parked on a public channel stays off it whatever anyone asks. */
+ZTEST(relay, test_e4_ear_never_transmits)
+{
+	struct lora_sim_frame f;
+
+	switch_preset(PRESET_LF);
+	(void)meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "the ear must not speak");
+	zassert_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(500)), -EAGAIN,
+		      "an RX-only ear transmitted");
+}
+
+/* The ear forwards only what crossed the AIR: a frame that reached it over the
+ * peer link is someone else's hearing, and bouncing it back would loop. */
+ZTEST(relay, test_ear_ignores_bearer_frames)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	switch_preset(PRESET_LF);
+	build_far_text(0U, 0x5330U, "came over BLE", wire, &wire_len);
+	ear_forwards(wire, wire_len);
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "not delivered");
+	zassert_equal(k_sem_take(&ear_sent.sem, K_MSEC(300)), -EAGAIN, "bounced back");
+}
+
+/* No receiving half configured: counted, nothing sent. A failed send is
+ * counted too. */
+ZTEST(relay, test_ear_no_peer_and_send_failure)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	meshtastic_relay_ear_set_peer(0U);
+	ear_hears(0x5340U, "nobody to tell", wire, &wire_len);
+	zassert_equal(k_sem_take(&ear_sent.sem, K_MSEC(300)), -EAGAIN, "sent with no peer");
+	zassert_equal(ear_stats().no_peer, 1U);
+
+	meshtastic_relay_ear_set_peer(EAR_PEER);
+	ear_sent.ret = -EHOSTUNREACH;
+	ear_hears(0x5341U, "link down", wire, &wire_len);
+	zassert_ok(k_sem_take(&ear_sent.sem, K_MSEC(1000)), "not attempted");
+	k_msleep(20);
+	zassert_equal(ear_stats().send_failed, 1U);
+	zassert_equal(ear_stats().forwarded, 0U);
+}
+#endif /* CONFIG_MESHTASTIC_RELAY_EAR */
 
 ZTEST_SUITE(relay, NULL, relay_setup, relay_before, relay_after, NULL);

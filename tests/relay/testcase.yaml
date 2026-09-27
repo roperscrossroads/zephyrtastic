@@ -10,3 +10,11 @@ common:
     - native_sim/native/64
 tests:
   meshtastic.relay.native_sim: {}
+
+  # The ear: a separate image in real life (a LongFast node with RX compiled
+  # out), so a separate build here, without the receiving half.
+  meshtastic.relay.ear.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_RELAY=n
+      - CONFIG_MESHTASTIC_RELAY_EAR=y
+      - CONFIG_MESHTASTIC_RELAY_EAR_PEER=0x0E0E0E0E

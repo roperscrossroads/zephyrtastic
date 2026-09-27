@@ -144,9 +144,15 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_RELAY=y
 
-  # The scanner's RX-only build. Its branch in meshtastic_radio_send_wire_now()
-  # had never been compiled under -Werror: this scenario's first run found two
-  # locals unused in it.
+  # The relay's ear, as its image is built: transmit compiled out. That shares
+  # the scanner's RX-only branch in meshtastic_radio_send_wire_now(), which no
+  # -Werror build had compiled until this scenario (its first run found two
+  # locals unused in that branch).
+  meshtastic.variants.relay_ear.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_RELAY_EAR=y
+
+  # The scanner's own RX-only build, for the same branch.
   meshtastic.variants.scanner_rx_only.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_SCANNER=y

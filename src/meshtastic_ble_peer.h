@@ -196,6 +196,11 @@ bool meshtastic_ble_slot_addr(unsigned int index, bt_addr_le_t *out);
  * kits on the courier's peripheral side). */
 struct bt_conn *meshtastic_ble_slot_conn(unsigned int index);
 
+/* Run @p work on the BLE module's own work queue: for code outside
+ * meshtastic_ble.c that must call blepeer APIs (which may block on GATT
+ * buffers) off both the radio thread and the system work queue. */
+int meshtastic_ble_work_submit(struct k_work *work);
+
 /* Advertiser state, tracked in meshtastic_ble.c (a4it.2). */
 bool meshtastic_ble_adv_active(void);
 

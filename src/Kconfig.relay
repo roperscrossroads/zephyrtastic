@@ -89,3 +89,44 @@ config MESHTASTIC_RELAY_QUEUE_SIZE
 	  send them. Each slot holds a full text (~240 B).
 
 endif # MESHTASTIC_RELAY
+
+menuconfig MESHTASTIC_RELAY_EAR
+	bool "Cross-preset relay: the ear"
+	default n
+	help
+	  The other node of a cross-preset relay pair: it sits on the source
+	  preset and forwards every broadcast TEXT frame it hears, byte for
+	  byte, over the BLE peer link to the relay's receiving half
+	  (MESHTASTIC_RELAY) on the destination preset.
+
+	  The ear does not decide what crosses: the receiving half does, and
+	  re-checks everything. The ear only avoids spending BLE on what could
+	  never cross (DMs, non-text).
+
+if MESHTASTIC_RELAY_EAR
+
+config MESHTASTIC_RELAY_EAR_PEER
+	hex "Receiving half's node id"
+	default 0x0
+	help
+	  The node the ear forwards to, over whichever BLE peer link reaches
+	  it. 0 means none until set at runtime (`meshtastic relay ear <id>`).
+
+config MESHTASTIC_RELAY_EAR_QUEUE_SIZE
+	int "Frames waiting to be forwarded"
+	default 4
+	range 1 32
+	help
+	  Each slot holds one wire frame (up to 256 B). Forwarding runs on the
+	  BLE work queue, never on the LoRa receive thread.
+
+config MESHTASTIC_RELAY_EAR_RX_ONLY
+	bool "Compile the transmit path out"
+	default y
+	help
+	  An ear usually sits on a PUBLIC channel it does not own. With this on
+	  the image cannot key the radio at all (the same gate as
+	  MESHTASTIC_SCANNER_RX_ONLY), so a stored tx_enabled, a phone or an
+	  admin write cannot put it on someone else's air.
+
+endif # MESHTASTIC_RELAY_EAR

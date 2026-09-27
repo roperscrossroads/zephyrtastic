@@ -613,6 +613,11 @@ bool meshtastic_ble_slot_addr(unsigned int index, bt_addr_le_t *out)
 	return ok;
 }
 
+int meshtastic_ble_work_submit(struct k_work *work)
+{
+	return k_work_submit_to_queue(&ble.work_q, work);
+}
+
 struct bt_conn *meshtastic_ble_slot_conn(unsigned int index)
 {
 	struct bt_conn *conn = NULL;

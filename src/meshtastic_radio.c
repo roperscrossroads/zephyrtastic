@@ -461,8 +461,8 @@ int meshtastic_radio_retune(void)
 
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 {
-#if defined(CONFIG_MESHTASTIC_SCANNER_RX_ONLY)
-	/* Dedicated scanner build: no transmit path at all. (The
+#if defined(CONFIG_MESHTASTIC_SCANNER_RX_ONLY) || defined(CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY)
+	/* Dedicated scanner or relay-ear build: no transmit path at all. (The
 	 * locals below live in the other branch: declared up here, they were
 	 * unused in this one, and no -Werror build had ever compiled it.) */
 	ARG_UNUSED(pkt);
@@ -683,7 +683,7 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	}
 
 	return ret;
-#endif /* CONFIG_MESHTASTIC_SCANNER_RX_ONLY */
+#endif /* CONFIG_MESHTASTIC_SCANNER_RX_ONLY || CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY */
 }
 
 /*
