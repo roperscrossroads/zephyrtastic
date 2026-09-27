@@ -72,6 +72,17 @@ choice ESP_WIFI_HEAP
 	default ESP_WIFI_HEAP_SPIRAM
 endchoice
 
+# The NodeDB sizes (2026-09-27, agents-2dk3; moved here from overlay-v4-unified.conf the
+# same day). Both tables are MESHTASTIC_EXT_RAM_BSS_ATTR, so with PSRAM they cost no
+# internal RAM: 250 hot (34 KB) and 2000 warm keys (88 KB) are upstream's PSRAM-S3
+# figures. Set in the profile they also reached the V3, which has no PSRAM, and put
+# 122 KB in its dram0 (overflowed by 72 KB). A listener overlay still sets its own.
+config MESHTASTIC_NODEDB_MAX_NODES
+	default 250
+
+config MESHTASTIC_NODEDB_WARM_KEYS
+	default 2000
+
 endif # ESP_SPIRAM
 
 if LVGL
