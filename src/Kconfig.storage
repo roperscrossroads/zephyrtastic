@@ -13,3 +13,17 @@ config MESHTASTIC_STORAGE_STATS
 
 	  Exists because nothing measured settings use while the XIAO's 32 KB
 	  partition is shared by everything that persists (agents-oaz1).
+
+config MESHTASTIC_BULK_STORE
+	bool "Bulk store: a second NVS for node tables and messages"
+	default y
+	depends on $(dt_nodelabel_enabled,mt_bulk_partition)
+	depends on NVS && FLASH_MAP
+	help
+	  Mount a second NVS instance on the `mt_bulk_partition` devicetree
+	  partition for large, rebuildable tables (node records, per-node
+	  satellites, the message store), apart from the settings NVS that holds
+	  identity, keys and config. On the XIAO the partition is on the external
+	  QSPI flash; on the Heltecs it is the idle part of the storage partition.
+	  Built only where the partition exists; elsewhere the node tables stay
+	  in settings. See meshtastic_bulk.h (agents-2dk3).

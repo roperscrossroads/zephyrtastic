@@ -1,0 +1,13 @@
+# The bulk store (agents-2dk3 Phase 3a): a second NVS on its own partition for
+# large, rebuildable tables. Real NVS on the flash simulator, the whole stack up
+# so lockdown sealing is the real thing.
+common:
+  tags:
+    - meshtastic
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.bulk_store.native_sim: {}

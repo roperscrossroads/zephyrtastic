@@ -1,0 +1,22 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+/ {
+	aliases {
+		lora0 = &lora_sim0;
+	};
+
+	lora_sim0: lora-sim {
+		compatible = "meshtastic,lora-sim";
+		status = "okay";
+	};
+};
+
+/* The bulk store (agents-2dk3): 256 KB in the simulated flash's free upper half,
+ * the size the XIAO gets on its QSPI flash. */
+&flash0 {
+	partitions {
+		mt_bulk_partition: partition@100000 {
+			label = "mt-bulk";
+			reg = <0x00100000 0x00040000>;
+		};
+	};
+};

@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,6 +105,17 @@ int meshtastic_lockdown_save_one(const char *name, const void *val, size_t len);
 ssize_t meshtastic_lockdown_read(const char *name, size_t len, settings_read_cb read_cb,
 				 void *cb_arg, void *buf, size_t cap);
 
+/** Buffer-to-buffer form of the store wrap, for stores outside the settings
+ *  subsystem (the bulk store). Wrap: plaintext copied when lockdown is inactive
+ *  or its disable is rewriting in the clear, sealed under `name` when active,
+ *  -EACCES when the store is not ready (locked, or unlocked but not reloaded).
+ *  Unwrap: plaintext passed through, a sealed blob opened, -EACCES when locked,
+ *  -EBADMSG when sealed on a stock device or tampered. Return the output length. */
+int meshtastic_lockdown_wrap_buf(const char *name, const void *in, size_t len, void *out,
+				 size_t cap);
+int meshtastic_lockdown_unwrap_buf(const char *name, const void *in, size_t len, void *out,
+				   size_t cap);
+
 /** The stack's reload after a deferred unlock (settings re-read, config
  *  re-applied, radio released). Registered by meshtastic_init; runs on the
  *  system workqueue, never on the transport thread that verified the passphrase. */
@@ -122,6 +134,21 @@ bool meshtastic_lockdown_busy(void);
 
 static inline bool meshtastic_lockdown_store_ready(void) { return true; }
 static inline bool meshtastic_lockdown_locked(void) { return false; }
+static inline int meshtastic_lockdown_wrap_buf(const char *name, const void *in, size_t len,
+					       void *out, size_t cap)
+{
+	(void)name;
+	if (len > cap) {
+		return -EMSGSIZE;
+	}
+	memcpy(out, in, len);
+	return (int)len;
+}
+static inline int meshtastic_lockdown_unwrap_buf(const char *name, const void *in, size_t len,
+						 void *out, size_t cap)
+{
+	return meshtastic_lockdown_wrap_buf(name, in, len, out, cap);
+}
 static inline int meshtastic_lockdown_export(int (*export_func)(const char *name,
 							       const void *val, size_t val_len),
 					     const char *name, const void *val, size_t len)

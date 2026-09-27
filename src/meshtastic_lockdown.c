@@ -1146,6 +1146,47 @@ ssize_t meshtastic_lockdown_read(const char *name, size_t len, settings_read_cb 
 	return n < 0 ? (ssize_t)n : (ssize_t)n;
 }
 
+int meshtastic_lockdown_wrap_buf(const char *name, const void *in, size_t len, void *out,
+				 size_t cap)
+{
+	if (in == NULL || out == NULL) {
+		return -EINVAL;
+	}
+	if (!ld.provisioned || ld.sealing_off) {
+		if (len > cap) {
+			return -EMSGSIZE;
+		}
+		memcpy(out, in, len);
+		return (int)len;
+	}
+	if (!meshtastic_lockdown_store_ready()) {
+		return -EACCES; /* same rule as wrap_write: never write placeholders */
+	}
+	return meshtastic_lockdown_seal(name, in, len, out, cap);
+}
+
+int meshtastic_lockdown_unwrap_buf(const char *name, const void *in, size_t len, void *out,
+				   size_t cap)
+{
+	if (in == NULL || out == NULL) {
+		return -EINVAL;
+	}
+	if (!meshtastic_lockdown_is_sealed(in, len)) {
+		if (len > cap) {
+			return -EMSGSIZE;
+		}
+		memcpy(out, in, len);
+		return (int)len;
+	}
+	if (!ld.provisioned) {
+		return -EBADMSG;
+	}
+	if (!ld.dek_ok) {
+		return -EACCES;
+	}
+	return meshtastic_lockdown_open(name, in, len, out, cap);
+}
+
 /* ---- phase 2: the deferred reload ------------------------------------------------- */
 
 void meshtastic_lockdown_set_reload_hook(void (*hook)(void))
