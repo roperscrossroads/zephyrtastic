@@ -1267,8 +1267,10 @@ ZTEST(meshtastic_shell, test_scanner_autostart_c_list_from_build)
 }
 #endif /* CONFIG_MESHTASTIC_SCANNER_AUTOSTART */
 
-#if defined(CONFIG_MESHTASTIC_RELAY)
+#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
 #include "meshtastic_relay.h"
+#endif
+#if defined(CONFIG_MESHTASTIC_RELAY)
 
 /* `meshtastic relay`: off at boot, `dir in` turns it on, the v1-refused
  * directions say why and do not stick, and reset returns to boot state. */
@@ -1300,3 +1302,22 @@ ZTEST(meshtastic_shell, test_relay_commands)
 	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_OFF);
 }
 #endif /* CONFIG_MESHTASTIC_RELAY */
+
+#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
+/* `meshtastic ear`: set the peer, see it, stop forwarding with 0. */
+ZTEST(meshtastic_shell, test_ear_commands)
+{
+	const char *out;
+
+	meshtastic_relay_ear_reset();
+	zassert_ok(run_cmd("meshtastic ear", &out));
+	zassert_not_null(strstr(out, "not forwarding"), "%s", out);
+	zassert_ok(run_cmd("meshtastic ear peer 0e0e0e0e", &out));
+	zassert_equal(meshtastic_relay_ear_get_peer(), 0x0e0e0e0eU);
+	zassert_ok(run_cmd("meshtastic ear show", &out));
+	zassert_not_null(strstr(out, "0x0e0e0e0e"), "%s", out);
+	zassert_not_null(strstr(out, "transmit: possible"), "%s", out);
+	zassert_ok(run_cmd("meshtastic ear peer 0", &out));
+	zassert_equal(meshtastic_relay_ear_get_peer(), 0U);
+}
+#endif /* CONFIG_MESHTASTIC_RELAY_EAR */

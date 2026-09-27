@@ -72,7 +72,7 @@
 #endif
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 #include "meshtastic_statusmessage.h"
-#if defined(CONFIG_MESHTASTIC_RELAY)
+#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
 #include "meshtastic_relay.h"
 #endif
 #endif
@@ -3426,6 +3426,47 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(reset, NULL, SHELL_HELP("Back to boot state.", NULL), cmd_relay_reset),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_RELAY */
+
+#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
+/* `meshtastic ear`: the relay's ear. RAM-only in v1. */
+static int cmd_ear_show(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_relay_ear_stats st;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_relay_ear_stats_get(&st);
+	shell_print(sh, "peer: 0x%08x%s", meshtastic_relay_ear_get_peer(),
+		    meshtastic_relay_ear_get_peer() == 0U ? " (none: not forwarding)" : "");
+	shell_print(sh, "heard %u  forwarded %u  send_failed %u  queue_full %u", st.heard,
+		    st.forwarded, st.send_failed, st.queue_full);
+	shell_print(sh, "skipped: not_text %u  not_broadcast %u  no_peer %u", st.not_text,
+		    st.not_broadcast, st.no_peer);
+	shell_print(sh, "transmit: %s",
+		    IS_ENABLED(CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY) ? "compiled out" : "possible");
+	return 0;
+}
+
+static int cmd_ear_peer(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t node = (uint32_t)strtoul(argv[1], NULL, 16);
+
+	ARG_UNUSED(argc);
+	meshtastic_relay_ear_set_peer(node);
+	shell_print(sh, "peer: 0x%08x%s", node, node == 0U ? " (forwarding stopped)" : "");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	meshtastic_ear_cmds,
+	SHELL_CMD(show, NULL, SHELL_HELP("Peer and counters.", NULL), cmd_ear_show),
+	SHELL_CMD_ARG(peer, NULL,
+		      SHELL_HELP("The receiving half's node id (0 stops forwarding).",
+				 "<hex node id>"),
+		      cmd_ear_peer, 2, 0),
+	SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_RELAY_EAR */
 
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 /* `meshtastic neighbors` (agents-dnr4.19). Reads always; writes gated behind
@@ -7215,6 +7256,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 			     "enable/disable, interval, lora, send.",
 			     NULL),
 		  cmd_neighbors_show),
+#endif
+#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
+	SHELL_CMD(ear, &meshtastic_ear_cmds,
+		  SHELL_HELP("Cross-preset relay ear: show, peer.", NULL), cmd_ear_show),
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY)
 	SHELL_CMD(relay, &meshtastic_relay_cmds,

@@ -100,3 +100,9 @@ tests:
   meshtastic.shell.relay.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_RELAY=y
+
+  # `meshtastic ear`. Transmit stays possible here: other shell tests send.
+  meshtastic.shell.relay_ear.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_RELAY_EAR=y
+      - CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY=n
