@@ -12,6 +12,9 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_lockdown.h"
 #include "meshtastic_settings.h"
+#if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
+#include "meshtastic_storage.h"
+#endif
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -124,7 +127,17 @@ int meshtastic_settings_init(void)
 		return ret;
 	}
 
-	ret = settings_load_subtree(MESHTASTIC_SETTINGS_SUBTREE);
+	{
+		uint32_t t0 = k_cycle_get_32();
+
+		ret = settings_load_subtree(MESHTASTIC_SETTINGS_SUBTREE);
+#if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
+		meshtastic_storage_note_load(MESHTASTIC_STORAGE_LOAD_CONFIG,
+					     k_cycle_get_32() - t0);
+#else
+		ARG_UNUSED(t0);
+#endif
+	}
 	if (ret < 0) {
 		LOG_ERR("Meshtastic settings load failed (%d)", ret);
 		return ret;

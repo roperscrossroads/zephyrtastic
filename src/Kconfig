@@ -105,6 +105,8 @@ config MESHTASTIC_ADMIN_CLIENT
 	  target adds this node's key); mutating ops carry the target's rotating
 	  session passkey obtained from a preceding get.
 
+rsource "Kconfig.storage"
+
 menuconfig MESHTASTIC_SETTINGS
 	bool "Persist Meshtastic configuration with Zephyr settings"
 	select SETTINGS

@@ -28,6 +28,7 @@
 #include "meshtastic_clock.h"
 #include "meshtastic_modules.h"
 #include "meshtastic_sched.h"
+#include "meshtastic_storage.h" /* declarations only; safe unconditionally */
 #if defined(CONFIG_MESHTASTIC_PKI)
 #include "meshtastic_pki.h"
 #include "meshtastic_phoneapi.h"
@@ -2317,7 +2318,17 @@ int meshtastic_nodedb_init(void)
 	/* Restore persisted peer public keys now the array is initialised and the
 	 * settings subsystem is up (settings_subsys_init ran earlier in
 	 * meshtastic_init). Runs outside the lock: nodekeys_set() takes it. */
-	(void)settings_load_subtree(MTNODE_SUBTREE);
+	{
+		uint32_t t0 = k_cycle_get_32();
+
+		(void)settings_load_subtree(MTNODE_SUBTREE);
+#if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
+		meshtastic_storage_note_load(MESHTASTIC_STORAGE_LOAD_NODE_KEYS,
+					     k_cycle_get_32() - t0);
+#else
+		ARG_UNUSED(t0);
+#endif
+	}
 
 	/* Prune any NVS records that didn't fit the warm ring on restore (or that a
 	 * pre-bounded build left behind), so the durable store converges to the RAM
@@ -2331,7 +2342,17 @@ int meshtastic_nodedb_init(void)
 	/* Restore persisted node records into the hot store now the settings
 	 * subsystem is up. Then reconcile so any record whose node no longer fits the
 	 * hot store (e.g. a shrunk MAX_NODES) is pruned off the boot path. */
-	(void)settings_load_subtree(MTREC_SUBTREE);
+	{
+		uint32_t t0 = k_cycle_get_32();
+
+		(void)settings_load_subtree(MTREC_SUBTREE);
+#if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
+		meshtastic_storage_note_load(MESHTASTIC_STORAGE_LOAD_NODE_RECS,
+					     k_cycle_get_32() - t0);
+#else
+		ARG_UNUSED(t0);
+#endif
+	}
 	mtrec_reconcile = true;
 	mtrec_schedule_save();
 #if CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC > 0

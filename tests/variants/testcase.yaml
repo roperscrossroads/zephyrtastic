@@ -304,6 +304,23 @@ tests:
       - CONFIG_MESHTASTIC_LOCKDOWN=y
       - CONFIG_HWINFO=y
       - CONFIG_MBEDTLS=y
+  # The storage report (MESHTASTIC_STORAGE_STATS, agents-oaz1) is default-y under
+  # SETTINGS, so the two scenarios above compile its =y arm (command registered,
+  # timing hooks live). This is the =n arm, with settings and the shell still on:
+  # the registration and the three timing hooks in settings/nodedb must drop out.
+  meshtastic.variants.shell_settings_no_storage_stats.native_sim:
+    extra_configs:
+      - CONFIG_SHELL=y
+      - CONFIG_SHELL_BACKEND_DUMMY=y
+      - CONFIG_SHELL_BACKEND_SERIAL=n
+      - CONFIG_MESHTASTIC_SHELL=y
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS_NVS=y
+      - CONFIG_MESHTASTIC_STORAGE_STATS=n
 
   # XEdDSA verify is default-N, so its untested arm is =Y -- and, like the MQTT bridge
   # above, nothing else here compiles it. It pulls in the shared PKI recipe because it

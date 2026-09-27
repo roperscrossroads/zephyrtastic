@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_STORAGE_STATS
+	bool "Storage report (meshtastic storage)"
+	default y
+	depends on MESHTASTIC_SETTINGS
+	help
+	  A read-only report of the settings store: sector layout, free space
+	  (NVS backends), and per-subtree record counts, value bytes, estimated
+	  on-flash bytes and lockdown-sealed counts, plus how long the config,
+	  node-key and node-record restores took at boot. Shell command
+	  `meshtastic storage`; API meshtastic_storage_stats().
+
+	  Exists because nothing measured settings use while the XIAO's 32 KB
+	  partition is shared by everything that persists (agents-oaz1).

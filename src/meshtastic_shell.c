@@ -31,6 +31,7 @@
 #include <zephyr/meshtastic/nodeinfo.h>
 #include <zephyr/meshtastic/telemetry.h>
 
+#include "meshtastic_storage.h" /* declarations only; safe unconditionally */
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #include "meshtastic_admin_client.h"
@@ -7300,6 +7301,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(lockdown, &meshtastic_lockdown_cmds,
 		  SHELL_HELP("Lockdown mode: status, provision, unlock, lock, disable.", NULL),
 		  cmd_lockdown_status),
+#endif
+#if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
+	SHELL_CMD(storage, NULL,
+		  SHELL_HELP("Settings store: free space, per-subtree use, boot restore time.",
+			     NULL),
+		  meshtastic_storage_shell_cmd),
 #endif
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 	SHELL_CMD(backup, NULL,

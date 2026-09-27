@@ -31,6 +31,7 @@
 #include "meshtastic_lockdown.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_pki.h"
+#include "meshtastic_storage.h"
 
 /* Declared privately by meshtastic.c: the NodeDB's boot, which a staged boot must repeat. */
 int meshtastic_nodedb_init(void);
@@ -430,4 +431,70 @@ ZTEST(lockdown_store, test_iteration_count_travels_in_the_dek_record)
 	zassert_ok(settings_save_one("mtlock/dek", r.buf, r.len), "");
 	stage_boot();
 	stage_boot(); /* the reboot floor after the wrong attempt */
+}
+
+static const struct meshtastic_storage_subtree *storage_subtree(
+	const struct meshtastic_storage_stats *st, const char *name)
+{
+	for (uint8_t i = 0U; i < st->subtree_count; i++) {
+		if (strcmp(st->subtree[i].name, name) == 0) {
+			return &st->subtree[i];
+		}
+	}
+	return NULL;
+}
+
+/*
+ * The storage report (agents-oaz1, Phase 0) on the real settings NVS: it must see
+ * the layout and free space, attribute records to their subtrees, and count the
+ * sealed ones once lockdown seals the store. Plans to grow the NodeDB and add a
+ * message store start from these numbers, so they have to be right.
+ */
+ZTEST(lockdown_store, test_storage_report_attributes_records_and_counts_seals)
+{
+	static uint8_t pub[32] = {7, 7, 7};
+	static struct meshtastic_storage_stats st;
+	const struct meshtastic_storage_subtree *keys, *recs, *cfgs;
+	uint32_t sum = 0U;
+
+	seed_peer(PEER_ID, pub);
+	flush_all();
+
+	zassert_ok(meshtastic_storage_stats(&st), "stats");
+	zassert_true(st.nvs, "the settings backend here is NVS");
+	zassert_true(st.sector_count > 1U && st.sector_size > 0U, "layout read");
+	zassert_true(st.write_sector < st.sector_count, "write sector in range");
+	zassert_true(st.free_bytes > 0, "free space computed (%d)", st.free_bytes);
+	zassert_true((uint32_t)st.free_bytes < (uint32_t)st.sector_count * st.sector_size,
+		     "free space below the partition size");
+
+	cfgs = storage_subtree(&st, "meshtastic");
+	keys = storage_subtree(&st, "mtnode");
+	recs = storage_subtree(&st, "mtrec");
+	zassert_not_null(cfgs, "config subtree reported");
+	zassert_not_null(keys, "node-key subtree reported");
+	zassert_not_null(recs, "node-record subtree reported");
+	zassert_true(keys->records >= 1U && recs->records >= 1U, "the seeded peer is counted");
+	zassert_equal(keys->sealed, 0U, "nothing is sealed before provisioning");
+	zassert_equal(recs->sealed, 0U, "");
+	zassert_true(keys->flash_bytes > keys->value_bytes, "flash cost includes overhead");
+
+	for (uint8_t i = 0U; i < st.subtree_count; i++) {
+		sum += st.subtree[i].records;
+	}
+	zassert_false(st.subtrees_truncated, "every subtree fits the table");
+	zassert_equal(sum, st.total_records, "per-subtree counts add up to the total");
+
+	/* Sealing: every node key and record is sealed after provisioning. */
+	zassert_ok(meshtastic_lockdown_provision(PP, PPLEN, 0U, 0U, 0U), "");
+	wait_idle();
+	zassert_ok(meshtastic_storage_stats(&st), "stats after provisioning");
+	keys = storage_subtree(&st, "mtnode");
+	recs = storage_subtree(&st, "mtrec");
+	zassert_not_null(keys, "");
+	zassert_not_null(recs, "");
+	zassert_true(keys->sealed >= 1U && keys->sealed == keys->records,
+		     "every node key sealed (%u of %u)", keys->sealed, keys->records);
+	zassert_true(recs->sealed >= 1U && recs->sealed == recs->records,
+		     "every node record sealed (%u of %u)", recs->sealed, recs->records);
 }
