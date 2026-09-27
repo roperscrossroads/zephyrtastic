@@ -82,6 +82,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_build.c
     meshtastic_channels.c
     meshtastic_clock.c
+    meshtastic_utf8.c
     meshtastic_config_store.c
     meshtastic_fatal.c
     meshtastic_hlc.c
