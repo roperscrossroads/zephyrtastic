@@ -60,10 +60,28 @@
 			reg = <0x220000 DT_SIZE_K(2048)>;
 		};
 
+		/* Settings NVS. It was 512 KB, of which the NVS only ever used its
+		 * first 8 x 4 KB sectors (CONFIG_SETTINGS_NVS_SECTOR_COUNT's default,
+		 * which also caps it), so 32 KB changes nothing on the flash. Do NOT
+		 * grow it by raising the sector count: NVS does not record its sector
+		 * count, and a store remounted larger loses or corrupts data
+		 * (agents-2dk3). Bulk data goes in mt_bulk_partition instead. */
 		storage_partition: partition@420000 {
 			compatible = "zephyr,mapped-partition";
 			label = "storage";
-			reg = <0x420000 DT_SIZE_K(512)>;
+			reg = <0x420000 DT_SIZE_K(32)>;
+		};
+
+		/* 0x428000-0x430000: reserved, left untouched. */
+
+		/* The bulk store (agents-2dk3): node records, per-node satellites and
+		 * the message store, in the old storage partition's idle tail. Whatever
+		 * an older layout left here is detected by the store's magic record and
+		 * reformatted; it is all rebuildable. */
+		mt_bulk_partition: partition@430000 {
+			compatible = "zephyr,mapped-partition";
+			label = "mt-bulk";
+			reg = <0x430000 DT_SIZE_K(448)>;
 		};
 
 		scratch_partition: partition@4a0000 {

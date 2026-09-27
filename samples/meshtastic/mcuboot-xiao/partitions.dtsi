@@ -131,5 +131,16 @@
 			label = "coredump";
 			reg = <0x000b4000 DT_SIZE_K(320)>;
 		};
+
+		/* The bulk store (agents-2dk3): node records, per-node satellites and
+		 * the message store, apart from the 32 KB internal settings partition
+		 * that keeps identity, keys and config. 256 KB of the ~1 MB the QSPI
+		 * chip has left after slot1 and the coredump. Plain child, no mapped
+		 * compatible, for the same reason as the coredump above. MCUboot never
+		 * opens it; it only uses slot0 and slot1. */
+		mt_bulk_partition: partition@104000 {
+			label = "mt-bulk";
+			reg = <0x00104000 DT_SIZE_K(256)>;
+		};
 	};
 };
