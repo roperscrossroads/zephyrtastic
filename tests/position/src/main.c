@@ -172,6 +172,56 @@ static void set_flags(uint32_t flags)
 	zassert_ok(meshtastic_config_store_set_config(&cfg));
 }
 
+/* The upgrade case the write-stamp rule cannot see (bench, kit1, 2026-09-27): a
+ * client wrote the position section before this firmware read smart/flags, so it
+ * echoed the zeros it was shown and STAMPED them. Once per node -- keyed on the
+ * "seed/position" marker, not the stamp -- the seed lands where the section
+ * holds zeros; a non-zero flags value is a choice and stays; and afterwards a
+ * written 0 is a 0. */
+ZTEST(position, test_stamped_zero_section_is_seeded_once)
+{
+	meshtastic_Config cfg;
+	uint8_t marker;
+
+	/* A stamped section full of zeros and no seed marker: the upgraded node. */
+	set_smart(false, 0U, 0U);
+	set_flags(0U);
+	zassert_ok(meshtastic_config_store_setting_set("seed/position", &marker, 0U), "");
+	zassert_ok(meshtastic_config_store_apply_core(), "post-load apply");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
+	zassert_equal(cfg.payload_variant.position.position_flags, SEED_FLAGS,
+		      "zero flags seeded (0x%x)", cfg.payload_variant.position.position_flags);
+	zassert_true(cfg.payload_variant.position.position_broadcast_smart_enabled, "smart on");
+	zassert_equal(cfg.payload_variant.position.broadcast_smart_minimum_distance, 100U, "");
+	zassert_equal(cfg.payload_variant.position.broadcast_smart_minimum_interval_secs, 300U,
+		      "");
+	zassert_equal(meshtastic_config_store_setting_get("seed/position", &marker, 1U), 1, "");
+	zassert_equal(marker, 1U, "marker left behind for the next save");
+
+	/* Marker set: a written 0 is a 0 across the same apply. */
+	set_flags(0U);
+	zassert_ok(meshtastic_config_store_apply_core(), "");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
+	zassert_equal(cfg.payload_variant.position.position_flags, 0U,
+		      "a 0 written after the seed stays 0");
+
+	/* Marker absent but non-zero flags: a choice, kept; smart is still seeded. */
+	set_flags(meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE);
+	set_smart(false, 0U, 0U);
+	zassert_ok(meshtastic_config_store_setting_set("seed/position", &marker, 0U), "");
+	zassert_ok(meshtastic_config_store_apply_core(), "");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
+	zassert_equal(cfg.payload_variant.position.position_flags,
+		      meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE,
+		      "non-zero flags kept through the seed");
+	zassert_true(cfg.payload_variant.position.position_broadcast_smart_enabled,
+		     "smart seeded alongside");
+
+	/* Back to the suite's baseline. */
+	set_flags(SEED_FLAGS);
+	meshtastic_position_config_changed();
+}
+
 static void set_role(meshtastic_Config_DeviceConfig_Role role)
 {
 	meshtastic_Config cfg;

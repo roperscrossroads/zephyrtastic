@@ -149,6 +149,10 @@ static struct {
 	struct meshtastic_hlc hlc;
 	struct meshtastic_hlc_stamp config_stamps[ARRAY_SIZE(config_names)];
 	struct meshtastic_hlc_stamp module_stamps[ARRAY_SIZE(module_names)];
+	/* Which position seed this node's section has been through, persisted as
+	 * "seed/position". 0 = never: the section may still hold the zeros a client
+	 * echoed back and stamped before this firmware read them (apply_core). */
+	uint8_t position_seed;
 	/* EXT_RAM_BSS_ATTR goes AFTER the declarator (below) — after the anonymous struct '}'
 	 * it would bind to the TYPE and be ignored (stay in internal DRAM). */
 } store MESHTASTIC_EXT_RAM_BSS_ATTR; /* ~9.2 KB -> PSRAM on V4 (no-op on V3); records are
@@ -654,6 +658,32 @@ static void seed_position_broadcast(void)
 			     meshtastic_Config_PositionConfig_PositionFlags_SATINVIEW;
 }
 
+/* The one history the write-stamp rule cannot see (bench, kit1, 2026-09-27): a
+ * client that wrote the position section BEFORE this firmware consumed these
+ * fields was shown zeros and wrote them back -- stamped. To the stamp that is
+ * "configured"; to the user it was never a choice, since the firmware of the day
+ * ignored the fields. Track C then honoured the zeros: no altitude or satellites
+ * on air and smart broadcast off. The reference never meets this because
+ * installDefaultConfig materialises defaults on the first boot ever. So, once
+ * per node and keyed on a marker the seed leaves behind rather than on the
+ * stamp: the seed lands where the section holds zeros, a non-zero position_flags
+ * is a choice and stays, and from then on a written 0 is a 0. */
+#define POSITION_SEED_VERSION 1U
+
+static void seed_position_once(void)
+{
+	meshtastic_Config_PositionConfig *pc =
+		&store.configs[index_for_config_tag(meshtastic_Config_position_tag)]
+			 .payload_variant.position;
+	uint32_t flags = pc->position_flags;
+
+	seed_position_broadcast();
+	if (flags != 0U) {
+		pc->position_flags = flags;
+	}
+	store.position_seed = POSITION_SEED_VERSION;
+}
+
 static void seed_telemetry_flags(void)
 {
 	int idx = index_for_module_tag(meshtastic_ModuleConfig_telemetry_tag);
@@ -838,6 +868,11 @@ int meshtastic_config_store_apply_core(void)
 	if (meshtastic_hlc_stamp_is_unset(
 		    &store.config_stamps[index_for_config_tag(meshtastic_Config_position_tag)])) {
 		seed_position_broadcast();
+	}
+	/* And once regardless of the stamp -- the marker rides the next save, so a
+	 * node that never saves simply seeds again next boot (idempotent). */
+	if (store.position_seed < POSITION_SEED_VERSION) {
+		seed_position_once();
 	}
 
 	mt.long_name = store.long_name;
@@ -1696,6 +1731,16 @@ int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_l
 		return setting_get_owner(buf, buf_len);
 	}
 
+	if (strcmp(key, "seed/position") == 0) {
+		if (buf_len < 1U) {
+			return -ENOMEM;
+		}
+		store_lock();
+		((uint8_t *)buf)[0] = store.position_seed;
+		store_unlock();
+		return 1;
+	}
+
 	if (strcmp(key, "canned") == 0) {
 		return setting_get_canned(buf, buf_len);
 	}
@@ -1784,6 +1829,13 @@ int meshtastic_config_store_setting_set(const char *key, const void *buf, size_t
 
 	if (strcmp(key, "owner") == 0) {
 		return setting_set_owner(buf, len);
+	}
+
+	if (strcmp(key, "seed/position") == 0) {
+		store_lock();
+		store.position_seed = (len >= 1U) ? ((const uint8_t *)buf)[0] : 0U;
+		store_unlock();
+		return 0;
 	}
 
 	if (strcmp(key, "canned") == 0) {
@@ -1949,6 +2001,13 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 		if (ret < 0) {
 			return ret;
 		}
+	}
+
+	/* The position seed marker: on this list so a factory reset clears it and
+	 * the wiped node seeds again like a fresh one. */
+	ret = export_one(export_func, "seed/position");
+	if (ret < 0) {
+		return ret;
 	}
 
 	/* The LWW stamps. meshtastic_settings_wipe() iterates this same list, so
