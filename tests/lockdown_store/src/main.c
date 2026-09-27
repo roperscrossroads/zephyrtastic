@@ -193,6 +193,65 @@ static void suite_before(void *f)
 
 ZTEST_SUITE(lockdown_store, NULL, suite_setup, suite_before, NULL, NULL);
 
+/* Runs first (by name), while the store is inactive and every record is
+ * plaintext: the position seed must survive what the hardware boot actually
+ * does. kit2/rzr6 (2026-09-27, 0.4.15) came up with smart off and flags 0
+ * although apply_core() had seeded them: meshtastic_ble_init() then did a FULL
+ * settings_load(), which set every record back from NVS, and the RAM marker
+ * still said "seeded". The reconcile now also runs from the settings commit,
+ * and the marker is written only by a save, with the seeded section. */
+ZTEST(lockdown_store, test_0_position_seed_survives_a_full_settings_load)
+{
+	meshtastic_Config cfg;
+	struct raw r;
+
+	/* The upgraded node: a client wrote the section before this firmware read
+	 * smart/flags -- stamped zeros on flash, and no marker. */
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg), "");
+	cfg.payload_variant.position.position_broadcast_smart_enabled = false;
+	cfg.payload_variant.position.broadcast_smart_minimum_distance = 0U;
+	cfg.payload_variant.position.broadcast_smart_minimum_interval_secs = 0U;
+	cfg.payload_variant.position.position_flags = 0U;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "");
+	flush_all();
+	(void)settings_delete("meshtastic/seed/position");
+	zassert_false(raw_read("meshtastic/seed/position", &r), "no marker on flash");
+	/* ...and a fresh boot's RAM: the save above set the in-RAM marker. */
+	zassert_ok(meshtastic_config_store_setting_set("seed/position", r.buf, 0U), "");
+
+	/* Boot: the subtree load (its commit reconciles), then apply_core. */
+	zassert_ok(settings_load_subtree("meshtastic"), "");
+	zassert_ok(meshtastic_config_store_apply_core(), "");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg), "");
+	zassert_true(cfg.payload_variant.position.position_broadcast_smart_enabled,
+		     "seeded at boot");
+	zassert_not_equal(cfg.payload_variant.position.position_flags, 0U, "flags seeded at boot");
+
+	/* The BLE bring-up: a FULL load puts every record back from flash. */
+	zassert_ok(settings_load(), "");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg), "");
+	zassert_true(cfg.payload_variant.position.position_broadcast_smart_enabled,
+		     "still seeded after the full load (kit2/rzr6, 2026-09-27)");
+	zassert_not_equal(cfg.payload_variant.position.position_flags, 0U,
+			  "flags still seeded after the full load");
+
+	/* The next save writes the marker together with the seeded section. */
+	flush_all();
+	zassert_true(raw_read("meshtastic/seed/position", &r) && r.len == 1U && r.buf[0] == 1U,
+		     "marker persisted by the save (found=%d len=%u)", r.found, (unsigned int)r.len);
+
+	/* From here a written 0 is a 0 -- across a full load too. */
+	cfg.payload_variant.position.position_flags = 0U;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "");
+	flush_all();
+	zassert_ok(settings_load(), "");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg), "");
+	zassert_equal(cfg.payload_variant.position.position_flags, 0U,
+		      "a 0 written after the seed stays 0");
+	zassert_true(cfg.payload_variant.position.position_broadcast_smart_enabled,
+		     "the rest of the section untouched");
+}
+
 ZTEST(lockdown_store, test_inactive_records_are_plaintext_and_the_radio_runs)
 {
 	struct raw r;

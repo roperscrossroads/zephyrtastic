@@ -31,6 +31,8 @@
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 static void seed_position_broadcast(void);
+static void seed_telemetry_flags(void);
+static void reconcile_seeds_locked(void);
 
 #define STORE_RECORD_VERSION     1U
 #define STORE_RECORD_VERSION_MIN 1U /* oldest record version still accepted on load */
@@ -681,7 +683,57 @@ static void seed_position_once(void)
 	if (flags != 0U) {
 		pc->position_flags = flags;
 	}
-	store.position_seed = POSITION_SEED_VERSION;
+	/* NOT store.position_seed: the marker means "the record is in NVS", and
+	 * only the export (a save) may say so -- see reconcile_seeds_locked(). */
+}
+
+/* The post-load reconcile. Runs from apply_core() AND from the settings
+ * handler's commit callback, i.e. after EVERY load of the subtree -- because
+ * meshtastic_ble_init() does a full settings_load() after meshtastic_init(),
+ * and that puts every record back from NVS over whatever the first pass had
+ * seeded in RAM. Found on kit2/rzr6 (2026-09-27): seeded at apply_core, zeros
+ * again by the time anyone looked, and the RAM marker said "done" so nothing
+ * re-seeded. Hence two rules: idempotent, and decided only from state a reload
+ * restores (the stamps, the persisted marker) -- never from "did I already run
+ * this boot". Caller holds store_lock().
+ *
+ * Telemetry and position stamp rule: every save persists EVERY record, so a
+ * node flashed from a build that never read these fields carries them as
+ * zeros. A section whose write-stamp is unset was never configured by anyone
+ * (only an admin, shell or cluster write stamps it), so it follows the build's
+ * seed; a written 0 stays 0 (the reference's meaning, and what the app shows). */
+static void reconcile_stamped_seeds_locked(void)
+{
+	if (meshtastic_hlc_stamp_is_unset(
+		    &store.module_stamps[index_for_module_tag(meshtastic_ModuleConfig_telemetry_tag)])) {
+		seed_telemetry_flags();
+	}
+	if (meshtastic_hlc_stamp_is_unset(
+		    &store.config_stamps[index_for_config_tag(meshtastic_Config_position_tag)])) {
+		seed_position_broadcast();
+	}
+}
+
+/* After a LOAD only (the settings commit) -- never after a write. set_config()
+ * re-runs apply_core(), and until the first save has put the marker on flash a
+ * marker seed there would undo the very write that triggered it (a client's
+ * smart interval of 5 s came back as the seed's 300 s in the position suite).
+ * A load is different: what it brings back is what flash holds, and flash
+ * holding no marker is exactly the case the seed exists for. The export writes
+ * the marker with the seeded section, so the two cannot come apart. */
+static void reconcile_seeds_locked(void)
+{
+	reconcile_stamped_seeds_locked();
+	if (store.position_seed < POSITION_SEED_VERSION) {
+		seed_position_once();
+	}
+}
+
+void meshtastic_config_store_reconcile_seeds(void)
+{
+	store_lock();
+	reconcile_seeds_locked();
+	store_unlock();
 }
 
 static void seed_telemetry_flags(void)
@@ -849,31 +901,9 @@ int meshtastic_config_store_apply_core(void)
 
 	store_lock();
 
-	/* Runs right after the settings load. Every save persists EVERY module
-	 * record, so a node flashed from a build that never read the telemetry
-	 * flags carries them as zeros -- and a naive gate on them would silence
-	 * device metrics across the fleet at the next flash. A section whose
-	 * write-stamp is unset was never configured by anyone (only an admin or
-	 * cluster write stamps it), so its flags follow the build's seed. */
-	if (meshtastic_hlc_stamp_is_unset(
-		    &store.module_stamps[index_for_module_tag(meshtastic_ModuleConfig_telemetry_tag)])) {
-		seed_telemetry_flags();
-	}
-	/* Same for the position section: every node flashed before these fields
-	 * had a consumer carries them as zeros -- smart broadcast off and no
-	 * optional position fields at all, which would strip altitude and
-	 * satellites from the fleet's positions at the next flash. Only a section
-	 * nobody ever wrote follows the seed; a written 0 stays 0 (the
-	 * reference's meaning, and what the app shows). agents-t2hb.3 / flags. */
-	if (meshtastic_hlc_stamp_is_unset(
-		    &store.config_stamps[index_for_config_tag(meshtastic_Config_position_tag)])) {
-		seed_position_broadcast();
-	}
-	/* And once regardless of the stamp -- the marker rides the next save, so a
-	 * node that never saves simply seeds again next boot (idempotent). */
-	if (store.position_seed < POSITION_SEED_VERSION) {
-		seed_position_once();
-	}
+	/* The stamp-keyed seeds only: apply_core() also runs after every
+	 * set_config(), and the marker seed must not (reconcile_seeds_locked). */
+	reconcile_stamped_seeds_locked();
 
 	mt.long_name = store.long_name;
 	mt.short_name = store.short_name;
@@ -2003,8 +2033,14 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 		}
 	}
 
-	/* The position seed marker: on this list so a factory reset clears it and
-	 * the wiped node seeds again like a fresh one. */
+	/* The position seed marker. Saving IS the moment the seeded section reaches
+	 * NVS, so this is where the marker becomes true -- set here, exported here,
+	 * loaded back by setting_set(); the seed itself never touches it. On this
+	 * list so a factory reset deletes it too (the wipe iterates the same list
+	 * and its caller reboots, so the RAM value it leaves behind is moot). */
+	store_lock();
+	store.position_seed = POSITION_SEED_VERSION;
+	store_unlock();
 	ret = export_one(export_func, "seed/position");
 	if (ret < 0) {
 		return ret;

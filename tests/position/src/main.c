@@ -172,6 +172,14 @@ static void set_flags(uint32_t flags)
 	zassert_ok(meshtastic_config_store_set_config(&cfg));
 }
 
+static int discard_record(const char *name, const void *val, size_t val_len)
+{
+	ARG_UNUSED(name);
+	ARG_UNUSED(val);
+	ARG_UNUSED(val_len);
+	return 0;
+}
+
 /* The upgrade case the write-stamp rule cannot see (bench, kit1, 2026-09-27): a
  * client wrote the position section before this firmware read smart/flags, so it
  * echoed the zeros it was shown and STAMPED them. Once per node -- keyed on the
@@ -187,7 +195,7 @@ ZTEST(position, test_stamped_zero_section_is_seeded_once)
 	set_smart(false, 0U, 0U);
 	set_flags(0U);
 	zassert_ok(meshtastic_config_store_setting_set("seed/position", &marker, 0U), "");
-	zassert_ok(meshtastic_config_store_apply_core(), "post-load apply");
+	meshtastic_config_store_reconcile_seeds(); /* the load's commit */
 	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
 	zassert_equal(cfg.payload_variant.position.position_flags, SEED_FLAGS,
 		      "zero flags seeded (0x%x)", cfg.payload_variant.position.position_flags);
@@ -196,11 +204,15 @@ ZTEST(position, test_stamped_zero_section_is_seeded_once)
 	zassert_equal(cfg.payload_variant.position.broadcast_smart_minimum_interval_secs, 300U,
 		      "");
 	zassert_equal(meshtastic_config_store_setting_get("seed/position", &marker, 1U), 1, "");
-	zassert_equal(marker, 1U, "marker left behind for the next save");
+	zassert_equal(marker, 0U, "the seed does not set the marker: only a save may, "
+				  "because the marker means the record is in NVS");
+	zassert_ok(meshtastic_config_store_export(discard_record), "a save");
+	zassert_equal(meshtastic_config_store_setting_get("seed/position", &marker, 1U), 1, "");
+	zassert_equal(marker, 1U, "the save wrote the marker with the seeded section");
 
 	/* Marker set: a written 0 is a 0 across the same apply. */
 	set_flags(0U);
-	zassert_ok(meshtastic_config_store_apply_core(), "");
+	meshtastic_config_store_reconcile_seeds();
 	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
 	zassert_equal(cfg.payload_variant.position.position_flags, 0U,
 		      "a 0 written after the seed stays 0");
@@ -209,7 +221,7 @@ ZTEST(position, test_stamped_zero_section_is_seeded_once)
 	set_flags(meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE);
 	set_smart(false, 0U, 0U);
 	zassert_ok(meshtastic_config_store_setting_set("seed/position", &marker, 0U), "");
-	zassert_ok(meshtastic_config_store_apply_core(), "");
+	meshtastic_config_store_reconcile_seeds();
 	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &cfg));
 	zassert_equal(cfg.payload_variant.position.position_flags,
 		      meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE,

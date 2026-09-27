@@ -25,6 +25,11 @@ extern "C" {
 
 int meshtastic_config_store_seed(const struct meshtastic_config *cfg);
 int meshtastic_config_store_apply_core(void);
+/* The post-load seed reconcile on its own (apply_core() runs it too). The
+ * settings handler calls it from its commit, i.e. after every load of the
+ * subtree, so a later full settings_load() (the BLE bring-up does one) cannot
+ * leave the loaded zeros in place. Idempotent. */
+void meshtastic_config_store_reconcile_seeds(void);
 
 const char *meshtastic_config_store_long_name(void);
 const char *meshtastic_config_store_short_name(void);

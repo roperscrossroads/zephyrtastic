@@ -88,8 +88,18 @@ static int settings_export_cb(int (*export_func)(const char *name, const void *v
 	return ret;
 }
 
+/* After every load of the subtree -- the boot load, and the FULL settings_load()
+ * the BLE bring-up does later (meshtastic_ble_init), which re-sets every record
+ * from NVS over what apply_core() seeded in RAM. Re-reconciling here is what
+ * keeps a seed in place; a load that changed nothing finds nothing to do. */
+static int settings_commit_cb(void)
+{
+	meshtastic_config_store_reconcile_seeds();
+	return 0;
+}
+
 SETTINGS_STATIC_HANDLER_DEFINE(meshtastic, MESHTASTIC_SETTINGS_SUBTREE, settings_get_cb,
-			       settings_set_cb, NULL, settings_export_cb);
+			       settings_set_cb, settings_commit_cb, settings_export_cb);
 
 static void save_work_handler(struct k_work *work)
 {
