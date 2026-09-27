@@ -22,6 +22,9 @@
 #include "meshtastic_lockdown.h"
 #endif
 #include "meshtastic_storage.h"
+#if defined(CONFIG_MESHTASTIC_BULK_STORE)
+#include "meshtastic_bulk.h"
+#endif
 
 /* NVS stores every settings record as TWO entries (the name under one id, the
  * value under id + 0x4000, settings_nvs.c), and every entry costs an 8-byte
@@ -210,6 +213,19 @@ int meshtastic_storage_shell_cmd(const struct shell *sh, size_t argc, char **arg
 		shell_warn(sh, "(more subtrees than the table holds; totals above are complete)");
 	}
 
+#if defined(CONFIG_MESHTASTIC_BULK_STORE)
+	{
+		struct meshtastic_bulk_info bi;
+
+		meshtastic_bulk_info_get(&bi);
+		if (bi.ready) {
+			shell_print(sh, "bulk store: %u sectors x %u B, %d B free, %u format(s) this boot",
+				    bi.sector_count, bi.sector_size, bi.free_bytes, bi.formats);
+		} else {
+			shell_print(sh, "bulk store: not mounted (node records stay in settings)");
+		}
+	}
+#endif
 	shell_print(sh, "boot restore:");
 	for (size_t i = 0U; i < ARRAY_SIZE(load_names); i++) {
 		if (st->load_us[i] == 0U) {
