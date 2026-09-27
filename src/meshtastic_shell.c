@@ -1646,6 +1646,16 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 #if defined(CONFIG_MESHTASTIC_KEYVERIFY)
 	shell_print(sh, "key verified: %s", node.is_key_manually_verified ? "yes" : "no");
 #endif
+	/* The cached peer position (agents-ooma.39) as it arrived on air: `time` is 0
+	 * from a sender whose clock is below NTP quality, `precision` is the sender's
+	 * channel precision -- the two fields a bench cannot otherwise read off a
+	 * received position without a packet hex dump. */
+	if (node.has_position) {
+		shell_print(sh, "position: lat=%d lon=%d alt=%d time=%u src=%u precision=%u",
+			    node.position_latitude_i, node.position_longitude_i,
+			    node.position_altitude, node.position_time,
+			    node.position_location_source, node.position_precision_bits);
+	}
 
 	if (node.has_user) {
 		shell_print(sh, "long name: %s", node.long_name);
