@@ -564,9 +564,12 @@ void meshtastic_phoneapi_enqueue_phone_config(struct meshtastic_phoneapi *api, u
 	LOG_INF("%s want_config nonce=%u", api->name, request_id);
 
 	k_mutex_lock(&api->lock, K_FOREVER);
-	api->head = 0U;
-	api->tail = 0U;
-	api->count = 0U;
+	/* The queue is KEPT: upstream holds toPhoneQueue across want_config and
+	 * serves it after the config stream (PhoneAPI.cpp STATE_SEND_PACKETS).
+	 * Every app sends want_config on every connect, so flushing here used to
+	 * discard everything received while the phone was away (agents-ddo5).
+	 * Only the in-flight frame is dropped: it may be half-delivered, or a
+	 * stale frame from an earlier, aborted config stream. */
 	api->current_valid = false;
 	/* ONLY_NODES (app Stage 2) starts at own node info; every other nonce
 	 * (incl. ONLY_CONFIG and legacy full) starts at my_info. */

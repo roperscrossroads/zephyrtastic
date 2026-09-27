@@ -120,12 +120,17 @@ void meshtastic_phoneapi_register(struct meshtastic_phoneapi *api)
 	k_mutex_unlock(&phoneapi_lock);
 }
 
-void meshtastic_phoneapi_reset(struct meshtastic_phoneapi *api)
+void meshtastic_phoneapi_session_reset(struct meshtastic_phoneapi *api)
 {
 	k_mutex_lock(&api->lock, K_FOREVER);
-	api->head = 0U;
-	api->tail = 0U;
-	api->count = 0U;
+	/* The connection died; the backlog did not (agents-ddo5). head/tail/count
+	 * and the queued frames stay, to be served to the next connection after
+	 * its config stream — upstream keeps toPhoneQueue across PhoneAPI::close()
+	 * the same way. Only the in-flight frame goes: it may be half-read, and it
+	 * may be a stale frame from an aborted config stream, which must never be
+	 * re-queued as if it were a packet. Under lockdown the kept backlog is
+	 * content: queue_take_servable() withholds it from an unauthorized
+	 * connection. */
 	api->current_valid = false;
 	api->config_state = MESHTASTIC_PHONEAPI_CONFIG_IDLE;
 	api->config_index = 0U;
@@ -140,6 +145,17 @@ void meshtastic_phoneapi_reset(struct meshtastic_phoneapi *api)
 	api->conn_epoch++;
 #endif
 	k_mutex_unlock(&api->lock);
+}
+
+void meshtastic_phoneapi_reset(struct meshtastic_phoneapi *api)
+{
+	k_mutex_lock(&api->lock, K_FOREVER);
+	api->head = 0U;
+	api->tail = 0U;
+	api->count = 0U;
+	api->saturated = false;
+	k_mutex_unlock(&api->lock);
+	meshtastic_phoneapi_session_reset(api);
 }
 
 uint8_t meshtastic_phoneapi_snapshot_transports(struct meshtastic_phoneapi **out, uint8_t cap)
@@ -175,26 +191,76 @@ uint32_t meshtastic_phoneapi_pending_count(struct meshtastic_phoneapi *api)
 	return count;
 }
 
+/* Remove the frame at tail-offset @p k (0 = oldest), preserving order. Caller
+ * holds api->lock. */
+static void queue_remove_at(struct meshtastic_phoneapi *api, uint8_t k)
+{
+	for (uint8_t i = k; i + 1U < api->count; i++) {
+		uint8_t cur = (uint8_t)((api->tail + i) % api->queue_size);
+		uint8_t nxt = (uint8_t)((api->tail + i + 1U) % api->queue_size);
+
+		api->queue[cur] = api->queue[nxt];
+	}
+	api->head = (uint8_t)((api->head + api->queue_size - 1U) % api->queue_size);
+	api->count--;
+}
+
+/* Take the oldest servable queued frame, preserving the order of the rest.
+ * Caller holds api->lock. Under active lockdown an unauthorized connection is
+ * served session-control frames only (the QueueStatus answering its refused
+ * sends, the LockdownStatus telling it to authenticate); the content backlog
+ * kept across a disconnect stays queued until a connection proves the
+ * passphrase (agents-ddo5 under lockdown). */
+static bool queue_take_servable(struct meshtastic_phoneapi *api,
+				struct meshtastic_phoneapi_frame *frame)
+{
+	bool auth = meshtastic_phoneapi_authorized(api);
+
+	for (uint8_t i = 0; i < api->count; i++) {
+		uint8_t idx = (uint8_t)((api->tail + i) % api->queue_size);
+
+		if (!auth && (api->queue[idx].flags & MT_PHONE_FRAME_F_CTRL) == 0U) {
+			continue;
+		}
+		*frame = api->queue[idx];
+		if (i == 0U) {
+			api->tail = (uint8_t)((api->tail + 1U) % api->queue_size);
+			api->count--;
+		} else {
+			queue_remove_at(api, i);
+		}
+		return true;
+	}
+	return false;
+}
+
 bool meshtastic_phoneapi_pop_frame(struct meshtastic_phoneapi *api,
 				   struct meshtastic_phoneapi_frame *frame)
 {
 	k_mutex_lock(&api->lock, K_FOREVER);
-	if (api->count == 0U) {
-		if (config_active(api) && meshtastic_phoneapi_next_config_frame(api, frame) == 0) {
+	/* The config stream goes FIRST, then the queue — upstream's order
+	 * (STATE_SEND_PACKETS only after config_complete), and what makes
+	 * keeping the backlog across want_config safe: the app finishes its
+	 * handshake before any packet, old or live, reaches it. */
+	if (config_active(api)) {
+		if (meshtastic_phoneapi_next_config_frame(api, frame) == 0) {
 			k_mutex_unlock(&api->lock);
 			return true;
 		}
-
+		if (config_active(api)) {
+			/* Stalled mid-stream (an encode failure): don't serve
+			 * the backlog ahead of the rest of the config frames. */
+			k_mutex_unlock(&api->lock);
+			return false;
+		}
+	}
+	if (api->count > 0U && queue_take_servable(api, frame)) {
 		k_mutex_unlock(&api->lock);
-		return false;
+		return true;
 	}
 
-	*frame = api->queue[api->tail];
-	api->tail = (uint8_t)((api->tail + 1U) % api->queue_size);
-	api->count--;
 	k_mutex_unlock(&api->lock);
-
-	return true;
+	return false;
 }
 
 void meshtastic_phoneapi_push_frame_front(struct meshtastic_phoneapi *api,
@@ -218,13 +284,13 @@ bool meshtastic_phoneapi_current_frame(struct meshtastic_phoneapi *api,
 				       struct meshtastic_phoneapi_frame *frame)
 {
 	k_mutex_lock(&api->lock, K_FOREVER);
-	if (!api->current_valid && api->count > 0U) {
-		api->current = api->queue[api->tail];
-		api->tail = (uint8_t)((api->tail + 1U) % api->queue_size);
-		api->count--;
+	/* Same order as pop_frame: config stream first, then the queue. */
+	if (!api->current_valid && config_active(api) &&
+	    meshtastic_phoneapi_next_config_frame(api, &api->current) == 0) {
 		api->current_valid = true;
-	} else if (!api->current_valid && config_active(api) &&
-		   meshtastic_phoneapi_next_config_frame(api, &api->current) == 0) {
+	}
+	if (!api->current_valid && !config_active(api) && api->count > 0U &&
+	    queue_take_servable(api, &api->current)) {
 		api->current_valid = true;
 	}
 
@@ -303,18 +369,20 @@ static bool rank_is_protected(uint8_t rank)
 	return rank >= MT_PHONE_RANK_KEEP;
 }
 
-/* Remove the frame at tail-offset @p k (0 = oldest), preserving order. Caller
- * holds api->lock. */
-static void queue_evict_at(struct meshtastic_phoneapi *api, uint8_t k)
+/* May this frame be served to a connection that has not proven the passphrase?
+ * Only session plumbing: the QueueStatus that answers its (possibly refused)
+ * sends, the LockdownStatus that tells it to authenticate, and the rebooted
+ * greeting. Everything else in this queue is content. */
+static uint8_t fromradio_frame_flags(const meshtastic_FromRadio *from)
 {
-	for (uint8_t i = k; i + 1U < api->count; i++) {
-		uint8_t cur = (uint8_t)((api->tail + i) % api->queue_size);
-		uint8_t nxt = (uint8_t)((api->tail + i + 1U) % api->queue_size);
-
-		api->queue[cur] = api->queue[nxt];
+	switch (from->which_payload_variant) {
+	case meshtastic_FromRadio_queueStatus_tag:
+	case meshtastic_FromRadio_rebooted_tag:
+	case meshtastic_FromRadio_lockdown_status_tag:
+		return MT_PHONE_FRAME_F_CTRL;
+	default:
+		return 0U;
 	}
-	api->head = (uint8_t)((api->head + api->queue_size - 1U) % api->queue_size);
-	api->count--;
 }
 
 /* Drop the oldest frame (tail). Caller holds api->lock. */
@@ -348,6 +416,7 @@ int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 		return ret;
 	}
 	frame.evict_rank = rank;
+	frame.flags = fromradio_frame_flags(from);
 
 	k_mutex_lock(&api->lock, K_FOREVER);
 	if (api->count == api->queue_size) {
@@ -373,7 +442,7 @@ int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 				/* Something cheaper than (or as cheap as) the newcomer is
 				 * queued. At equal rank the OLDEST goes: for a repeating
 				 * measurement the newer sample is the better one to keep. */
-				queue_evict_at(api, (uint8_t)victim);
+				queue_remove_at(api, (uint8_t)victim);
 				meshtastic_sched_stat_phone_drop(false);
 				LOG_DBG("%s queue full, evicted rank-%u frame for a rank-%u",
 					api->name, (unsigned int)victim_rank, (unsigned int)rank);

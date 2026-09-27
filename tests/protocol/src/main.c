@@ -5861,6 +5861,158 @@ ZTEST(protocol_stack, test_phone_config_handshake_only_nodes)
 		      "config_complete_id must echo the request nonce");
 }
 
+/* --- the reconnect backlog (agents-ddo5) ------------------------------------
+ *
+ * Upstream keeps toPhoneQueue across PhoneAPI::close() and want_config, and
+ * delivers it after the config stream (PhoneAPI.cpp STATE_SEND_PACKETS). Every
+ * app sends want_config on every connect, so a port that flushes the queue
+ * there delivers NOTHING received while the phone was away — whatever the
+ * queue's depth. The port used to do exactly that, in two places: the
+ * want_config handler zeroed head/tail/count, and a BLE disconnect (or TCP
+ * accept) called a reset that did the same. See the tooling repo's
+ * PHONE-DELIVERY-AND-MESSAGE-STORE-PLAN.md §2 (P1/P2).
+ */
+
+/* A FromRadio carrying a decoded text on the given packet id. */
+static meshtastic_FromRadio backlog_text(uint32_t id)
+{
+	meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+
+	from.which_payload_variant = meshtastic_FromRadio_packet_tag;
+	from.packet.id = id;
+	from.packet.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	from.packet.decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+	from.packet.decoded.payload.size = 1U;
+	from.packet.decoded.payload.bytes[0] = (uint8_t)id;
+	return from;
+}
+
+/* Drain queue + config stream via the transport-facing pop, recording packet
+ * ids in arrival order and how many packets came BEFORE config_complete_id
+ * (must be none: the config stream goes first, as upstream orders it). */
+static void backlog_drain(struct meshtastic_phoneapi *api, uint32_t *ids, uint8_t cap,
+			  uint8_t *n_pkts, uint8_t *before_complete)
+{
+	struct meshtastic_phoneapi_frame f;
+	bool complete = false;
+	int guard = 0;
+
+	*n_pkts = 0U;
+	*before_complete = 0U;
+	while (meshtastic_phoneapi_pop_frame(api, &f)) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t s = pb_istream_from_buffer(f.data, f.len);
+
+		zassert_true(++guard < 512, "stream did not terminate");
+		zassert_true(pb_decode(&s, meshtastic_FromRadio_fields, &from), "decode");
+		if (from.which_payload_variant == meshtastic_FromRadio_config_complete_id_tag) {
+			complete = true;
+		} else if (from.which_payload_variant == meshtastic_FromRadio_packet_tag) {
+			if (*n_pkts < cap) {
+				ids[*n_pkts] = from.packet.id;
+			}
+			(*n_pkts)++;
+			if (!complete) {
+				(*before_complete)++;
+			}
+		}
+	}
+}
+
+/* T1: want_config must not cost the phone the backlog, and the backlog goes
+ * out AFTER the config stream, in order. */
+ZTEST(protocol_stack, test_want_config_keeps_the_backlog_and_serves_it_after_config)
+{
+	static struct meshtastic_phoneapi_frame q[8];
+	static meshtastic_ToRadio to_scratch;
+	static meshtastic_FromRadio from_scratch;
+	struct meshtastic_phoneapi api;
+	uint32_t ids[8] = {0};
+	uint8_t n = 0U, before = 0U;
+
+	meshtastic_phoneapi_init(&api, "backlog1", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL,
+				 &to_scratch, &from_scratch);
+	for (uint32_t i = 1U; i <= 3U; i++) {
+		meshtastic_FromRadio t = backlog_text(i);
+
+		zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &t));
+	}
+
+	meshtastic_phoneapi_enqueue_phone_config(&api, 0xC0FFEE01U);
+	backlog_drain(&api, ids, ARRAY_SIZE(ids), &n, &before);
+
+	zassert_equal(n, 3U, "want_config discarded the backlog (%u of 3 texts arrived)", n);
+	zassert_equal(before, 0U,
+		      "the backlog must be served after the config stream, not interleaved");
+	zassert_equal(ids[0], 1U, "backlog order lost");
+	zassert_equal(ids[1], 2U, "backlog order lost");
+	zassert_equal(ids[2], 3U, "backlog order lost");
+}
+
+/* T2: a disconnect ends the session, not the backlog. The next connection's
+ * want_config gets everything that arrived while the phone was away. */
+ZTEST(protocol_stack, test_a_disconnect_keeps_the_backlog_for_the_next_connection)
+{
+	static struct meshtastic_phoneapi_frame q[8];
+	static meshtastic_ToRadio to_scratch;
+	static meshtastic_FromRadio from_scratch;
+	struct meshtastic_phoneapi api;
+	uint32_t ids[8] = {0};
+	uint8_t n = 0U, before = 0U;
+
+	meshtastic_phoneapi_init(&api, "backlog2", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL,
+				 &to_scratch, &from_scratch);
+	for (uint32_t i = 1U; i <= 3U; i++) {
+		meshtastic_FromRadio t = backlog_text(i);
+
+		zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &t));
+	}
+
+	/* The phone drops (BLE disconnected / TCP client gone), then reconnects. */
+	meshtastic_phoneapi_session_reset(&api);
+	meshtastic_phoneapi_enqueue_phone_config(&api, 0xC0FFEE02U);
+	backlog_drain(&api, ids, ARRAY_SIZE(ids), &n, &before);
+
+	zassert_equal(n, 3U, "the disconnect discarded the backlog (%u of 3 texts arrived)", n);
+	zassert_equal(before, 0U, "backlog served before the config stream");
+	zassert_equal(ids[0], 1U, "backlog order lost");
+	zassert_equal(ids[2], 3U, "backlog order lost");
+}
+
+/* Upstream parity on the loss bound: PhoneAPI::close() loses at most the one
+ * packet already dequeued. The frame in flight when the link died is gone (it
+ * may be half-read, or a stale config frame); everything still queued is not. */
+ZTEST(protocol_stack, test_a_disconnect_loses_at_most_the_in_flight_frame)
+{
+	static struct meshtastic_phoneapi_frame q[8];
+	static meshtastic_ToRadio to_scratch;
+	static meshtastic_FromRadio from_scratch;
+	struct meshtastic_phoneapi api;
+	struct meshtastic_phoneapi_frame f;
+	uint32_t ids[8] = {0};
+	uint8_t n = 0U, before = 0U;
+
+	meshtastic_phoneapi_init(&api, "backlog3", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL,
+				 &to_scratch, &from_scratch);
+
+	meshtastic_FromRadio a = backlog_text(1);
+	meshtastic_FromRadio b = backlog_text(2);
+
+	zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &a));
+	zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &b));
+
+	/* The transport stages text 1 (a BLE FromRadio read in progress)... */
+	zassert_true(meshtastic_phoneapi_current_frame(&api, &f));
+	/* ...and the link dies before the read completes. */
+	meshtastic_phoneapi_session_reset(&api);
+
+	meshtastic_phoneapi_enqueue_phone_config(&api, 0xC0FFEE03U);
+	backlog_drain(&api, ids, ARRAY_SIZE(ids), &n, &before);
+
+	zassert_equal(n, 1U, "expected exactly the one un-staged text (got %u)", n);
+	zassert_equal(ids[0], 2U, "the in-flight frame is the one that goes, never a queued one");
+}
+
 /* agents-ooma.39, end-to-end: the whole point is that a freshly-connected
  * phone's map view starts populated. Drives the real ONLY_NODES handshake and
  * decodes the streamed peer NodeInfo directly, rather than trusting the

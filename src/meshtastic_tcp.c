@@ -252,7 +252,8 @@ static void tcp_close_client(void)
 
 	zsock_close(tcp.client_fd);
 	tcp.client_fd = -1;
-	meshtastic_phoneapi_reset(&tcp.api);
+	/* Session only: the backlog is kept for the next client (agents-ddo5). */
+	meshtastic_phoneapi_session_reset(&tcp.api);
 	meshtastic_power_note_phone_disconnected();
 	LOG_INF("Meshtastic TCP PhoneAPI client disconnected");
 }
@@ -275,9 +276,9 @@ static void tcp_accept_client(int lfd)
 	tcp.client_fd = nfd;
 	tcp.rx_state = TCP_RX_WAIT_START1;
 
-	/* Fresh session: reset the PhoneAPI and greet with the rebooted marker
-	 * so the client (re)starts its want_config handshake. */
-	meshtastic_phoneapi_reset(&tcp.api);
+	/* Fresh session (backlog kept, agents-ddo5): greet with the rebooted
+	 * marker so the client (re)starts its want_config handshake. */
+	meshtastic_phoneapi_session_reset(&tcp.api);
 	meshtastic_phoneapi_enqueue_rebooted(&tcp.api);
 	(void)tcp_drain_tx();
 

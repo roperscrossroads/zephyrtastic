@@ -741,7 +741,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	 * was the phone's own connection that went away. */
 	if (was_phone) {
 		ble_invalidate_delivery(&ble.api);
-		meshtastic_phoneapi_reset(&ble.api);
+		/* Session only: the FromRadio backlog survives the disconnect and
+		 * is delivered after the next connection's config stream
+		 * (agents-ddo5). */
+		meshtastic_phoneapi_session_reset(&ble.api);
 		(void)k_work_cancel(&ble.fromradio_work);
 
 		meshtastic_set_ble_connected(false);

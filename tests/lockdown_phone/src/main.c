@@ -821,6 +821,76 @@ ZTEST(lockdown_phone, test_session_cap_revokes_then_locks)
 	meshtastic_phoneapi_lockdown_cancel_reboot();
 }
 
+/* agents-ddo5 × lockdown: the FromRadio backlog is kept across a disconnect,
+ * and it is CONTENT. A new connection under active lockdown completes its
+ * (redacted) handshake without being served a byte of it; proving the
+ * passphrase releases it. */
+ZTEST(lockdown_phone, test_kept_backlog_waits_for_authorization)
+{
+	struct meshtastic_phoneapi_frame f;
+	struct stream s;
+	meshtastic_LockdownStatus st;
+	unsigned int texts = 0U;
+	bool unlocked = false;
+	struct meshtastic_packet txt = {
+		.from = PEER_ID,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.id = 0x0AD0BAC6U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.channel_index = meshtastic_channels_primary_index(),
+		.payload = (const uint8_t *)"psst",
+		.payload_len = 4U,
+	};
+
+	/* Provision: lockdown ACTIVE, and the connection that did it authorized. */
+	send_auth(&phone, PP, PPLEN, 0U, 0U, false, false);
+	zassert_true(wait_status(&phone, &st, 5000), "no status after provisioning");
+	zassert_equal(st.state, meshtastic_LockdownStatus_State_UNLOCKED, "");
+	wait_idle();
+	zassert_true(meshtastic_lockdown_active(), "");
+	zassert_true(meshtastic_phoneapi_authorized(&phone), "");
+	drain(&phone);
+
+	/* A text arrives from the mesh; it lands in the attached phone's queue. */
+	meshtastic_handle_inbound_packet(&txt, NULL, 0U, true);
+	k_sleep(K_MSEC(100));
+
+	/* The phone drops. Whoever connects next has proven nothing. */
+	meshtastic_phoneapi_session_reset(&phone);
+	zassert_false(meshtastic_phoneapi_authorized(&phone), "");
+
+	run_config(&phone, 31U, &s);
+	zassert_true(s.complete, "");
+	while (meshtastic_phoneapi_pop_frame(&phone, &f)) {
+		zassert_true(decode_frame(&f, &dec), "");
+		zassert_not_equal(dec.which_payload_variant, meshtastic_FromRadio_packet_tag,
+				  "kept backlog served to an unauthorized connection");
+	}
+
+	/* Prove the passphrase: UNLOCKED, and the held text follows. */
+	send_auth(&phone, PP, PPLEN, 0U, 0U, false, false);
+	for (int t = 0; t < 300 && (texts == 0U || !unlocked); t++) {
+		while (meshtastic_phoneapi_pop_frame(&phone, &f)) {
+			if (!decode_frame(&f, &dec)) {
+				continue;
+			}
+			if (dec.which_payload_variant == meshtastic_FromRadio_lockdown_status_tag &&
+			    dec.lockdown_status.state ==
+				    meshtastic_LockdownStatus_State_UNLOCKED) {
+				unlocked = true;
+			}
+			if (dec.which_payload_variant == meshtastic_FromRadio_packet_tag &&
+			    dec.packet.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP) {
+				texts++;
+			}
+		}
+		k_sleep(K_MSEC(10));
+	}
+	zassert_true(unlocked, "no UNLOCKED status");
+	zassert_equal(texts, 1U, "the kept backlog must be delivered once authorized (got %u)",
+		      texts);
+}
+
 /* The app's toggle going off: disable needs the passphrase, rewrites the store
  * in the clear on the workqueue, then reports DISABLED and reboots. */
 ZTEST(lockdown_phone, test_disable_over_the_phoneapi)

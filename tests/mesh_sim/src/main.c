@@ -6212,6 +6212,132 @@ ZTEST(mesh_sim, test_cluster_digest_stays_off_the_phone)
 		      "PRIVATE_APP on a user channel must still reach the phone");
 	wait_rx_armed();
 }
+
+/*
+ * agents-ddo5 end to end, on the real RX path (plan T3): with no phone
+ * attached, the node hears cluster digests, two channel texts and a DM to us.
+ * A phone then connects and runs want_config. The digests never show; the
+ * config stream completes; and only THEN do the two texts and the DM arrive —
+ * the backlog that used to be zeroed by the want_config handler.
+ */
+ZTEST(mesh_sim, test_texts_heard_while_the_phone_was_away_arrive_after_config)
+{
+	zephyrtastic_ClusterMessage msg = zephyrtastic_ClusterMessage_init_zero;
+	struct meshtastic_phoneapi_frame frame;
+	uint8_t cbuf[64];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	pb_ostream_t os = pb_ostream_from_buffer(cbuf, sizeof(cbuf));
+	uint8_t ch_index;
+	unsigned int texts = 0U, texts_before_complete = 0U, digests = 0U;
+	bool complete = false;
+	int guard = 0;
+
+	if (!duty_api_registered) {
+		meshtastic_phoneapi_init(&duty_api, "duty-test", duty_q, DUTY_TEST_QUEUE, NULL,
+					 NULL, NULL, NULL, &duty_to_scratch,
+					 &duty_from_scratch);
+		meshtastic_phoneapi_register(&duty_api);
+		duty_api_registered = true;
+	}
+	{
+		meshtastic_Channel ch = meshtastic_Channel_init_zero;
+
+		ch.role = meshtastic_Channel_Role_SECONDARY;
+		ch.has_settings = true;
+		strncpy(ch.settings.name, CONFIG_MESHTASTIC_CLUSTER_CHANNEL_NAME,
+			sizeof(ch.settings.name) - 1U);
+		ch.settings.psk.size = 16U;
+		ch.settings.psk.bytes[0] = 0x42U;
+		zassert_ok(meshtastic_channels_set_slot(2U, &ch), "cluster channel set failed");
+	}
+	zassert_true(meshtastic_cluster_channel_resolved(&ch_index), "module must bind");
+
+	msg.which_variant = zephyrtastic_ClusterMessage_digest_tag;
+	msg.variant.digest.doc_hash = 0xC0FFEE02U;
+	msg.variant.digest.entry_count = 1U;
+	zassert_true(pb_encode(&os, zephyrtastic_ClusterMessage_fields, &msg), "encode failed");
+
+	wait_rx_armed();
+	meshtastic_phoneapi_reset(&duty_api);
+
+	/* No phone attached. Digests chatter, then real traffic arrives. */
+	for (uint32_t i = 0U; i < 3U; i++) {
+		struct meshtastic_packet pkt = {
+			.from = PEER_NODE_ID,
+			.to = MESHTASTIC_NODE_BROADCAST,
+			.id = 0x5B00U + i,
+			.portnum = MESHTASTIC_PORT_PRIVATE,
+			.payload = cbuf,
+			.payload_len = os.bytes_written,
+			.hop_limit = 3U,
+			.hop_start = 3U,
+			.channel_index = ch_index,
+		};
+
+		zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "encode failed");
+		zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject");
+		k_sleep(K_MSEC(100));
+		wait_rx_armed();
+	}
+	for (uint32_t i = 0U; i < 3U; i++) {
+		/* Two channel texts and one DM addressed to us. The DM is
+		 * channel-encrypted on purpose (no_pkc): the harness holds no
+		 * PKC sender key for PEER here, and a channel-keyed DM is a
+		 * frame every configuration accepts. */
+		struct meshtastic_packet pkt = {
+			.from = PEER_NODE_ID,
+			.to = (i == 2U) ? meshtastic_get_node_id() : MESHTASTIC_NODE_BROADCAST,
+			.id = 0x5B10U + i,
+			.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+			.payload = (const uint8_t *)"away",
+			.payload_len = 4U,
+			.hop_limit = 3U,
+			.hop_start = 3U,
+			.channel_index = meshtastic_channels_primary_index(),
+			.no_pkc = true,
+		};
+
+		zassert_ok(meshtastic_build_wire_packet(&pkt, wire, &wire_len), "encode failed");
+		zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject");
+		k_sleep(K_MSEC(100));
+		wait_rx_armed();
+	}
+
+	/* The phone connects and asks for config. */
+	meshtastic_phoneapi_enqueue_phone_config(&duty_api, 0x0DD05EEDU);
+	while (meshtastic_phoneapi_pop_frame(&duty_api, &frame)) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t stream = pb_istream_from_buffer(frame.data, frame.len);
+
+		zassert_true(++guard < 512, "stream did not terminate");
+		if (!pb_decode(&stream, meshtastic_FromRadio_fields, &from)) {
+			continue;
+		}
+		if (from.which_payload_variant == meshtastic_FromRadio_config_complete_id_tag) {
+			complete = true;
+		} else if (from.which_payload_variant == meshtastic_FromRadio_packet_tag &&
+			   from.packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
+			uint32_t port = (uint32_t)from.packet.decoded.portnum;
+
+			if (port == MESHTASTIC_PORT_TEXT_MESSAGE) {
+				texts++;
+				if (!complete) {
+					texts_before_complete++;
+				}
+			} else if (port == MESHTASTIC_PORT_PRIVATE) {
+				digests++;
+			}
+		}
+	}
+
+	zassert_true(complete, "config stream must complete");
+	zassert_equal(texts, 3U, "both texts and the DM must survive the away time (got %u)",
+		      texts);
+	zassert_equal(texts_before_complete, 0U, "backlog must follow the config stream");
+	zassert_equal(digests, 0U, "cluster digests never reach the phone");
+	wait_rx_armed();
+}
 #endif /* CONFIG_MESHTASTIC_CLUSTER */
 
 /* The harm agents-tosb actually named: an unconfigured node relaying a

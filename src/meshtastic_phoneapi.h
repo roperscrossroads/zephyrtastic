@@ -49,12 +49,23 @@ enum meshtastic_phoneapi_evict_rank {
 	MT_PHONE_RANK_KEEP = 4,
 };
 
+/**
+ * Session control rather than content: a QueueStatus, LockdownStatus or the
+ * rebooted greeting. Under active lockdown these are the only queued frames an
+ * unauthorized connection may be served — the content backlog kept across a
+ * disconnect (agents-ddo5) waits for whoever proves the passphrase.
+ */
+#define MT_PHONE_FRAME_F_CTRL BIT(0)
+
 struct meshtastic_phoneapi_frame {
 	uint8_t data[MESHTASTIC_API_FRAME_MAX];
 	uint16_t len;
 	/* meshtastic_phoneapi_evict_rank; see meshtastic sched phone.evict. Stored
 	 * as a uint8_t so the frame stays packable. */
 	uint8_t evict_rank;
+	/* MT_PHONE_FRAME_F_* — what kind of frame this is, decided at enqueue
+	 * time when the FromRadio variant is still known. */
+	uint8_t flags;
 };
 
 typedef void (*meshtastic_phoneapi_data_ready_cb_t)(struct meshtastic_phoneapi *api);
@@ -152,7 +163,23 @@ void meshtastic_phoneapi_init(struct meshtastic_phoneapi *api, const char *name,
 			      meshtastic_ToRadio *to_scratch, meshtastic_FromRadio *from_scratch);
 void meshtastic_phoneapi_release_current_frame(struct meshtastic_phoneapi *api);
 void meshtastic_phoneapi_register(struct meshtastic_phoneapi *api);
+/**
+ * @brief Full reset: session state AND the queued backlog.
+ *
+ * For test fixtures and factory paths. A transport losing its client wants
+ * meshtastic_phoneapi_session_reset() instead — flushing here is what used to
+ * cost the phone everything received while it was away (agents-ddo5).
+ */
 void meshtastic_phoneapi_reset(struct meshtastic_phoneapi *api);
+/**
+ * @brief The connection went away (BLE disconnect, TCP client swap): reset the
+ *        session — delivery cursor, config state, from_num, and under lockdown
+ *        the connection's authorization — but keep the queued backlog, to be
+ *        served to the next connection after its config stream. Upstream keeps
+ *        toPhoneQueue across PhoneAPI::close() the same way; at most the one
+ *        in-flight frame is lost.
+ */
+void meshtastic_phoneapi_session_reset(struct meshtastic_phoneapi *api);
 void meshtastic_phoneapi_notify_data_ready(struct meshtastic_phoneapi *api);
 uint32_t meshtastic_phoneapi_from_num(struct meshtastic_phoneapi *api);
 uint32_t meshtastic_phoneapi_pending_count(struct meshtastic_phoneapi *api);
