@@ -94,3 +94,9 @@ tests:
   meshtastic.shell.tx_default_off.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_TX_ENABLED_DEFAULT=n
+
+  # `meshtastic relay` (agents-jbrq.12). The relay is default-N and its own
+  # suite builds without the shell, so this is where its commands compile and run.
+  meshtastic.shell.relay.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_RELAY=y

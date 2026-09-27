@@ -1266,3 +1266,37 @@ ZTEST(meshtastic_shell, test_scanner_autostart_c_list_from_build)
 	zassert_equal(got[2], meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO);
 }
 #endif /* CONFIG_MESHTASTIC_SCANNER_AUTOSTART */
+
+#if defined(CONFIG_MESHTASTIC_RELAY)
+#include "meshtastic_relay.h"
+
+/* `meshtastic relay`: off at boot, `dir in` turns it on, the v1-refused
+ * directions say why and do not stick, and reset returns to boot state. */
+ZTEST(meshtastic_shell, test_relay_commands)
+{
+	const char *out;
+
+	meshtastic_relay_reset();
+	zassert_ok(run_cmd("meshtastic relay", &out));
+	zassert_not_null(strstr(out, "direction: off"), "boot direction: %s", out);
+
+	zassert_ok(run_cmd("meshtastic relay dir in", &out));
+	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_INBOUND);
+
+	zassert_not_equal(run_cmd("meshtastic relay dir both", &out), 0);
+	zassert_not_null(strstr(out, "ear that transmits"), "refusal reason: %s", out);
+	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_INBOUND,
+		      "a refused direction must not stick");
+
+	zassert_not_equal(run_cmd("meshtastic relay dir sideways", &out), 0);
+	zassert_ok(run_cmd("meshtastic relay ignore 0d0d0d0d", &out));
+	zassert_not_null(strstr(out, "0x0d0d0d0d"), "%s", out);
+	zassert_not_equal(run_cmd("meshtastic relay ignore zz", &out), 0);
+
+	zassert_ok(run_cmd("meshtastic relay show", &out));
+	zassert_not_null(strstr(out, "considered 0"), "%s", out);
+
+	zassert_ok(run_cmd("meshtastic relay reset", &out));
+	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_OFF);
+}
+#endif /* CONFIG_MESHTASTIC_RELAY */

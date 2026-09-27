@@ -72,6 +72,9 @@
 #endif
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 #include "meshtastic_statusmessage.h"
+#if defined(CONFIG_MESHTASTIC_RELAY)
+#include "meshtastic_relay.h"
+#endif
 #endif
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 #include "meshtastic_neighborinfo.h"
@@ -3324,6 +3327,105 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_status_cmds,
 					 cmd_status_peers),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_STATUSMESSAGE */
+
+#if defined(CONFIG_MESHTASTIC_RELAY)
+/* `meshtastic relay` (agents-jbrq.12): the cross-preset relay's receiving
+ * half. State is RAM-only in v1: a reboot restores the Kconfig direction. */
+static const char *const relay_dir_names[] = { "off", "in", "out", "both" };
+
+static int cmd_relay_show(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_relay_stats st;
+	enum meshtastic_relay_dir dir = meshtastic_relay_get_direction();
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_relay_stats_get(&st);
+	shell_print(sh, "direction: %s", relay_dir_names[dir & 3]);
+	shell_print(sh, "considered %u  relayed %u  sent %u  tx_failed %u", st.considered,
+		    st.relayed, st.sent, st.tx_failed);
+	shell_print(sh, "refused: dir_off %u  not_broadcast %u  not_text %u  ignored %u",
+		    st.dir_off, st.not_broadcast, st.not_text, st.ignored);
+	shell_print(sh, "         bad_text %u  prefixed %u  no_mapping %u  seen %u",
+		    st.bad_text, st.prefixed, st.no_mapping, st.seen);
+	shell_print(sh, "         rate_dropped %u  queue_full %u  (unprefixed sent %u)",
+		    st.rate_dropped, st.queue_full, st.unprefixed);
+	shell_print(sh, "cap %d per %d s, seen TTL %d s", CONFIG_MESHTASTIC_RELAY_RATE_MAX,
+		    CONFIG_MESHTASTIC_RELAY_RATE_WINDOW_SEC, CONFIG_MESHTASTIC_RELAY_SEEN_TTL_SEC);
+	return 0;
+}
+
+static int cmd_relay_dir(const struct shell *sh, size_t argc, char **argv)
+{
+	int ret;
+
+	ARG_UNUSED(argc);
+	for (size_t i = 0U; i < ARRAY_SIZE(relay_dir_names); i++) {
+		if (strcmp(argv[1], relay_dir_names[i]) == 0) {
+			ret = meshtastic_relay_set_direction((enum meshtastic_relay_dir)i);
+			if (ret == -ENOTSUP) {
+				shell_error(sh, "%s needs an ear that transmits (not in v1)",
+					    argv[1]);
+			} else if (ret < 0) {
+				shell_error(sh, "failed (%d)", ret);
+			} else {
+				shell_print(sh, "direction: %s", argv[1]);
+			}
+			return ret;
+		}
+	}
+	shell_error(sh, "usage: meshtastic relay dir <off|in|out|both>");
+	return -EINVAL;
+}
+
+static int cmd_relay_ignore(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t node;
+	int ret;
+
+	ARG_UNUSED(argc);
+	if (strcmp(argv[1], "clear") == 0) {
+		meshtastic_relay_ignore_clear();
+		shell_print(sh, "ignore list cleared");
+		return 0;
+	}
+	node = (uint32_t)strtoul(argv[1], NULL, 16);
+	if (node == 0U) {
+		shell_error(sh, "usage: meshtastic relay ignore <hex node id>|clear");
+		return -EINVAL;
+	}
+	ret = meshtastic_relay_ignore_add(node);
+	if (ret < 0) {
+		shell_error(sh, "ignore list full (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "never relaying 0x%08x", node);
+	return 0;
+}
+
+static int cmd_relay_reset(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	meshtastic_relay_reset();
+	shell_print(sh, "relay reset: boot direction, caches, counters, ignore list");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	meshtastic_relay_cmds,
+	SHELL_CMD(show, NULL, SHELL_HELP("Direction and counters.", NULL), cmd_relay_show),
+	SHELL_CMD_ARG(dir, NULL,
+		      SHELL_HELP("Set the direction (v1: off or in).", "<off|in|out|both>"),
+		      cmd_relay_dir, 2, 0),
+	SHELL_CMD_ARG(ignore, NULL,
+		      SHELL_HELP("Never relay a node (another relay), or clear the list.",
+				 "<hex node id>|clear"),
+		      cmd_relay_ignore, 2, 0),
+	SHELL_CMD(reset, NULL, SHELL_HELP("Back to boot state.", NULL), cmd_relay_reset),
+	SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_RELAY */
 
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 /* `meshtastic neighbors` (agents-dnr4.19). Reads always; writes gated behind
@@ -7113,6 +7215,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 			     "enable/disable, interval, lora, send.",
 			     NULL),
 		  cmd_neighbors_show),
+#endif
+#if defined(CONFIG_MESHTASTIC_RELAY)
+	SHELL_CMD(relay, &meshtastic_relay_cmds,
+		  SHELL_HELP("Cross-preset text relay: show, dir, ignore, reset.", NULL),
+		  cmd_relay_show),
 #endif
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 	SHELL_CMD(status, &meshtastic_status_cmds,
