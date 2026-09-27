@@ -57,7 +57,7 @@ config MESHTASTIC_NODEDB_WARM_KEYS
 	int "Warm key-tier size"
 	depends on MESHTASTIC_NODEDB_PERSIST_KEYS
 	default 32
-	range 8 512
+	range 8 4096
 	help
 	  Size of the in-RAM warm key tier: an {id -> X25519 pubkey} cache
 	  (~40 bytes/entry), sized larger than the hot NodeDB and mirrored to
