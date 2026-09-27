@@ -25,7 +25,9 @@ menuconfig MESHTASTIC_RELAY
 	  drops repeats, and a rate cap bounds the damage of anything that
 	  gets past both.
 
-	  Off at boot unless MESHTASTIC_RELAY_INBOUND_AT_BOOT.
+	  Off at boot unless MESHTASTIC_RELAY_INBOUND_AT_BOOT, or unless a
+	  direction was set before a reboot: with MESHTASTIC_SETTINGS the
+	  direction and the ignore list are saved (mtrelay/relay).
 
 if MESHTASTIC_RELAY
 
@@ -34,8 +36,9 @@ config MESHTASTIC_RELAY_INBOUND_AT_BOOT
 	default n
 	help
 	  Start with the direction set to inbound. The default is off:
-	  enabling a relay is a deliberate act. There is no persisted setting
-	  yet, so a relay image that must work unattended sets this.
+	  enabling a relay is a deliberate act. A direction set at runtime is
+	  saved when MESHTASTIC_SETTINGS is on and wins over this; this is for
+	  an image that must relay from its very first boot.
 
 config MESHTASTIC_RELAY_SEEN_SIZE
 	int "Seen-cache entries"
@@ -110,7 +113,8 @@ config MESHTASTIC_RELAY_EAR_PEER
 	default 0x0
 	help
 	  The node the ear forwards to, over whichever BLE peer link reaches
-	  it. 0 means none until set at runtime (`meshtastic relay ear <id>`).
+	  it. 0 means none until set at runtime (`meshtastic ear peer <id>`),
+	  which is saved (mtear/peer) when MESHTASTIC_SETTINGS is on.
 
 config MESHTASTIC_RELAY_EAR_QUEUE_SIZE
 	int "Frames waiting to be forwarded"

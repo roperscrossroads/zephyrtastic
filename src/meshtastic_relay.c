@@ -25,6 +25,9 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
@@ -373,6 +376,89 @@ out:
 	k_mutex_unlock(&relay_lock);
 }
 
+/* ---- persistence ------------------------------------------------------------ */
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+/*
+ * The direction and the ignore list survive a reboot (mtrelay/relay). Before
+ * this, a relay left running as a soak stopped silently at the first reset and
+ * someone had to notice and type `relay dir in` again. Only what the operator
+ * set is stored; caches and counters are not.
+ */
+#define RELAY_REC_VER 1U
+
+struct relay_rec {
+	uint8_t ver;
+	uint8_t dir;
+	uint8_t n_ignore;
+	uint32_t ignore[CONFIG_MESHTASTIC_RELAY_IGNORE_MAX];
+} __packed;
+
+#define RELAY_REC_HDR_LEN 3U
+
+/* Snapshot under the lock, write outside it. */
+static void relay_save(void)
+{
+	struct relay_rec rec;
+	size_t len;
+
+	k_mutex_lock(&relay_lock, K_FOREVER);
+	rec.ver = RELAY_REC_VER;
+	rec.dir = (uint8_t)relay.dir;
+	rec.n_ignore = relay.ignore_count;
+	memcpy(rec.ignore, relay.ignore, sizeof(rec.ignore));
+	len = RELAY_REC_HDR_LEN + (size_t)rec.n_ignore * sizeof(uint32_t);
+	k_mutex_unlock(&relay_lock);
+
+	if (settings_save_one("mtrelay/relay", &rec, len) != 0) {
+		LOG_WRN("relay: settings save failed");
+	}
+}
+
+static int relay_settings_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	struct relay_rec rec;
+
+	if (strcmp(key, "relay") != 0) {
+		return -ENOENT;
+	}
+	if (len < RELAY_REC_HDR_LEN || len > sizeof(rec) ||
+	    read_cb(cb_arg, &rec, len) != (ssize_t)len || rec.ver != RELAY_REC_VER ||
+	    rec.n_ignore > CONFIG_MESHTASTIC_RELAY_IGNORE_MAX ||
+	    len != RELAY_REC_HDR_LEN + (size_t)rec.n_ignore * sizeof(uint32_t)) {
+		return -EINVAL;
+	}
+	/* Only what this image can do: a record written by a build that had the
+	 * outbound direction must not switch it on here. */
+	if (rec.dir != MESHTASTIC_RELAY_OFF && rec.dir != MESHTASTIC_RELAY_INBOUND) {
+		LOG_WRN("relay: stored direction %u not supported, staying off", rec.dir);
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&relay_lock, K_FOREVER);
+	relay.dir = (enum meshtastic_relay_dir)rec.dir;
+	relay.ignore_count = rec.n_ignore;
+	memcpy(relay.ignore, rec.ignore, (size_t)rec.n_ignore * sizeof(uint32_t));
+	k_mutex_unlock(&relay_lock);
+	return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mt_relay, "mtrelay", NULL, relay_settings_set, NULL, NULL);
+
+static void relay_forget(void)
+{
+	(void)settings_delete("mtrelay/relay");
+}
+#else
+static void relay_save(void)
+{
+}
+
+static void relay_forget(void)
+{
+}
+#endif /* CONFIG_MESHTASTIC_SETTINGS */
+
 /* ---- control ---------------------------------------------------------------- */
 
 int meshtastic_relay_set_direction(enum meshtastic_relay_dir dir)
@@ -387,6 +473,7 @@ int meshtastic_relay_set_direction(enum meshtastic_relay_dir dir)
 	k_mutex_lock(&relay_lock, K_FOREVER);
 	relay.dir = dir;
 	k_mutex_unlock(&relay_lock);
+	relay_save();
 	return 0;
 }
 
@@ -410,6 +497,9 @@ int meshtastic_relay_ignore_add(uint32_t node_id)
 		goto out;
 	}
 	relay.ignore[relay.ignore_count++] = node_id;
+	k_mutex_unlock(&relay_lock);
+	relay_save();
+	return 0;
 out:
 	k_mutex_unlock(&relay_lock);
 	return ret;
@@ -420,6 +510,7 @@ void meshtastic_relay_ignore_clear(void)
 	k_mutex_lock(&relay_lock, K_FOREVER);
 	relay.ignore_count = 0U;
 	k_mutex_unlock(&relay_lock);
+	relay_save();
 }
 
 void meshtastic_relay_stats_get(struct meshtastic_relay_stats *out)
@@ -443,4 +534,5 @@ void meshtastic_relay_reset(void)
 	relay.ignore_count = 0U;
 	memset(&relay.stats, 0, sizeof(relay.stats));
 	k_mutex_unlock(&relay_lock);
+	relay_forget();
 }

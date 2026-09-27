@@ -3341,7 +3341,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_status_cmds,
 
 #if defined(CONFIG_MESHTASTIC_RELAY)
 /* `meshtastic relay` (agents-jbrq.12): the cross-preset relay's receiving
- * half. State is RAM-only in v1: a reboot restores the Kconfig direction. */
+ * half. The direction and ignore list are saved (MESHTASTIC_SETTINGS); `reset`
+ * forgets them. */
 static const char *const relay_dir_names[] = { "off", "in", "out", "both" };
 
 static int cmd_relay_show(const struct shell *sh, size_t argc, char **argv)
@@ -3420,7 +3421,7 @@ static int cmd_relay_reset(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	meshtastic_relay_reset();
-	shell_print(sh, "relay reset: boot direction, caches, counters, ignore list");
+	shell_print(sh, "relay reset: boot direction, caches, counters, ignore list; saved settings forgotten");
 	return 0;
 }
 
@@ -3434,12 +3435,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      SHELL_HELP("Never relay a node (another relay), or clear the list.",
 				 "<hex node id>|clear"),
 		      cmd_relay_ignore, 2, 0),
-	SHELL_CMD(reset, NULL, SHELL_HELP("Back to boot state.", NULL), cmd_relay_reset),
+	SHELL_CMD(reset, NULL, SHELL_HELP("Back to boot state; forgets the saved settings.", NULL),
+		  cmd_relay_reset),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_RELAY */
 
 #if defined(CONFIG_MESHTASTIC_RELAY_EAR)
-/* `meshtastic ear`: the relay's ear. RAM-only in v1. */
+/* `meshtastic ear`: the relay's ear. The peer is saved (MESHTASTIC_SETTINGS). */
 static int cmd_ear_show(const struct shell *sh, size_t argc, char **argv)
 {
 	struct meshtastic_relay_ear_stats st;

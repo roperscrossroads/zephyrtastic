@@ -19,6 +19,9 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
 #include <zephyr/sys/util.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
@@ -137,11 +140,55 @@ out:
 	k_mutex_unlock(&ear_lock);
 }
 
+/* ---- persistence: the peer survives a reboot (mtear/peer) --------------------- */
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+static void ear_save(uint32_t peer)
+{
+	if (settings_save_one("mtear/peer", &peer, sizeof(peer)) != 0) {
+		LOG_WRN("ear: settings save failed");
+	}
+}
+
+static int ear_settings_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	uint32_t peer;
+
+	if (strcmp(key, "peer") != 0) {
+		return -ENOENT;
+	}
+	if (len != sizeof(peer) || read_cb(cb_arg, &peer, len) != (ssize_t)len) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&ear_lock, K_FOREVER);
+	ear.peer = peer;
+	k_mutex_unlock(&ear_lock);
+	return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mt_ear, "mtear", NULL, ear_settings_set, NULL, NULL);
+
+static void ear_forget(void)
+{
+	(void)settings_delete("mtear/peer");
+}
+#else
+static void ear_save(uint32_t peer)
+{
+	ARG_UNUSED(peer);
+}
+
+static void ear_forget(void)
+{
+}
+#endif /* CONFIG_MESHTASTIC_SETTINGS */
+
 void meshtastic_relay_ear_set_peer(uint32_t node_id)
 {
 	k_mutex_lock(&ear_lock, K_FOREVER);
 	ear.peer = node_id;
 	k_mutex_unlock(&ear_lock);
+	ear_save(node_id);
 }
 
 uint32_t meshtastic_relay_ear_get_peer(void)
@@ -171,4 +218,5 @@ void meshtastic_relay_ear_reset(void)
 	ear.peer = CONFIG_MESHTASTIC_RELAY_EAR_PEER;
 	memset(&ear.stats, 0, sizeof(ear.stats));
 	k_mutex_unlock(&ear_lock);
+	ear_forget();
 }

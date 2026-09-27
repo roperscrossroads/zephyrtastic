@@ -55,7 +55,7 @@ void meshtastic_relay_ignore_clear(void);
 void meshtastic_relay_stats_get(struct meshtastic_relay_stats *out);
 
 /* Back to boot state: direction per Kconfig, caches, counters and the
- * ignore list cleared. For the shell and for tests. */
+ * ignore list cleared, and the saved settings forgotten. */
 void meshtastic_relay_reset(void);
 
 /* True if @p text starts with a relay-style prefix: '[', 1..8 printable
@@ -77,7 +77,8 @@ struct meshtastic_relay_ear_stats {
 	uint32_t send_failed;   /* the peer link refused (no live link, GATT error) */
 };
 
-/* The receiving half's node id; 0 stops forwarding. */
+/* The receiving half's node id; 0 stops forwarding. Saved with
+ * MESHTASTIC_SETTINGS; reset() returns to the Kconfig value and forgets it. */
 void meshtastic_relay_ear_set_peer(uint32_t node_id);
 uint32_t meshtastic_relay_ear_get_peer(void);
 void meshtastic_relay_ear_stats_get(struct meshtastic_relay_ear_stats *out);

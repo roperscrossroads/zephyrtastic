@@ -33,6 +33,9 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/ztest.h>
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
 
 #include <zephyr/meshtastic/meshtastic.h>
 #include <meshtastic/lora_sim.h>
@@ -990,6 +993,7 @@ ZTEST(relay, test_e3_ear_forwards_once)
 	zassert_equal(ear_sent.count, 1U);
 }
 
+#if defined(CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY)
 /* E4: the ear image cannot key the radio (MESHTASTIC_RELAY_EAR_RX_ONLY), so an
  * ear parked on a public channel stays off it whatever anyone asks. */
 ZTEST(relay, test_e4_ear_never_transmits)
@@ -1001,6 +1005,7 @@ ZTEST(relay, test_e4_ear_never_transmits)
 	zassert_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(500)), -EAGAIN,
 		      "an RX-only ear transmitted");
 }
+#endif /* CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY */
 
 /* The ear forwards only what crossed the AIR: a frame that reached it over the
  * peer link is someone else's hearing, and bouncing it back would loop. */
@@ -1037,5 +1042,106 @@ ZTEST(relay, test_ear_no_peer_and_send_failure)
 	zassert_equal(ear_stats().forwarded, 0U);
 }
 #endif /* CONFIG_MESHTASTIC_RELAY_EAR */
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS) && defined(CONFIG_MESHTASTIC_RELAY)
+/* ==========================================================================
+ * Persistence: what the operator set survives a reboot. A reboot is modelled
+ * as a settings reload after the RAM state is lost (reset() drops it and
+ * forgets the record; the test writes the record back, as flash would still
+ * hold it, and loads).
+ * ========================================================================== */
+
+struct raw_rec {
+	uint8_t buf[64];
+	ssize_t len;
+};
+
+static int raw_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		  void *param)
+{
+	struct raw_rec *r = param;
+
+	ARG_UNUSED(key);
+	r->len = read_cb(cb_arg, r->buf, MIN(len, sizeof(r->buf)));
+	return 0;
+}
+
+static struct raw_rec read_raw(const char *name)
+{
+	struct raw_rec r = { .len = -1 };
+
+	(void)settings_load_subtree_direct(name, raw_cb, &r);
+	return r;
+}
+
+/* Setting the direction and the ignore list writes mtrelay/relay; reloading
+ * that record restores both, with the RAM state lost in between. */
+ZTEST(relay, test_relay_settings_survive_reboot)
+{
+	struct raw_rec r;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+
+	/* Each write saves on its own: read back after each, or the second
+	 * save would hide a first one that never happened. */
+	zassert_ok(meshtastic_relay_set_direction(MESHTASTIC_RELAY_INBOUND));
+	r = read_raw("mtrelay/relay");
+	zassert_equal(r.len, 3, "direction alone not saved (len %d)", (int)r.len);
+	zassert_equal(r.buf[1], MESHTASTIC_RELAY_INBOUND, "direction");
+	zassert_ok(meshtastic_relay_ignore_add(FAR_NODE_ID));
+	r = read_raw("mtrelay/relay");
+	zassert_equal(r.len, 3 + 4, "record length %d", (int)r.len);
+	zassert_equal(r.buf[0], 1U, "version");
+	zassert_equal(r.buf[1], MESHTASTIC_RELAY_INBOUND, "direction");
+	zassert_equal(r.buf[2], 1U, "ignore count");
+
+	/* The reboot: RAM gone, flash kept. */
+	meshtastic_relay_reset();
+	zassert_equal(read_raw("mtrelay/relay").len, -1, "reset must forget the record");
+	zassert_ok(settings_save_one("mtrelay/relay", r.buf, (size_t)r.len));
+	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_OFF);
+	zassert_ok(settings_load_subtree("mtrelay"));
+	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_INBOUND,
+		      "direction not restored");
+
+	/* The ignore list came back too: FAR's text is refused as ignored. */
+	public_setup_and_build(0x5401U, "after the reboot", wire, &wire_len);
+	ear_forwards(wire, wire_len);
+	assert_nothing_relayed();
+	zassert_equal(stats().ignored, 1U, "ignore list not restored");
+}
+
+/* A record from a build that could relay outbound must not turn this one on. */
+ZTEST(relay, test_relay_stored_unsupported_direction_refused)
+{
+	const uint8_t both[3] = { 1U, MESHTASTIC_RELAY_BOTH, 0U };
+
+	zassert_ok(settings_save_one("mtrelay/relay", both, sizeof(both)));
+	(void)settings_load_subtree("mtrelay");
+	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_OFF,
+		      "an unsupported stored direction was applied");
+	meshtastic_relay_reset();
+}
+#endif /* CONFIG_MESHTASTIC_SETTINGS && CONFIG_MESHTASTIC_RELAY */
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS) && defined(CONFIG_MESHTASTIC_RELAY_EAR)
+/* The ear's peer survives a reboot the same way (mtear/peer). */
+ZTEST(relay, test_ear_peer_survives_reboot)
+{
+	const uint32_t peer = 0x051c2856U;
+	uint32_t stored;
+
+	meshtastic_relay_ear_set_peer(peer);
+	zassert_ok(settings_save_one("mtear/peer", &peer, sizeof(peer)), "");
+	meshtastic_relay_ear_reset();
+	zassert_equal(meshtastic_relay_ear_get_peer(), CONFIG_MESHTASTIC_RELAY_EAR_PEER,
+		      "reset returns to the Kconfig peer");
+	stored = peer;
+	zassert_ok(settings_save_one("mtear/peer", &stored, sizeof(stored)));
+	zassert_ok(settings_load_subtree("mtear"));
+	zassert_equal(meshtastic_relay_ear_get_peer(), peer, "peer not restored");
+	meshtastic_relay_ear_reset();
+}
+#endif
 
 ZTEST_SUITE(relay, NULL, relay_setup, relay_before, relay_after, NULL);

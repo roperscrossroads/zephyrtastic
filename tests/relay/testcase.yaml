@@ -18,3 +18,18 @@ tests:
       - CONFIG_MESHTASTIC_RELAY=n
       - CONFIG_MESHTASTIC_RELAY_EAR=y
       - CONFIG_MESHTASTIC_RELAY_EAR_PEER=0x0E0E0E0E
+
+  # Persistence (mtrelay/relay, mtear/peer) on real NVS, with both halves in one
+  # image so both records are exercised. Transmit stays on: the relay's cases
+  # need it, and E4 is the RX-only build's case, not this one's.
+  meshtastic.relay.settings.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_RELAY_EAR=y
+      - CONFIG_MESHTASTIC_RELAY_EAR_PEER=0x0E0E0E0E
+      - CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY=n
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS_NVS=y
