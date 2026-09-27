@@ -1885,6 +1885,36 @@ int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *
 	return 0;
 }
 
+int meshtastic_nodedb_get_next_after(uint32_t after_num, struct meshtastic_nodedb_node *out)
+{
+	const struct nodedb_entry *best = NULL;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+
+	/* No sort: the walk's order is the node number, which nothing reorders.
+	 * O(N) per call, O(N^2) for a whole stream -- ~62k comparisons at 250
+	 * nodes, spread over as many frames. */
+	k_mutex_lock(&nodedb_lock, K_FOREVER);
+	for (size_t i = 0U; i < nodedb_entry_count; i++) {
+		const struct nodedb_entry *e = &nodedb_entries[i];
+
+		if (e->used && e->node.num > after_num &&
+		    (best == NULL || e->node.num < best->node.num)) {
+			best = e;
+		}
+	}
+	if (best == NULL) {
+		k_mutex_unlock(&nodedb_lock);
+		return -ENOENT;
+	}
+	fill_snapshot(best, out);
+	k_mutex_unlock(&nodedb_lock);
+
+	return 0;
+}
+
 static int nodedb_set_bit(uint32_t node_num, int bit, bool value)
 {
 	struct nodedb_entry *entry;

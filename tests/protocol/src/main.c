@@ -2351,6 +2351,112 @@ ZTEST(protocol_stack, test_zzz_nodedb_sort_orders_self_favorite_recency)
 	meshtastic_nodedb_reset(false);
 }
 
+/* Walk a config stream, calling hook(n) after the n-th peer NodeInfo, and count
+ * how many times each of `peers` was sent. Returns the peer NodeInfo frame count. */
+static int stream_count_peers(const uint32_t *peers, size_t n_peers, uint8_t *seen,
+			      void (*hook)(int n))
+{
+	static struct meshtastic_phoneapi_frame q[4];
+	struct meshtastic_phoneapi api;
+	struct meshtastic_phoneapi_frame frame;
+	meshtastic_ToRadio to_scratch;
+	meshtastic_FromRadio from_scratch;
+	uint32_t self = meshtastic_get_node_id();
+	int peer_frames = 0;
+	int frames = 0;
+
+	memset(seen, 0, n_peers);
+	meshtastic_phoneapi_init(&api, "streamtest", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL,
+				 &to_scratch, &from_scratch);
+	meshtastic_phoneapi_enqueue_phone_config(&api, 0x5EED0001U);
+	while (meshtastic_phoneapi_next_config_frame(&api, &frame) == 0) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t st = pb_istream_from_buffer(frame.data, frame.len);
+
+		zassert_true(++frames < 1024, "config stream did not terminate");
+		if (!pb_decode(&st, meshtastic_FromRadio_fields, &from) ||
+		    from.which_payload_variant != meshtastic_FromRadio_node_info_tag ||
+		    from.node_info.num == self) {
+			continue;
+		}
+		for (size_t i = 0U; i < n_peers; i++) {
+			if (peers[i] == from.node_info.num) {
+				seen[i]++;
+			}
+		}
+		peer_frames++;
+		if (hook != NULL) {
+			hook(peer_frames);
+		}
+	}
+	return peer_frames;
+}
+
+#define STREAM_PEERS 8U
+static uint32_t stream_peers[STREAM_PEERS];
+
+/* After the 2nd peer is sent, re-hear the OLDEST peer (still unsent, at the tail)
+ * and let the sort throttle lapse: the next read re-sorts it to the front, into a
+ * position the stream has already passed. */
+static void stream_resort_hook(int n)
+{
+	if (n == 2) {
+		inject_keyless_peer(stream_peers[0], 0xE4F00000U);
+		k_sleep(K_MSEC(CONFIG_MESHTASTIC_NODEDB_SORT_THROTTLE_MS + 500));
+	}
+}
+
+/* After the 2nd peer is sent, remove the most recent peer (sent first): the entry
+ * table closes the hole, which must not make the stream skip anyone. */
+static void stream_remove_hook(int n)
+{
+	if (n == 2) {
+		zassert_ok(meshtastic_nodedb_forget(stream_peers[STREAM_PEERS - 1U]), "forget");
+		k_sleep(K_MSEC(CONFIG_MESHTASTIC_NODEDB_SORT_THROTTLE_MS + 500));
+	}
+}
+
+static void stream_seed(void)
+{
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE);
+	meshtastic_nodedb_reset(false);
+	for (size_t i = 0U; i < STREAM_PEERS; i++) {
+		stream_peers[i] = 0x00B10000U + (uint32_t)i;
+		inject_keyless_peer(stream_peers[i], 0xE4000000U + (uint32_t)(i << 8));
+		k_sleep(K_MSEC(1100)); /* distinct recency: [0] oldest ... [7] newest */
+	}
+}
+
+/* agents-2dk3.2: the phone's node list must hold every peer exactly once even
+ * when the NodeDB re-sorts in the middle of the stream. */
+ZTEST(protocol_stack, test_zzz_nodedb_config_stream_survives_a_resort)
+{
+	uint8_t seen[STREAM_PEERS];
+
+	stream_seed();
+	(void)stream_count_peers(stream_peers, STREAM_PEERS, seen, stream_resort_hook);
+	for (size_t i = 0U; i < STREAM_PEERS; i++) {
+		zassert_equal(seen[i], 1U, "peer 0x%08x sent %u times (want exactly 1)",
+			      stream_peers[i], seen[i]);
+	}
+	meshtastic_nodedb_reset(false);
+}
+
+/* agents-2dk3.2: removing a node mid-stream must not make the stream skip another. */
+ZTEST(protocol_stack, test_zzz_nodedb_config_stream_survives_a_removal)
+{
+	uint8_t seen[STREAM_PEERS];
+
+	stream_seed();
+	(void)stream_count_peers(stream_peers, STREAM_PEERS, seen, stream_remove_hook);
+	for (size_t i = 0U; i < STREAM_PEERS - 1U; i++) {
+		zassert_equal(seen[i], 1U, "peer 0x%08x sent %u times (want exactly 1)",
+			      stream_peers[i], seen[i]);
+	}
+	zassert_true(seen[STREAM_PEERS - 1U] <= 1U, "the removed peer at most once");
+	meshtastic_nodedb_reset(false);
+}
+
 /* Favorites/ignored are capped at MAX-RESERVE so a saturated DB keeps a
  * couple of evictable slots and never wedges — new nodes still land. */
 ZTEST(protocol_stack, test_zzz_nodedb_protected_cap_keeps_learning)

@@ -311,7 +311,7 @@ static int fill_module_variant(meshtastic_FromRadio *from, pb_size_t which_tag, 
 }
 
 static int emit_frame(struct meshtastic_phoneapi *api, const meshtastic_FromRadio *from,
-		      enum meshtastic_phoneapi_config_state next_state, uint8_t next_index,
+		      enum meshtastic_phoneapi_config_state next_state, uint16_t next_index,
 		      struct meshtastic_phoneapi_frame *frame)
 {
 	int ret = meshtastic_phoneapi_encode_fromradio_frame(from, frame);
@@ -418,7 +418,7 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 						  : MESHTASTIC_PHONEAPI_CONFIG_CHANNELS,
 					  (api->config_index + 1U >= MESHTASTIC_MAX_CHANNELS)
 						  ? 0U
-						  : (uint8_t)(api->config_index + 1U),
+						  : (uint16_t)(api->config_index + 1U),
 					  frame);
 		case MESHTASTIC_PHONEAPI_CONFIG_CONFIGS:
 			while (api->config_index < ARRAY_SIZE(config_tags)) {
@@ -432,7 +432,7 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 							: MESHTASTIC_PHONEAPI_CONFIG_CONFIGS,
 						(api->config_index + 1U >= ARRAY_SIZE(config_tags))
 							? 0U
-							: (uint8_t)(api->config_index + 1U),
+							: (uint16_t)(api->config_index + 1U),
 						frame);
 				}
 				api->config_index++;
@@ -463,7 +463,7 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 							: MESHTASTIC_PHONEAPI_CONFIG_MODULES,
 						(api->config_index + 1U >= ARRAY_SIZE(module_tags))
 							? 0U
-							: (uint8_t)(api->config_index + 1U),
+							: (uint16_t)(api->config_index + 1U),
 						frame);
 				}
 				api->config_index++;
@@ -476,22 +476,35 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 			/* Stream the NodeDB (peers) so the app shows a populated node list;
 			 * mirrors firmware STATE_SEND_OTHER_NODEINFOS. Own node already went
 			 * out in the NODE_INFO stage, so skip it if the DB holds it. */
-			while (api->config_index < meshtastic_nodedb_count()) {
+			{
 				struct meshtastic_nodedb_node node;
 
-				*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
-				if (meshtastic_nodedb_get_by_index(api->config_index, &node) == 0 &&
-				    node.num != meshtastic_get_node_id()) {
+				/* Walk by node number, not index: the NodeDB may re-sort or
+				 * close a hole between frames, and an index walk then sent a
+				 * node twice or never (agents-2dk3.2). The phone orders its own
+				 * list, so the wire order does not matter to it. */
+				while (meshtastic_nodedb_get_next_after(api->config_node_cursor,
+									&node) == 0) {
+					int ret;
+
+					if (node.num == meshtastic_get_node_id()) {
+						api->config_node_cursor = node.num;
+						continue;
+					}
+					*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
 					fill_other_node_info(from, &node);
-					return emit_frame(
-						api, from,
-						MESHTASTIC_PHONEAPI_CONFIG_OTHER_NODEINFOS,
-						(uint8_t)(api->config_index + 1U), frame);
+					ret = emit_frame(api, from,
+							 MESHTASTIC_PHONEAPI_CONFIG_OTHER_NODEINFOS, 0U,
+							 frame);
+					if (ret == 0) {
+						api->config_node_cursor = node.num;
+					}
+					return ret;
 				}
-				api->config_index++;
 			}
 			api->config_state = MESHTASTIC_PHONEAPI_CONFIG_FILEMANIFEST;
 			api->config_index = 0U;
+			api->config_node_cursor = 0U;
 			break;
 		case MESHTASTIC_PHONEAPI_CONFIG_FILEMANIFEST:
 			/* No on-device file manifest yet; emit nothing and advance, matching
@@ -561,6 +574,7 @@ void meshtastic_phoneapi_enqueue_phone_config(struct meshtastic_phoneapi *api, u
 				    ? MESHTASTIC_PHONEAPI_CONFIG_NODE_INFO
 				    : MESHTASTIC_PHONEAPI_CONFIG_MY_INFO;
 	api->config_index = 0U;
+	api->config_node_cursor = 0U;
 	api->config_request_id = request_id;
 	k_mutex_unlock(&api->lock);
 

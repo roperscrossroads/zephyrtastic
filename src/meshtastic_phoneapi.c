@@ -129,6 +129,7 @@ void meshtastic_phoneapi_reset(struct meshtastic_phoneapi *api)
 	api->current_valid = false;
 	api->config_state = MESHTASTIC_PHONEAPI_CONFIG_IDLE;
 	api->config_index = 0U;
+	api->config_node_cursor = 0U;
 	api->config_request_id = 0U;
 	api->from_num = 0U;
 #if defined(CONFIG_MESHTASTIC_LOCKDOWN)

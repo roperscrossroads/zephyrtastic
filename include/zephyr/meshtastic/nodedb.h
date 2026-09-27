@@ -102,6 +102,21 @@ int meshtastic_nodedb_get(uint32_t node_num, struct meshtastic_nodedb_node *out)
 int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *out);
 
 /**
+ * @brief Copy the node with the smallest node number greater than @p after_num.
+ *
+ * A stable walk over the NodeDB for readers that span several calls (the phone's
+ * config stream): the order is by node number, so a re-sort or a removal between
+ * calls cannot make the walk repeat or skip a node, as walking by index could
+ * (agents-2dk3.2). Start with @p after_num = 0 (node numbers are never 0).
+ *
+ * @retval 0 Entry copied.
+ * @retval -EINVAL @p out is NULL.
+ * @retval -ENOENT No node has a number greater than @p after_num.
+ * @retval -ENOTSUP NodeDB support is not enabled.
+ */
+int meshtastic_nodedb_get_next_after(uint32_t after_num, struct meshtastic_nodedb_node *out);
+
+/**
  * @brief Copy a node's 32-byte X25519 public key.
  *
  * Looks in the hot NodeDB first, then the warm key tier, so a key remains

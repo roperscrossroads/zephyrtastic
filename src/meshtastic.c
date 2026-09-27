@@ -1348,6 +1348,14 @@ int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *
 	return -ENOTSUP;
 }
 
+int meshtastic_nodedb_get_next_after(uint32_t after_num, struct meshtastic_nodedb_node *out)
+{
+	ARG_UNUSED(after_num);
+	ARG_UNUSED(out);
+
+	return -ENOTSUP;
+}
+
 int meshtastic_nodedb_copy_pubkey(uint32_t node_num,
 				  uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
 {

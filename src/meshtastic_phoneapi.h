@@ -98,7 +98,11 @@ struct meshtastic_phoneapi {
 	bool current_valid;
 	uint32_t from_num;
 	enum meshtastic_phoneapi_config_state config_state;
-	uint8_t config_index;
+	/* uint16_t: a NodeDB or replay larger than 255 frames must not wrap
+	 * (agents-2dk3.1). The node stream walks by node number instead
+	 * (config_node_cursor), so this only counts the fixed tables now. */
+	uint16_t config_index;
+	uint32_t config_node_cursor; /* last node number sent; 0 = start */
 	uint32_t config_request_id;
 	meshtastic_phoneapi_data_ready_cb_t data_ready;
 	meshtastic_phoneapi_disconnect_cb_t disconnect;
