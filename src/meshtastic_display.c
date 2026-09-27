@@ -173,9 +173,21 @@ static int32_t node_age_sec(const struct meshtastic_nodedb_node *node, uint32_t 
 	return -1;
 }
 
+/* The Nodes page's row and focus indexes are uint8_t, and its focus ring is the
+ * node count plus the footer choices (Back, Next). A NodeDB of 254+ nodes wrapped
+ * them (agents-2dk3.3), so the page offers at most DISPLAY_NODES_MAX nodes; the
+ * rest stay in the NodeDB and reach the phone, they are just not listed here. */
+#define DISPLAY_FOOTER_CHOICES 2U
+#define DISPLAY_NODES_MAX ((size_t)UINT8_MAX - DISPLAY_FOOTER_CHOICES)
+
+static size_t display_node_count(void)
+{
+	return MIN(meshtastic_nodedb_count(), DISPLAY_NODES_MAX);
+}
+
 static void page_nodes(void)
 {
-	size_t n = meshtastic_nodedb_count();
+	size_t n = display_node_count();
 	uint8_t list_rows = (content_rows > 1U) ? (uint8_t)(content_rows - 1U) : 0U;
 	uint8_t first = 0;
 	int sel = -1; /* index of the highlighted node row, or -1 for none */
@@ -425,6 +437,9 @@ BUILD_ASSERT(ARRAY_SIZE(pages) == ARRAY_SIZE(page_names),
  * ring is just these two; the Nodes page prepends one entry per node. */
 enum page_focus { FOCUS_BACK = 0, FOCUS_NEXT, FOCUS_COUNT };
 
+/* display_node_count() assumes the footer holds exactly these two choices. */
+BUILD_ASSERT(FOCUS_COUNT == DISPLAY_FOOTER_CHOICES, "footer size changed: fix DISPLAY_NODES_MAX");
+
 /* Top-level UI state: launcher menu, an open page, or a node-detail view. */
 static enum { UI_MENU, UI_PAGE, UI_NODE_DETAIL } ui_state = UI_MENU;
 static uint8_t menu_cursor;              /* highlighted launcher entry */
@@ -438,7 +453,7 @@ static uint8_t detail_idx;               /* node index shown in UI_NODE_DETAIL *
 static uint8_t focus_count(void)
 {
 	if (ui_state == UI_PAGE && cur_page == PAGE_NODES) {
-		return (uint8_t)(meshtastic_nodedb_count() + FOCUS_COUNT);
+		return (uint8_t)(display_node_count() + FOCUS_COUNT);
 	}
 
 	return FOCUS_COUNT;
@@ -540,7 +555,7 @@ static void render_footer(void)
 static void clamp_focus(void)
 {
 	if (ui_state == UI_NODE_DETAIL) {
-		size_t n = meshtastic_nodedb_count();
+		size_t n = display_node_count();
 
 		if (n == 0) {
 			ui_state = UI_PAGE;
@@ -579,7 +594,7 @@ static void nav_long(void)
 	}
 
 	if (ui_state == UI_NODE_DETAIL) {
-		size_t n = meshtastic_nodedb_count();
+		size_t n = display_node_count();
 
 		if (page_focus == FOCUS_BACK || n == 0) {
 			ui_state = UI_PAGE; /* return to the node list, cursor on this node */
