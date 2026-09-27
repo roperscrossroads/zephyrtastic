@@ -1192,6 +1192,9 @@ static int cmd_channel_show(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "role: %s", shell_channel_role_name(ch->role));
 	shell_print(sh, "name: \"%s\"", meshtastic_channels_get_name(index));
 	shell_print(sh, "hash: 0x%02x", meshtastic_channels_get_hash(index));
+	/* The precision our positions go out with on this slot (0 = never on it). */
+	shell_print(sh, "position_precision: %u",
+		    (unsigned int)ch->settings.module_settings.position_precision);
 	if (ch->has_settings) {
 		shell_print(sh, "uplink: %s", ch->settings.uplink_enabled ? "on" : "off");
 		shell_print(sh, "downlink: %s", ch->settings.downlink_enabled ? "on" : "off");
@@ -1635,7 +1638,17 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 
 	snr = scaled_tenths(node.snr);
 	shell_print(sh, "node: 0x%08x", node.num);
-	shell_print(sh, "last heard: %us", node.last_heard_uptime_sec);
+	/* An age, as `nodedb list` prints it -- the raw uptime stamp printed here
+	 * until 2026-09-27 read like an age ("last heard: 82908s") and was not. */
+	if (node.last_heard_uptime_sec == 0U) {
+		shell_print(sh, "last heard: never-this-boot");
+	} else {
+		uint32_t now = (uint32_t)(k_uptime_get() / MSEC_PER_SEC);
+
+		shell_print(sh, "last heard: %us ago",
+			    (now > node.last_heard_uptime_sec)
+				    ? (now - node.last_heard_uptime_sec) : 0U);
+	}
 	shell_print(sh, "snr: %d.%u", scaled_whole(snr, 10), scaled_fraction(snr, 10));
 	shell_print(sh, "channel: %u", node.channel);
 	shell_print(sh, "next hop: 0x%02x", node.next_hop);
