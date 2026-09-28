@@ -293,6 +293,9 @@ struct meshtastic_status {
 	uint32_t decode_failures;
 	uint32_t rx_dropped;
 	uint32_t rx_rearm_failures;
+	/** Our own transmissions heard back through another of our radios (an
+	 *  attachment): counted, never treated as an echo. 0 on a single-radio node. */
+	uint32_t self_heard;
 	uint32_t last_rx_from;
 	int16_t last_rssi;
 	int8_t last_snr;

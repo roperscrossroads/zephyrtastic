@@ -553,10 +553,35 @@ static void rx_airtime_log(bool rf, enum meshtastic_airtime_type type, uint32_t 
 void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int8_t snr,
 				  enum meshtastic_bearer bearer)
 {
+	const struct meshtastic_rx_meta meta = {
+		.bearer = (uint8_t)bearer,
+		.attach = 0U,
+		.preset = (bearer == MESHTASTIC_BEARER_LORA) ? (uint8_t)mt.modem_preset
+							      : MESHTASTIC_PRESET_UNKNOWN,
+		.rssi = rssi,
+		.snr = snr,
+		.rx_ms = (uint32_t)k_uptime_get(),
+	};
+
+	meshtastic_router_process_rx_meta(buf, len, &meta);
+}
+
+void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
+				       const struct meshtastic_rx_meta *meta)
+{
+	const enum meshtastic_bearer bearer = (enum meshtastic_bearer)meta->bearer;
+	const int16_t rssi = meta->rssi;
+	const int8_t snr = meta->snr;
 	/* The link-local rule (agents-xhli.2) hangs off this one flag: everything
-	 * that describes RF — relay, airtime, signal stats, route learning, the
-	 * MQTT uplink — happens only for a frame that actually crossed the air. */
-	const bool rf = (bearer == MESHTASTIC_BEARER_LORA);
+	 * that describes RF — relay, signal stats, route learning, the MQTT uplink
+	 * — happens only for a frame that actually crossed the air. A radio head's
+	 * frame did (ATTACHMENT-DESIGN S1); the BLE peer link's did not. */
+	const bool rf = meshtastic_bearer_is_rf(bearer);
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+	/* The airtime ledger is priced with THIS board's modem and budgets THIS
+	 * board's air: a head's frame spent no time on it. */
+	const bool lora = (bearer == MESHTASTIC_BEARER_LORA);
+#endif
 	const struct meshtastic_wire_header *hdr;
 	uint32_t src;
 	uint32_t pkt_id;
@@ -596,7 +621,7 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 	if (meshtastic_nodedb_is_ignored(src)) {
 		LOG_DBG("Ignoring packet from ignored node 0x%08x", src);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(lora, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
@@ -606,7 +631,7 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 		 * poison the dedup cache and NodeDB if processed. */
 		LOG_DBG("Ignoring packet with broadcast source");
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(lora, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
@@ -615,7 +640,7 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 	    ((hdr->flags & MESHTASTIC_FLAGS_VIA_MQTT) != 0U)) {
 		LOG_DBG("Ignoring packet with via_mqtt set");
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(lora, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
@@ -630,13 +655,24 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 				(unsigned int)bearer);
 			return;
 		}
+		/* Our own transmission, heard by ANOTHER of our radios (a head, or
+		 * the local radio hearing a head's TX): the relay byte is still ours,
+		 * so nobody rebroadcast it -- it is our voice, not an echo, and must
+		 * not count as an implicit ACK. A single-radio node can never hear
+		 * itself, so this only ever fires with attachments (S1). */
+		if (hdr->relay_node == (uint8_t)(mt.node_id & 0xFFU)) {
+			mt.status.self_heard++;
+			LOG_DBG("Own frame id=0x%08x heard on attach %u: our own voice",
+				pkt_id, (unsigned int)meta->attach);
+			return;
+		}
 		/* A neighbour rebroadcast one of our own packets: implicit ACK that it
 		 * reached the mesh. We never relay or deliver our own echo. The
 		 * relayer byte feeds the next-hop learn correlation (M2). */
 		meshtastic_routing_note_own_echo(pkt_id, hdr->relay_node);
 		meshtastic_reliable_on_implicit_ack(pkt_id);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX, airtime_ms);
+		rx_airtime_log(lora, MESHTASTIC_AIRTIME_RX, airtime_ms);
 #endif
 		return;
 	}
@@ -670,7 +706,7 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 
 		LOG_DBG("Duplicate (src=0x%08x id=0x%08x)", src, pkt_id);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(lora, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
@@ -693,7 +729,7 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 							     NULL);
 		}
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(lora, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
@@ -708,16 +744,16 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 	if (ret < 0) {
 		LOG_DBG("RX header parse failed (%d)", ret);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(lora, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 #endif
 		return;
 	}
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 	if (packet.from == 0U) {
-		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
+		rx_airtime_log(lora, MESHTASTIC_AIRTIME_RX_ALL, airtime_ms);
 	} else {
-		rx_airtime_log(rf, MESHTASTIC_AIRTIME_RX, airtime_ms);
+		rx_airtime_log(lora, MESHTASTIC_AIRTIME_RX, airtime_ms);
 	}
 #endif
 
@@ -922,7 +958,7 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 				meshtastic_MeshPacket *decoded_mesh,
 				enum meshtastic_bearer bearer)
 {
-	const bool rf = (bearer == MESHTASTIC_BEARER_LORA);
+	const bool rf = meshtastic_bearer_is_rf(bearer);
 	const struct meshtastic_wire_header *hdr = NULL;
 	const struct meshtastic_packet *pkt = packet;
 	struct meshtastic_packet materialized;
@@ -1067,8 +1103,9 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 #if defined(CONFIG_MESHTASTIC_RELAY_EAR)
 		/* The relay's ear: a decoded broadcast heard on LoRa goes, byte for
 		 * byte, to the receiving half over the BLE peer link. Only frames
-		 * that crossed the air: a bearer frame is someone else's hearing. */
-		if (rf && wire != NULL) {
+		 * THIS radio heard: a bearer frame -- and an attachment's -- is
+		 * someone else's hearing, already forwarded once. */
+		if (bearer == MESHTASTIC_BEARER_LORA && wire != NULL) {
 			meshtastic_relay_ear_on_rx(pkt, wire, wire_len);
 		}
 #endif
@@ -1085,7 +1122,11 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 			pkt->id);
 	}
 
-	if (hdr != NULL && !suppress_relay && rf) {
+	/* A relay goes back out on the air the frame came in on. Until P3 gives the
+	 * outbound path a target attachment, only this board's own radio can do
+	 * that: a head's frame is on another preset, where our radio would be
+	 * wrong -- so it is delivered, counted, and not relayed here. */
+	if (hdr != NULL && !suppress_relay && rf && bearer != MESHTASTIC_BEARER_ATTACHMENT) {
 		/* Phase 4b: decoded_mesh is NULL on the encrypted-relay path (no decode) and
 		 * the public inject/test path -> struct-fallback for snr inside. Phase 4c: pkt is
 		 * the materialised struct on the decoded RF path, else the passed-in struct.

@@ -36,6 +36,18 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 				  enum meshtastic_bearer bearer);
 
 /**
+ * @brief Process one raw frame with everything the receiving radio knew about it.
+ *
+ * The form the RX thread uses. An ATTACHMENT bearer (a remote radio head) counts as
+ * RF for every rule that describes the air -- relay, own-echo, signal bookkeeping,
+ * route learning -- because its frames did cross the air, on the head's preset;
+ * only what is priced with THIS board's modem (the airtime ledger) and the relay
+ * ear (an ear forwards its own hearing) stay LoRa-only.
+ */
+void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
+				       const struct meshtastic_rx_meta *meta);
+
+/**
  * @brief Process one raw LoRa frame from the radio RX path.
  *
  * @ref meshtastic_router_process_rx with the LoRa bearer.

@@ -43,6 +43,34 @@ extern "C" {
 enum meshtastic_bearer {
 	MESHTASTIC_BEARER_LORA = 0,
 	MESHTASTIC_BEARER_BLE_PEER,
+	/* A radio head (ATTACHMENT-DESIGN, D1): a remote SX1262 that forwards the
+	 * frames it hears, undecoded and tagged with the signal it saw, and holds
+	 * none of this node's keys. Its frames DID cross the air -- on the head's
+	 * preset -- so everything that describes RF applies to them; only the
+	 * things priced with the LOCAL modem (airtime, the ear) stay LoRa-only. */
+	MESHTASTIC_BEARER_ATTACHMENT,
+};
+
+/* "Did this frame cross the air?" -- the question the router's link-local rule
+ * actually asks. LoRa and an attachment say yes; the BLE peer link says no. */
+static inline bool meshtastic_bearer_is_rf(enum meshtastic_bearer b)
+{
+	return b == MESHTASTIC_BEARER_LORA || b == MESHTASTIC_BEARER_ATTACHMENT;
+}
+
+/* Everything the RX path knows about a frame besides its bytes. The LoRa
+ * callback fills it for the local radio (attach 0, the active preset); an
+ * attachment's envelope fills it for a head. preset is a
+ * meshtastic_Config_LoRaConfig_ModemPreset value, MESHTASTIC_PRESET_UNKNOWN when
+ * the bearer cannot say (the BLE peer link). */
+#define MESHTASTIC_PRESET_UNKNOWN 0xFFU
+struct meshtastic_rx_meta {
+	uint8_t bearer; /* enum meshtastic_bearer */
+	uint8_t attach; /* attachment id; 0 = this board's radio */
+	uint8_t preset;
+	int16_t rssi;
+	int8_t snr;
+	uint32_t rx_ms; /* the receiving radio's uptime at reception */
 };
 
 /* The phone-protocol firmware version this port advertises — parses as 2.7.4 so
@@ -200,6 +228,13 @@ int meshtastic_radio_init(void);
  * counted, same as an RF frame in that state).
  */
 int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic_bearer bearer);
+
+/* The same, with everything the receiving radio knew: bearer, attachment id,
+ * preset, rssi/snr, its uptime at reception. This is how a head's frames enter
+ * the brain. meshtastic_radio_rx_inject() is this with an all-zero signal and
+ * attach 0. */
+int meshtastic_radio_rx_inject_meta(const uint8_t *buf, uint16_t len,
+				    const struct meshtastic_rx_meta *meta);
 
 /* Disarm the SX1262 DIO1 EXT1 light-sleep/deep-sleep wake before sys_poweroff(), so an
  * incoming frame does not wake an admin-shut-down node (it wakes only on reset, as

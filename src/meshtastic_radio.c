@@ -217,6 +217,9 @@ struct mt_rx_slot {
 	int16_t rssi;
 	int8_t snr;
 	uint8_t bearer; /* enum meshtastic_bearer */
+	uint8_t attach; /* which radio heard it: 0 = ours, else an attachment */
+	uint8_t preset; /* that radio's preset (MESHTASTIC_PRESET_UNKNOWN if unsaid) */
+	uint32_t rx_ms; /* that radio's uptime at reception */
 	uint8_t buf[MESHTASTIC_PKT_MAX];
 };
 
@@ -756,6 +759,9 @@ static void mt_rx_cb(const struct device *dev, uint8_t *data, uint16_t size, int
 	slot.rssi = rssi;
 	slot.snr = snr;
 	slot.bearer = MESHTASTIC_BEARER_LORA;
+	slot.attach = 0U;
+	slot.preset = (uint8_t)mt.modem_preset;
+	slot.rx_ms = (uint32_t)k_uptime_get();
 	memcpy(slot.buf, data, size);
 
 	if (k_msgq_put(&mt_rx_msgq, &slot, K_NO_WAIT) != 0) {
@@ -764,21 +770,22 @@ static void mt_rx_cb(const struct device *dev, uint8_t *data, uint16_t size, int
 	}
 }
 
-int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic_bearer bearer)
+int meshtastic_radio_rx_inject_meta(const uint8_t *buf, uint16_t len,
+				    const struct meshtastic_rx_meta *meta)
 {
 	struct mt_rx_slot slot;
 
-	if (buf == NULL || len < MESHTASTIC_HDR_LEN || len > sizeof(slot.buf)) {
+	if (buf == NULL || meta == NULL || len < MESHTASTIC_HDR_LEN || len > sizeof(slot.buf)) {
 		return -EINVAL;
 	}
 
 	slot.len = len;
-	/* No RF reception happened: rssi/snr carry no meaning on a wired-style
-	 * bearer. Zeros are the explicit "no measurement" the router's bookkeeping
-	 * gates on (it never folds non-LoRa frames into RF signal stats). */
-	slot.rssi = 0;
-	slot.snr = 0;
-	slot.bearer = (uint8_t)bearer;
+	slot.rssi = meta->rssi;
+	slot.snr = meta->snr;
+	slot.bearer = meta->bearer;
+	slot.attach = meta->attach;
+	slot.preset = meta->preset;
+	slot.rx_ms = meta->rx_ms;
 	memcpy(slot.buf, buf, len);
 
 	if (k_msgq_put(&mt_rx_msgq, &slot, K_NO_WAIT) != 0) {
@@ -787,6 +794,23 @@ int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic
 		return -ENOBUFS;
 	}
 	return 0;
+}
+
+int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic_bearer bearer)
+{
+	/* No RF reception happened: rssi/snr carry no meaning on a wired-style
+	 * bearer. Zeros are the explicit "no measurement" the router's bookkeeping
+	 * gates on (it never folds non-RF frames into RF signal stats). */
+	const struct meshtastic_rx_meta meta = {
+		.bearer = (uint8_t)bearer,
+		.attach = 0U,
+		.preset = MESHTASTIC_PRESET_UNKNOWN,
+		.rssi = 0,
+		.snr = 0,
+		.rx_ms = (uint32_t)k_uptime_get(),
+	};
+
+	return meshtastic_radio_rx_inject_meta(buf, len, &meta);
 }
 
 static void mt_thread_fn(void *p1, void *p2, void *p3)
@@ -814,8 +838,16 @@ static void mt_thread_fn(void *p1, void *p2, void *p3)
 
 		ret = k_msgq_get(&mt_rx_msgq, &slot, wait);
 		if (ret == 0) {
-			meshtastic_router_process_rx(slot.buf, slot.len, slot.rssi, slot.snr,
-						     (enum meshtastic_bearer)slot.bearer);
+			const struct meshtastic_rx_meta meta = {
+				.bearer = slot.bearer,
+				.attach = slot.attach,
+				.preset = slot.preset,
+				.rssi = slot.rssi,
+				.snr = slot.snr,
+				.rx_ms = slot.rx_ms,
+			};
+
+			meshtastic_router_process_rx_meta(slot.buf, slot.len, &meta);
 			continue;
 		}
 
