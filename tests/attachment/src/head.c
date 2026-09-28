@@ -17,6 +17,11 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/ztest.h>
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include <zephyr/settings/settings.h>
+#include "meshtastic_channels.h"
+#include "meshtastic_config_store.h"
+#endif
 
 #include <zephyr/meshtastic/meshtastic.h>
 #include <meshtastic/lora_sim.h>
@@ -304,3 +309,98 @@ ZTEST(attachment_head, test_status_on_the_timer_and_on_demand)
 	meshtastic_attachment_head_set_brain(0U);
 	zassert_equal(meshtastic_attachment_head_status_send(), -EHOSTUNREACH);
 }
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+/* H8 (SCOPE §7, review F4): the identity in flash is neither loaded nor
+ * touched by a head. The records a node leaves are written raw (their content
+ * is irrelevant: a head must never decode them), the head loads settings, and
+ * afterwards no channel holds a key, the security section is empty, a save by
+ * the head leaves the records byte for byte as they were, and the head's own
+ * record (mtattach/brain) is the only thing it wrote. */
+static const uint8_t keyed_channel[] = { 0x0A, 0x12, 0x0A, 0x10, 0xDE, 0xAD, 0xBE, 0xEF,
+					 0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
+					 0xDE, 0xAD, 0xBE, 0xEF, 0x10, 0x01 };
+static const uint8_t keyed_security[] = { 0x4A, 0x22, 0x0A, 0x20, 0x01, 0x02, 0x03, 0x04,
+					  0x05, 0x06, 0x07, 0x08 };
+static const uint8_t keyed_module[] = { 0x0A, 0x04, 0x08, 0x01, 0x10, 0x01 };
+
+struct raw_read {
+	uint8_t buf[64];
+	size_t len;
+	bool found;
+};
+
+static int raw_read_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		       void *param)
+{
+	struct raw_read *r = param;
+
+	ARG_UNUSED(key);
+	if (len > sizeof(r->buf)) {
+		return -EMSGSIZE;
+	}
+	r->len = (size_t)read_cb(cb_arg, r->buf, len);
+	r->found = true;
+	return 0;
+}
+
+static void raw_expect(const char *name, const uint8_t *want, size_t want_len)
+{
+	struct raw_read r = { .found = false };
+
+	zassert_ok(settings_load_subtree_direct(name, raw_read_cb, &r), "%s", name);
+	zassert_true(r.found, "%s still in flash", name);
+	zassert_equal(r.len, want_len, "%s length %zu", name, r.len);
+	zassert_mem_equal(r.buf, want, want_len, "%s unchanged", name);
+}
+
+ZTEST(attachment_head, test_identity_in_flash_is_never_loaded_or_touched)
+{
+	struct meshtastic_channel_key key;
+	meshtastic_Config sec;
+
+	/* what a node left behind */
+	zassert_ok(settings_save_one("meshtastic/channel/0", keyed_channel, sizeof(keyed_channel)));
+	zassert_ok(settings_save_one("meshtastic/channel/2", keyed_channel, sizeof(keyed_channel)));
+	zassert_ok(settings_save_one("meshtastic/config/security", keyed_security,
+				     sizeof(keyed_security)));
+	zassert_ok(settings_save_one("meshtastic/module/mqtt", keyed_module, sizeof(keyed_module)));
+
+	/* the head boots (loads) over it */
+	zassert_ok(settings_load(), "settings_load");
+
+	/* nothing reached RAM */
+	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
+		zassert_true(meshtastic_channels_get_key(i, &key) < 0, "slot %u holds a key", i);
+	}
+	zassert_equal(mt.psk_len, 0U, "no primary PSK in RAM");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &sec));
+	zassert_equal(sec.payload_variant.security.private_key.size, 0U, "no private key in RAM");
+	zassert_equal(meshtastic_config_store_setting_get("channel/0", (void *)key.bytes,
+							  sizeof(key.bytes)),
+		      -ENOENT, "a head answers no channel record");
+
+	/* the head saves its own state: the identity is not rewritten, not wiped */
+	meshtastic_attachment_head_set_brain(0x12345678U);
+	zassert_ok(settings_save(), "settings_save");
+	raw_expect("meshtastic/channel/0", keyed_channel, sizeof(keyed_channel));
+	raw_expect("meshtastic/channel/2", keyed_channel, sizeof(keyed_channel));
+	raw_expect("meshtastic/config/security", keyed_security, sizeof(keyed_security));
+	raw_expect("meshtastic/module/mqtt", keyed_module, sizeof(keyed_module));
+	{
+		struct raw_read r = { .found = false };
+
+		zassert_ok(settings_load_subtree_direct("mtattach/brain", raw_read_cb, &r));
+		zassert_true(r.found, "the head's own record was written");
+	}
+
+	/* and it cannot be made to write one */
+	{
+		meshtastic_Channel ch = meshtastic_Channel_init_zero;
+
+		ch.role = meshtastic_Channel_Role_PRIMARY;
+		ch.has_settings = true;
+		zassert_equal(meshtastic_config_store_set_channel(0U, &ch), -EPERM);
+	}
+}
+#endif /* CONFIG_MESHTASTIC_SETTINGS */

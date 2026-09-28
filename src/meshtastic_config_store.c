@@ -925,12 +925,19 @@ int meshtastic_config_store_apply_core(void)
 	mt.config_ok_to_mqtt = lora.config_ok_to_mqtt;
 	meshtastic_duty_set_override(lora.override_duty_cycle);
 
+#if !defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
 	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		ret = meshtastic_channels_set_slot(i, &channels[i]);
 		if (ret < 0) {
 			return ret;
 		}
 	}
+#else
+	/* A keyless head keeps no channel table: not the records in flash (never
+	 * loaded, head_hidden_key) and not the store's defaults either, whose
+	 * slot 0 carries the public PSK (ATTACHMENT-SCOPE §7). */
+	ARG_UNUSED(channels);
+#endif
 
 	meshtastic_set_device_role(device.role);
 	meshtastic_set_rebroadcast_mode(device.rebroadcast_mode);
@@ -1131,6 +1138,9 @@ int meshtastic_config_store_set_channel(uint8_t index, const meshtastic_Channel 
 {
 	int ret;
 
+	if (IS_ENABLED(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)) {
+		return -EPERM; /* a head has no channels to set (ATTACHMENT-SCOPE §7) */
+	}
 	if (index >= MESHTASTIC_MAX_CHANNELS || !channel_is_valid(channel)) {
 		return -EINVAL;
 	}
@@ -1747,8 +1757,30 @@ int meshtastic_config_store_set_canned_messages(const char *messages)
 	return 0;
 }
 
+/* A keyless radio head loads only what its role needs (ATTACHMENT-SCOPE §7):
+ * the identity's records -- the channel table with its PSKs, the security
+ * section with the X25519 key, and the module configs that make a node speak
+ * -- are neither read into RAM nor ever written, so a board's identity waits in
+ * flash, untouched, for the day it is a node again. The same predicate gates
+ * load, runtime get, export (and so the wipe) and the channel setter. */
+static bool head_hidden_key(const char *key)
+{
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+	return strncmp(key, "channel/", strlen("channel/")) == 0 ||
+	       strcmp(key, "config/security") == 0 ||
+	       strncmp(key, "module/", strlen("module/")) == 0;
+#else
+	ARG_UNUSED(key);
+	return false;
+#endif
+}
+
 int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_len)
 {
+	if (head_hidden_key(key)) {
+		return -ENOENT;
+	}
+
 	uint8_t index;
 	int idx;
 	int ret;
@@ -1846,6 +1878,10 @@ int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_l
 
 int meshtastic_config_store_setting_set(const char *key, const void *buf, size_t len)
 {
+	if (head_hidden_key(key)) {
+		return 0; /* a head neither reads nor keeps it; the record stays in flash */
+	}
+
 	meshtastic_Channel channel = meshtastic_Channel_init_zero;
 	meshtastic_Config config = meshtastic_Config_init_zero;
 	meshtastic_ModuleConfig module = meshtastic_ModuleConfig_init_zero;
@@ -2011,6 +2047,9 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 
 	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		snprintk(name, sizeof(name), "channel/%u", i);
+		if (head_hidden_key(name)) {
+			continue;
+		}
 		ret = export_one(export_func, name);
 		if (ret < 0) {
 			return ret;
@@ -2019,6 +2058,9 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 
 	for (size_t i = 0; i < ARRAY_SIZE(config_names); i++) {
 		snprintk(name, sizeof(name), "config/%s", config_names[i].name);
+		if (head_hidden_key(name)) {
+			continue;
+		}
 		ret = export_one(export_func, name);
 		if (ret < 0) {
 			return ret;
@@ -2027,6 +2069,9 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 
 	for (size_t i = 0; i < ARRAY_SIZE(module_names); i++) {
 		snprintk(name, sizeof(name), "module/%s", module_names[i].name);
+		if (head_hidden_key(name)) {
+			continue;
+		}
 		ret = export_one(export_func, name);
 		if (ret < 0) {
 			return ret;

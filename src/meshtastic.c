@@ -561,10 +561,18 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 			mt.node_id);
 	}
 #endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+	/* A keyless head has no channel table: no PSK enters RAM from the app's
+	 * config or from flash, and with every slot unnamed the frequency slot is
+	 * the active preset's public one -- a head sits where a stock node on that
+	 * preset sits (ATTACHMENT-SCOPE B6, §7). */
+	ARG_UNUSED(cfg->psk);
+#else
 	ret = meshtastic_channels_init_from_config(cfg);
 	if (ret < 0) {
 		return ret;
 	}
+#endif
 
 	mt.frequency = cfg->frequency;
 
