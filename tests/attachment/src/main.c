@@ -30,6 +30,7 @@
 #include <zephyr/meshtastic/nodedb.h>
 #include "meshtastic_packet.h"
 #include "meshtastic_preset.h"
+#include "meshtastic_reliable.h"
 #include "meshtastic_sched.h"
 
 #define TEST_NODE_ID 0x0A0A0A0AU
@@ -886,4 +887,61 @@ ZTEST(attachment, test_link_latency_is_measured_from_a_local_first_duplicate)
 	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN, "a duplicate");
 	zassert_true(meshtastic_attachment_get(1U, &a));
 	zassert_equal(a.lat_n, 2U, "a rebroadcast through the head adds no sample (%u)", a.lat_n);
+}
+
+/* B8 (review): the positive twin of the own-voice guard, asserted on the
+ * reliable module itself. A want_ack unicast leaves on our radio and is
+ * pending. Heard back through a head with a NEIGHBOUR's relay byte, it is an
+ * implicit ACK -- someone forwarded it -- and the tracker is resolved. Heard
+ * back through a head with OUR OWN relay byte, it is our own transmission
+ * reaching one of our radios: not an ACK, the tracker stays. */
+ZTEST(attachment, test_implicit_ack_through_a_head_resolves_the_reliable_send)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	struct lora_sim_frame tx;
+	uint32_t self_heard_before;
+
+	meshtastic_reliable_reset();
+
+	/* Our own voice through a head: pending stays. */
+	{
+		struct meshtastic_packet dm = {
+			.to = FAR_NODE_ID,
+			.id = 0x0B080001U,
+			.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+			.payload = (const uint8_t *)"ack me",
+			.payload_len = 6U,
+			.hop_limit = 3U,
+			.hop_start = 3U,
+			.want_ack = true,
+			.channel_index = 0U,
+		};
+
+		zassert_ok(meshtastic_send_packet(&dm, K_NO_WAIT), "reliable DM send");
+		zassert_ok(lora_sim_take_tx(lora_dev, &tx, K_SECONDS(3)), "the DM left on our radio");
+		zassert_equal(meshtastic_reliable_pending(), 1U, "awaiting an ACK");
+
+		memcpy(wire, tx.data, tx.len);
+		((struct meshtastic_wire_header *)wire)->relay_node = (uint8_t)(TEST_NODE_ID & 0xFFU);
+		self_heard_before = mt.status.self_heard;
+		zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -60, 10, wire, tx.len), "via head");
+		k_msleep(200);
+		zassert_equal(mt.status.self_heard, self_heard_before + 1U, "our own voice");
+		zassert_equal(meshtastic_reliable_pending(), 1U,
+			      "our own transmission through a head is not an implicit ACK");
+	}
+
+	/* A neighbour's rebroadcast through a head: pending resolves. */
+	{
+		memcpy(wire, tx.data, tx.len);
+		((struct meshtastic_wire_header *)wire)->relay_node = 0x77U;
+		set_hop_limit(wire, 2U);
+		zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -60, 10, wire, tx.len), "via head");
+		k_msleep(200);
+		zassert_equal(mt.status.self_heard, self_heard_before + 1U, "a real echo, not self");
+		zassert_equal(meshtastic_reliable_pending(), 0U,
+			      "a neighbour's rebroadcast heard through a head is an implicit ACK");
+		zassert_equal(rx.count, 0U, "an echo is never delivered");
+	}
+	meshtastic_reliable_reset();
 }
