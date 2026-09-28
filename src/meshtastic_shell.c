@@ -75,10 +75,10 @@
 #include "meshtastic_statusmessage.h"
 #if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
 #include "meshtastic_relay.h"
+#endif
+#endif
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
 #include "meshtastic_attachment.h"
-#endif
-#endif
 #endif
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 #include "meshtastic_neighborinfo.h"

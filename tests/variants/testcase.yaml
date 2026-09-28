@@ -148,15 +148,18 @@ tests:
   # the scanner's RX-only branch in meshtastic_radio_send_wire_now(), which no
   # -Werror build had compiled until this scenario (its first run found two
   # locals unused in that branch).
-  # The brain of a multi-radio node (ATTACHMENT-DESIGN): accepts radio heads'
-  # envelopes over the peer link; here without BLE, so only that it boots.
-  meshtastic.variants.attachment_brain.native_sim:
-    extra_configs:
-      - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=y
-
   meshtastic.variants.relay_ear.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_RELAY_EAR=y
+
+  # The brain of a multi-radio node (ATTACHMENT-DESIGN): accepts radio heads'
+  # envelopes over the peer link; here without BLE, so only that it boots.
+  # Note the baseline has no shell: `meshtastic attach` is compiled only by the
+  # hardware images (the class-2 brain build caught an include the sweep could
+  # not, 2026-09-28).
+  meshtastic.variants.attachment_brain.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=y
 
   # The scanner's own RX-only build, for the same branch.
   meshtastic.variants.scanner_rx_only.native_sim:
