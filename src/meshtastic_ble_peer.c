@@ -1122,6 +1122,37 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 			k_mutex_unlock(&peer_lock);
 			LOG_INF("BLE peer frame channel to 0x%08x ready", central.conn_node);
 			{
+				/* The interval is the floor of every frame's latency
+				 * (ATTACHMENT-STATUS §2c): say what this link landed on,
+				 * and ask for the role's interval when one is configured. */
+				struct bt_conn_info info;
+
+				if (bt_conn_get_info(conn, &info) == 0) {
+					LOG_INF("BLE peer link 0x%08x: interval %u.%02u ms, latency %u, timeout %u ms",
+						central.conn_node, info.le.interval_us / 1000U,
+						(info.le.interval_us % 1000U) / 10U, info.le.latency,
+						info.le.timeout * 10U);
+				}
+#if CONFIG_MESHTASTIC_BLE_PEER_FRAME_CONN_INTERVAL_MS > 0
+				{
+					uint16_t units = MAX(6U, (CONFIG_MESHTASTIC_BLE_PEER_FRAME_CONN_INTERVAL_MS * 100U) / 125U);
+					struct bt_le_conn_param want = {
+						.interval_min = units,
+						.interval_max = units,
+						.latency = 0U,
+						.timeout = 400U, /* 4 s, the default's */
+					};
+
+					err = bt_conn_le_param_update(conn, &want);
+					if (err != 0) {
+						LOG_WRN("BLE peer: interval %u ms request to 0x%08x failed (%d)",
+							CONFIG_MESHTASTIC_BLE_PEER_FRAME_CONN_INTERVAL_MS,
+							central.conn_node, err);
+					}
+				}
+#endif
+			}
+			{
 				/* Ask for the MTU now: the frame channel is what carries
 				 * frames, and their latency is the chunk count. */
 				struct bt_gatt_exchange_params *mtu =
@@ -1274,6 +1305,16 @@ static void peer_central_connected(struct bt_conn *conn, uint8_t err)
 	}
 }
 
+/* What the link actually settled on after a parameter request (ours or the
+ * peer's): the interval is the floor of every frame's latency. */
+static void peer_le_param_updated(struct bt_conn *conn, uint16_t interval, uint16_t latency,
+				  uint16_t timeout)
+{
+	ARG_UNUSED(conn);
+	LOG_INF("BLE link params: interval %u.%02u ms, latency %u, timeout %u ms",
+		(interval * 125U) / 100U, (interval * 125U) % 100U, latency, timeout * 10U);
+}
+
 static void peer_central_disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	uint32_t delay = 0U;
@@ -1315,6 +1356,7 @@ static void peer_central_disconnected(struct bt_conn *conn, uint8_t reason)
 BT_CONN_CB_DEFINE(peer_conn_callbacks) = {
 	.connected = peer_central_connected,
 	.disconnected = peer_central_disconnected,
+	.le_param_updated = peer_le_param_updated,
 };
 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)

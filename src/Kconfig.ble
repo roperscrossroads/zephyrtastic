@@ -153,6 +153,24 @@ config MESHTASTIC_BLE_PEER_STICKY_MS
 	  courier was mid-swap (~30 s) fell back to the other kit and then
 	  REMEMBERED it. 0 disables the preference.
 
+config MESHTASTIC_BLE_PEER_FRAME_CONN_INTERVAL_MS
+	int "Connection interval the central asks for once its frame channel is up (ms, 0 = keep the default)"
+	default 0
+	range 0 4000
+	help
+	  The peer central dials with the host's default connection parameters
+	  (a 30-50 ms interval) and nothing on the link ever renegotiates them
+	  (peripherals run with BT_GAP_AUTO_UPDATE_CONN_PARAMS=n). A frame's
+	  delivery waits for a connection event, so the interval is the floor of
+	  the link's latency -- measured 2026-09-28 (ATTACHMENT-STATUS §2c). A
+	  role that needs frames fast (a radio head feeding its brain, whose
+	  relay timing runs on that latency) sets this; the interval is a
+	  link-role fact, so a plain peer keeps the default and its power. The
+	  request is central-initiated (the direction the 2026-08-26 stability
+	  note allows); the peripheral's controller may still refuse it, and the
+	  live interval is logged at frame-ready either way. Rounded down to
+	  1.25 ms units; below 7.5 ms is clamped to 7.5.
+
 config MESHTASTIC_BLE_PEER_BRINGUP_TIMEOUT_MS
 	int "Outbound link bring-up budget (ms)"
 	default 10000
