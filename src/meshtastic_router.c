@@ -17,6 +17,9 @@
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#include "meshtastic_attachment.h"
+#endif
 #include "meshtastic_channels.h"
 #include "meshtastic_contention.h"
 #include "meshtastic_core.h"
@@ -79,6 +82,9 @@ static enum dup_verdict dup_check_hops(uint32_t src, uint32_t id, uint8_t hop_li
 			 * one we already handled (upstream PacketHistory hop
 			 * upgrade). Remember the higher budget so this fires once. */
 			mt.dup_cache[i].hop_limit = hop_limit;
+			/* The entry's time is the first copy's; this copy is another
+			 * transmission, so the entry no longer measures a link. */
+			mt.dup_cache[i].attach = 0xFFU;
 			return DUP_UPGRADE;
 		}
 		mt.status.duplicate_packets++;
@@ -201,12 +207,15 @@ static void note_possible_redundant_relay(const struct meshtastic_wire_header *h
 	}
 }
 
-static void dup_add(uint32_t src, uint32_t id, uint8_t hop_limit)
+static void dup_add(uint32_t src, uint32_t id, uint8_t hop_limit, uint8_t attach,
+		    uint8_t relay_node)
 {
 	mt.dup_cache[mt.dup_head].src = src;
 	mt.dup_cache[mt.dup_head].id = id;
 	mt.dup_cache[mt.dup_head].ms = k_uptime_get_32();
 	mt.dup_cache[mt.dup_head].hop_limit = hop_limit;
+	mt.dup_cache[mt.dup_head].attach = attach;
+	mt.dup_cache[mt.dup_head].relay_node = relay_node;
 	/* Ring slots are reused: clear the relay marks or a new (src,id) inherits
 	 * the previous occupant's and mis-attributes a redundant relay. */
 	mt.dup_cache[mt.dup_head].relayed = false;
@@ -718,6 +727,30 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 		if (rf) {
 			note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
 		}
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+		/* The same air frame, heard first by our own radio and now again
+		 * through a head: the two radios heard it at the same instant, so
+		 * the gap between the arrivals, on this one clock, is the head's
+		 * link latency (ATTACHMENT-SCOPE F5 / R2). Only the local-first
+		 * order measures anything -- a head's copy cannot precede the air --
+		 * and only a copy of the SAME transmission: a neighbour's rebroadcast
+		 * (another relay byte, one hop fewer) heard through the head is
+		 * seconds later and says nothing about the link (bench, 22:06Z). */
+		if (meta->attach != 0U) {
+			const struct meshtastic_dup_entry *e = dup_find(src, pkt_id);
+
+			if (e != NULL && e->attach == 0U && e->hop_limit == rx_hop_limit &&
+			    e->relay_node == hdr->relay_node) {
+				uint32_t delta = k_uptime_get_32() - e->ms;
+
+				meshtastic_attachment_note_latency(meta->attach, delta);
+				/* INF, not DBG: fleet images compile DBG out, and this line
+				 * is the bench's per-frame sample (one per diversity frame). */
+				LOG_INF("attach %u: link latency %u ms (src=0x%08x id=0x%08x len=%d)",
+					(unsigned int)meta->attach, delta, src, pkt_id, len);
+			}
+		}
+#endif
 
 		LOG_DBG("Duplicate (src=0x%08x id=0x%08x)", src, pkt_id);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
@@ -753,7 +786,7 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 		break;
 	}
 
-	dup_add(src, pkt_id, rx_hop_limit);
+	dup_add(src, pkt_id, rx_hop_limit, meta->attach, hdr->relay_node);
 
 	ret = meshtastic_try_decode_wire_packet_on(buf, len, rssi, snr, meta->preset, &packet,
 						   payload, sizeof(payload), &decoded, &fail_reason,
@@ -896,7 +929,8 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 		return -EALREADY;
 	}
 
-	dup_add(work.from, work.id, (uint8_t)(work.hop_limit & MESHTASTIC_FLAGS_HOP_LIMIT_MASK));
+	dup_add(work.from, work.id, (uint8_t)(work.hop_limit & MESHTASTIC_FLAGS_HOP_LIMIT_MASK), 0U,
+		0U);
 
 	local = (work.to == mt.node_id || work.to == MESHTASTIC_NODE_BROADCAST);
 	relay = (work.to != mt.node_id &&

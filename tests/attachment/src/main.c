@@ -811,3 +811,79 @@ ZTEST(attachment, test_set_preset_reaches_the_head)
 	zassert_ok(meshtastic_attachment_forget(id));
 	zassert_equal(meshtastic_attachment_id_for_node(HEAD1_NODE), 0U);
 }
+
+/* R2's instrument (ATTACHMENT-SCOPE F5): when the brain's own radio hears a
+ * frame and a head then delivers the same frame, the gap between the two
+ * arrivals on the brain's clock is that head's link latency -- both radios
+ * heard the air at the same instant. Measured only in that order: a head's
+ * copy arriving FIRST says nothing about the link (the twin). */
+ZTEST(attachment, test_link_latency_is_measured_from_a_local_first_duplicate)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct meshtastic_attachment_info a;
+
+	/* Admit the head with a frame of its own, so id 1 exists. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1A00U, "admit", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -90, 5, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	zassert_equal(a.lat_n, 0U, "nothing measured yet");
+
+	/* Local first, the head 120 ms later: one sample of ~120 ms. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1A01U, "local first", wire, &len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -80, 6));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered from the local radio");
+	k_msleep(120);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -90, 5, wire, len));
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN, "a duplicate, not delivered");
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	zassert_equal(a.lat_n, 1U, "one sample (%u)", a.lat_n);
+	zassert_true(a.lat_min_ms >= 120U && a.lat_min_ms < 400U, "latency ~120 ms (%u)",
+		     a.lat_min_ms);
+	zassert_equal(a.lat_max_ms, a.lat_min_ms);
+
+	/* A second, slower sample: min/max/avg follow. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1A02U, "local first 2", wire, &len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -80, 6));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	k_msleep(300);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -90, 5, wire, len));
+	(void)k_sem_take(&rx.sem, K_MSEC(200));
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	zassert_equal(a.lat_n, 2U);
+	zassert_true(a.lat_max_ms >= 300U, "max is the slow one (%u)", a.lat_max_ms);
+	zassert_true(a.lat_min_ms < a.lat_max_ms);
+	zassert_true(a.lat_sum_ms / a.lat_n >= a.lat_min_ms &&
+		     a.lat_sum_ms / a.lat_n <= a.lat_max_ms);
+
+	/* The twin: head first, local radio second -- not a measurement. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1A03U, "head first", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -90, 5, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered from the head");
+	k_msleep(100);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -80, 6));
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN, "a duplicate");
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	zassert_equal(a.lat_n, 2U, "a head-first duplicate adds no sample (%u)", a.lat_n);
+
+	/* The other twin (bench, 22:06Z): a neighbour REBROADCASTS the frame the
+	 * local radio heard first, and the head forwards that copy -- one hop
+	 * fewer, another relay byte, seconds later. Same (src, id), not the same
+	 * air: no sample. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1A04U, "relayed later", wire, &len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -80, 6));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	{
+		struct meshtastic_wire_header *h = (struct meshtastic_wire_header *)wire;
+
+		h->flags = (uint8_t)((h->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) |
+				     ((h->flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK) - 1U));
+		h->relay_node = 0x5AU;
+	}
+	k_msleep(150);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -90, 5, wire, len));
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN, "a duplicate");
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	zassert_equal(a.lat_n, 2U, "a rebroadcast through the head adds no sample (%u)", a.lat_n);
+}

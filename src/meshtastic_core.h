@@ -85,6 +85,10 @@ struct meshtastic_dup_entry {
 	uint32_t ms;        /* k_uptime_get_32() when recorded, for TTL expiry */
 	uint32_t relayed_ms; /* when WE relayed it; valid only if relayed */
 	uint8_t hop_limit;  /* highest hop budget seen for this (src,id) */
+	uint8_t attach;     /* the attachment that delivered the FIRST copy (0 = local radio;
+			     * 0xFF = no longer that copy, after a hop upgrade) */
+	uint8_t relay_node; /* the first copy's relay byte: a later copy with another
+			     * relayer or hop budget is a rebroadcast, not the same air */
 	bool relayed;       /* we transmitted a relay of this (src,id) */
 };
 

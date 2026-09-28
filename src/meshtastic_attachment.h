@@ -40,7 +40,19 @@ struct meshtastic_attachment_info {
 	int8_t last_snr;
 	int16_t rssi_min;
 	int16_t rssi_max;
+	/* Link latency, measured by the router when our own radio heard the same
+	 * frame first (ATTACHMENT-SCOPE F5 / R2): the gap between the local copy
+	 * and this head's copy. Only accrues while the brain's radio shares the
+	 * head's preset. */
+	uint32_t lat_n;
+	uint32_t lat_min_ms;
+	uint32_t lat_max_ms;
+	uint32_t lat_sum_ms;
 };
+
+/* The router noted that attachment @p id delivered a copy of a frame the local
+ * radio had delivered @p ms earlier. */
+void meshtastic_attachment_note_latency(uint8_t id, uint32_t ms);
 
 /* Counters that are not per head. */
 struct meshtastic_attachment_stats {

@@ -3633,6 +3633,10 @@ static int cmd_attach_status(const struct shell *sh, size_t argc, char **argv)
 	}
 	shell_print(sh, "  last envelope %lld ms ago  rejected %u  tx_results %u",
 		    (long long)(k_uptime_get() - a.last_ms), a.rejected, a.tx_results);
+	if (a.lat_n != 0U) {
+		shell_print(sh, "  link latency vs local radio: n %u  min %u  avg %u  max %u ms",
+			    a.lat_n, a.lat_min_ms, a.lat_sum_ms / a.lat_n, a.lat_max_ms);
+	}
 	return 0;
 }
 

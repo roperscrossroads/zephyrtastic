@@ -349,6 +349,28 @@ unsigned int meshtastic_attachment_count(void)
 	return n;
 }
 
+void meshtastic_attachment_note_latency(uint8_t id, uint32_t ms)
+{
+	struct meshtastic_attachment_info *a;
+
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	a = &tab[id];
+	if (used[id]) {
+		if (a->lat_n == 0U || ms < a->lat_min_ms) {
+			a->lat_min_ms = ms;
+		}
+		if (ms > a->lat_max_ms) {
+			a->lat_max_ms = ms;
+		}
+		a->lat_sum_ms += ms;
+		a->lat_n++;
+	}
+	k_mutex_unlock(&tab_lock);
+}
+
 bool meshtastic_attachment_get(uint8_t id, struct meshtastic_attachment_info *out)
 {
 	bool ok = false;
