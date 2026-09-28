@@ -37,6 +37,14 @@
  * not by anything in these bytes.
  */
 
+/*
+ * Compatibility rule (ATTACHMENT-SCOPE D5): there is no version byte. A sender
+ * may APPEND fields to a fixed-layout type (STATUS, TX_RESULT, SET_PRESET); a
+ * receiver checks that the prefix it knows is present (`len >=`) and ignores
+ * the tail. Fields are never reordered or removed. The two types that carry a
+ * wire frame (RX_FRAME, TX_FRAME) have a fixed header followed by the frame;
+ * they grow through their flags byte, not by appending.
+ */
 #define MESHTASTIC_ATTACHMENT_WIRE_MAX 255U
 #define MESHTASTIC_ATTACHMENT_HDR_MAX  16U
 /* Mirrors MESHTASTIC_BLE_PEER_ENV_MAX (BUILD_ASSERTed where both are visible). */

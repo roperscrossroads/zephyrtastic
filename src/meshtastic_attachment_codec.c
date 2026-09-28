@@ -182,7 +182,7 @@ int meshtastic_attachment_decode(const uint8_t *env, size_t len,
 		out->u.tx.wire_len = (uint16_t)(len - MESHTASTIC_ATTACHMENT_TX_HDR_LEN);
 		return 0;
 	case MESHTASTIC_ATTACHMENT_TX_RESULT:
-		if (len != MESHTASTIC_ATTACHMENT_TX_RESULT_LEN) {
+		if (len < MESHTASTIC_ATTACHMENT_TX_RESULT_LEN) {
 			return -EBADMSG;
 		}
 		out->u.result.tx_seq = get_u16(&env[1]);
@@ -191,10 +191,15 @@ int meshtastic_attachment_decode(const uint8_t *env, size_t len,
 		out->u.result.tx_ms = get_u32(&env[5]);
 		return 0;
 	case MESHTASTIC_ATTACHMENT_STATUS: {
-		const bool pos = (env[2] & MESHTASTIC_ATTACHMENT_ST_HAS_POS) != 0U;
+		bool pos;
 
-		if (len != (pos ? MESHTASTIC_ATTACHMENT_STATUS_POS_LEN
-				: MESHTASTIC_ATTACHMENT_STATUS_LEN)) {
+		/* The flags byte says whether the position tail is present; it must
+		 * itself be present before it is read (review F8). */
+		if (len < MESHTASTIC_ATTACHMENT_STATUS_LEN) {
+			return -EBADMSG;
+		}
+		pos = (env[2] & MESHTASTIC_ATTACHMENT_ST_HAS_POS) != 0U;
+		if (pos && len < MESHTASTIC_ATTACHMENT_STATUS_POS_LEN) {
 			return -EBADMSG;
 		}
 		out->u.status.preset = env[1];
@@ -213,7 +218,7 @@ int meshtastic_attachment_decode(const uint8_t *env, size_t len,
 		return 0;
 	}
 	case MESHTASTIC_ATTACHMENT_SET_PRESET:
-		if (len != MESHTASTIC_ATTACHMENT_SET_PRESET_LEN) {
+		if (len < MESHTASTIC_ATTACHMENT_SET_PRESET_LEN) {
 			return -EBADMSG;
 		}
 		out->u.preset = env[1];

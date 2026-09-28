@@ -758,3 +758,78 @@ ZTEST(ble_peer_attach, test_envelope_other_types_roundtrip)
 	env[0] = 0xEEU;
 	zassert_equal(meshtastic_attachment_decode(env, 3U, &msg), -EBADMSG);
 }
+
+/* U1/U3 (review F8, SCOPE D5/D6): every truncation of every type is refused
+ * without reading past len, and the compatibility rule holds -- a fixed-layout
+ * type with bytes APPENDED (a newer sender) decodes its known prefix; the two
+ * frame-carrying types treat the tail as the frame. */
+ZTEST(ble_peer_attach, test_envelope_truncations_refused_and_tails_ignored)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	struct meshtastic_attachment_msg msg;
+	static const uint8_t wire[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+	const struct meshtastic_attachment_rx_frame rx = {
+		.preset = 4U, .rssi = -70, .snr = 5, .rx_ms = 99U, .wire = wire,
+		.wire_len = sizeof(wire),
+	};
+	const struct meshtastic_attachment_tx_frame tx = {
+		.preset = 4U, .tx_seq = 7U, .wire = wire, .wire_len = sizeof(wire),
+	};
+	const struct meshtastic_attachment_tx_result res = { .tx_seq = 7U, .rc = 0, .tx_ms = 1U };
+	struct meshtastic_attachment_status st = {
+		.preset = 4U, .flags = MESHTASTIC_ATTACHMENT_ST_IS_HEAD, .hwid = 1U, .brain = 2U,
+	};
+	int len;
+
+	/* RX_FRAME / TX_FRAME: the header alone (no frame) is malformed; header +
+	 * 1 byte is a 1-byte frame. */
+	len = meshtastic_attachment_encode_rx_frame(&rx, env, sizeof(env));
+	zassert_true(len > 0);
+	for (size_t l = 1U; l <= MESHTASTIC_ATTACHMENT_RX_HDR_LEN; l++) {
+		zassert_equal(meshtastic_attachment_decode(env, l, &msg), -EBADMSG, "rx len %zu", l);
+	}
+	zassert_ok(meshtastic_attachment_decode(env, MESHTASTIC_ATTACHMENT_RX_HDR_LEN + 1U, &msg));
+	zassert_equal(msg.u.rx.wire_len, 1U);
+	len = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
+	zassert_true(len > 0);
+	for (size_t l = 1U; l <= MESHTASTIC_ATTACHMENT_TX_HDR_LEN; l++) {
+		zassert_equal(meshtastic_attachment_decode(env, l, &msg), -EBADMSG, "tx len %zu", l);
+	}
+
+	/* TX_RESULT: every shorter length refused; longer accepted, tail ignored. */
+	len = meshtastic_attachment_encode_tx_result(&res, env, sizeof(env));
+	zassert_equal(len, (int)MESHTASTIC_ATTACHMENT_TX_RESULT_LEN);
+	for (size_t l = 1U; l < MESHTASTIC_ATTACHMENT_TX_RESULT_LEN; l++) {
+		zassert_equal(meshtastic_attachment_decode(env, l, &msg), -EBADMSG, "res len %zu", l);
+	}
+	env[MESHTASTIC_ATTACHMENT_TX_RESULT_LEN] = 0xAAU; /* a field from the future */
+	zassert_ok(meshtastic_attachment_decode(env, MESHTASTIC_ATTACHMENT_TX_RESULT_LEN + 1U, &msg));
+	zassert_equal(msg.u.result.tx_seq, 7U);
+
+	/* STATUS: the 1- and 2-byte forms used to read the flags byte past the
+	 * end; every short length refused; longer accepted; HAS_POS needs its tail. */
+	len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
+	zassert_equal(len, (int)MESHTASTIC_ATTACHMENT_STATUS_LEN);
+	for (size_t l = 1U; l < MESHTASTIC_ATTACHMENT_STATUS_LEN; l++) {
+		zassert_equal(meshtastic_attachment_decode(env, l, &msg), -EBADMSG, "st len %zu", l);
+	}
+	memset(&env[MESHTASTIC_ATTACHMENT_STATUS_LEN], 0x55, 6U); /* appended fields */
+	zassert_ok(meshtastic_attachment_decode(env, MESHTASTIC_ATTACHMENT_STATUS_LEN + 6U, &msg));
+	zassert_equal(msg.u.status.brain, 2U);
+	zassert_false((msg.u.status.flags & MESHTASTIC_ATTACHMENT_ST_HAS_POS) != 0U);
+	st.flags |= MESHTASTIC_ATTACHMENT_ST_HAS_POS;
+	len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
+	zassert_equal(len, (int)MESHTASTIC_ATTACHMENT_STATUS_POS_LEN);
+	for (size_t l = MESHTASTIC_ATTACHMENT_STATUS_LEN; l < MESHTASTIC_ATTACHMENT_STATUS_POS_LEN;
+	     l++) {
+		zassert_equal(meshtastic_attachment_decode(env, l, &msg), -EBADMSG, "pos len %zu", l);
+	}
+	zassert_ok(meshtastic_attachment_decode(env, MESHTASTIC_ATTACHMENT_STATUS_POS_LEN + 3U, &msg));
+
+	/* SET_PRESET: 1 byte refused, 2 accepted, 3 accepted (tail ignored). */
+	len = meshtastic_attachment_encode_set_preset(3U, env, sizeof(env));
+	zassert_equal(len, 2);
+	zassert_equal(meshtastic_attachment_decode(env, 1U, &msg), -EBADMSG);
+	zassert_ok(meshtastic_attachment_decode(env, 3U, &msg));
+	zassert_equal(msg.u.preset, 3U);
+}
