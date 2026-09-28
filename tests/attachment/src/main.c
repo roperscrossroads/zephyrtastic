@@ -255,10 +255,13 @@ static void attachment_before(void *fixture)
 	mt.status.last_snr = 0;
 	mt.status.last_rx_from = 0U;
 	mt.status.self_heard = 0U;
-	/* A fresh table per case: every head is admitted by the case that uses it. */
+	/* A fresh table per case: every head is admitted by the case that uses it,
+	 * over a trusted link unless the case says otherwise. */
 	for (uint8_t id = 1U; id <= CONFIG_MESHTASTIC_ATTACHMENT_MAX; id++) {
 		(void)meshtastic_attachment_forget(id);
 	}
+	test_auth = MESHTASTIC_ATTACH_AUTH_ENCRYPTED;
+	meshtastic_attachment_allow_clear();
 	/* Fresh dup cache per case so the same (src,id) can be reused. */
 	memset(mt.dup_cache, 0, sizeof(mt.dup_cache));
 	mt.dup_head = 0U;
@@ -355,6 +358,125 @@ ZTEST(attachment, test_frame_from_another_preset_decodes_on_the_brain)
 	zassert_true(meshtastic_attachment_get(1U, &a));
 	zassert_equal(a.preset, (uint8_t)PRESET_MF, "the head now reports MediumFast");
 	zassert_equal(a.rx_frames, 2U, "both envelopes counted, one decoded");
+}
+
+/* B15 (review F3, SCOPE C1): a head is admitted only over a link the bearer
+ * vouches for, or from the operator's allow-list. Anything else gets nothing --
+ * not a slot, not a delivery, not an RF frame. */
+ZTEST(attachment, test_admission_needs_a_trusted_link_or_the_allow_list)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct meshtastic_attachment_stats st0, st;
+
+	meshtastic_attachment_stats_get(&st0);
+	test_auth = MESHTASTIC_ATTACH_AUTH_NONE;
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2001U, "stranger", wire, &len);
+	zassert_equal(head_hears(HEAD1_NODE, PRESET_ST, -50, 9, wire, len), -EACCES,
+		      "an untrusted, unlisted link is refused");
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN, "nothing delivered");
+	zassert_equal(meshtastic_attachment_count(), 1U, "no slot taken");
+	meshtastic_attachment_stats_get(&st);
+	zassert_equal(st.admission_refused, st0.admission_refused + 1U);
+
+	/* The operator vouches for it: admitted over the same untrusted link. */
+	zassert_ok(meshtastic_attachment_allow_add(HEAD1_NODE));
+	zassert_true(meshtastic_attachment_is_allowed(HEAD1_NODE));
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2002U, "allowed", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -50, 9, wire, len), "allow-listed");
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+	zassert_equal(meshtastic_attachment_count(), 2U);
+
+	/* A second stranger stays out; a trusted link admits without the list. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2003U, "stranger2", wire, &len);
+	zassert_equal(head_hears(HEAD2_NODE, PRESET_ST, -50, 9, wire, len), -EACCES);
+	test_auth = MESHTASTIC_ATTACH_AUTH_PHYSICAL;
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2004U, "wired", wire, &len);
+	zassert_ok(head_hears(HEAD2_NODE, PRESET_ST, -50, 9, wire, len), "a trusted wire admits");
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	zassert_equal(meshtastic_attachment_count(), 3U);
+}
+
+/* B14: the table -- a malformed first contact takes no slot, a full table
+ * refuses, a head whose link went down keeps its slot through the grace and
+ * loses it after (EVICT_SEC=2 in this build), and speaks itself up again. */
+ZTEST(attachment, test_table_admission_capacity_and_eviction)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint8_t junk[4] = { MESHTASTIC_ATTACHMENT_STATUS, 1, 2, 3 };
+	uint32_t len;
+	struct meshtastic_attachment_info a;
+	struct meshtastic_attachment_stats st0, st;
+
+	meshtastic_attachment_stats_get(&st0);
+	/* malformed first contact: no slot */
+	zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, HEAD1_NODE, junk, sizeof(junk)),
+		      -EBADMSG);
+	zassert_equal(meshtastic_attachment_count(), 1U, "malformed does not admit");
+	meshtastic_attachment_stats_get(&st);
+	zassert_equal(st.not_admitted_malformed, st0.not_admitted_malformed + 1U);
+
+	/* fill the table (MAX=2), a third is refused */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2101U, "a", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -50, 9, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2102U, "b", wire, &len);
+	zassert_ok(head_hears(HEAD2_NODE, PRESET_ST, -50, 9, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2103U, "c", wire, &len);
+	zassert_equal(head_hears(0x00E10003U, PRESET_ST, -50, 9, wire, len), -ENOSPC, "table full");
+
+	/* link down: still there, marked; up again on its next envelope */
+	meshtastic_attach_bearer_link_down(&test_bearer, HEAD1_NODE);
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	zassert_false(a.link_up, "marked down");
+	zassert_equal(a.node, HEAD1_NODE, "slot kept through the grace");
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2104U, "back", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -50, 9, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	zassert_true(a.link_up, "up again");
+	zassert_equal(a.rx_frames, 2U, "counters kept");
+
+	/* down for longer than the grace: evicted, the slot is free again */
+	meshtastic_attach_bearer_link_down(&test_bearer, HEAD1_NODE);
+	k_sleep(K_MSEC(3500));
+	zassert_false(meshtastic_attachment_get(1U, &a), "evicted");
+	zassert_equal(meshtastic_attachment_id_for_node(HEAD1_NODE), 0U);
+	meshtastic_attachment_stats_get(&st);
+	zassert_equal(st.evicted, st0.evicted + 1U);
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2105U, "c again", wire, &len);
+	zassert_ok(head_hears(0x00E10003U, PRESET_ST, -50, 9, wire, len), "the slot is free");
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+}
+
+/* B16: hostile envelopes from an ADMITTED head -- what a compromised head
+ * could say. None of it may leave on our radio or be delivered as ours. */
+ZTEST(attachment, test_hostile_envelopes_from_an_admitted_head)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct meshtastic_wire_header *h = (struct meshtastic_wire_header *)wire;
+
+	/* src = broadcast address: dropped before anything */
+	build_frame(MESHTASTIC_NODE_BROADCAST, MESHTASTIC_NODE_BROADCAST, 0x2201U, "x", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -50, 9, wire, len));
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN, "src=broadcast not delivered");
+	zassert_false(relayed_within(MESHTASTIC_NODE_BROADCAST, 0x2201U, 500));
+	/* src = 0: whatever the router makes of it (today it delivers, as it does
+	 * from the local radio -- a pre-existing question, agents-pcs2), it must
+	 * not leave on our radio */
+	build_frame(0U, MESHTASTIC_NODE_BROADCAST, 0x2202U, "x", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -50, 9, wire, len));
+	(void)k_sem_take(&rx.sem, K_MSEC(300));
+	zassert_false(relayed_within(0U, 0x2202U, 500), "src=0 never relayed on our radio");
+	/* hop limit 7, an unknown preset tag, absurd signal */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2203U, "x", wire, &len);
+	set_hop_limit(wire, 7U);
+	zassert_ok(head_hears(HEAD1_NODE, 0xFEU, 127, 127, wire, len));
+	(void)k_sem_take(&rx.sem, K_MSEC(300));
+	zassert_false(relayed_within(FAR_NODE_ID, 0x2203U, 500), "never relayed on our radio");
+	ARG_UNUSED(h);
 }
 
 /* T2b: two heads hear the same frame -- delivered once (the dup cache is keyed

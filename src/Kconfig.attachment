@@ -36,6 +36,22 @@ config MESHTASTIC_ATTACHMENT_MAX
 	help
 	  A BLE peer link per head; the R8 has 3 connection slots in total.
 
+config MESHTASTIC_ATTACHMENT_EVICT_SEC
+	int "Seconds a head stays in the table after its link went down"
+	depends on MESHTASTIC_ATTACHMENT_BRAIN
+	default 180
+	range 1 3600
+	help
+	  A head whose bearer link dropped keeps its slot (and counters) this long
+	  so a reboot or a BLE hiccup re-admits it in place; after that the slot
+	  is freed. A head that speaks again before then is simply up again.
+
+config MESHTASTIC_ATTACHMENT_ALLOW_MAX
+	int "Operator allow-list entries (heads admitted on an untrusted link)"
+	depends on MESHTASTIC_ATTACHMENT_BRAIN
+	default 4
+	range 1 8
+
 config MESHTASTIC_ATTACHMENT_HEAD
 	bool "This node is a keyless radio head"
 	depends on !MESHTASTIC_ATTACHMENT_BRAIN

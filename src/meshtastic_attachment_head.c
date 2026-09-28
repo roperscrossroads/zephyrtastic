@@ -208,7 +208,6 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 	struct meshtastic_attachment_msg msg;
 	int ret;
 
-	ARG_UNUSED(b); /* the link's trust level gates controls from fix 7 on */
 	if (node == 0U || env == NULL) {
 		return -EINVAL;
 	}
@@ -221,12 +220,24 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 		goto out;
 	}
 	switch (msg.type) {
-	case MESHTASTIC_ATTACHMENT_SET_PRESET:
-		/* Only the brain retunes this radio. (Phase 3 adds the bond gate
-		 * beside this identity check.) */
+	case MESHTASTIC_ATTACHMENT_SET_PRESET: {
+		struct meshtastic_attach_link_info info;
+		bool trusted;
+
+		/* Only the brain retunes this radio, and only over a link the
+		 * bearer vouches for (bonded BLE, a trusted wire): a beat's node
+		 * number alone is spoofable (ATTACHMENT-SCOPE C4). */
 		if (node != head.brain) {
 			head.stats.refused++;
 			ret = -EPERM;
+			break;
+		}
+		trusted = ((b != NULL) ? b->link_info(node, &info)
+				       : meshtastic_attach_bearer_link_info(node, &info, NULL)) &&
+			  info.up && info.auth != MESHTASTIC_ATTACH_AUTH_NONE;
+		if (!trusted) {
+			head.stats.untrusted++;
+			ret = -EACCES;
 			break;
 		}
 		if (msg.u.preset > (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX) {
@@ -244,6 +255,7 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 			}
 		}
 		break;
+	}
 	case MESHTASTIC_ATTACHMENT_TX_FRAME:
 		/* Phase 3. Counted as refused so the brain's TX_RESULT-less send
 		 * is visible on both ends. */

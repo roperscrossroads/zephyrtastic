@@ -27,10 +27,171 @@ BUILD_ASSERT(MESHTASTIC_ATTACHMENT_ENV_MAX == MESHTASTIC_BLE_PEER_ENV_MAX,
 	     "the envelope must fit the peer link's kind-1 frame");
 #endif
 
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
+
 /* [0] is the local radio and never admitted or forgotten. */
 static struct meshtastic_attachment_info tab[CONFIG_MESHTASTIC_ATTACHMENT_MAX + 1U];
 static bool used[CONFIG_MESHTASTIC_ATTACHMENT_MAX + 1U] = { true };
+static struct meshtastic_attachment_stats stats;
+static uint32_t allow[CONFIG_MESHTASTIC_ATTACHMENT_ALLOW_MAX];
 static K_MUTEX_DEFINE(tab_lock);
+
+static void evict_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(evict_work, evict_fn);
+
+/* ---- the allow-list (mtattach/allow) --------------------------------------- */
+
+static bool allowed_locked(uint32_t node)
+{
+	for (unsigned int i = 0U; i < ARRAY_SIZE(allow); i++) {
+		if (allow[i] == node) {
+			return true;
+		}
+	}
+	return false;
+}
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+static void allow_save_locked(void)
+{
+	if (settings_save_one("mtattach/allow", allow, sizeof(allow)) != 0) {
+		LOG_WRN("attach: allow-list save failed");
+	}
+}
+
+static int attach_settings_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	uint32_t tmp[CONFIG_MESHTASTIC_ATTACHMENT_ALLOW_MAX] = { 0 };
+
+	if (strcmp(key, "allow") != 0) {
+		return -ENOENT;
+	}
+	if (len > sizeof(tmp) || read_cb(cb_arg, tmp, len) != (ssize_t)len) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	memcpy(allow, tmp, sizeof(allow));
+	k_mutex_unlock(&tab_lock);
+	return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mt_attach_brain, "mtattach", NULL, attach_settings_set, NULL, NULL);
+#else
+static void allow_save_locked(void)
+{
+}
+#endif
+
+int meshtastic_attachment_allow_add(uint32_t node)
+{
+	int ret = -ENOSPC;
+
+	if (node == 0U) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (allowed_locked(node)) {
+		ret = 0;
+	} else {
+		for (unsigned int i = 0U; i < ARRAY_SIZE(allow); i++) {
+			if (allow[i] == 0U) {
+				allow[i] = node;
+				allow_save_locked();
+				ret = 0;
+				break;
+			}
+		}
+	}
+	k_mutex_unlock(&tab_lock);
+	return ret;
+}
+
+void meshtastic_attachment_allow_clear(void)
+{
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	memset(allow, 0, sizeof(allow));
+	allow_save_locked();
+	k_mutex_unlock(&tab_lock);
+}
+
+bool meshtastic_attachment_allow_get(unsigned int i, uint32_t *node)
+{
+	bool ok = false;
+
+	if (i >= ARRAY_SIZE(allow) || node == NULL) {
+		return false;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (allow[i] != 0U) {
+		*node = allow[i];
+		ok = true;
+	}
+	k_mutex_unlock(&tab_lock);
+	return ok;
+}
+
+bool meshtastic_attachment_is_allowed(uint32_t node)
+{
+	bool ok;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	ok = allowed_locked(node);
+	k_mutex_unlock(&tab_lock);
+	return ok;
+}
+
+void meshtastic_attachment_stats_get(struct meshtastic_attachment_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	*out = stats;
+	k_mutex_unlock(&tab_lock);
+}
+
+/* Is the link this envelope came over one we may extend RF trust to? The
+ * bearer answers; with no bearer (the test seam) the registry is asked. */
+static bool link_trusted(const struct meshtastic_attach_bearer *b, uint32_t node)
+{
+	struct meshtastic_attach_link_info info;
+	bool known;
+
+	known = (b != NULL) ? b->link_info(node, &info)
+			    : meshtastic_attach_bearer_link_info(node, &info, NULL);
+	return known && info.up && info.auth != MESHTASTIC_ATTACH_AUTH_NONE;
+}
+
+/* ---- eviction: a dead link's slot is freed after the grace ------------------- */
+
+static void evict_fn(struct k_work *work)
+{
+	int64_t now = k_uptime_get();
+
+	ARG_UNUSED(work);
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	for (unsigned int i = 1U; i < ARRAY_SIZE(tab); i++) {
+		if (used[i] && !tab[i].link_up && tab[i].down_ms != 0 &&
+		    now - tab[i].down_ms >= (int64_t)CONFIG_MESHTASTIC_ATTACHMENT_EVICT_SEC * 1000) {
+			LOG_INF("attach: head 0x%08x (attachment %u) evicted after %d s down",
+				tab[i].node, i, CONFIG_MESHTASTIC_ATTACHMENT_EVICT_SEC);
+			used[i] = false;
+			memset(&tab[i], 0, sizeof(tab[i]));
+			stats.evicted++;
+		}
+	}
+	k_mutex_unlock(&tab_lock);
+	(void)k_work_schedule(&evict_work,
+			      K_MSEC(CONFIG_MESHTASTIC_ATTACHMENT_EVICT_SEC * 1000 / 2));
+}
+
+void meshtastic_attachment_start(void)
+{
+	(void)k_work_schedule(&evict_work,
+			      K_MSEC(CONFIG_MESHTASTIC_ATTACHMENT_EVICT_SEC * 1000 / 2));
+}
 
 static struct meshtastic_attachment_info *find_locked(uint32_t node)
 {
@@ -102,6 +263,18 @@ int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, 
 	k_mutex_lock(&tab_lock, K_FOREVER);
 	a = find_locked(node);
 	if (a == NULL) {
+		/* Admission (ATTACHMENT-SCOPE C1): decode first, trust second. */
+		if (ret < 0) {
+			stats.not_admitted_malformed++;
+			k_mutex_unlock(&tab_lock);
+			return -EBADMSG;
+		}
+		if (!allowed_locked(node) && !link_trusted(b, node)) {
+			stats.admission_refused++;
+			k_mutex_unlock(&tab_lock);
+			LOG_WRN("attach: 0x%08x refused: link not trusted and not allowed", node);
+			return -EACCES;
+		}
 		a = admit_locked(node);
 		if (a == NULL) {
 			k_mutex_unlock(&tab_lock);
@@ -111,6 +284,7 @@ int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, 
 	}
 	a->bearer = b;
 	a->link_up = true;
+	a->down_ms = 0;
 	a->last_ms = k_uptime_get();
 	if (ret < 0) {
 		a->rejected++;

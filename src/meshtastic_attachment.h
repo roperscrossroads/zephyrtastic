@@ -42,11 +42,35 @@ struct meshtastic_attachment_info {
 	int16_t rssi_max;
 };
 
+/* Counters that are not per head. */
+struct meshtastic_attachment_stats {
+	uint32_t admission_refused; /* envelopes from a link that is neither trusted nor allowed */
+	uint32_t not_admitted_malformed; /* unknown peers whose first envelope did not decode */
+	uint32_t evicted;           /* slots freed after the link-down grace */
+};
+void meshtastic_attachment_stats_get(struct meshtastic_attachment_stats *out);
+
+/* The operator's allow-list (ATTACHMENT-SCOPE C1): a head admitted although
+ * its link is not trusted (an unbonded BLE link, a wire the Kconfig does not
+ * vouch for). Saved with MESHTASTIC_SETTINGS (mtattach/allow). */
+int meshtastic_attachment_allow_add(uint32_t node);
+void meshtastic_attachment_allow_clear(void);
+bool meshtastic_attachment_allow_get(unsigned int i, uint32_t *node);
+bool meshtastic_attachment_is_allowed(uint32_t node);
+
+/* Arm the eviction sweep. Called once from meshtastic_init(). */
+void meshtastic_attachment_start(void);
+
 /* An envelope arrived from the link whose peer identity is @p node (the beat's
- * node number). Admits an unknown head into a free slot. Runs on the BT RX
- * thread with the peer lock held: it only parses, updates the table and does a
- * non-blocking queue put. Returns 0, -EBADMSG on a malformed envelope, -ENOSPC
- * when the table is full, -ENOBUFS when the RX queue refused the frame. */
+ * node number). An unknown head is admitted into a free slot only after its
+ * envelope decodes, and only if the bearer reports the link trusted
+ * (ENCRYPTED or PHYSICAL) or the node is on the allow-list (ATTACHMENT-SCOPE
+ * C1/C3): the metadata an envelope carries -- bearer, preset, signal, time --
+ * is trusted by the router, so its source must be. Runs on the BT RX thread
+ * with the peer lock held: it only parses, updates the table and does a
+ * non-blocking queue put. Returns 0, -EBADMSG on a malformed envelope, -EACCES
+ * when an unknown peer is neither trusted nor allowed, -ENOSPC when the table
+ * is full, -ENOBUFS when the RX queue refused the frame. */
 int meshtastic_attachment_ingest(uint32_t node, const uint8_t *env, size_t len);
 /* The same, from a bearer's RX path: @p b is the bearer the envelope arrived
  * over (its link_info answers the admission gate), NULL for the test seam. */

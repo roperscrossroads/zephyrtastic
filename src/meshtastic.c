@@ -37,6 +37,9 @@
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
 #include "meshtastic_attachment_head.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#include "meshtastic_attachment.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 #include "meshtastic_scanner.h"
 #endif
@@ -717,6 +720,9 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	}
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
 	meshtastic_attachment_head_start();
+#endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+	meshtastic_attachment_start();
 #endif
 
 #if defined(CONFIG_MESHTASTIC_GNSS)

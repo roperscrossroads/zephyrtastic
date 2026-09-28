@@ -115,6 +115,7 @@ static void head_before(void *fixture)
 {
 	ARG_UNUSED(fixture);
 	meshtastic_attachment_head_reset();
+	test_auth = MESHTASTIC_ATTACH_AUTH_ENCRYPTED;
 	zassert_ok(meshtastic_preset_switch(PRESET_ST, NULL), "preset");
 	lora_sim_reset(lora_dev);
 	wait_rx_armed();
@@ -211,6 +212,19 @@ ZTEST(attachment_head, test_set_preset_from_the_brain_only)
 	meshtastic_attachment_head_stats_get(&st);
 	zassert_equal(st.refused, 1U);
 	zassert_equal(st.controls, 1U);
+
+	/* H10 (SCOPE C4): the brain's own id over a link the bearer does not
+	 * vouch for (an unbonded connection) is refused, and counted apart. */
+	test_auth = MESHTASTIC_ATTACH_AUTH_NONE;
+	len = meshtastic_attachment_encode_set_preset((uint8_t)PRESET_ST, env, sizeof(env));
+	zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len),
+		      -EACCES, "untrusted link");
+	zassert_equal(mt.modem_preset, PRESET_MF, "not retuned");
+	meshtastic_attachment_head_stats_get(&st);
+	zassert_equal(st.untrusted, 1U);
+	zassert_equal(st.controls, 1U);
+	test_auth = MESHTASTIC_ATTACH_AUTH_ENCRYPTED;
+	len = meshtastic_attachment_encode_set_preset((uint8_t)PRESET_MF, env, sizeof(env));
 
 	/* An out-of-range preset is a bad envelope, not a retune. */
 	env[1] = 0xEEU;

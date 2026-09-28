@@ -3552,6 +3552,43 @@ static void attach_print_row(const struct shell *sh, const struct meshtastic_att
 		    a->have_status ? "  status" : "",
 		    (a->have_status &&
 		     (a->status.flags & MESHTASTIC_ATTACHMENT_ST_IS_HEAD) != 0U) ? " head" : " ear");
+	if (!a->link_up) {
+		shell_print(sh, "     link DOWN %lld s (evicted after %d s)",
+			    (long long)((k_uptime_get() - a->down_ms) / 1000),
+			    CONFIG_MESHTASTIC_ATTACHMENT_EVICT_SEC);
+	}
+}
+
+static int cmd_attach_allow(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_attachment_stats st;
+	uint32_t node;
+
+	if (argc >= 2 && strcmp(argv[1], "clear") == 0) {
+		meshtastic_attachment_allow_clear();
+		shell_print(sh, "allow-list cleared");
+		return 0;
+	}
+	if (argc >= 2) {
+		int ret;
+
+		node = (uint32_t)strtoul(argv[1], NULL, 16);
+		ret = meshtastic_attachment_allow_add(node);
+		if (ret < 0) {
+			shell_error(sh, "allow failed (%d)", ret);
+			return ret;
+		}
+		shell_print(sh, "0x%08x allowed", node);
+		return 0;
+	}
+	shell_print(sh, "allowed on an untrusted link:");
+	for (unsigned int i = 0U; meshtastic_attachment_allow_get(i, &node); i++) {
+		shell_print(sh, "  0x%08x", node);
+	}
+	meshtastic_attachment_stats_get(&st);
+	shell_print(sh, "refused %u  malformed-first-contact %u  evicted %u", st.admission_refused,
+		    st.not_admitted_malformed, st.evicted);
+	return 0;
 }
 
 static int cmd_attach_list(const struct shell *sh, size_t argc, char **argv)
@@ -3642,6 +3679,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_attach_status, 2, 0),
 	SHELL_CMD_ARG(preset, NULL, SHELL_HELP("Ask a head to retune.", "<id> <preset number>"),
 		      cmd_attach_preset, 3, 0),
+	SHELL_CMD_ARG(allow, NULL,
+		      SHELL_HELP("Heads admitted on an untrusted link: show, add, clear.",
+				 "[<hex node id>|clear]"),
+		      cmd_attach_allow, 1, 1),
 	SHELL_CMD_ARG(forget, NULL, SHELL_HELP("Drop a head from the table.", "<id>"),
 		      cmd_attach_forget, 2, 0),
 	SHELL_SUBCMD_SET_END);
@@ -3665,8 +3706,8 @@ static int cmd_attach_head_show(const struct shell *sh, size_t argc, char **argv
 		    (unsigned int)mt.modem_preset);
 	shell_print(sh, "heard %u  forwarded %u  no_brain %u  queue_full %u  send_failed %u",
 		    st.heard, st.forwarded, st.no_brain, st.queue_full, st.send_failed);
-	shell_print(sh, "status_sent %u  controls %u  refused %u  rejected %u", st.status_sent,
-		    st.controls, st.refused, st.rejected);
+	shell_print(sh, "status_sent %u  controls %u  refused %u  untrusted %u  rejected %u",
+		    st.status_sent, st.controls, st.refused, st.untrusted, st.rejected);
 	return 0;
 }
 

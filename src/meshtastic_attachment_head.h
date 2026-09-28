@@ -34,6 +34,7 @@ struct meshtastic_attachment_head_stats {
 	uint32_t status_sent;
 	uint32_t controls;     /* SET_PRESET accepted */
 	uint32_t refused;      /* a control from a node that is not the brain, or TX (phase 3) */
+	uint32_t untrusted;    /* a control from the brain over a link the bearer does not vouch for */
 	uint32_t rejected;     /* envelopes that failed to decode, or types a head does not take */
 };
 

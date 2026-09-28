@@ -16,6 +16,7 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=y
       - CONFIG_MESHTASTIC_ATTACHMENT_MAX=2
+      - CONFIG_MESHTASTIC_ATTACHMENT_EVICT_SEC=2
   # The head (S5): the real stack as a keyless radio head on the sim radio. What
   # it hears is captured at the send seam as RX_FRAME envelopes; controls come
   # in through on_envelope as the BLE glue would deliver them. The build itself
