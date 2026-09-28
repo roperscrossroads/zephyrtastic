@@ -148,6 +148,35 @@ static void assert_not_relayed(uint32_t src, uint32_t id)
 	}
 }
 
+/* Did a frame from (src, id) leave on THIS board's radio within @p ms? Every
+ * "not relayed" assertion in this suite has a "relayed" twin (review F6): the
+ * suite runs with rebroadcast ALL, so a LoRa frame IS relayed, and a head's
+ * frame is the one that must not be. */
+static bool relayed_within(uint32_t src, uint32_t id, int ms)
+{
+	struct lora_sim_frame f;
+	int64_t end = k_uptime_get() + ms;
+
+	while (k_uptime_get() < end) {
+		if (lora_sim_take_tx(lora_dev, &f, K_MSEC(100)) == 0) {
+			const struct meshtastic_wire_header *h =
+				(const struct meshtastic_wire_header *)f.data;
+
+			if (sys_le32_to_cpu(h->src) == src && sys_le32_to_cpu(h->id) == id) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static void set_hop_limit(uint8_t *wire, uint8_t hops)
+{
+	struct meshtastic_wire_header *h = (struct meshtastic_wire_header *)wire;
+
+	h->flags = (uint8_t)((h->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) | hops);
+}
+
 /* Slot 0 holding the active preset's default channel (what stock stores). */
 static void set_default_primary(void)
 {
@@ -183,9 +212,13 @@ static void *attachment_setup(void)
 static void attachment_before(void *fixture)
 {
 	ARG_UNUSED(fixture);
-	/* The brain on the bench: ShortTurbo, on that preset's default channel. */
+	/* The brain on the bench: ShortTurbo, on that preset's default channel,
+	 * relaying like a stock node -- without ALL nothing in this suite would
+	 * ever relay, and "not relayed" could not fail (review F6). */
 	set_default_primary();
+	mt.use_preset = true;
 	zassert_ok(meshtastic_preset_switch(PRESET_ST, NULL), "preset");
+	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_ALL);
 	meshtastic_sched_defaults();
 	zassert_ok(meshtastic_sched_set("cw.max", "0"));
 	lora_sim_reset(lora_dev);
@@ -340,6 +373,101 @@ ZTEST(attachment, test_legacy_ble_peer_inject_stays_non_rf)
 
 /* T4: a head's frame is never flood-relayed onto OUR radio (it is on the head's
  * preset; relays go back out the way they came in, which P3 provides). */
+/* B1, the control: a frame on OUR radio is relayed in this suite. Without this
+ * case every "not relayed" below is vacuous. */
+ZTEST(attachment, test_control_local_frame_is_relayed)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1E00U, "local", wire, &len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -80, 6));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+	zassert_true(relayed_within(FAR_NODE_ID, 0x1E00U, 4000), "control: a LoRa frame relays");
+}
+
+/* B3/B4 (review F1): a hop-upgraded duplicate through a head takes the second
+ * relay path in the router; it must obey the same rule as the first copy --
+ * in both arrival orders. */
+ZTEST(attachment, test_hop_upgrade_through_a_head_is_not_relayed)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+
+	/* head first (1 hop), head again (3 hops) */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1F00U, "upgrade me", wire, &len);
+	set_hop_limit(wire, 1U);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -80, 6, wire, len), "first copy");
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+	zassert_false(relayed_within(FAR_NODE_ID, 0x1F00U, 2000), "first copy not relayed");
+	set_hop_limit(wire, 3U);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -80, 6, wire, len), "upgraded copy");
+	zassert_false(relayed_within(FAR_NODE_ID, 0x1F00U, 3000),
+		      "a hop-upgraded head copy leaked onto the local radio");
+	zassert_equal(rx.count, 1U, "never re-delivered");
+
+	/* local first (1 hop, relayed), head upgrade (3 hops): the upgrade is the
+	 * head's, so it stays off our air even though the first copy was ours */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1F01U, "upgrade me", wire, &len);
+	set_hop_limit(wire, 1U);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -80, 6));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+	zassert_true(relayed_within(FAR_NODE_ID, 0x1F01U, 4000), "our copy relays");
+	set_hop_limit(wire, 3U);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -80, 6, wire, len), "head upgrade");
+	zassert_false(relayed_within(FAR_NODE_ID, 0x1F01U, 3000), "the head's upgrade does not");
+
+	/* head first (1 hop), local upgrade (3 hops): ours, relayed */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1F02U, "upgrade me", wire, &len);
+	set_hop_limit(wire, 1U);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -80, 6, wire, len), "head first");
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+	set_hop_limit(wire, 3U);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -80, 6));
+	zassert_true(relayed_within(FAR_NODE_ID, 0x1F02U, 4000), "our upgrade relays");
+}
+
+/* B7 (review F2): a node on a custom modem (use_preset=false) hashes an unnamed
+ * slot under "Custom"; its OWN radio's frames now carry a concrete preset tag,
+ * and must still decode against the cached hash. */
+ZTEST(attachment, test_custom_modem_local_frame_still_decodes)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	uint8_t cached, recomputed;
+	int r;
+
+	mt.use_preset = false;
+	meshtastic_channels_refresh_derived();
+	cached = meshtastic_channels_get_hash(0U);
+	recomputed = meshtastic_channels_hash_for_preset(0U, (uint8_t)mt.modem_preset);
+	zassert_equal(recomputed, cached, "the active preset's hash is the cached one (0x%02x vs 0x%02x)",
+		      recomputed, cached);
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1C00U, "custom", wire, &len);
+	zassert_equal(((struct meshtastic_wire_header *)wire)->channel, cached);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -80, 6));
+	r = k_sem_take(&rx.sem, K_SECONDS(2));
+	mt.use_preset = true;
+	meshtastic_channels_refresh_derived();
+	zassert_ok(r, "own-radio frame on an unnamed slot under a custom modem not decoded");
+}
+
+/* B9 (review F7): on the local radio a relay byte equal to our low byte is a
+ * neighbour who happens to share it, relaying us -- an implicit ACK upstream,
+ * never "our own voice". The guard is asked only of attachment frames. */
+ZTEST(attachment, test_own_voice_guard_is_for_attachments_only)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+
+	build_frame(TEST_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1B00U, "mine", wire, &len);
+	((struct meshtastic_wire_header *)wire)->relay_node = (uint8_t)(TEST_NODE_ID & 0xFFU);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -80, 6));
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN, "own frames are never delivered");
+	zassert_equal(mt.status.self_heard, 0U, "not our voice: our radio cannot hear itself");
+	zassert_false(relayed_within(TEST_NODE_ID, 0x1B00U, 500), "own echo is never relayed");
+}
+
 ZTEST(attachment, test_head_frame_is_not_relayed_on_the_local_radio)
 {
 	uint8_t wire[MESHTASTIC_PKT_MAX];

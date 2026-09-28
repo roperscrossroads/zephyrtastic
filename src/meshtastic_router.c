@@ -228,6 +228,18 @@ static void log_wire_rx(const uint8_t *pkt, int len, int16_t rssi, int8_t snr)
 }
 #endif /* CONFIG_MESHTASTIC_PACKET_HEXDUMP */
 
+/* May a frame that arrived on @p bearer be flood-relayed on THIS board's radio?
+ * Only a frame this radio heard: a relay goes back out on the air it came in
+ * on, and until P3 gives the outbound path a target attachment, a head's frame
+ * (on another preset, another radio) has nowhere to go here -- it is delivered
+ * and counted, never relayed locally. Both relay sites (first copy and the
+ * hop-upgraded duplicate) use this one predicate (review F1). The peer-link
+ * bearer is not RF at all: the link-local rule (agents-xhli.2). */
+static bool relay_local_ok(enum meshtastic_bearer bearer)
+{
+	return bearer == MESHTASTIC_BEARER_LORA;
+}
+
 /* ROUTER, ROUTER_LATE and CLIENT_BASE are "router-like": infrastructure that
  * carries traffic for others rather than merely participating. The reference
  * groups them the same way for hop-limit preservation. */
@@ -659,8 +671,11 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 		 * the local radio hearing a head's TX): the relay byte is still ours,
 		 * so nobody rebroadcast it -- it is our voice, not an echo, and must
 		 * not count as an implicit ACK. A single-radio node can never hear
-		 * itself, so this only ever fires with attachments (S1). */
-		if (hdr->relay_node == (uint8_t)(mt.node_id & 0xFFU)) {
+		 * itself, so this is asked only of frames that came through an
+		 * attachment (S1): on the local radio a matching relay byte is a
+		 * neighbour that shares our low byte relaying us -- a real implicit
+		 * ACK, as upstream treats it (review F7). */
+		if (meta->attach != 0U && hdr->relay_node == (uint8_t)(mt.node_id & 0xFFU)) {
 			mt.status.self_heard++;
 			LOG_DBG("Own frame id=0x%08x heard on attach %u: our own voice",
 				pkt_id, (unsigned int)meta->attach);
@@ -722,7 +737,8 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 
 		if (rf) {
 			note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
-
+		}
+		if (relay_local_ok(bearer)) {
 			LOG_DBG("Hop-upgraded duplicate (src=0x%08x id=0x%08x hops=%u): relay",
 				src, pkt_id, rx_hop_limit);
 			meshtastic_routing_sniff_rebroadcast(hdr, buf, (size_t)len, &upgraded,
@@ -1123,16 +1139,12 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 			pkt->id);
 	}
 
-	/* A relay goes back out on the air the frame came in on. Until P3 gives the
-	 * outbound path a target attachment, only this board's own radio can do
-	 * that: a head's frame is on another preset, where our radio would be
-	 * wrong -- so it is delivered, counted, and not relayed here. */
-	if (hdr != NULL && !suppress_relay && rf && bearer != MESHTASTIC_BEARER_ATTACHMENT) {
+	/* A relay goes back out on the air the frame came in on: relay_local_ok()
+	 * says whether this board's radio is that air. */
+	if (hdr != NULL && !suppress_relay && relay_local_ok(bearer)) {
 		/* Phase 4b: decoded_mesh is NULL on the encrypted-relay path (no decode) and
 		 * the public inject/test path -> struct-fallback for snr inside. Phase 4c: pkt is
-		 * the materialised struct on the decoded RF path, else the passed-in struct.
-		 * rf: THE link-local gate — a frame that arrived over a non-LoRa bearer is
-		 * never flood-relayed onto the air (agents-xhli.2). */
+		 * the materialised struct on the decoded RF path, else the passed-in struct. */
 		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, pkt, decoded_mesh);
 	}
 }
