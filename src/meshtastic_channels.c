@@ -365,9 +365,14 @@ uint8_t meshtastic_channels_hash_for_preset(uint8_t index, uint8_t preset)
 		return 0U;
 	}
 	ch = &channel_slots[index];
-	/* A named slot, or no preset to speak of: the cached hash is the hash. */
+	/* A named slot, no preset to speak of, or OUR preset: the cached hash is
+	 * the hash. The last case matters on a custom modem (use_preset=false):
+	 * the cached hash is under the name "Custom", which is what every node on
+	 * that modem stamps -- recomputing under the preset's display name would
+	 * stop our own radio's frames decoding (review F2). */
 	if ((ch->has_settings && ch->settings.name[0] != '\0') ||
-	    preset > (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX) {
+	    preset > (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX ||
+	    preset == (uint8_t)mt.modem_preset) {
 		return channel_hashes[index];
 	}
 	if (channel_get_key(index, &key) < 0) {
