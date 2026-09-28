@@ -53,6 +53,7 @@ K_MSGQ_DEFINE(head_q, sizeof(struct head_frame), CONFIG_MESHTASTIC_ATTACHMENT_HE
 
 static void head_work_fn(struct k_work *work);
 static K_WORK_DEFINE(head_work, head_work_fn);
+static void head_dial_brain(uint32_t brain);
 /* The STATUS timer ticks on the system queue; the send itself runs where the
  * GATT write may block (head_submit), like every other envelope. */
 static void head_status_fn(struct k_work *work);
