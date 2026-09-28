@@ -39,6 +39,9 @@
 
 #include <zephyr/sys/byteorder.h>
 
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+#include "meshtastic_attach_bearer.h"
+#endif
 #include "meshtastic_backoff.h"
 #include "meshtastic_ble_peer.h"
 #include "meshtastic_ble_registry.h"
