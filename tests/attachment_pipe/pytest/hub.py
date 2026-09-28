@@ -21,6 +21,8 @@ import tempfile
 import threading
 import time
 
+from meshwire import us_tuning
+
 ENV, HELLO, LINK, RF, CMD, EVENT = range(6)
 AUTH_NONE, AUTH_PHYSICAL, AUTH_ENCRYPTED = range(3)
 
@@ -209,8 +211,14 @@ class Hub:
             raise KeyError(f"{node:08x} is not connected to the hub")
         c.send(frame(LINK, peer, struct.pack("<BBBH", int(up), auth, 1, rtt_ms)))
 
-    def rf(self, node, preset, rssi, snr, wire):
-        self.nodes[node].send(frame(RF, 0, struct.pack("<Bhb", preset, rssi, snr) + wire))
+    def rf(self, node, preset, rssi, snr, wire, tuning=None):
+        """@p node's radio hears @p wire, sent on @p tuning (freq_hz, sf,
+        bw_khz): by default where a stock node on @p preset transmits, worked
+        out here and not by the firmware. A radio tuned anywhere else does not
+        hear it."""
+        freq, sf, bw = tuning or us_tuning(preset)
+        hdr = struct.pack("<BhbIBH", preset, rssi, snr, freq, sf, bw)
+        self.nodes[node].send(frame(RF, 0, hdr + wire))
 
     def env_from(self, fake_peer, node, env):
         """An envelope to @p node claiming to come from @p fake_peer (no hub
