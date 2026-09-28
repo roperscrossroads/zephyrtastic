@@ -26,6 +26,8 @@
 #include "meshtastic_attachment_codec.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
+#include "meshtastic_neighborinfo.h"
+#include <zephyr/meshtastic/nodedb.h>
 #include "meshtastic_packet.h"
 #include "meshtastic_preset.h"
 #include "meshtastic_sched.h"
@@ -477,6 +479,93 @@ ZTEST(attachment, test_hostile_envelopes_from_an_admitted_head)
 	(void)k_sem_take(&rx.sem, K_MSEC(300));
 	zassert_false(relayed_within(FAR_NODE_ID, 0x2203U, 500), "never relayed on our radio");
 	ARG_UNUSED(h);
+}
+
+/* The choreography upstream's NextHopRouter demands before a route is learned
+ * (meshtastic_routing_learn_next_hop): we send a unicast; we overhear a
+ * neighbour relay it (our own frame back, with its relay byte); a reply to
+ * that packet (request_id = our id) arrives via the same relayer, who resolves
+ * to one known node. Then next_hop(from) = that relayer. @p via_head delivers
+ * the reply through a head instead of our radio. */
+static void learn_choreography(uint32_t far, bool via_head)
+{
+	struct lora_sim_frame tx;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	uint32_t our_id;
+	const uint8_t relayer = (uint8_t)(far & 0xFFU);
+	struct meshtastic_packet reply = {
+		.from = far,
+		.to = TEST_NODE_ID,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"re",
+		.payload_len = 2U,
+		.hop_limit = 2U,
+		.hop_start = 3U,
+		.channel_index = 0U,
+	};
+
+	/* 1. our unicast leaves on the air */
+	zassert_ok(meshtastic_send_text(far, "q"), "send");
+	zassert_ok(lora_sim_take_tx(lora_dev, &tx, K_SECONDS(3)), "our TX");
+	our_id = sys_le32_to_cpu(((const struct meshtastic_wire_header *)tx.data)->id);
+	/* 2. a neighbour relays it: we overhear our own frame with its relay byte */
+	memcpy(wire, tx.data, tx.len);
+	((struct meshtastic_wire_header *)wire)->relay_node = relayer;
+	set_hop_limit(wire, 2U);
+	zassert_ok(lora_sim_inject(lora_dev, wire, tx.len, -60, 8), "echo");
+	k_sleep(K_MSEC(200));
+	/* 3. the reply, correlated to our packet, via the same relayer */
+	reply.id = our_id ^ 0x5A5A0000U;
+	reply.request_id = our_id;
+	zassert_ok(meshtastic_build_wire_packet(&reply, wire, &len), "build reply");
+	((struct meshtastic_wire_header *)wire)->relay_node = relayer;
+	if (via_head) {
+		zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -60, 8, wire, len), "via head");
+	} else {
+		zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -60, 8), "via our radio");
+	}
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "reply delivered");
+	k_sleep(K_MSEC(100));
+}
+
+/* B10 (review F5, SCOPE E1): a next hop is learned only from our own radio.
+ * The relay byte on a frame a head heard names a neighbour on the head's
+ * preset; a DM we later sent our radio with that next-hop byte would be
+ * ignored by everyone on ours. Same choreography twice: the reply through a
+ * head teaches nothing, through our radio it teaches the route. */
+ZTEST(attachment, test_next_hop_is_learned_from_the_local_radio_only)
+{
+	const uint32_t far_a = 0x0D0D0D21U; /* low bytes distinct: unique relayers */
+	const uint32_t far_b = 0x0D0D0D22U;
+
+	learn_choreography(far_a, true);
+	zassert_equal(meshtastic_nodedb_get_next_hop(far_a), 0U, "nothing learned from a head");
+
+	learn_choreography(far_b, false);
+	zassert_equal(meshtastic_nodedb_get_next_hop(far_b), (uint8_t)(far_b & 0xFFU),
+		      "learned from our own radio");
+}
+
+/* B11 (SCOPE E2): NeighborInfo's table is per local radio. A head's frame
+ * with hop_start == hop_limit is the HEAD's neighbour, not ours. */
+ZTEST(attachment, test_neighbors_are_the_local_radios_only)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+
+	meshtastic_neighborinfo_reset();
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2401U, "hi", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -60, 8, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	k_sleep(K_MSEC(100)); /* module dispatch runs after the delivery callback */
+	zassert_equal(meshtastic_neighborinfo_count(), 0U, "a head's neighbour is not ours");
+
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2402U, "hi", wire, &len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -60, 8));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	k_sleep(K_MSEC(100));
+	zassert_equal(meshtastic_neighborinfo_count(), 1U, "heard on our radio: a neighbour");
 }
 
 /* T2b: two heads hear the same frame -- delivered once (the dup cache is keyed

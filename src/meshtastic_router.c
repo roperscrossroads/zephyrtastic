@@ -758,6 +758,7 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 	ret = meshtastic_try_decode_wire_packet_on(buf, len, rssi, snr, meta->preset, &packet,
 						   payload, sizeof(payload), &decoded, &fail_reason,
 						   &rx_mesh);
+	packet.rx_attach = meta->attach;
 	if (ret < 0) {
 		LOG_DBG("RX header parse failed (%d)", ret);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
@@ -1010,6 +1011,9 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		if (hdr != NULL) {
 			materialized.channel = hdr->channel;
 		}
+		/* The MeshPacket has no notion of which of our radios heard it;
+		 * the flat struct does. Carry it across (SCOPE E1/E2). */
+		materialized.rx_attach = (packet != NULL) ? packet->rx_attach : 0U;
 		pkt = &materialized;
 	}
 
@@ -1130,8 +1134,10 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		 * source entry, so a learned next hop has somewhere to land.
 		 * Phase 4b: pass rx_mesh (NULL on the public inject/test path -> struct
 		 * fallback inside). LoRa only: a bearer frame's relay_node never rode
-		 * the air and says nothing about RF topology. */
-		if (rf) {
+		 * the air and says nothing about RF topology. And only OUR radio's
+		 * air: a next hop learned through a head is a neighbour on the
+		 * head's preset, which our radio cannot reach (SCOPE E1). */
+		if (rf && pkt->rx_attach == 0U) {
 			meshtastic_routing_learn_next_hop(pkt, decoded_mesh);
 		}
 	} else if (hdr != NULL) {

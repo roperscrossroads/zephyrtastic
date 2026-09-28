@@ -370,6 +370,12 @@ static void neighborinfo_on_packet(const struct meshtastic_packet *packet,
 	    !heard_directly(packet, mesh)) {
 		return;
 	}
+	/* Heard by one of our radio heads, not by this radio: a neighbour of the
+	 * head on the head's preset, which we would then broadcast as ours on a
+	 * preset where it is not (SCOPE E2). The table is per local radio. */
+	if (packet->rx_attach != 0U) {
+		return;
+	}
 
 	if (portnum == MESHTASTIC_PORT_NEIGHBORINFO) {
 		meshtastic_NeighborInfo np = meshtastic_NeighborInfo_init_zero;

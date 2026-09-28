@@ -222,6 +222,12 @@ struct meshtastic_packet {
 	uint8_t hop_limit;
 	/** Initial hop limit. */
 	uint8_t hop_start;
+	/**
+	 * The attachment this frame was heard on: 0 = this board's own radio, else
+	 * a radio head's id in the brain's table. What a frame teaches about RF
+	 * topology (next hops, neighbours) is true for THAT radio only.
+	 */
+	uint8_t rx_attach;
 	/** On-air channel hash from the wire header. */
 	uint8_t channel;
 	/**
