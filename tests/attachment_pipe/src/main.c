@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include <zephyr/device.h>
+#include <zephyr/drivers/lora.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 
@@ -44,22 +45,15 @@ static uint32_t env_hex(const char *name, uint32_t dflt)
 	return (v != NULL) ? (uint32_t)strtoul(v, NULL, 16) : dflt;
 }
 
-/* The radio hears a frame the hub played. The sim radio delivers only what is
- * on its tuning, so a frame on another preset is played off-frequency: this
- * radio does not hear it, as on air. */
-static void on_rf(uint8_t preset, int16_t rssi, int8_t snr, const uint8_t *wire, size_t len)
+/* A frame on the air, at the tuning the hub worked out for its preset. The sim
+ * radio delivers only on an exact frequency/SF/bandwidth match, so an image
+ * tuned anywhere else -- a wrong slot, a wrong modem -- does not hear it, as on
+ * the bench (lora_sim compares the bandwidth as a uint8_t, hence the cast). */
+static void on_rf(const struct attach_pipe_rf *rf, const uint8_t *wire, size_t len)
 {
-	uint32_t freq;
-	uint8_t sf;
-	uint8_t bw;
-
-	if (lora_sim_get_tuning(lora_dev, &freq, &sf, &bw) != 0) {
-		return;
-	}
-	if (preset != (uint8_t)mt.modem_preset) {
-		freq += 1000000U;
-	}
-	(void)lora_sim_inject_on(lora_dev, freq, sf, bw, wire, (uint8_t)len, rssi, snr);
+	(void)lora_sim_inject_on(lora_dev, rf->freq_hz, rf->sf,
+				 (uint8_t)(enum lora_signal_bandwidth)rf->bw_khz, wire, (uint8_t)len,
+				 rf->rssi, rf->snr);
 }
 
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)

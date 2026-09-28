@@ -67,3 +67,29 @@ ENV_RX_FRAME, ENV_TX_FRAME, ENV_TX_RESULT, ENV_STATUS, ENV_SET_PRESET = 1, 2, 3,
 
 def env_rx_frame(preset, rssi, snr, wire, rx_ms=0, flags=0):
     return struct.pack("<BBhbIB", ENV_RX_FRAME, preset, rssi, snr, rx_ms, flags) + wire
+
+
+# ---- where a stock node on a preset transmits (US, standard profile) ---------
+# meshtastic_region_presets.c / upstream RadioInterface::applyModemConfig:
+# slot = djb2(channel name) % num_slots, an unnamed channel named after its
+# preset; frequency = start + bw/2 + slot * bw (no spacing or padding in US).
+
+PRESET_MODEM = {LONG_FAST: (11, 250), MEDIUM_FAST: (9, 250), SHORT_TURBO: (7, 500)}
+US_START_HZ, US_END_HZ = 902_000_000, 928_000_000
+
+
+def djb2(s):
+    h = 5381
+    for c in s.encode():
+        h = (h * 33 + c) & 0xFFFFFFFF
+    return h
+
+
+def us_tuning(preset, channel_name=None):
+    """(freq_hz, sf, bw_khz) of a node on @p preset whose primary channel is
+    @p channel_name (None: unnamed, i.e. named after the preset)."""
+    sf, bw_khz = PRESET_MODEM[preset]
+    width = bw_khz * 1000
+    num_slots = (US_END_HZ - US_START_HZ + width // 2) // width
+    slot = djb2(channel_name or PRESET_NAMES[preset]) % num_slots
+    return US_START_HZ + width // 2 + slot * width, sf, bw_khz

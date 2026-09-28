@@ -16,7 +16,8 @@
  *
  *   HELLO  image -> hub   peer = this image's node id; payload [role]
  *   LINK   hub -> image   the link to peer changed: [up][auth][takes_env][rtt_ms u16]
- *   RF     hub -> image   the radio hears a frame: [preset][rssi i16][snr i8][wire]
+ *   RF     hub -> image   a frame on the air: [preset][rssi i16][snr i8]
+ *                         [freq_hz u32][sf u8][bw_khz u16][wire]
  *   CMD    hub -> image   a text command for the application
  *   EVENT  image -> hub   a text line the test reads
  *
@@ -46,9 +47,18 @@ enum attach_pipe_role {
 	ATTACH_PIPE_ROLE_HEAD = 2,
 };
 
-/* The radio hears @p wire on @p preset with this signal (hub RF frame). */
-typedef void (*attach_pipe_rf_cb)(uint8_t preset, int16_t rssi, int8_t snr, const uint8_t *wire,
-				  size_t len);
+/* A frame on the air (hub RF frame): sent on @p preset at this tuning, heard
+ * with this signal if the radio is tuned there. The hub works the tuning out
+ * itself, so a radio on the wrong frequency does not hear it. */
+struct attach_pipe_rf {
+	uint8_t preset;
+	int16_t rssi;
+	int8_t snr;
+	uint32_t freq_hz;
+	uint8_t sf;
+	uint16_t bw_khz;
+};
+typedef void (*attach_pipe_rf_cb)(const struct attach_pipe_rf *rf, const uint8_t *wire, size_t len);
 /* A text command from the hub, NUL-terminated. */
 typedef void (*attach_pipe_cmd_cb)(const char *cmd);
 

@@ -10,7 +10,7 @@ import time
 
 from conftest import BRAIN, HEAD1, HEAD2, start_brain, start_head
 from hub import AUTH_ENCRYPTED, AUTH_NONE
-from meshwire import MEDIUM_FAST, SHORT_TURBO, airframe, env_rx_frame
+from meshwire import MEDIUM_FAST, SHORT_TURBO, airframe, env_rx_frame, us_tuning
 
 FAR = 0x0D0D0D0D
 RX = r"^rx from=0d0d0d0d "
@@ -163,3 +163,33 @@ def test_x5_a_stranger_on_the_link_is_refused(hub, images):
     hub.env_from(stranger, BRAIN, env_rx_frame(MEDIUM_FAST, -40, 12,
                                                airframe(FAR, 0x5002, "x5-allowed")))
     hub.wait_event(BRAIN, RX + r".*text=x5-allowed$", 5, since=m)
+
+
+def head_heard(hub, node):
+    line = hub.query(node, "stats", r"^head ")[-1]
+    return int(line.split("heard=")[1].split()[0])
+
+
+def test_x8_a_head_listens_where_its_preset_transmits(hub, images):
+    """A head on MediumFast hears a frame on the frequency a stock MediumFast
+    node uses (913.125 MHz, the hub's own arithmetic), and the brain decodes
+    it. Twin: the same modem on the slot a channel NAMED "LongFast" would pick
+    (906.875 MHz) is not heard -- the bench bug where a head kept its old
+    channel name's slot and sat deaf (SCOPE B6)."""
+    start_brain(hub, images)
+    pair(hub, images)
+    wrong = (us_tuning(MEDIUM_FAST, "LongFast")[0], *us_tuning(MEDIUM_FAST)[1:])
+    assert wrong[0] != us_tuning(MEDIUM_FAST)[0]
+
+    before = head_heard(hub, HEAD1)
+    m = hub.mark(BRAIN)
+    hub.rf(HEAD1, MEDIUM_FAST, -70, 9, airframe(FAR, 0x8001, "x8-slot"))
+    hub.wait_event(BRAIN, RX + r".*text=x8-slot$", 5, since=m)
+    assert head_heard(hub, HEAD1) == before + 1
+
+    before = head_heard(hub, HEAD1)
+    m = hub.mark(BRAIN)
+    hub.rf(HEAD1, MEDIUM_FAST, -70, 9, airframe(FAR, 0x8002, "x8-wrong"), tuning=wrong)
+    time.sleep(1.5)
+    assert head_heard(hub, HEAD1) == before, "heard a frame off its preset's slot"
+    assert rx_lines(hub, m, "x8-wrong") == []

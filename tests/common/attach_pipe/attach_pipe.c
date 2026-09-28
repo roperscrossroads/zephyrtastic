@@ -171,8 +171,17 @@ static void on_frame(const uint8_t *body, size_t len)
 		on_link(peer, p, plen);
 		break;
 	case ATTACH_PIPE_RF:
-		if (plen > 4U && pipe.rf != NULL) {
-			pipe.rf(p[0], (int16_t)sys_get_le16(&p[1]), (int8_t)p[3], &p[4], plen - 4U);
+		if (plen > 11U && pipe.rf != NULL) {
+			const struct attach_pipe_rf rf = {
+				.preset = p[0],
+				.rssi = (int16_t)sys_get_le16(&p[1]),
+				.snr = (int8_t)p[3],
+				.freq_hz = sys_get_le32(&p[4]),
+				.sf = p[8],
+				.bw_khz = sys_get_le16(&p[9]),
+			};
+
+			pipe.rf(&rf, &p[11], plen - 11U);
 		}
 		break;
 	case ATTACH_PIPE_CMD:
