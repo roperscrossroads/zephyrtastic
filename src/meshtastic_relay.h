@@ -100,6 +100,12 @@ void meshtastic_relay_ear_on_rx(const struct meshtastic_packet *pkt, const uint8
 /* The send seam. The default forwards over the BLE peer link
  * (meshtastic_ble_peer_frame_send_to); a test overrides it. */
 int meshtastic_relay_ear_send(uint32_t peer, const uint8_t *wire, size_t wire_len);
+/* The same seam for a peer that takes attachment envelopes (a brain,
+ * ATTACHMENT-DESIGN P0): the frame wrapped with this radio's signal and preset,
+ * sent as frame kind ATTACH. Whether the peer takes them is its beat's ATTACH
+ * flag; both are __weak so a test can decide. */
+int meshtastic_relay_ear_send_env(uint32_t peer, const uint8_t *env, size_t env_len);
+bool meshtastic_relay_ear_peer_takes_env(uint32_t peer);
 
 #ifdef __cplusplus
 }

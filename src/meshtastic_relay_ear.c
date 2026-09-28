@@ -28,14 +28,22 @@
 
 #include "meshtastic_core.h"
 #include "meshtastic_relay.h"
+#include "meshtastic_attachment_codec.h"
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 #include "meshtastic_ble_peer.h"
+#include "meshtastic_ble_peer_codec.h"
 #endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 struct ear_frame {
 	uint16_t len;
+	/* What this radio saw, for a peer that takes attachment envelopes
+	 * (ATTACHMENT-DESIGN P0): the same frame, plus its signal and preset. */
+	int16_t rssi;
+	int8_t snr;
+	uint8_t preset;
+	uint32_t rx_ms;
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 };
 
@@ -66,6 +74,62 @@ __weak int meshtastic_relay_ear_send(uint32_t peer, const uint8_t *wire, size_t 
 #endif
 }
 
+/* The same seam for an attachment envelope (frame kind ATTACH). */
+__weak int meshtastic_relay_ear_send_env(uint32_t peer, const uint8_t *env, size_t env_len)
+{
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+	return meshtastic_ble_peer_frame_send_to_kind(peer, env, env_len,
+						      MESHTASTIC_BLE_PEER_KIND_ATTACH);
+#else
+	ARG_UNUSED(peer);
+	ARG_UNUSED(env);
+	ARG_UNUSED(env_len);
+	return -ENOTSUP;
+#endif
+}
+
+/* Does the peer take attachment envelopes? Its beats say (FLAG_ATTACH). Without
+ * a BLE stack there are no beats: the test seam decides. */
+__weak bool meshtastic_relay_ear_peer_takes_env(uint32_t peer)
+{
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+	uint8_t flags;
+
+	return meshtastic_ble_peer_node_flags(peer, &flags) &&
+	       (flags & MESHTASTIC_BLE_PEER_FLAG_ATTACH) != 0U;
+#else
+	ARG_UNUSED(peer);
+	return false;
+#endif
+}
+
+static int ear_forward(uint32_t peer, const struct ear_frame *f)
+{
+	if (meshtastic_relay_ear_peer_takes_env(peer)) {
+		/* A brain (ATTACHMENT-DESIGN P0): the frame with the signal this
+		 * radio saw, so the brain treats it as heard on THIS preset by THIS
+		 * radio -- an RF frame, not a bearer frame. */
+		static uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX]; /* one worker */
+		const struct meshtastic_attachment_rx_frame m = {
+			.preset = f->preset,
+			.rssi = f->rssi,
+			.snr = f->snr,
+			.rx_ms = f->rx_ms,
+			.flags = 0U,
+			.wire = f->wire,
+			.wire_len = f->len,
+		};
+		int len = meshtastic_attachment_encode_rx_frame(&m, env, sizeof(env));
+
+		if (len < 0) {
+			return len;
+		}
+		return meshtastic_relay_ear_send_env(peer, env, (size_t)len);
+	}
+	/* The receiving half of a relay: the bare frame, as before. */
+	return meshtastic_relay_ear_send(peer, f->wire, f->len);
+}
+
 static void ear_work_fn(struct k_work *work)
 {
 	static struct ear_frame f; /* one worker: static keeps it off the stack */
@@ -80,7 +144,7 @@ static void ear_work_fn(struct k_work *work)
 		peer = ear.peer;
 		k_mutex_unlock(&ear_lock);
 
-		ret = (peer == 0U) ? -EHOSTUNREACH : meshtastic_relay_ear_send(peer, f.wire, f.len);
+		ret = (peer == 0U) ? -EHOSTUNREACH : ear_forward(peer, &f);
 
 		k_mutex_lock(&ear_lock, K_FOREVER);
 		if (ret == 0) {
@@ -146,6 +210,10 @@ void meshtastic_relay_ear_on_rx(const struct meshtastic_packet *pkt, const uint8
 		ear.used++;
 	}
 	f.len = (uint16_t)wire_len;
+	f.rssi = pkt->rssi;
+	f.snr = pkt->snr;
+	f.preset = (uint8_t)mt.modem_preset;
+	f.rx_ms = (uint32_t)k_uptime_get();
 	memcpy(f.wire, wire, wire_len);
 	if (k_msgq_put(&ear_q, &f, K_NO_WAIT) != 0) {
 		ear.stats.queue_full++;
