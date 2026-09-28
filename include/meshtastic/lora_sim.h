@@ -127,7 +127,40 @@ int lora_sim_rx_activity_clear(const struct device *dev);
 /** @brief Silently drop the next @p n transmissions (retransmit/reliability). */
 void lora_sim_drop_next(const struct device *dev, unsigned int n);
 
-/** @brief Clear the capture queue, drop counter and busy state (between tests). */
+/**
+ * @brief Co-site desense model (H18, attachment measurement R3).
+ *
+ * Declares @p aggressor's antenna to be centimetres from @p victim's: while the
+ * aggressor is mid-transmission (its channel modelled busy — a real
+ * lora_send(), or lora_sim_set_busy()), the victim's front end is compressed
+ * and an injected frame is LOST (-ECANCELED, counted by
+ * lora_sim_rx_blanked()), regardless of either radio's tuning. This models the
+ * physics the sim's ideal preset orthogonality deliberately omits: a +22 dBm
+ * transmitter 10-30 cm away puts roughly -3..+10 dBm into the victim's LNA,
+ * orders of magnitude past any blocking spec, so "different preset" does not
+ * save it.
+ *
+ * The relationship is DIRECTIONAL; pair both ways for the physical case of two
+ * co-sited radios (that is deadlock-free by construction). NULL clears.
+ * lora_sim_reset() clears the pairing and the counter.
+ *
+ * Approximation: the blanking check runs at the instant of delivery, and an
+ * injected frame is instantaneous — a frame whose airtime would only PARTIALLY
+ * overlap the aggressor's TX is judged solely by its delivery instant. The
+ * hardware measurement (the H18 bench test) is what calibrates how much real
+ * blanking a given spacing/power produces; this model answers what a given
+ * blanking fraction COSTS.
+ *
+ * @return 0, or -EINVAL if @p aggressor is @p victim (half-duplex already
+ *         models self-TX deafness).
+ */
+int lora_sim_set_cosite(const struct device *victim, const struct device *aggressor);
+
+/** @brief Frames lost to the co-sited aggressor since the last reset. */
+uint32_t lora_sim_rx_blanked(const struct device *dev);
+
+/** @brief Clear the capture queue, drop counter, busy state, co-site pairing
+ *         and blanked counter (between tests). */
 void lora_sim_reset(const struct device *dev);
 
 #ifdef __cplusplus

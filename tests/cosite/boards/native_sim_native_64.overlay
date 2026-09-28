@@ -1,0 +1,21 @@
+/* SPDX-License-Identifier: GPL-3.0
+ *
+ * Two independent sim radios: the aggressor transmits, the victim listens.
+ * Physically: two SX1262 boards centimetres apart on one mast (a supernode's
+ * radio heads, a brain and its head, a relay pair in one enclosure).
+ */
+/ {
+	aliases {
+		lora0 = &lora_sim0;
+	};
+
+	lora_sim0: lora-sim-0 {
+		compatible = "meshtastic,lora-sim";
+		status = "okay";
+	};
+
+	lora_sim1: lora-sim-1 {
+		compatible = "meshtastic,lora-sim";
+		status = "okay";
+	};
+};

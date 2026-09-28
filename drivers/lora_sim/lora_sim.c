@@ -44,6 +44,14 @@ struct lora_sim_data {
 	bool act_preamble;
 	bool act_header;
 
+	/* Co-site desense model (H18 / attachment R3): while @p cosite_aggressor
+	 * is mid-transmission (its channel modelled busy), THIS radio's front end
+	 * is compressed and an injected frame is lost, however different the two
+	 * radios' tunings are. NULL = far apart, no interaction (the default,
+	 * which is also what every existing test gets). */
+	const struct device *cosite_aggressor;
+	uint32_t rx_blanked; /* frames lost to the aggressor, since reset */
+
 	struct k_msgq txq;
 	char          txq_buf[CONFIG_LORA_SIM_TX_QUEUE_DEPTH *
 			      sizeof(struct lora_sim_frame)];
@@ -256,9 +264,12 @@ static int lora_sim_inject_common(const struct device *dev, bool match_tuning, u
 		return -EMSGSIZE;
 	}
 
+	const struct device *aggressor;
+
 	k_mutex_lock(&d->lock, K_FOREVER);
 	cb   = d->rx_cb;
 	user = d->rx_user;
+	aggressor = d->cosite_aggressor;
 	if (match_tuning) {
 		/* An unconfigured radio hears nothing: lora_config() has not run, so
 		 * there is no frequency to be on. */
@@ -274,6 +285,31 @@ static int lora_sim_inject_common(const struct device *dev, bool match_tuning, u
 
 	if (!tuned_here) {
 		return -ENOTCONN; /* on the air, but not on OUR air */
+	}
+
+	if (aggressor != NULL) {
+		/* Co-site desense (H18): a transmitter centimetres away drives the
+		 * LNA into compression whatever frequency it is on, so while the
+		 * aggressor's channel is modelled busy this receiver hears nothing.
+		 * The check is at the instant of delivery; a frame whose airtime
+		 * merely OVERLAPS the aggressor's TX is delivered or lost by where
+		 * its end (the inject instant) falls, an approximation noted in the
+		 * header. The aggressor's lock is taken in its own critical section,
+		 * never nested inside ours: two radios may be aggressors of each
+		 * other (the physical case), and nesting would deadlock. */
+		struct lora_sim_data *a = aggressor->data;
+		bool blanked;
+
+		k_mutex_lock(&a->lock, K_FOREVER);
+		blanked = k_uptime_get() < a->busy_until_ms;
+		k_mutex_unlock(&a->lock);
+
+		if (blanked) {
+			k_mutex_lock(&d->lock, K_FOREVER);
+			d->rx_blanked++;
+			k_mutex_unlock(&d->lock);
+			return -ECANCELED; /* front end compressed: never heard */
+		}
 	}
 
 	/* Hand the callback a private, mutable copy, exactly as the real driver
@@ -420,16 +456,42 @@ void lora_sim_drop_next(const struct device *dev, unsigned int n)
 	k_mutex_unlock(&d->lock);
 }
 
+int lora_sim_set_cosite(const struct device *victim, const struct device *aggressor)
+{
+	struct lora_sim_data *d = victim->data;
+
+	if (aggressor == victim) {
+		return -EINVAL; /* half-duplex already models self-TX deafness */
+	}
+	k_mutex_lock(&d->lock, K_FOREVER);
+	d->cosite_aggressor = aggressor;
+	k_mutex_unlock(&d->lock);
+	return 0;
+}
+
+uint32_t lora_sim_rx_blanked(const struct device *dev)
+{
+	struct lora_sim_data *d = dev->data;
+	uint32_t n;
+
+	k_mutex_lock(&d->lock, K_FOREVER);
+	n = d->rx_blanked;
+	k_mutex_unlock(&d->lock);
+	return n;
+}
+
 void lora_sim_reset(const struct device *dev)
 {
 	struct lora_sim_data *d = dev->data;
 
 	k_mutex_lock(&d->lock, K_FOREVER);
 	k_msgq_purge(&d->txq);
-	d->drop_next     = 0U;
-	d->busy_until_ms = 0;
-	d->act_preamble  = false;
-	d->act_header    = false;
+	d->drop_next        = 0U;
+	d->busy_until_ms    = 0;
+	d->act_preamble     = false;
+	d->act_header       = false;
+	d->cosite_aggressor = NULL;
+	d->rx_blanked       = 0U;
 	k_mutex_unlock(&d->lock);
 }
 
