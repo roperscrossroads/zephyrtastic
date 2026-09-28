@@ -401,14 +401,54 @@ bool meshtastic_ble_peer_frame_notify_ready(void)
 	return peer.frame_notify_enabled;
 }
 
+/* The largest chunk one ATT write or notification carries on this link:
+ * the live MTU less the 3-byte ATT header, never below the guaranteed 20
+ * (an old peer that never exchanged, or one that refused) and never above
+ * what CONFIG_BT_L2CAP_TX_MTU lets a buffer hold. Measured 2026-09-28
+ * (ATTACHMENT-STATUS §2c): at 20-byte chunks the link cost ~14 ms per chunk
+ * over one connection interval -- 12 / 73 / 144 ms p50 at 52 / 122 / 223 B
+ * -- so the chunk size IS the latency for anything but the smallest frame.
+ * The reassembler takes any chunk length, so a mixed fleet keeps working. */
+#define PEER_CHUNK_MAX (CONFIG_BT_L2CAP_TX_MTU - 3U)
+BUILD_ASSERT(PEER_CHUNK_MAX >= MESHTASTIC_BLE_PEER_CHUNK_MTU23);
+
+static uint16_t peer_chunk_size(struct bt_conn *conn)
+{
+	uint16_t mtu = bt_gatt_get_mtu(conn);
+
+	if (mtu < MESHTASTIC_BLE_PEER_CHUNK_MTU23 + 3U) {
+		return MESHTASTIC_BLE_PEER_CHUNK_MTU23;
+	}
+	return MIN((uint16_t)(mtu - 3U), (uint16_t)PEER_CHUNK_MAX);
+}
+
+#if defined(CONFIG_BT_GATT_CLIENT)
+/* One exchange per connection, requested by the central once its frame
+ * channel is up (past the bring-up watchdog, which clears at the beat
+ * stage). Per-conn params, as the phone link keeps them: the request is in
+ * flight until the callback, and two links must not share the struct. */
+static struct bt_gatt_exchange_params peer_mtu_exchange[CONFIG_BT_MAX_CONN];
+
+static void peer_mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
+				 struct bt_gatt_exchange_params *params)
+{
+	ARG_UNUSED(params);
+
+	if (err != 0U) {
+		LOG_WRN("BLE peer MTU exchange failed: 0x%02x (chunks stay at %u)", err,
+			(unsigned int)MESHTASTIC_BLE_PEER_CHUNK_MTU23);
+		return;
+	}
+	LOG_INF("BLE peer MTU %u: chunks of %u", bt_gatt_get_mtu(conn),
+		(unsigned int)peer_chunk_size(conn));
+}
+#endif
+
 static int frame_notify_kind(struct bt_conn *conn, const uint8_t *frame, size_t len,
 			     uint8_t kind)
 {
-	/* Chunk at the guaranteed minimum ATT payload rather than the live
-	 * MTU: correct on every link by construction (the codec's whole
-	 * point), merely more chunks when an MTU exchange has succeeded.
-	 * Per-conn MTU lookup is an optimization to measure at M3. */
-	uint8_t buf[MESHTASTIC_BLE_PEER_CHUNK_MTU23];
+	uint8_t buf[PEER_CHUNK_MAX];
+	const uint16_t chunk = peer_chunk_size(conn);
 	struct meshtastic_ble_peer_chunker ck;
 	int n;
 	int ret;
@@ -422,7 +462,7 @@ static int frame_notify_kind(struct bt_conn *conn, const uint8_t *frame, size_t 
 		return ret;
 	}
 
-	while ((n = meshtastic_ble_peer_chunker_next(&ck, buf, sizeof(buf))) > 0) {
+	while ((n = meshtastic_ble_peer_chunker_next(&ck, buf, chunk)) > 0) {
 		ret = bt_gatt_notify(conn,
 				     &meshtastic_peer_svc.attrs[MESHTASTIC_PEER_ATTR_FRAME_VALUE],
 				     buf, (uint16_t)n);
@@ -1081,6 +1121,19 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 			central.frame_ready = true;
 			k_mutex_unlock(&peer_lock);
 			LOG_INF("BLE peer frame channel to 0x%08x ready", central.conn_node);
+			{
+				/* Ask for the MTU now: the frame channel is what carries
+				 * frames, and their latency is the chunk count. */
+				struct bt_gatt_exchange_params *mtu =
+					&peer_mtu_exchange[bt_conn_index(conn)];
+
+				mtu->func = peer_mtu_exchange_cb;
+				err = bt_gatt_exchange_mtu(conn, mtu);
+				if (err != 0) {
+					LOG_WRN("BLE peer MTU exchange request to 0x%08x failed (%d)",
+						central.conn_node, err);
+				}
+			}
 #if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
 			/* The attachment bearer trusts an encrypted link only
 			 * (ATTACHMENT-SCOPE C1/C8): ask for L2 now. A bonded pair
@@ -1478,10 +1531,11 @@ bool meshtastic_ble_peer_seen_get(unsigned int i, struct meshtastic_ble_peer_see
  * passed; conn/handle are re-read under the lock per chunk-loop entry. */
 static int central_send_frame(const uint8_t *frame, size_t len, uint8_t kind)
 {
-	uint8_t buf[MESHTASTIC_BLE_PEER_CHUNK_MTU23];
+	uint8_t buf[PEER_CHUNK_MAX];
 	struct meshtastic_ble_peer_chunker ck;
 	struct bt_conn *conn;
 	uint16_t handle;
+	uint16_t chunk;
 	int n;
 	int ret;
 
@@ -1493,6 +1547,7 @@ static int central_send_frame(const uint8_t *frame, size_t len, uint8_t kind)
 	conn = bt_conn_ref(central.conn);
 	handle = central.frame_value_handle;
 	k_mutex_unlock(&peer_lock);
+	chunk = peer_chunk_size(conn);
 
 	ret = meshtastic_ble_peer_chunker_start_kind(&ck, frame, len, kind);
 	if (ret < 0) {
@@ -1500,7 +1555,7 @@ static int central_send_frame(const uint8_t *frame, size_t len, uint8_t kind)
 		return ret;
 	}
 
-	while ((n = meshtastic_ble_peer_chunker_next(&ck, buf, sizeof(buf))) > 0) {
+	while ((n = meshtastic_ble_peer_chunker_next(&ck, buf, chunk)) > 0) {
 		ret = bt_gatt_write_without_response(conn, handle, buf, (uint16_t)n, false);
 		if (ret != 0) {
 			break;
