@@ -125,6 +125,17 @@ int meshtastic_attach_bearer_rx(const struct meshtastic_attach_bearer *b, uint32
 #endif
 }
 
+void meshtastic_attach_bearer_link_up(const struct meshtastic_attach_bearer *b, uint32_t peer)
+{
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+	ARG_UNUSED(b);
+	meshtastic_attachment_head_link_up(peer);
+#else
+	ARG_UNUSED(b);
+	ARG_UNUSED(peer);
+#endif
+}
+
 void meshtastic_attach_bearer_link_down(const struct meshtastic_attach_bearer *b, uint32_t peer)
 {
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)

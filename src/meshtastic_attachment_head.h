@@ -52,6 +52,10 @@ int meshtastic_attachment_head_on_envelope(uint32_t node, const uint8_t *env, si
 int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_bearer *b,
 						uint32_t node, const uint8_t *env, size_t len);
 
+/* The bearer's link to @p peer came up: if it is the brain, a STATUS goes out
+ * at once (the boot-time one is lost before any link exists). */
+void meshtastic_attachment_head_link_up(uint32_t peer);
+
 /* The brain's link identity (its node number); 0 = none, nothing forwarded.
  * Saved with MESHTASTIC_SETTINGS (mtattach/brain). */
 void meshtastic_attachment_head_set_brain(uint32_t node);

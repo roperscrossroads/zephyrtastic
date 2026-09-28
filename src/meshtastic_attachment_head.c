@@ -158,12 +158,53 @@ static void head_status_fn(struct k_work *work)
 	k_mutex_unlock(&head_lock);
 }
 
+/* Is the peer link up to @p brain? If it is up to someone else (a target the
+ * link restored from its node days, a stale intent), drop it; if it is not up,
+ * dial. The tick asks this every period, so a head converges on its brain
+ * without an operator (ATTACHMENT-SCOPE C7; bench 2026-09-28: kit1 booted
+ * scanning for the node it last dialled as a node). */
+static void head_assert_dial(uint32_t brain)
+{
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+	struct meshtastic_ble_peer_link l;
+
+	if (brain == 0U) {
+		return;
+	}
+	meshtastic_ble_peer_link_get(&l);
+	if (l.connected && l.node_num == brain) {
+		return;
+	}
+	if (l.connected) {
+		LOG_INF("head: peer link is to 0x%08x, not the brain 0x%08x: dropping it",
+			l.node_num, brain);
+		(void)meshtastic_ble_peer_disconnect();
+	}
+	if (meshtastic_ble_peer_scan_target() != brain || !meshtastic_ble_peer_scan_armed()) {
+		head_dial_brain(brain);
+	}
+#else
+	ARG_UNUSED(brain);
+#endif
+}
+
 static void head_status_tick(struct k_work *work)
 {
 	ARG_UNUSED(work);
+	head_assert_dial(meshtastic_attachment_head_get_brain());
 	head_submit(&head_status_work);
 	(void)k_work_schedule(&head_status_timer,
 			      K_SECONDS(CONFIG_MESHTASTIC_ATTACHMENT_HEAD_STATUS_PERIOD_SEC));
+}
+
+void meshtastic_attachment_head_link_up(uint32_t peer)
+{
+	uint32_t brain = meshtastic_attachment_head_get_brain();
+
+	if (peer != 0U && peer == brain) {
+		/* Introduce ourselves now, not at the next tick (review X4). */
+		head_submit(&head_status_work);
+	}
 }
 
 void meshtastic_attachment_head_on_rx(const uint8_t *wire, uint16_t len, int16_t rssi, int8_t snr,
@@ -400,6 +441,7 @@ void meshtastic_attachment_head_start(void)
 	if (brain != 0U) {
 		head_dial_brain(brain);
 	}
-	(void)k_work_schedule(&head_status_timer,
-			      K_SECONDS(CONFIG_MESHTASTIC_ATTACHMENT_HEAD_STATUS_PERIOD_SEC));
+	/* The first tick comes soon: the peer link restores its own saved intent
+	 * after this runs, and the tick's head_assert_dial() puts the brain back. */
+	(void)k_work_schedule(&head_status_timer, K_SECONDS(5));
 }

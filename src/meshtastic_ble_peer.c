@@ -1093,6 +1093,8 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 						central.conn_node, sec);
 				}
 			}
+			meshtastic_attach_bearer_link_up(&meshtastic_attach_bearer_ble,
+							 central.conn_node);
 #endif
 		}
 		return BT_GATT_ITER_STOP;

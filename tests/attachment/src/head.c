@@ -290,6 +290,22 @@ ZTEST(attachment_head, test_a_head_originates_nothing)
 	zassert_equal(lora_sim_tx_pending(lora_dev), 0, "nothing on the air");
 }
 
+/* H7b (fix 11, review X4): the bearer's link-up to the brain sends STATUS at
+ * once -- the boot-time introduction is lost before any link exists. A
+ * link-up to anyone else sends nothing. */
+ZTEST(attachment_head, test_status_on_link_up_to_the_brain)
+{
+	struct meshtastic_attachment_msg msg;
+
+	meshtastic_attach_bearer_link_up(&test_bearer, STRANGER);
+	zassert_equal(k_sem_take(&sent.sem, K_MSEC(300)), -EAGAIN, "a stranger's link: nothing");
+	meshtastic_attach_bearer_link_up(&test_bearer, BRAIN_NODE);
+	zassert_ok(k_sem_take(&sent.sem, K_MSEC(500)), "the brain's link: STATUS at once");
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_STATUS);
+	zassert_equal(msg.u.status.brain, BRAIN_NODE);
+}
+
 /* H7: STATUS on the timer (5 s in this build), and on demand. */
 ZTEST(attachment_head, test_status_on_the_timer_and_on_demand)
 {

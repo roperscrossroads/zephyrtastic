@@ -63,6 +63,9 @@ bool meshtastic_attach_bearer_link_info(uint32_t peer, struct meshtastic_attach_
 int meshtastic_attach_bearer_rx(const struct meshtastic_attach_bearer *b, uint32_t peer,
 				const uint8_t *env, size_t len);
 
+/* A bearer's link to @p peer came up (envelopes can flow). A head introduces
+ * itself to its brain at once; a brain marks a known head up. */
+void meshtastic_attach_bearer_link_up(const struct meshtastic_attach_bearer *b, uint32_t peer);
 /* A bearer's link to @p peer went down. */
 void meshtastic_attach_bearer_link_down(const struct meshtastic_attach_bearer *b, uint32_t peer);
 
