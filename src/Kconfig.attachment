@@ -1,0 +1,41 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menu "Attachments: one brain, many radios (ATTACHMENT-DESIGN)"
+
+config MESHTASTIC_ATTACHMENT_CODEC
+	bool
+	default y if MESHTASTIC_ATTACHMENT_BRAIN || MESHTASTIC_ATTACHMENT_HEAD || MESHTASTIC_RELAY_EAR
+	help
+	  The envelope a radio head and its brain exchange (pure byte packing).
+	  Pulled in by anything that speaks it; not a user choice.
+
+config MESHTASTIC_ATTACHMENT_BRAIN
+	bool "This node is a brain: it hears through radio heads"
+	default n
+	help
+	  Accept attachment envelopes over the BLE peer link. A head's RX_FRAME
+	  enters the router as an RF frame tagged with the head's preset and
+	  signal; the node's identity, keys, NodeDB and modules stay exactly as
+	  they are. Costs a small table (MESHTASTIC_ATTACHMENT_MAX entries) and
+	  8 B per RX queue slot; the code is flash.
+
+config MESHTASTIC_ATTACHMENT_MAX
+	int "Radio heads a brain tracks (its own radio is not counted)"
+	depends on MESHTASTIC_ATTACHMENT_BRAIN
+	default 4
+	range 1 8
+	help
+	  A BLE peer link per head; the R8 has 3 connection slots in total.
+
+config MESHTASTIC_ATTACHMENT_HEAD
+	bool "This node is a keyless radio head"
+	depends on MESHTASTIC_BLE_PEER
+	default n
+	help
+	  (Phase 2.) The radio forwards every frame it hears, undecoded, with its
+	  RSSI/SNR and preset, to the brain over the peer link, and transmits
+	  frames the brain hands it. The image carries no channel keys, no PKI,
+	  no NodeDB and no config beyond its preset and its brain.
+
+endmenu

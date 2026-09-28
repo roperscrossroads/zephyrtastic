@@ -150,13 +150,16 @@ void meshtastic_ble_peer_rx_account(struct meshtastic_ble_peer_rx *st,
 	st->last = *beat;
 }
 
-int meshtastic_ble_peer_chunker_start(struct meshtastic_ble_peer_chunker *ck,
-				      const uint8_t *frame, size_t len)
+int meshtastic_ble_peer_chunker_start_kind(struct meshtastic_ble_peer_chunker *ck,
+					   const uint8_t *frame, size_t len, uint8_t kind)
 {
-	if (len == 0U) {
+	const size_t cap = (kind == MESHTASTIC_BLE_PEER_KIND_WIRE) ? MESHTASTIC_BLE_PEER_FRAME_MAX
+								    : MESHTASTIC_BLE_PEER_ENV_MAX;
+
+	if (len == 0U || kind > MESHTASTIC_BLE_PEER_KIND_MAX) {
 		return -EINVAL;
 	}
-	if (len > MESHTASTIC_BLE_PEER_FRAME_MAX) {
+	if (len > cap) {
 		return -EMSGSIZE;
 	}
 
@@ -164,8 +167,15 @@ int meshtastic_ble_peer_chunker_start(struct meshtastic_ble_peer_chunker *ck,
 	ck->len = (uint16_t)len;
 	ck->off = 0U;
 	ck->seq = 0U;
+	ck->kind = kind;
 	ck->first_sent = false;
 	return 0;
+}
+
+int meshtastic_ble_peer_chunker_start(struct meshtastic_ble_peer_chunker *ck,
+				      const uint8_t *frame, size_t len)
+{
+	return meshtastic_ble_peer_chunker_start_kind(ck, frame, len, MESHTASTIC_BLE_PEER_KIND_WIRE);
 }
 
 int meshtastic_ble_peer_chunker_next(struct meshtastic_ble_peer_chunker *ck,
@@ -185,8 +195,10 @@ int meshtastic_ble_peer_chunker_next(struct meshtastic_ble_peer_chunker *ck,
 
 	pos = MESHTASTIC_BLE_PEER_CHUNK_HDR_LEN;
 	if (first) {
+		/* 12-bit length LE, kind in the top nibble: a WIRE frame's prefix is
+		 * byte-identical to the pre-kind encoding (its high byte was 0). */
 		out[pos] = (uint8_t)(ck->len & 0xFFU);
-		out[pos + 1U] = (uint8_t)(ck->len >> 8);
+		out[pos + 1U] = (uint8_t)(((ck->len >> 8) & 0x0FU) | (uint8_t)(ck->kind << 4));
 		pos += 2U;
 	}
 	body_cap = out_size - pos;
@@ -254,7 +266,10 @@ int meshtastic_ble_peer_reasm_ingest(struct meshtastic_ble_peer_reasm *rs,
 			rs->rejected++;
 			return -EBADMSG;
 		}
-		declared = (uint16_t)body[0] | ((uint16_t)body[1] << 8);
+		uint8_t kind = body[1] >> 4;
+		size_t cap;
+
+		declared = (uint16_t)body[0] | ((uint16_t)(body[1] & 0x0FU) << 8);
 		body += 2U;
 		blen -= 2U;
 
@@ -262,7 +277,13 @@ int meshtastic_ble_peer_reasm_ingest(struct meshtastic_ble_peer_reasm *rs,
 			rs->rejected++;
 			return -EBADMSG;
 		}
-		if (declared > MESHTASTIC_BLE_PEER_FRAME_MAX) {
+		/* A WIRE frame is a Meshtastic airframe (<= 255 B); anything else
+		 * is an envelope around one. Before kinds existed the high byte was
+		 * the length's, so a pre-kind sender's frames land here as kind 0
+		 * with an unchanged limit. */
+		cap = (kind == MESHTASTIC_BLE_PEER_KIND_WIRE) ? MESHTASTIC_BLE_PEER_FRAME_MAX
+							       : MESHTASTIC_BLE_PEER_ENV_MAX;
+		if (declared > cap) {
 			rs->rejected++;
 			return -EMSGSIZE;
 		}
@@ -272,6 +293,7 @@ int meshtastic_ble_peer_reasm_ingest(struct meshtastic_ble_peer_reasm *rs,
 		}
 
 		memcpy(rs->frame, body, blen);
+		rs->kind = kind;
 		rs->expect = declared;
 		rs->got = (uint16_t)blen;
 		rs->next_seq = (seq + 1U) & MESHTASTIC_BLE_PEER_CHUNK_SEQ_MASK;

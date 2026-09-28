@@ -13,4 +13,5 @@ target_include_directories(app PRIVATE
 target_sources(app PRIVATE
   src/main.c
   ../../src/meshtastic_ble_peer_codec.c
+  ../../src/meshtastic_attachment_codec.c
 )

@@ -19,6 +19,10 @@
 #include "meshtastic_backoff.h"
 #include "meshtastic_ble_name.h"
 #include "meshtastic_ble_peer.h"
+#include "meshtastic_ble_peer_codec.h"
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#include "meshtastic_attachment.h"
+#endif
 #include "meshtastic_ble_registry.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_ext_ram.h"
@@ -1120,12 +1124,35 @@ uint32_t meshtastic_ble_adv_starts(void)
  * so the router applies the link-local rule (delivered locally, never relayed
  * onto LoRa). Runs under the peer lock on the BT RX thread — the inject is a
  * non-blocking queue put, exactly what the M1 callback contract allows. */
-static void ble_peer_frame_ingest(unsigned int index, const uint8_t *frame, size_t len)
+static void ble_peer_frame_ingest(unsigned int index, const uint8_t *frame, size_t len,
+				  uint8_t kind)
 {
-	int ret = meshtastic_radio_rx_inject(frame, (uint16_t)len, MESHTASTIC_BEARER_BLE_PEER);
+	int ret;
+
+	if (kind == MESHTASTIC_BLE_PEER_KIND_ATTACH) {
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+		/* A head's envelope: the brain's table turns it into an RF frame
+		 * tagged with the head's preset and signal (ATTACHMENT-DESIGN S6).
+		 * The head is known by its link identity, the beat's node number. */
+		struct meshtastic_ble_peer_rx rx;
+
+		if (!meshtastic_ble_peer_rx_get(index, &rx, NULL) || rx.last.node_num == 0U) {
+			LOG_WRN("BLE peer envelope (conn %u) before any beat: dropped", index);
+			return;
+		}
+		ret = meshtastic_attachment_ingest(rx.last.node_num, frame, len);
+#else
+		ret = -ENOTSUP;
+#endif
+	} else if (kind == MESHTASTIC_BLE_PEER_KIND_WIRE) {
+		ret = meshtastic_radio_rx_inject(frame, (uint16_t)len, MESHTASTIC_BEARER_BLE_PEER);
+	} else {
+		ret = -ENOTSUP;
+	}
 
 	if (ret < 0) {
-		LOG_WRN("BLE peer frame (conn %u, %zu B) not ingested (%d)", index, len, ret);
+		LOG_WRN("BLE peer frame kind %u (conn %u, %zu B) not ingested (%d)", kind, index,
+			len, ret);
 	}
 }
 #endif

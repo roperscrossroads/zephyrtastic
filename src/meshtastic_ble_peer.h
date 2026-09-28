@@ -72,8 +72,13 @@ bool meshtastic_ble_peer_frame_notify_ready(void);
  * copy or queue the bytes and return; never call back into blepeer APIs from
  * it. NULL (the default) means completed frames are counted and dropped. */
 typedef void (*meshtastic_ble_peer_frame_cb_t)(unsigned int index, const uint8_t *frame,
-					       size_t len);
+					       size_t len, uint8_t kind);
 void meshtastic_ble_peer_frame_rx_register(meshtastic_ble_peer_frame_cb_t cb);
+/* The beat flags the peer on registry slot @p index last sent (its capabilities:
+ * COURIER, ATTACH, ...). False when that slot has never beaten. */
+bool meshtastic_ble_peer_slot_flags(unsigned int index, uint8_t *flags);
+/* The same, by the peer's node number over any live slot. */
+bool meshtastic_ble_peer_node_flags(uint32_t node_num, uint8_t *flags);
 
 /* Send one wire frame to the named node over whichever live BLE peer link
  * reaches it: chunk-writes up the outbound (central) link, or notifications
@@ -81,6 +86,10 @@ void meshtastic_ble_peer_frame_rx_register(meshtastic_ble_peer_frame_cb_t cb);
  * -EHOSTUNREACH when no live link reaches that node, else the codec/GATT
  * error. */
 int meshtastic_ble_peer_frame_send_to(uint32_t node_num, const uint8_t *frame, size_t len);
+/* The same for any frame kind (MESHTASTIC_BLE_PEER_KIND_*); frame_send_to is
+ * kind WIRE. */
+int meshtastic_ble_peer_frame_send_to_kind(uint32_t node_num, const uint8_t *frame, size_t len,
+					   uint8_t kind);
 
 /* TX divert (agents-xhli.2): called at the LoRa TX choke point with a queued
  * wire frame. Sends it over a BLE peer link INSTEAD of the radio when — and

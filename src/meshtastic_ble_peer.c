@@ -231,7 +231,8 @@ static int frame_chunk_ingest(unsigned int index, const void *buf, uint16_t len)
 		if (peer.frame_cb != NULL) {
 			/* Contract (meshtastic_ble_peer.h): cb runs here with
 			 * the peer lock held and must only copy/queue. */
-			peer.frame_cb(index, peer.frame_rx[index].frame, frame_len);
+			peer.frame_cb(index, peer.frame_rx[index].frame, frame_len,
+				      peer.frame_rx[index].kind);
 		}
 	} else if (ret < 0) {
 		peer.stats.frame_rx_rejected++;
@@ -325,6 +326,11 @@ static void beat_fill_identity(struct meshtastic_ble_peer_beat *beat, bool hello
 	if (IS_ENABLED(CONFIG_MESHTASTIC_SMP_CENTRAL)) {
 		beat->flags |= MESHTASTIC_BLE_PEER_FLAG_COURIER;
 	}
+	/* A brain understands attachment envelopes; heads and ears send them
+	 * only to a peer that says so (ATTACHMENT-DESIGN S4). */
+	if (IS_ENABLED(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)) {
+		beat->flags |= MESHTASTIC_BLE_PEER_FLAG_ATTACH;
+	}
 	beat->class_id = (uint8_t)CONFIG_MESHTASTIC_FLEET_CLASS;
 	beat->node_num = mt.node_id;
 	beat->uptime_s = (uint32_t)(k_uptime_get() / MSEC_PER_SEC);
@@ -392,7 +398,8 @@ bool meshtastic_ble_peer_frame_notify_ready(void)
 	return peer.frame_notify_enabled;
 }
 
-int meshtastic_ble_peer_frame_notify(struct bt_conn *conn, const uint8_t *frame, size_t len)
+static int frame_notify_kind(struct bt_conn *conn, const uint8_t *frame, size_t len,
+			     uint8_t kind)
 {
 	/* Chunk at the guaranteed minimum ATT payload rather than the live
 	 * MTU: correct on every link by construction (the codec's whole
@@ -407,7 +414,7 @@ int meshtastic_ble_peer_frame_notify(struct bt_conn *conn, const uint8_t *frame,
 		return -ENOTCONN;
 	}
 
-	ret = meshtastic_ble_peer_chunker_start(&ck, frame, len);
+	ret = meshtastic_ble_peer_chunker_start_kind(&ck, frame, len, kind);
 	if (ret < 0) {
 		return ret;
 	}
@@ -430,6 +437,46 @@ int meshtastic_ble_peer_frame_notify(struct bt_conn *conn, const uint8_t *frame,
 	peer.stats.frame_tx_frames++;
 	k_mutex_unlock(&peer_lock);
 	return 0;
+}
+
+int meshtastic_ble_peer_frame_notify(struct bt_conn *conn, const uint8_t *frame, size_t len)
+{
+	return frame_notify_kind(conn, frame, len, MESHTASTIC_BLE_PEER_KIND_WIRE);
+}
+
+bool meshtastic_ble_peer_slot_flags(unsigned int index, uint8_t *flags)
+{
+	bool valid = false;
+
+	if (index >= MESHTASTIC_BLE_REG_SLOTS || flags == NULL) {
+		return false;
+	}
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	if (peer.rx[index].beats > 0U) {
+		*flags = peer.rx[index].last.flags;
+		valid = true;
+	}
+	k_mutex_unlock(&peer_lock);
+	return valid;
+}
+
+bool meshtastic_ble_peer_node_flags(uint32_t node_num, uint8_t *flags)
+{
+	bool valid = false;
+
+	if (node_num == 0U || flags == NULL) {
+		return false;
+	}
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	for (unsigned int i = 0U; i < MESHTASTIC_BLE_REG_SLOTS; i++) {
+		if (peer.rx[i].beats > 0U && peer.rx[i].last.node_num == node_num) {
+			*flags = peer.rx[i].last.flags;
+			valid = true;
+			break;
+		}
+	}
+	k_mutex_unlock(&peer_lock);
+	return valid;
 }
 
 bool meshtastic_ble_peer_rx_get(unsigned int index, struct meshtastic_ble_peer_rx *out,
@@ -1408,7 +1455,7 @@ bool meshtastic_ble_peer_seen_get(unsigned int i, struct meshtastic_ble_peer_see
 
 /* Chunk-write one frame up the outbound link. The target check has already
  * passed; conn/handle are re-read under the lock per chunk-loop entry. */
-static int central_send_frame(const uint8_t *frame, size_t len)
+static int central_send_frame(const uint8_t *frame, size_t len, uint8_t kind)
 {
 	uint8_t buf[MESHTASTIC_BLE_PEER_CHUNK_MTU23];
 	struct meshtastic_ble_peer_chunker ck;
@@ -1426,7 +1473,7 @@ static int central_send_frame(const uint8_t *frame, size_t len)
 	handle = central.frame_value_handle;
 	k_mutex_unlock(&peer_lock);
 
-	ret = meshtastic_ble_peer_chunker_start(&ck, frame, len);
+	ret = meshtastic_ble_peer_chunker_start_kind(&ck, frame, len, kind);
 	if (ret < 0) {
 		bt_conn_unref(conn);
 		return ret;
@@ -1451,6 +1498,13 @@ static int central_send_frame(const uint8_t *frame, size_t len)
 }
 
 int meshtastic_ble_peer_frame_send_to(uint32_t node_num, const uint8_t *frame, size_t len)
+{
+	return meshtastic_ble_peer_frame_send_to_kind(node_num, frame, len,
+						      MESHTASTIC_BLE_PEER_KIND_WIRE);
+}
+
+int meshtastic_ble_peer_frame_send_to_kind(uint32_t node_num, const uint8_t *frame, size_t len,
+					   uint8_t kind)
 {
 	bool via_central = false;
 	int via_slot = -1;
@@ -1482,7 +1536,7 @@ int meshtastic_ble_peer_frame_send_to(uint32_t node_num, const uint8_t *frame, s
 	k_mutex_unlock(&peer_lock);
 
 	if (via_central) {
-		return central_send_frame(frame, len);
+		return central_send_frame(frame, len, kind);
 	}
 	if (via_slot >= 0) {
 		struct bt_conn *conn = meshtastic_ble_slot_conn((unsigned int)via_slot);
@@ -1491,7 +1545,7 @@ int meshtastic_ble_peer_frame_send_to(uint32_t node_num, const uint8_t *frame, s
 		if (conn == NULL) {
 			return -EHOSTUNREACH; /* gone between the lookup and now */
 		}
-		ret = meshtastic_ble_peer_frame_notify(conn, frame, len);
+		ret = frame_notify_kind(conn, frame, len, kind);
 		bt_conn_unref(conn);
 		return ret;
 	}
