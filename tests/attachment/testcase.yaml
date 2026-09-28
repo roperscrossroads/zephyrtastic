@@ -1,0 +1,15 @@
+common:
+  tags:
+    - meshtastic
+    - lora_sim
+    - native_sim
+    - attachment
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # The brain (ATTACHMENT-DESIGN S1/S6): a real stack whose heads are scripted --
+  # the test injects RX_FRAME envelopes as a head would and reads what the router
+  # made of them. No BLE: the send seam is the __weak stub, as the relay's ear's is.
+  meshtastic.attachment.brain.native_sim: {}

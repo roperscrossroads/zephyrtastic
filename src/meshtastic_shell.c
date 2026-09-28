@@ -75,6 +75,9 @@
 #include "meshtastic_statusmessage.h"
 #if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
 #include "meshtastic_relay.h"
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#include "meshtastic_attachment.h"
+#endif
 #endif
 #endif
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
@@ -3523,6 +3526,119 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_ear_peer, 2, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_RELAY_EAR */
+
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+/* `meshtastic attach`: the radios this brain hears through (ATTACHMENT-DESIGN
+ * S6). Attachment 0 is this board's own radio; the rest are heads that spoke
+ * to us over the peer link. */
+static void attach_print_row(const struct shell *sh, const struct meshtastic_attachment_info *a)
+{
+	if (a->id == 0U) {
+		shell_print(sh, "  0  local            preset %u  last %d dBm / %d dB", a->preset,
+			    a->last_rssi, a->last_snr);
+		return;
+	}
+	shell_print(sh, "  %u  0x%08x  preset %u  rx %u (dropped %u)  tx %u  last %d dBm / %d dB"
+		    "  [%d..%d]%s%s",
+		    a->id, a->node, a->preset, a->rx_frames, a->rx_dropped, a->tx_frames,
+		    a->last_rssi, a->last_snr, a->rssi_min, a->rssi_max,
+		    a->have_status ? "  status" : "",
+		    (a->have_status &&
+		     (a->status.flags & MESHTASTIC_ATTACHMENT_ST_IS_HEAD) != 0U) ? " head" : " ear");
+}
+
+static int cmd_attach_list(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_attachment_info a;
+	unsigned int shown = 0U;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "attachments: %u (of %u + local)", meshtastic_attachment_count(),
+		    (unsigned int)CONFIG_MESHTASTIC_ATTACHMENT_MAX);
+	for (uint8_t id = 0U; id <= CONFIG_MESHTASTIC_ATTACHMENT_MAX; id++) {
+		if (meshtastic_attachment_get(id, &a)) {
+			attach_print_row(sh, &a);
+			shown++;
+		}
+	}
+	return 0;
+}
+
+static int cmd_attach_status(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_attachment_info a;
+	unsigned long id = strtoul(argv[1], NULL, 10);
+
+	ARG_UNUSED(argc);
+	if (id > CONFIG_MESHTASTIC_ATTACHMENT_MAX || !meshtastic_attachment_get((uint8_t)id, &a)) {
+		shell_error(sh, "no attachment %lu", id);
+		return -ENOENT;
+	}
+	attach_print_row(sh, &a);
+	if (a.have_status) {
+		shell_print(sh, "  reports: preset %u flags 0x%02x hwid 0x%08x brain 0x%08x",
+			    a.status.preset, a.status.flags, a.status.hwid, a.status.brain);
+		shell_print(sh, "  reports: rx %u tx %u dropped %u uptime %u s", a.status.rx_frames,
+			    a.status.tx_frames, a.status.rx_dropped, a.status.uptime_s);
+		if ((a.status.flags & MESHTASTIC_ATTACHMENT_ST_HAS_POS) != 0U) {
+			shell_print(sh, "  position: lat=%d lon=%d alt=%d", a.status.lat,
+				    a.status.lon, a.status.alt);
+		}
+	}
+	shell_print(sh, "  last envelope %lld ms ago  rejected %u  tx_results %u",
+		    (long long)(k_uptime_get() - a.last_ms), a.rejected, a.tx_results);
+	return 0;
+}
+
+static int cmd_attach_preset(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long id = strtoul(argv[1], NULL, 10);
+	unsigned long preset = strtoul(argv[2], NULL, 10);
+	int ret;
+
+	ARG_UNUSED(argc);
+	if (id == 0U || id > CONFIG_MESHTASTIC_ATTACHMENT_MAX || preset > 0xFFU) {
+		shell_error(sh, "usage: meshtastic attach preset <id> <preset number>");
+		return -EINVAL;
+	}
+	ret = meshtastic_attachment_set_preset((uint8_t)id, (uint8_t)preset);
+	if (ret < 0) {
+		shell_error(sh, "set_preset failed (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "asked attachment %lu to retune to preset %lu", id, preset);
+	return 0;
+}
+
+static int cmd_attach_forget(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long id = strtoul(argv[1], NULL, 10);
+	int ret;
+
+	ARG_UNUSED(argc);
+	ret = meshtastic_attachment_forget((uint8_t)id);
+	if (ret < 0) {
+		shell_error(sh, "forget failed (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "attachment %lu forgotten", id);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	meshtastic_attach_cmds,
+	SHELL_CMD(list, NULL, SHELL_HELP("Every radio this brain hears through.", NULL),
+		  cmd_attach_list),
+	SHELL_CMD_ARG(status, NULL, SHELL_HELP("One attachment in detail.", "<id>"),
+		      cmd_attach_status, 2, 0),
+	SHELL_CMD_ARG(preset, NULL, SHELL_HELP("Ask a head to retune.", "<id> <preset number>"),
+		      cmd_attach_preset, 3, 0),
+	SHELL_CMD_ARG(forget, NULL, SHELL_HELP("Drop a head from the table.", "<id>"),
+		      cmd_attach_forget, 2, 0),
+	SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_ATTACHMENT_BRAIN */
 
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 /* `meshtastic neighbors` (agents-dnr4.19). Reads always; writes gated behind
@@ -7316,6 +7432,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_MESHTASTIC_RELAY_EAR)
 	SHELL_CMD(ear, &meshtastic_ear_cmds,
 		  SHELL_HELP("Cross-preset relay ear: show, peer.", NULL), cmd_ear_show),
+#endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+	SHELL_CMD(attach, &meshtastic_attach_cmds,
+		  SHELL_HELP("Radio heads: list, status, preset, forget.", NULL), cmd_attach_list),
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY)
 	SHELL_CMD(relay, &meshtastic_relay_cmds,
