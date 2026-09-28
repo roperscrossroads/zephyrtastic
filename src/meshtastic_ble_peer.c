@@ -1078,6 +1078,22 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 			central.frame_ready = true;
 			k_mutex_unlock(&peer_lock);
 			LOG_INF("BLE peer frame channel to 0x%08x ready", central.conn_node);
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+			/* The attachment bearer trusts an encrypted link only
+			 * (ATTACHMENT-SCOPE C1/C8): ask for L2 now. A bonded pair
+			 * answers at once from its keys; an unbonded one pairs
+			 * Just-Works (the residual the design names). An already
+			 * encrypted link returns 0 with no callback, which is fine
+			 * here -- nothing waits on it (link_info reads the level live). */
+			if (bt_conn_get_security(conn) < BT_SECURITY_L2) {
+				int sec = bt_conn_set_security(conn, BT_SECURITY_L2);
+
+				if (sec != 0 && sec != -EBUSY) {
+					LOG_WRN("BLE peer: set_security(L2) to 0x%08x failed (%d)",
+						central.conn_node, sec);
+				}
+			}
+#endif
 		}
 		return BT_GATT_ITER_STOP;
 	}

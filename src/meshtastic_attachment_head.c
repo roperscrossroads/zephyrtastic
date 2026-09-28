@@ -316,12 +316,30 @@ static void head_forget(void)
 }
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
 
+/* A head dials its brain (ATTACHMENT-SCOPE C7): the peer link's central half
+ * hunts for the brain's advert and reconnects on its own after either side
+ * reboots, and the intent is persisted by the peer link itself. Without a BLE
+ * stack (native_sim) there is nothing to dial. */
+static void head_dial_brain(uint32_t brain)
+{
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+	int ret = (brain != 0U) ? meshtastic_ble_peer_connect(brain) : meshtastic_ble_peer_scan_set(false);
+
+	if (ret != 0 && ret != -EALREADY) {
+		LOG_WRN("head: dialling brain 0x%08x failed (%d)", brain, ret);
+	}
+#else
+	ARG_UNUSED(brain);
+#endif
+}
+
 void meshtastic_attachment_head_set_brain(uint32_t node)
 {
 	k_mutex_lock(&head_lock, K_FOREVER);
 	head.brain = node;
 	k_mutex_unlock(&head_lock);
 	head_save(node);
+	head_dial_brain(node);
 	if (node != 0U) {
 		/* Introduce ourselves without waiting for the timer. */
 		head_submit(&head_status_work);
@@ -377,6 +395,11 @@ void meshtastic_attachment_head_reset(void)
 
 void meshtastic_attachment_head_start(void)
 {
+	uint32_t brain = meshtastic_attachment_head_get_brain();
+
+	if (brain != 0U) {
+		head_dial_brain(brain);
+	}
 	(void)k_work_schedule(&head_status_timer,
 			      K_SECONDS(CONFIG_MESHTASTIC_ATTACHMENT_HEAD_STATUS_PERIOD_SEC));
 }
