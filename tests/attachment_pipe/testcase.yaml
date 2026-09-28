@@ -1,0 +1,22 @@
+common:
+  tags:
+    - meshtastic
+    - lora_sim
+    - native_sim
+    - attachment
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # Layer 3 of the attachment test plan (ATTACHMENT-REVIEW part 2): a real brain
+  # image and real keyless head images (sysbuild builds both), joined through
+  # the attachment pipe (tests/common/attach_pipe). The pytest driver is the hub:
+  # it plays RF, carries envelopes with latency/loss/trust, reads both images.
+  meshtastic.attachment_pipe.native_sim:
+    sysbuild: true
+    harness: pytest
+    harness_config:
+      pytest_root:
+        - "pytest/test_attach_pipe.py"
+    timeout: 300
