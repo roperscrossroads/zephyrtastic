@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "meshtastic_attach_bearer.h"
 #include "meshtastic_attachment_codec.h"
 
 /*
@@ -23,6 +24,9 @@
 struct meshtastic_attachment_info {
 	uint8_t id;          /* 0 = this board's radio */
 	uint32_t node;       /* the head's link identity (beat node number); 0 for id 0 */
+	const struct meshtastic_attach_bearer *bearer; /* the link it speaks over; NULL = the test seam */
+	bool link_up;        /* the bearer reported the link up at the last envelope */
+	int64_t down_ms;     /* k_uptime when the bearer reported it down (0 = never) */
 	uint8_t preset;      /* meshtastic_Config_LoRaConfig_ModemPreset it reports */
 	bool have_status;
 	struct meshtastic_attachment_status status; /* last STATUS, when have_status */
@@ -44,6 +48,13 @@ struct meshtastic_attachment_info {
  * non-blocking queue put. Returns 0, -EBADMSG on a malformed envelope, -ENOSPC
  * when the table is full, -ENOBUFS when the RX queue refused the frame. */
 int meshtastic_attachment_ingest(uint32_t node, const uint8_t *env, size_t len);
+/* The same, from a bearer's RX path: @p b is the bearer the envelope arrived
+ * over (its link_info answers the admission gate), NULL for the test seam. */
+int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, uint32_t node,
+				      const uint8_t *env, size_t len);
+/* A bearer's link to a head went down. The head stays in the table, marked
+ * down, until the eviction grace passes or it speaks again. */
+void meshtastic_attachment_link_down(const struct meshtastic_attach_bearer *b, uint32_t node);
 
 /* The table: attachment 0 is always present (the local radio). */
 unsigned int meshtastic_attachment_count(void);

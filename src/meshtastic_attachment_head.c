@@ -27,8 +27,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
-#include "meshtastic_ble_peer.h"
-#include "meshtastic_ble_peer_codec.h"
+#include "meshtastic_ble_peer.h" /* meshtastic_ble_work_submit only */
 #endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -61,17 +60,10 @@ static K_WORK_DEFINE(head_status_work, head_status_fn);
 static void head_status_tick(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(head_status_timer, head_status_tick);
 
+/* The send seam: whichever registered bearer has a live link to the brain. */
 __weak int meshtastic_attachment_head_send(uint32_t brain, const uint8_t *env, size_t len)
 {
-#if defined(CONFIG_MESHTASTIC_BLE_PEER)
-	return meshtastic_ble_peer_frame_send_to_kind(brain, env, len,
-						      MESHTASTIC_BLE_PEER_KIND_ATTACH);
-#else
-	ARG_UNUSED(brain);
-	ARG_UNUSED(env);
-	ARG_UNUSED(len);
-	return -ENOTSUP;
-#endif
+	return meshtastic_attach_bearer_send(brain, env, len);
 }
 
 static void head_submit(struct k_work *work)
@@ -207,9 +199,16 @@ void meshtastic_attachment_head_on_rx(const uint8_t *wire, uint16_t len, int16_t
 
 int meshtastic_attachment_head_on_envelope(uint32_t node, const uint8_t *env, size_t len)
 {
+	return meshtastic_attachment_head_on_envelope_from(NULL, node, env, len);
+}
+
+int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_bearer *b,
+						uint32_t node, const uint8_t *env, size_t len)
+{
 	struct meshtastic_attachment_msg msg;
 	int ret;
 
+	ARG_UNUSED(b); /* the link's trust level gates controls from fix 7 on */
 	if (node == 0U || env == NULL) {
 		return -EINVAL;
 	}

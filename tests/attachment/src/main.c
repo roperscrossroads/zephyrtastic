@@ -63,7 +63,8 @@ static void on_recv(uint32_t from, uint32_t to, uint32_t portnum, const uint8_t 
 	k_sem_give(&rx.sem);
 }
 
-/* The brain's send seam, captured: what would have gone to a head. */
+/* The test bearer (ATTACHMENT-SCOPE §4): what the brain sends is captured, and
+ * what the bearer says about a link -- up, trusted -- is a knob per case. */
 static struct {
 	uint32_t node;
 	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
@@ -71,14 +72,36 @@ static struct {
 	uint32_t count;
 } sent;
 
-int meshtastic_attachment_send(uint32_t node, const uint8_t *env, size_t len)
+static enum meshtastic_attach_auth test_auth = MESHTASTIC_ATTACH_AUTH_ENCRYPTED;
+
+static int test_bearer_send(uint32_t node, const uint8_t *env, size_t len)
 {
+	if (len > sizeof(sent.env)) {
+		return -EMSGSIZE;
+	}
 	sent.node = node;
-	sent.len = MIN(len, sizeof(sent.env));
-	memcpy(sent.env, env, sent.len);
+	memcpy(sent.env, env, len);
+	sent.len = len;
 	sent.count++;
 	return 0;
 }
+
+static bool test_bearer_link_info(uint32_t node, struct meshtastic_attach_link_info *out)
+{
+	ARG_UNUSED(node);
+	out->up = true;
+	out->auth = test_auth;
+	out->takes_envelopes = true;
+	out->mtu = 20U;
+	out->rtt_ms = 0U;
+	return true;
+}
+
+static const struct meshtastic_attach_bearer test_bearer = {
+	.name = "test",
+	.send = test_bearer_send,
+	.link_info = test_bearer_link_info,
+};
 
 static void wait_rx_armed(void)
 {
@@ -132,7 +155,7 @@ static int head_hears(uint32_t head, uint8_t preset, int16_t rssi, int8_t snr,
 	int len = meshtastic_attachment_encode_rx_frame(&m, env, sizeof(env));
 
 	zassert_true(len > 0, "encode rx_frame (%d)", len);
-	return meshtastic_attachment_ingest(head, env, (size_t)len);
+	return meshtastic_attach_bearer_rx(&test_bearer, head, env, (size_t)len);
 }
 
 static void assert_not_relayed(uint32_t src, uint32_t id)
@@ -206,6 +229,7 @@ static void *attachment_setup(void)
 	zassert_true(device_is_ready(lora_dev), "sim lora device not ready");
 	zassert_ok(meshtastic_init(&cfg), "meshtastic_init");
 	meshtastic_set_recv_cb(on_recv);
+	zassert_ok(meshtastic_attach_bearer_register(&test_bearer), "test bearer");
 	return NULL;
 }
 

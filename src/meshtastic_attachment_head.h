@@ -7,6 +7,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "meshtastic_attach_bearer.h"
+
 /*
  * A keyless radio head (ATTACHMENT-DESIGN S5, D1): one radio, no identity of
  * its own on the air. Every frame it hears goes, undecoded, to its brain as an
@@ -44,6 +46,10 @@ void meshtastic_attachment_head_on_rx(const uint8_t *wire, uint16_t len, int16_t
  * -EPERM when @p node is not the brain (or the control is not yet supported),
  * -EBADMSG for anything a head does not take. */
 int meshtastic_attachment_head_on_envelope(uint32_t node, const uint8_t *env, size_t len);
+/* The same from a bearer's RX path (@p b answers whether the link is trusted;
+ * NULL for the test seam). */
+int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_bearer *b,
+						uint32_t node, const uint8_t *env, size_t len);
 
 /* The brain's link identity (its node number); 0 = none, nothing forwarded.
  * Saved with MESHTASTIC_SETTINGS (mtattach/brain). */

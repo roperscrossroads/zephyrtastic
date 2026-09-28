@@ -26,6 +26,9 @@
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
 #include "meshtastic_attachment_head.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+#include "meshtastic_attach_bearer.h"
+#endif
 #include "meshtastic_ble_registry.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_ext_ram.h"
@@ -620,6 +623,18 @@ bool meshtastic_ble_slot_addr(unsigned int index, bt_addr_le_t *out)
 	return ok;
 }
 
+int meshtastic_ble_conn_security(unsigned int index)
+{
+	int level = 0;
+
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	if (index < MESHTASTIC_BLE_REG_SLOTS && ble.conns[index] != NULL) {
+		level = (int)bt_conn_get_security(ble.conns[index]);
+	}
+	k_mutex_unlock(&ble.lock);
+	return level;
+}
+
 int meshtastic_ble_work_submit(struct k_work *work)
 {
 	return k_work_submit_to_queue(&ble.work_q, work);
@@ -727,6 +742,15 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	unsigned int index = bt_conn_index(conn);
 	bool was_phone;
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+	struct meshtastic_ble_peer_rx peer_rx;
+	uint32_t peer_node = 0U;
+
+	/* Who was on this slot, before its beat accounting is dropped. */
+	if (meshtastic_ble_peer_rx_get(index, &peer_rx, NULL)) {
+		peer_node = peer_rx.last.node_num;
+	}
+#endif
 
 	k_mutex_lock(&ble.lock, K_FOREVER);
 	was_phone = meshtastic_ble_reg_disconnect(index);
@@ -743,6 +767,11 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	/* Drop any peer-beat accounting for this slot before the index can be
 	 * recycled (no-op stub when the peer link is compiled out). */
 	meshtastic_ble_peer_conn_down(index);
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+	if (peer_node != 0U) {
+		meshtastic_attach_bearer_link_down(&meshtastic_attach_bearer_ble, peer_node);
+	}
+#endif
 
 	/* Tear down the phone session and release its PM inhibitor only when it
 	 * was the phone's own connection that went away. */
@@ -1133,27 +1162,19 @@ static void ble_peer_frame_ingest(unsigned int index, const uint8_t *frame, size
 	int ret;
 
 	if (kind == MESHTASTIC_BLE_PEER_KIND_ATTACH) {
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-		/* A head's envelope: the brain's table turns it into an RF frame
-		 * tagged with the head's preset and signal (ATTACHMENT-DESIGN S6).
-		 * The head is known by its link identity, the beat's node number. */
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+		/* An attachment envelope (ATTACHMENT-DESIGN S6): the peer is known
+		 * by its link identity, the beat's node number, and the bearer
+		 * registry routes it to the brain's ingest or the head's control
+		 * handler, whichever this image is. */
 		struct meshtastic_ble_peer_rx rx;
 
 		if (!meshtastic_ble_peer_rx_get(index, &rx, NULL) || rx.last.node_num == 0U) {
 			LOG_WRN("BLE peer envelope (conn %u) before any beat: dropped", index);
 			return;
 		}
-		ret = meshtastic_attachment_ingest(rx.last.node_num, frame, len);
-#elif defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-		/* The brain's control (SET_PRESET; TX_FRAME in phase 3), taken only
-		 * from the link whose beat carries the brain's node number. */
-		struct meshtastic_ble_peer_rx rx;
-
-		if (!meshtastic_ble_peer_rx_get(index, &rx, NULL) || rx.last.node_num == 0U) {
-			LOG_WRN("BLE peer envelope (conn %u) before any beat: dropped", index);
-			return;
-		}
-		ret = meshtastic_attachment_head_on_envelope(rx.last.node_num, frame, len);
+		ret = meshtastic_attach_bearer_rx(&meshtastic_attach_bearer_ble, rx.last.node_num,
+						  frame, len);
 #else
 		ret = -ENOTSUP;
 #endif
@@ -1212,6 +1233,9 @@ int meshtastic_ble_init(void)
 
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 	meshtastic_ble_peer_frame_rx_register(ble_peer_frame_ingest);
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+	(void)meshtastic_attach_bearer_register(&meshtastic_attach_bearer_ble);
+#endif
 #endif
 
 	meshtastic_phoneapi_init(&ble.api, "ble", ble_queue, ARRAY_SIZE(ble_queue), ble_data_ready,

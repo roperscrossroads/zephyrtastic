@@ -29,9 +29,11 @@
 #include "meshtastic_core.h"
 #include "meshtastic_relay.h"
 #include "meshtastic_attachment_codec.h"
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+#include "meshtastic_attach_bearer.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
-#include "meshtastic_ble_peer.h"
-#include "meshtastic_ble_peer_codec.h"
+#include "meshtastic_ble_peer.h" /* meshtastic_ble_work_submit, frame_send_to */
 #endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -74,12 +76,12 @@ __weak int meshtastic_relay_ear_send(uint32_t peer, const uint8_t *wire, size_t 
 #endif
 }
 
-/* The same seam for an attachment envelope (frame kind ATTACH). */
+/* The same seam for an attachment envelope, over whichever bearer reaches the
+ * peer (ATTACHMENT-SCOPE §4). */
 __weak int meshtastic_relay_ear_send_env(uint32_t peer, const uint8_t *env, size_t env_len)
 {
-#if defined(CONFIG_MESHTASTIC_BLE_PEER)
-	return meshtastic_ble_peer_frame_send_to_kind(peer, env, env_len,
-						      MESHTASTIC_BLE_PEER_KIND_ATTACH);
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+	return meshtastic_attach_bearer_send(peer, env, env_len);
 #else
 	ARG_UNUSED(peer);
 	ARG_UNUSED(env);
@@ -88,15 +90,15 @@ __weak int meshtastic_relay_ear_send_env(uint32_t peer, const uint8_t *env, size
 #endif
 }
 
-/* Does the peer take attachment envelopes? Its beats say (FLAG_ATTACH). Without
- * a BLE stack there are no beats: the test seam decides. */
+/* Does the peer take attachment envelopes? The bearer knows (on BLE, the
+ * peer's beat flag). Without a bearer the test seam decides. */
 __weak bool meshtastic_relay_ear_peer_takes_env(uint32_t peer)
 {
-#if defined(CONFIG_MESHTASTIC_BLE_PEER)
-	uint8_t flags;
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+	struct meshtastic_attach_link_info info;
 
-	return meshtastic_ble_peer_node_flags(peer, &flags) &&
-	       (flags & MESHTASTIC_BLE_PEER_FLAG_ATTACH) != 0U;
+	return meshtastic_attach_bearer_link_info(peer, &info, NULL) && info.up &&
+	       info.takes_envelopes;
 #else
 	ARG_UNUSED(peer);
 	return false;

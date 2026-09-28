@@ -209,6 +209,10 @@ struct bt_conn *meshtastic_ble_slot_conn(unsigned int index);
  * meshtastic_ble.c that must call blepeer APIs (which may block on GATT
  * buffers) off both the radio thread and the system work queue. */
 int meshtastic_ble_work_submit(struct k_work *work);
+/* The security level (bt_security_t) of the live connection in registry slot
+ * @p index, or 0 when the slot is empty. For the attachment bearer's trust
+ * question (ATTACHMENT-SCOPE §4). */
+int meshtastic_ble_conn_security(unsigned int index);
 
 /* Advertiser state, tracked in meshtastic_ble.c (a4it.2). */
 bool meshtastic_ble_adv_active(void);

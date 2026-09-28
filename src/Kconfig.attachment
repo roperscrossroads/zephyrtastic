@@ -10,6 +10,14 @@ config MESHTASTIC_ATTACHMENT_CODEC
 	  The envelope a radio head and its brain exchange (pure byte packing).
 	  Pulled in by anything that speaks it; not a user choice.
 
+config MESHTASTIC_ATTACH_BEARER
+	bool
+	default y if MESHTASTIC_ATTACHMENT_CODEC
+	help
+	  The board-to-board link behind the attachments (ATTACHMENT-SCOPE §4):
+	  a registry of bearers -- the BLE peer link, a wire, a test pipe -- each
+	  a send and a link_info. Envelopes never see a bearer's types.
+
 config MESHTASTIC_ATTACHMENT_BRAIN
 	bool "This node is a brain: it hears through radio heads"
 	default n

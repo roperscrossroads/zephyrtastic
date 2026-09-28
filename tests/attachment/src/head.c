@@ -45,7 +45,9 @@ static struct {
 	uint32_t count;
 } sent;
 
-int meshtastic_attachment_head_send(uint32_t brain, const uint8_t *env, size_t len)
+static enum meshtastic_attach_auth test_auth = MESHTASTIC_ATTACH_AUTH_ENCRYPTED;
+
+static int test_bearer_send(uint32_t brain, const uint8_t *env, size_t len)
 {
 	if (len > sizeof(sent.env)) {
 		return -EMSGSIZE;
@@ -57,6 +59,23 @@ int meshtastic_attachment_head_send(uint32_t brain, const uint8_t *env, size_t l
 	k_sem_give(&sent.sem);
 	return 0;
 }
+
+static bool test_bearer_link_info(uint32_t node, struct meshtastic_attach_link_info *out)
+{
+	ARG_UNUSED(node);
+	out->up = true;
+	out->auth = test_auth;
+	out->takes_envelopes = true;
+	out->mtu = 20U;
+	out->rtt_ms = 0U;
+	return true;
+}
+
+static const struct meshtastic_attach_bearer test_bearer = {
+	.name = "test",
+	.send = test_bearer_send,
+	.link_info = test_bearer_link_info,
+};
 
 /* A frame is any bytes with a header: the head never looks inside. */
 static void some_frame(uint8_t *wire, uint8_t len, uint8_t seed)
@@ -88,6 +107,7 @@ static void *head_setup(void)
 	k_sem_init(&sent.sem, 0, 16);
 	zassert_true(device_is_ready(lora_dev), "sim lora device not ready");
 	zassert_ok(meshtastic_init(&cfg), "meshtastic_init");
+	zassert_ok(meshtastic_attach_bearer_register(&test_bearer), "test bearer");
 	return NULL;
 }
 
@@ -167,12 +187,12 @@ ZTEST(attachment_head, test_set_preset_from_the_brain_only)
 
 	zassert_true(len > 0);
 
-	zassert_equal(meshtastic_attachment_head_on_envelope(STRANGER, env, (size_t)len), -EPERM,
+	zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, STRANGER, env, (size_t)len), -EPERM,
 		      "a stranger does not retune this radio");
 	zassert_equal(mt.modem_preset, PRESET_ST, "still ShortTurbo");
 	zassert_equal(k_sem_take(&sent.sem, K_MSEC(200)), -EAGAIN, "and gets no STATUS");
 
-	zassert_ok(meshtastic_attachment_head_on_envelope(BRAIN_NODE, env, (size_t)len));
+	zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len));
 	zassert_equal(mt.modem_preset, PRESET_MF, "retuned");
 	zassert_ok(meshtastic_preset_to_params(PRESET_MF, false, &want));
 	zassert_ok(lora_sim_get_tuning(lora_dev, &freq, &sf, &bw));
@@ -194,7 +214,7 @@ ZTEST(attachment_head, test_set_preset_from_the_brain_only)
 
 	/* An out-of-range preset is a bad envelope, not a retune. */
 	env[1] = 0xEEU;
-	zassert_equal(meshtastic_attachment_head_on_envelope(BRAIN_NODE, env, (size_t)len),
+	zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len),
 		      -EBADMSG);
 	zassert_equal(mt.modem_preset, PRESET_MF);
 }
@@ -216,7 +236,7 @@ ZTEST(attachment_head, test_controls_a_head_refuses)
 		};
 		len = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
 		zassert_true(len > 0);
-		zassert_equal(meshtastic_attachment_head_on_envelope(BRAIN_NODE, env, (size_t)len),
+		zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len),
 			      -EPERM, "TX via a head is phase 3");
 		zassert_equal(lora_sim_tx_pending(lora_dev), 0, "nothing on the air");
 	}
@@ -227,12 +247,12 @@ ZTEST(attachment_head, test_controls_a_head_refuses)
 		};
 		len = meshtastic_attachment_encode_rx_frame(&rx, env, sizeof(env));
 		zassert_true(len > 0);
-		zassert_equal(meshtastic_attachment_head_on_envelope(BRAIN_NODE, env, (size_t)len),
+		zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len),
 			      -EBADMSG, "a head sends RX_FRAME, it does not take one");
 	}
 	env[0] = 0x7FU;
-	zassert_equal(meshtastic_attachment_head_on_envelope(BRAIN_NODE, env, 3U), -EBADMSG);
-	zassert_equal(meshtastic_attachment_head_on_envelope(0U, env, 3U), -EINVAL);
+	zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, 3U), -EBADMSG);
+	zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, 0U, env, 3U), -EINVAL);
 
 	meshtastic_attachment_head_stats_get(&st);
 	zassert_equal(st.refused, 1U);

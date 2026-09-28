@@ -17,8 +17,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_attachment.h"
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
-#include "meshtastic_ble_peer.h"
-#include "meshtastic_ble_peer_codec.h"
+#include "meshtastic_ble_peer_codec.h" /* the ENV_MAX cross-check only */
 #endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -61,19 +60,34 @@ static struct meshtastic_attachment_info *admit_locked(uint32_t node)
 	return NULL;
 }
 
+/* The send seam: whichever registered bearer has a live link to the head. A
+ * test overrides this, or registers a bearer of its own. */
 __weak int meshtastic_attachment_send(uint32_t node, const uint8_t *env, size_t len)
 {
-#if defined(CONFIG_MESHTASTIC_BLE_PEER)
-	return meshtastic_ble_peer_frame_send_to_kind(node, env, len, MESHTASTIC_BLE_PEER_KIND_ATTACH);
-#else
-	ARG_UNUSED(node);
-	ARG_UNUSED(env);
-	ARG_UNUSED(len);
-	return -ENOTSUP;
-#endif
+	return meshtastic_attach_bearer_send(node, env, len);
 }
 
 int meshtastic_attachment_ingest(uint32_t node, const uint8_t *env, size_t len)
+{
+	return meshtastic_attachment_ingest_from(NULL, node, env, len);
+}
+
+void meshtastic_attachment_link_down(const struct meshtastic_attach_bearer *b, uint32_t node)
+{
+	struct meshtastic_attachment_info *a;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	a = find_locked(node);
+	if (a != NULL && (a->bearer == b || a->bearer == NULL)) {
+		a->link_up = false;
+		a->down_ms = k_uptime_get();
+		LOG_INF("attach: head 0x%08x (attachment %u) link down", node, a->id);
+	}
+	k_mutex_unlock(&tab_lock);
+}
+
+int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, uint32_t node,
+				      const uint8_t *env, size_t len)
 {
 	struct meshtastic_attachment_msg msg;
 	struct meshtastic_attachment_info *a;
@@ -95,6 +109,8 @@ int meshtastic_attachment_ingest(uint32_t node, const uint8_t *env, size_t len)
 			return -ENOSPC;
 		}
 	}
+	a->bearer = b;
+	a->link_up = true;
 	a->last_ms = k_uptime_get();
 	if (ret < 0) {
 		a->rejected++;
