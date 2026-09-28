@@ -36,6 +36,10 @@ struct meshtastic_attachment_head_stats {
 	uint32_t refused;      /* a control from a node that is not the brain, or TX (phase 3) */
 	uint32_t untrusted;    /* a control from the brain over a link the bearer does not vouch for */
 	uint32_t rejected;     /* envelopes that failed to decode, or types a head does not take */
+	uint32_t tx_sent;      /* TX_FRAMEs from the brain that went on the air */
+	uint32_t tx_failed;    /* ...that the radio refused for good */
+	uint32_t tx_deferred;  /* radio said DEFER; re-queued */
+	uint32_t tx_queue_full;
 };
 
 /* The radio's frame, from the RX thread: queued, forwarded from a work queue

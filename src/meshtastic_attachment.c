@@ -324,6 +324,11 @@ int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, 
 		break;
 	case MESHTASTIC_ATTACHMENT_TX_RESULT:
 		a->tx_results++;
+		a->last_tx_rc = msg.u.result.rc;
+		a->last_tx_defers = msg.u.result.defers;
+		if (msg.u.result.rc != 0) {
+			a->tx_failed++;
+		}
 		ret = 0;
 		break;
 	default:
@@ -416,6 +421,66 @@ int meshtastic_attachment_forget(uint8_t id)
 	memset(&tab[id], 0, sizeof(tab[id]));
 	k_mutex_unlock(&tab_lock);
 	return 0;
+}
+
+bool meshtastic_attachment_tx_ready(uint8_t id)
+{
+	bool ready = false;
+
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return false;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (used[id] && tab[id].link_up) {
+		const struct meshtastic_attachment_info *a = &tab[id];
+
+		ready = !a->have_status ||
+			((a->status.flags & MESHTASTIC_ATTACHMENT_ST_RX_ONLY) == 0U &&
+			 (a->status.flags & MESHTASTIC_ATTACHMENT_ST_TX_ENABLED) != 0U);
+	}
+	k_mutex_unlock(&tab_lock);
+	return ready;
+}
+
+int meshtastic_attachment_tx(uint8_t id, const uint8_t *wire, size_t len, bool want_result)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	struct meshtastic_attachment_tx_frame tx = {
+		.flags = want_result ? MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT : 0U,
+		.wire = wire,
+		.wire_len = (uint16_t)len,
+	};
+	uint32_t node;
+	int elen;
+	int ret;
+
+	if (wire == NULL || len == 0U || len > MESHTASTIC_ATTACHMENT_WIRE_MAX) {
+		return -EINVAL;
+	}
+	if (!meshtastic_attachment_tx_ready(id)) {
+		return -EHOSTUNREACH;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	node = tab[id].node;
+	tx.preset = tab[id].preset;
+	tx.tx_seq = ++tab[id].tx_seq;
+	k_mutex_unlock(&tab_lock);
+
+	elen = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
+	if (elen < 0) {
+		return elen;
+	}
+	ret = meshtastic_attachment_send(node, env, (size_t)elen);
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (used[id]) {
+		if (ret == 0) {
+			tab[id].tx_frames++;
+		} else {
+			tab[id].tx_failed++;
+		}
+	}
+	k_mutex_unlock(&tab_lock);
+	return ret;
 }
 
 int meshtastic_attachment_set_preset(uint8_t id, uint8_t preset)

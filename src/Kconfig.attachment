@@ -81,6 +81,16 @@ config MESHTASTIC_ATTACHMENT_HEAD_STATUS_PERIOD_SEC
 	default 60
 	range 5 3600
 
+config MESHTASTIC_ATTACHMENT_HEAD_TX_QUEUE_SIZE
+	int "Frames the brain has handed this head, waiting to key up"
+	depends on MESHTASTIC_ATTACHMENT_HEAD
+	default 4
+	range 1 16
+	help
+	  TX_FRAMEs accepted from the brain and not yet transmitted. A full queue
+	  refuses the envelope (counted; the brain sees no TX_RESULT). Each entry
+	  is a full airframe.
+
 config MESHTASTIC_ATTACHMENT_HEAD_QUEUE_SIZE
 	int "Frames queued for the brain"
 	depends on MESHTASTIC_ATTACHMENT_HEAD

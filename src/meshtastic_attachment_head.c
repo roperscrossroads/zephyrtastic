@@ -24,6 +24,7 @@
 
 #include "meshtastic_attachment_codec.h"
 #include "meshtastic_attachment_head.h"
+#include "meshtastic_outbound.h"
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
@@ -48,8 +49,23 @@ static struct {
 	.brain = CONFIG_MESHTASTIC_ATTACHMENT_HEAD_BRAIN_ID,
 };
 
+/* A frame the brain handed us to transmit (P3 slice 1): the bytes as built by
+ * the brain, untouched -- a head never builds a frame, it keys one up. */
+struct head_tx {
+	uint16_t len;
+	uint16_t tx_seq;
+	uint8_t flags;
+	uint8_t defers;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+};
+
 static K_MUTEX_DEFINE(head_lock);
 K_MSGQ_DEFINE(head_q, sizeof(struct head_frame), CONFIG_MESHTASTIC_ATTACHMENT_HEAD_QUEUE_SIZE, 4);
+K_MSGQ_DEFINE(head_tx_q, sizeof(struct head_tx), CONFIG_MESHTASTIC_ATTACHMENT_HEAD_TX_QUEUE_SIZE, 4);
+static void head_tx_fn(struct k_work *work);
+static K_WORK_DEFINE(head_tx_work, head_tx_fn);
+static void head_tx_retry_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(head_tx_retry, head_tx_retry_fn);
 
 static void head_work_fn(struct k_work *work);
 static K_WORK_DEFINE(head_work, head_work_fn);
@@ -88,7 +104,7 @@ static int status_send_locked(uint32_t brain)
 		.hwid = mt.node_id,
 		.brain = brain,
 		.rx_frames = head.stats.forwarded,
-		.tx_frames = 0U,
+		.tx_frames = head.stats.tx_sent,
 		.uptime_s = (uint32_t)(k_uptime_get() / 1000),
 		.rx_dropped = head.stats.queue_full + head.stats.send_failed,
 	};
@@ -105,6 +121,63 @@ static int status_send_locked(uint32_t brain)
 		return len;
 	}
 	return meshtastic_attachment_head_send(brain, env_buf, (size_t)len);
+}
+
+/* Transmit what the brain handed us: the one funnel every transmit takes
+ * (meshtastic_radio_send_wire_now: CAD/LBT, the scanner gate, tx_enabled,
+ * radio_held), so a head keys up under exactly the rules its own image would.
+ * DEFER re-queues, bounded as the brain's own worker bounds it. */
+static void head_tx_fn(struct k_work *work)
+{
+	static struct head_tx t; /* one worker: static keeps it off the stack */
+
+	ARG_UNUSED(work);
+
+	while (k_msgq_get(&head_tx_q, &t, K_NO_WAIT) == 0) {
+		int ret = meshtastic_radio_send_wire_now(t.wire, t.len);
+
+		if (ret == MESHTASTIC_TX_DEFER && t.defers < CONFIG_MESHTASTIC_TX_DEFER_MAX) {
+			t.defers++;
+			k_mutex_lock(&head_lock, K_FOREVER);
+			head.stats.tx_deferred++;
+			k_mutex_unlock(&head_lock);
+			if (k_msgq_put(&head_tx_q, &t, K_NO_WAIT) == 0) {
+				(void)k_work_schedule(&head_tx_retry, K_MSEC(20));
+				return;
+			}
+			ret = -ENOBUFS;
+		}
+
+		k_mutex_lock(&head_lock, K_FOREVER);
+		if (ret == 0) {
+			head.stats.tx_sent++;
+		} else {
+			head.stats.tx_failed++;
+		}
+		if ((t.flags & MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT) != 0U && head.brain != 0U) {
+			const struct meshtastic_attachment_tx_result r = {
+				.tx_seq = t.tx_seq,
+				.rc = (int8_t)CLAMP(ret, -127, 127),
+				.defers = t.defers,
+				.tx_ms = (uint32_t)k_uptime_get(),
+			};
+			int elen = meshtastic_attachment_encode_tx_result(&r, env_buf, sizeof(env_buf));
+
+			if (elen > 0) {
+				(void)meshtastic_attachment_head_send(head.brain, env_buf, (size_t)elen);
+			}
+		}
+		k_mutex_unlock(&head_lock);
+		if (ret != 0) {
+			LOG_DBG("head: tx seq %u failed (%d)", t.tx_seq, ret);
+		}
+	}
+}
+
+static void head_tx_retry_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	head_submit(&head_tx_work);
 }
 
 static void head_work_fn(struct k_work *work)
@@ -298,12 +371,47 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 		}
 		break;
 	}
-	case MESHTASTIC_ATTACHMENT_TX_FRAME:
-		/* Phase 3. Counted as refused so the brain's TX_RESULT-less send
-		 * is visible on both ends. */
-		head.stats.refused++;
-		ret = -EPERM;
+	case MESHTASTIC_ATTACHMENT_TX_FRAME: {
+		struct meshtastic_attach_link_info info;
+		struct head_tx t;
+		bool trusted;
+
+		/* The same gate as SET_PRESET: the brain, over a link the bearer
+		 * vouches for. Transmitting is the one thing a head does on the
+		 * air, and only for its brain. */
+		if (node != head.brain) {
+			head.stats.refused++;
+			ret = -EPERM;
+			break;
+		}
+		trusted = ((b != NULL) ? b->link_info(node, &info)
+				       : meshtastic_attach_bearer_link_info(node, &info, NULL)) &&
+			  info.up && info.auth != MESHTASTIC_ATTACH_AUTH_NONE;
+		if (!trusted) {
+			head.stats.untrusted++;
+			ret = -EACCES;
+			break;
+		}
+		if (msg.u.tx.wire_len == 0U || msg.u.tx.wire_len > MESHTASTIC_PKT_MAX) {
+			head.stats.rejected++;
+			ret = -EBADMSG;
+			break;
+		}
+		t.len = msg.u.tx.wire_len;
+		t.tx_seq = msg.u.tx.tx_seq;
+		t.flags = msg.u.tx.flags;
+		t.defers = 0U;
+		memcpy(t.wire, msg.u.tx.wire, msg.u.tx.wire_len);
+		if (k_msgq_put(&head_tx_q, &t, K_NO_WAIT) != 0) {
+			head.stats.tx_queue_full++;
+			ret = -ENOBUFS;
+			break;
+		}
+		head.stats.controls++;
+		head_submit(&head_tx_work);
+		ret = 0;
 		break;
+	}
 	default:
 		/* RX_FRAME, STATUS, TX_RESULT are what a head SENDS. */
 		head.stats.rejected++;

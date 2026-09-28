@@ -48,7 +48,21 @@ struct meshtastic_attachment_info {
 	uint32_t lat_min_ms;
 	uint32_t lat_max_ms;
 	uint32_t lat_sum_ms;
+	/* TX through this head (P3 slice 1): the sequence stamped on each
+	 * TX_FRAME, and what the last TX_RESULT said. */
+	uint16_t tx_seq;
+	int8_t last_tx_rc;
+	uint8_t last_tx_defers;
+	uint32_t tx_failed;   /* TX_RESULTs with rc != 0 */
 };
+
+/* Can a frame be handed to attachment @p id right now: known, link up, and
+ * not reporting itself receive-only. id 0 (the local radio) is never asked
+ * here. */
+bool meshtastic_attachment_tx_ready(uint8_t id);
+/* Hand @p wire to head @p id as a TX_FRAME on its preset. Called from the
+ * outbound worker. @p want_result asks the head for a TX_RESULT. */
+int meshtastic_attachment_tx(uint8_t id, const uint8_t *wire, size_t len, bool want_result);
 
 /* The router noted that attachment @p id delivered a copy of a frame the local
  * radio had delivered @p ms earlier. */

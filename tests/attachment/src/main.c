@@ -32,6 +32,7 @@
 #include "meshtastic_preset.h"
 #include "meshtastic_reliable.h"
 #include "meshtastic_sched.h"
+#include "meshtastic_outbound.h"
 
 #define TEST_NODE_ID 0x0A0A0A0AU
 #define FAR_NODE_ID  0x0D0D0D0DU
@@ -944,4 +945,92 @@ ZTEST(attachment, test_implicit_ack_through_a_head_resolves_the_reliable_send)
 		zassert_equal(rx.count, 0U, "an echo is never delivered");
 	}
 	meshtastic_reliable_reset();
+}
+
+/* P3 slice 1: the pipe. A frame enqueued for attachment 1 leaves as a TX_FRAME
+ * to that head -- its preset, its bytes -- and never on our own radio; a
+ * TX_RESULT from the head is accounted. The twin: attachment 0 leaves on the
+ * radio and nothing reaches the bearer. A head that is not ready refuses at
+ * enqueue, where the caller can still be told. */
+ZTEST(attachment, test_tx_through_a_head_leaves_as_tx_frame)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_msg msg;
+	struct meshtastic_attachment_info a;
+	uint32_t before;
+
+	/* Admit the head with a frame of its own (id 1, preset ShortTurbo). */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1C00U, "admit", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -90, 5, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	drain_radio();
+	zassert_true(meshtastic_attachment_tx_ready(1U), "head 1 is ready");
+	zassert_false(meshtastic_attachment_tx_ready(2U), "no head 2");
+
+	build_frame(TEST_NODE_ID, FAR_NODE_ID, 0x1C01U, "via head", wire, &len);
+	before = sent.count;
+	zassert_ok(meshtastic_radio_send_wire_after_on(wire, len, MT_SCHED_TIER_NORMAL, 0U, 1U),
+		   "enqueue for head 1");
+	for (int i = 0; i < 100 && sent.count == before; i++) {
+		k_msleep(10);
+	}
+	zassert_equal(sent.count, before + 1U, "one TX_FRAME to the head");
+	zassert_equal(sent.node, HEAD1_NODE);
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_FRAME);
+	zassert_equal(msg.u.tx.preset, (uint8_t)PRESET_ST, "the head's preset");
+	zassert_equal(msg.u.tx.wire_len, len);
+	zassert_mem_equal(msg.u.tx.wire, wire, len, "the bytes as built");
+	zassert_equal(msg.u.tx.tx_seq, 1U);
+	zassert_true((msg.u.tx.flags & MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT) != 0U);
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing on our radio");
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	zassert_equal(a.tx_frames, 1U);
+	zassert_equal(a.tx_seq, 1U);
+
+	/* The head reports back. */
+	{
+		uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+		const struct meshtastic_attachment_tx_result r = {
+			.tx_seq = 1U, .rc = 0, .defers = 1U, .tx_ms = 1234U,
+		};
+		int elen = meshtastic_attachment_encode_tx_result(&r, env, sizeof(env));
+
+		zassert_true(elen > 0);
+		zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, HEAD1_NODE, env, (size_t)elen));
+	}
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	zassert_equal(a.tx_results, 1U);
+	zassert_equal(a.last_tx_rc, 0);
+	zassert_equal(a.last_tx_defers, 1U);
+	zassert_equal(a.tx_failed, 0U);
+
+	/* The twin: attachment 0 is our own radio. */
+	build_frame(TEST_NODE_ID, FAR_NODE_ID, 0x1C02U, "local", wire, &len);
+	before = sent.count;
+	zassert_ok(meshtastic_radio_send_wire_after_on(wire, len, MT_SCHED_TIER_NORMAL, 0U, 0U));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(2)), "on our radio");
+	zassert_equal(f.len, len);
+	k_msleep(100);
+	zassert_equal(sent.count, before, "nothing to the head");
+
+	/* Not ready: unknown, or the head says receive-only. */
+	zassert_equal(meshtastic_radio_send_wire_after_on(wire, len, MT_SCHED_TIER_NORMAL, 0U, 2U),
+		      -EHOSTUNREACH, "no such head");
+	{
+		uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+		const struct meshtastic_attachment_status st = {
+			.preset = (uint8_t)PRESET_ST,
+			.flags = MESHTASTIC_ATTACHMENT_ST_IS_HEAD | MESHTASTIC_ATTACHMENT_ST_RX_ONLY,
+			.hwid = HEAD1_NODE, .brain = TEST_NODE_ID,
+		};
+		int elen = meshtastic_attachment_encode_status(&st, env, sizeof(env));
+
+		zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, HEAD1_NODE, env, (size_t)elen));
+	}
+	zassert_false(meshtastic_attachment_tx_ready(1U), "the head says receive-only");
+	zassert_equal(meshtastic_radio_send_wire_after_on(wire, len, MT_SCHED_TIER_NORMAL, 0U, 1U),
+		      -EHOSTUNREACH, "refused at enqueue");
 }

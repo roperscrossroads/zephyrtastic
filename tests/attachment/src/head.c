@@ -255,8 +255,8 @@ ZTEST(attachment_head, test_controls_a_head_refuses)
 		};
 		len = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
 		zassert_true(len > 0);
-		zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len),
-			      -EPERM, "TX via a head is phase 3");
+		zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, STRANGER, env, (size_t)len),
+			      -EPERM, "only the brain hands a head frames to transmit");
 		zassert_equal(lora_sim_tx_pending(lora_dev), 0, "nothing on the air");
 	}
 	{
@@ -420,3 +420,77 @@ ZTEST(attachment_head, test_identity_in_flash_is_never_loaded_or_touched)
 	}
 }
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
+
+/* P3 slice 1: a TX_FRAME from the brain over a trusted link goes on the air
+ * byte for byte -- the head keys up what the brain built, through the one
+ * transmit funnel -- and a TX_RESULT comes back when asked. Over a link the
+ * bearer does not vouch for, it is refused (the SET_PRESET gate). */
+ZTEST(attachment_head, test_tx_frame_from_the_brain_is_transmitted)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	uint8_t wire[40];
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_msg msg;
+	struct meshtastic_attachment_head_stats st;
+	int len;
+
+	meshtastic_attachment_head_set_brain(BRAIN_NODE);
+	(void)k_sem_take(&sent.sem, K_MSEC(500)); /* the introductory STATUS */
+	wait_rx_armed();
+	some_frame(wire, sizeof(wire), 0x50U);
+
+	{
+		const struct meshtastic_attachment_tx_frame tx = {
+			.preset = (uint8_t)PRESET_ST, .flags = MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT,
+			.tx_seq = 7U, .wire = wire, .wire_len = sizeof(wire),
+		};
+		len = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
+		zassert_true(len > 0);
+		zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len),
+			   "accepted from the brain");
+	}
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(2)), "the frame went on the air");
+	zassert_equal(f.len, sizeof(wire));
+	zassert_mem_equal(f.data, wire, sizeof(wire), "byte for byte");
+
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(1)), "TX_RESULT sent");
+	zassert_equal(sent.to, BRAIN_NODE);
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_RESULT);
+	zassert_equal(msg.u.result.tx_seq, 7U);
+	zassert_equal(msg.u.result.rc, 0, "transmitted (%d)", msg.u.result.rc);
+	zassert_equal(msg.u.result.defers, 0U);
+
+	meshtastic_attachment_head_stats_get(&st);
+	zassert_equal(st.tx_sent, 1U);
+	zassert_equal(st.controls, 1U);
+
+	/* No result asked for: none sent. */
+	{
+		const struct meshtastic_attachment_tx_frame tx = {
+			.preset = (uint8_t)PRESET_ST, .flags = 0U, .tx_seq = 8U,
+			.wire = wire, .wire_len = sizeof(wire),
+		};
+		len = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
+		zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len));
+	}
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(2)), "on the air");
+	zassert_equal(k_sem_take(&sent.sem, K_MSEC(300)), -EAGAIN, "no TX_RESULT unasked");
+
+	/* The twin: the brain over an untrusted link is refused. */
+	test_auth = MESHTASTIC_ATTACH_AUTH_NONE;
+	{
+		const struct meshtastic_attachment_tx_frame tx = {
+			.preset = (uint8_t)PRESET_ST, .flags = 0U, .tx_seq = 9U,
+			.wire = wire, .wire_len = sizeof(wire),
+		};
+		len = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
+		zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len),
+			      -EACCES, "untrusted link");
+	}
+	test_auth = MESHTASTIC_ATTACH_AUTH_ENCRYPTED;
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing on the air");
+	meshtastic_attachment_head_stats_get(&st);
+	zassert_equal(st.tx_sent, 2U);
+	zassert_equal(st.untrusted, 1U);
+}

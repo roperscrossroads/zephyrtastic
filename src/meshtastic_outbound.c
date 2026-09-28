@@ -24,6 +24,9 @@
 #include "meshtastic_duty.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_outbound.h"
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#include "meshtastic_attachment.h"
+#endif
 #include "meshtastic_sched.h"
 
 #include "meshtastic_preset.h"
@@ -58,6 +61,10 @@ struct ob_item {
 	/* Times the radio has answered MESHTASTIC_TX_DEFER for this frame and it
 	 * went back in the queue. Bounded by CONFIG_MESHTASTIC_TX_DEFER_MAX. */
 	uint8_t defers;
+	/* Which radio this frame leaves by: 0 = ours, else an attachment (a head
+	 * the brain hands the bytes to). The preset-generation check and the
+	 * TX divert apply to our own radio only. */
+	uint8_t attach;
 	struct k_sem *done; /* non-NULL => a blocking caller is waiting; never evict */
 	int *result;
 };
@@ -276,8 +283,16 @@ static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 			 * radio at all, so a preset switch says nothing about
 			 * whether the destination can still be reached over it.
 			 * Only the LoRa half is preset-bound. */
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+			if (cur.attach != 0U) {
+				/* The head's radio, the head's preset, the head's
+				 * clock: nothing below applies. The head answers
+				 * with TX_RESULT; DEFER is its own affair. */
+				ret = meshtastic_attachment_tx(cur.attach, cur.wire, cur.len, true);
+			} else
+#endif
 			ret = meshtastic_ble_peer_tx_try_divert(cur.wire, cur.len);
-			if (ret != 0 && cur.gen != meshtastic_preset_generation()) {
+			if (cur.attach == 0U && ret != 0 && cur.gen != meshtastic_preset_generation()) {
 				/* Composed for a preset this node has since left.
 				 * Dropped rather than transmitted: the wire
 				 * channel hash it carries was derived from the
@@ -288,7 +303,7 @@ static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 				 * looking like plain packet loss. */
 				meshtastic_preset_note_tx_stale();
 				ret = -ESTALE;
-			} else if (ret != 0) {
+			} else if (cur.attach == 0U && ret != 0) {
 				ret = meshtastic_radio_send_wire_now(cur.wire, cur.len);
 			}
 
@@ -336,7 +351,7 @@ static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 }
 
 static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, k_timeout_t wait,
-			    uint32_t delay_ms)
+			    uint32_t delay_ms, uint8_t attach)
 {
 	struct k_sem done;
 	int result = 0;
@@ -353,6 +368,19 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 	 * brain's frames (phase 3) enter one layer down, at send_wire_now. */
 	return -EPERM;
 #endif
+
+	if (attach != 0U) {
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+		/* Refused here, where the caller can still be told, rather than
+		 * at the worker: a head that is down or receive-only cannot carry
+		 * it, and a reply on the wrong radio is noise, not a fallback. */
+		if (!meshtastic_attachment_tx_ready(attach)) {
+			return -EHOSTUNREACH;
+		}
+#else
+		return -EHOSTUNREACH;
+#endif
+	}
 
 #if defined(CONFIG_MESHTASTIC_DUTY_CYCLE)
 	/* The regulatory gate, at the one funnel every egress path reaches:
@@ -434,6 +462,7 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 	memcpy(ob_items[idx].wire, pkt, pkt_len);
 	ob_items[idx].len = pkt_len;
 	ob_items[idx].tier = tier;
+	ob_items[idx].attach = attach;
 	/* A deadline of 0 means "now"; bump a zero-valued uptime by 1 ms so the
 	 * sentinel keeps its meaning at the very start of boot. */
 	ob_items[idx].late = false;
@@ -473,7 +502,7 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 
 int meshtastic_radio_send_wire_prio(uint8_t *pkt, uint32_t pkt_len, uint8_t tier)
 {
-	int ret = outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, 0U);
+	int ret = outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, 0U, 0U);
 
 	return (ret == 0) ? 0 : ret;
 }
@@ -481,13 +510,19 @@ int meshtastic_radio_send_wire_prio(uint8_t *pkt, uint32_t pkt_len, uint8_t tier
 int meshtastic_radio_send_wire_wait_prio(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
 					 k_timeout_t timeout)
 {
-	return outbound_enqueue(pkt, pkt_len, tier, timeout, 0U);
+	return outbound_enqueue(pkt, pkt_len, tier, timeout, 0U, 0U);
 }
 
 int meshtastic_radio_send_wire_after(uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
 				     uint32_t delay_ms)
 {
-	return outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, delay_ms);
+	return outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, delay_ms, 0U);
+}
+
+int meshtastic_radio_send_wire_after_on(uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
+					uint32_t delay_ms, uint8_t attach)
+{
+	return outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, delay_ms, attach);
 }
 
 uint8_t meshtastic_outbound_pending(void)
@@ -586,7 +621,7 @@ int meshtastic_radio_send_wire(uint8_t *pkt, uint32_t pkt_len)
 
 int meshtastic_radio_send_wire_wait(const uint8_t *pkt, uint32_t pkt_len, k_timeout_t timeout)
 {
-	return outbound_enqueue(pkt, pkt_len, MT_SCHED_TIER_NORMAL, timeout, 0U);
+	return outbound_enqueue(pkt, pkt_len, MT_SCHED_TIER_NORMAL, timeout, 0U, 0U);
 }
 
 int meshtastic_outbound_init(void)

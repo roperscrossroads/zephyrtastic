@@ -3637,6 +3637,11 @@ static int cmd_attach_status(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "  link latency vs local radio: n %u  min %u  avg %u  max %u ms",
 			    a.lat_n, a.lat_min_ms, a.lat_sum_ms / a.lat_n, a.lat_max_ms);
 	}
+	if (a.id != 0U) {
+		shell_print(sh, "  tx: handed %u (seq %u)  results %u  failed %u  last rc %d after %u defers%s",
+			    a.tx_frames, a.tx_seq, a.tx_results, a.tx_failed, a.last_tx_rc,
+			    a.last_tx_defers, meshtastic_attachment_tx_ready(a.id) ? "" : "  [not ready]");
+	}
 	return 0;
 }
 
@@ -3704,7 +3709,7 @@ static int cmd_attach_head_show(const struct shell *sh, size_t argc, char **argv
 	ARG_UNUSED(argv);
 
 	meshtastic_attachment_head_stats_get(&st);
-	shell_print(sh, "role: keyless radio head (rx-only until phase 3)");
+	shell_print(sh, "role: keyless radio head (transmits what its brain hands it)");
 	shell_print(sh, "brain: 0x%08x%s", brain, brain == 0U ? " (none: not forwarding)" : "");
 	shell_print(sh, "preset: %s (%u)", meshtastic_preset_display_name(mt.modem_preset, true),
 		    (unsigned int)mt.modem_preset);
@@ -3712,6 +3717,8 @@ static int cmd_attach_head_show(const struct shell *sh, size_t argc, char **argv
 		    st.heard, st.forwarded, st.no_brain, st.queue_full, st.send_failed);
 	shell_print(sh, "status_sent %u  controls %u  refused %u  untrusted %u  rejected %u",
 		    st.status_sent, st.controls, st.refused, st.untrusted, st.rejected);
+	shell_print(sh, "tx: sent %u  failed %u  deferred %u  queue_full %u", st.tx_sent,
+		    st.tx_failed, st.tx_deferred, st.tx_queue_full);
 	return 0;
 }
 

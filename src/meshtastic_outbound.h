@@ -43,6 +43,16 @@ int meshtastic_radio_send_wire_wait_prio(const uint8_t *pkt, uint32_t pkt_len, u
 /* Driver-level TX; only called from the outbound worker thread. */
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len);
 
+/*
+ * As _after, but the frame leaves through attachment @p attach (0 = this
+ * board's radio, identical to _after): the brain hands it to that radio head as
+ * a TX_FRAME and the head keys up on its own clock with its own CAD
+ * (ATTACHMENT-P3-PLAN slice 1). -EHOSTUNREACH when that head is not ready to
+ * transmit (unknown, link down, or it reports itself receive-only).
+ */
+int meshtastic_radio_send_wire_after_on(uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
+					uint32_t delay_ms, uint8_t attach);
+
 /**
  * @brief "Not now" — meshtastic_radio_send_wire_now()'s answer when the air is in use.
  *
