@@ -354,6 +354,45 @@ bool meshtastic_channels_decrypt_for_hash(uint8_t index, uint8_t wire_hash)
 	return channel_hashes[index] == wire_hash;
 }
 
+uint8_t meshtastic_channels_hash_for_preset(uint8_t index, uint8_t preset)
+{
+	struct meshtastic_channel_key key;
+	const meshtastic_Channel *ch;
+	const char *name;
+	uint8_t h;
+
+	if (index >= MESHTASTIC_MAX_CHANNELS) {
+		return 0U;
+	}
+	ch = &channel_slots[index];
+	/* A named slot, or no preset to speak of: the cached hash is the hash. */
+	if ((ch->has_settings && ch->settings.name[0] != '\0') ||
+	    preset > (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX) {
+		return channel_hashes[index];
+	}
+	if (channel_get_key(index, &key) < 0) {
+		return 0U;
+	}
+	/* channel_generate_hash, with the preset's display name where the active
+	 * preset's would be substituted: what a node ON that preset stamps. */
+	name = meshtastic_preset_display_name((meshtastic_Config_LoRaConfig_ModemPreset)preset,
+					      true);
+	h = xor_hash_bytes((const uint8_t *)name, strlen(name));
+	if (!channel_key_invalid(&key)) {
+		h ^= xor_hash_bytes(key.bytes, key.len);
+	}
+	return h;
+}
+
+bool meshtastic_channels_decrypt_for_hash_on(uint8_t index, uint8_t wire_hash, uint8_t preset)
+{
+	if (index >= MESHTASTIC_MAX_CHANNELS) {
+		return false;
+	}
+
+	return meshtastic_channels_hash_for_preset(index, preset) == wire_hash;
+}
+
 bool meshtastic_channels_is_default(uint8_t index)
 {
 	const meshtastic_Channel *ch = meshtastic_channels_get(index);

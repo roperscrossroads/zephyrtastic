@@ -739,8 +739,9 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 
 	dup_add(src, pkt_id, rx_hop_limit);
 
-	ret = meshtastic_try_decode_wire_packet(buf, len, rssi, snr, &packet, payload,
-						sizeof(payload), &decoded, &fail_reason, &rx_mesh);
+	ret = meshtastic_try_decode_wire_packet_on(buf, len, rssi, snr, meta->preset, &packet,
+						   payload, sizeof(payload), &decoded, &fail_reason,
+						   &rx_mesh);
 	if (ret < 0) {
 		LOG_DBG("RX header parse failed (%d)", ret);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)

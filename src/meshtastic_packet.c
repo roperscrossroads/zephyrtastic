@@ -386,8 +386,12 @@ uint8_t meshtastic_packet_wire_hash_for_index(uint8_t channel_index)
 	return meshtastic_channels_get_hash(channel_index);
 }
 
-static int try_decrypt_wire_hash(uint8_t wire_hash, uint32_t from, uint32_t id, const uint8_t *enc,
-				 size_t enc_len, meshtastic_Data *data, uint8_t *channel_index_out)
+/* @p rx_preset is the modem preset the frame was heard on: the active one for
+ * our own radio, a head's for a frame it forwarded (ATTACHMENT-DESIGN S2), or
+ * MESHTASTIC_PRESET_UNKNOWN. An unnamed slot's hash depends on it. */
+static int try_decrypt_wire_hash(uint8_t wire_hash, uint8_t rx_preset, uint32_t from, uint32_t id,
+				 const uint8_t *enc, size_t enc_len, meshtastic_Data *data,
+				 uint8_t *channel_index_out)
 {
 	struct meshtastic_channel_key key;
 
@@ -399,7 +403,7 @@ static int try_decrypt_wire_hash(uint8_t wire_hash, uint32_t from, uint32_t id, 
 			continue;
 		}
 
-		if (!meshtastic_channels_decrypt_for_hash(ch, wire_hash)) {
+		if (!meshtastic_channels_decrypt_for_hash_on(ch, wire_hash, rx_preset)) {
 			continue;
 		}
 
@@ -513,8 +517,9 @@ int meshtastic_mesh_pb_try_decode(meshtastic_MeshPacket *mesh)
 		 * wire byte of 0 that was not PKC (a PKC frame not addressed to us, or a
 		 * channel whose hash is 0) is matched literally against the channel hashes,
 		 * mirroring upstream's decryptForHash loop. */
-		ret = try_decrypt_wire_hash(wire_hash, mesh->from, mesh->id, mesh->encrypted.bytes,
-					    enc_len, &data, &ch_index);
+		ret = try_decrypt_wire_hash(wire_hash, MESHTASTIC_PRESET_UNKNOWN, mesh->from,
+					    mesh->id, mesh->encrypted.bytes, enc_len, &data,
+					    &ch_index);
 		if (ret < 0) {
 			return ret;
 		}
@@ -639,6 +644,17 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 				      enum meshtastic_decode_fail *fail_reason,
 				      meshtastic_MeshPacket *out_mesh)
 {
+	return meshtastic_try_decode_wire_packet_on(buf, len, rssi, snr, MESHTASTIC_PRESET_UNKNOWN,
+						    packet, payload, payload_len, decoded,
+						    fail_reason, out_mesh);
+}
+
+int meshtastic_try_decode_wire_packet_on(const uint8_t *buf, int len, int16_t rssi, int8_t snr,
+					 uint8_t rx_preset, struct meshtastic_packet *packet,
+					 uint8_t *payload, size_t payload_len, bool *decoded,
+					 enum meshtastic_decode_fail *fail_reason,
+					 meshtastic_MeshPacket *out_mesh)
+{
 	const struct meshtastic_wire_header *hdr;
 	meshtastic_Data data = meshtastic_Data_init_zero;
 	const uint8_t *packet_payload = NULL;
@@ -693,7 +709,7 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 #endif
 
 		if (!pkc_done) {
-			ret = try_decrypt_wire_hash(wire_hash, packet->from, packet->id,
+			ret = try_decrypt_wire_hash(wire_hash, rx_preset, packet->from, packet->id,
 						    buf + MESHTASTIC_HDR_LEN,
 						    (size_t)(len - (int)MESHTASTIC_HDR_LEN), &data,
 						    &channel_index);

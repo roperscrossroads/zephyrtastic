@@ -149,6 +149,28 @@ uint8_t meshtastic_channels_get_hash(uint8_t index);
 bool meshtastic_channels_decrypt_for_hash(uint8_t index, uint8_t wire_hash);
 
 /**
+ * @brief The hash a slot carries on the air under a given modem preset.
+ *
+ * An unnamed slot takes its name from the preset it is used on (see
+ * meshtastic_channels_get_name), so the same key hashes differently on
+ * LongFast and on MediumFast. A frame heard by a radio head on another preset
+ * (ATTACHMENT-DESIGN S2) carries THAT preset's hash; this is how the brain
+ * matches it against its own table. A named slot hashes the same everywhere.
+ *
+ * @param index Slot index.
+ * @param preset meshtastic_Config_LoRaConfig_ModemPreset the frame was heard on;
+ *        MESHTASTIC_PRESET_UNKNOWN (or any value out of range) means the active
+ *        preset, i.e. the cached hash.
+ * @return The hash, or @c 0 if @p index is invalid.
+ */
+uint8_t meshtastic_channels_hash_for_preset(uint8_t index, uint8_t preset);
+
+/**
+ * @brief meshtastic_channels_decrypt_for_hash for a frame heard on @p preset.
+ */
+bool meshtastic_channels_decrypt_for_hash_on(uint8_t index, uint8_t wire_hash, uint8_t preset);
+
+/**
  * @brief Human-readable channel name for a slot.
  *
  * Empty or unset names map to @ref MESHTASTIC_CHANNEL_LONGFAST for slot 0 semantics. The returned

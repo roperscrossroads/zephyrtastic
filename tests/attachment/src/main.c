@@ -35,6 +35,7 @@
 #define HEAD1_NODE   0x00E10001U /* a head's link identity (its hw node number) */
 #define HEAD2_NODE   0x00E10002U
 #define PRESET_ST meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO
+#define PRESET_MF meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST
 
 static const struct device *const lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
@@ -197,6 +198,10 @@ static void attachment_before(void *fixture)
 	mt.status.last_snr = 0;
 	mt.status.last_rx_from = 0U;
 	mt.status.self_heard = 0U;
+	/* A fresh table per case: every head is admitted by the case that uses it. */
+	for (uint8_t id = 1U; id <= CONFIG_MESHTASTIC_ATTACHMENT_MAX; id++) {
+		(void)meshtastic_attachment_forget(id);
+	}
 	/* Fresh dup cache per case so the same (src,id) can be reused. */
 	memset(mt.dup_cache, 0, sizeof(mt.dup_cache));
 	mt.dup_head = 0U;
@@ -245,6 +250,54 @@ ZTEST(attachment, test_head_frame_is_delivered_as_rf)
 	zassert_equal(a.preset, (uint8_t)PRESET_ST);
 	zassert_equal(a.rx_frames, 1U);
 	zassert_equal(a.last_rssi, -90);
+}
+
+/* T1 (P1): a frame heard by a head on ANOTHER preset carries that preset's
+ * channel hash -- an unnamed slot is named after the preset it is used on. The
+ * brain, on ShortTurbo, cannot match it against its cached hashes; it matches
+ * the slot hashed under the head's preset instead. Same key, same nonce
+ * (id, from): the channel byte is header-only, so the ciphertext is the one a
+ * MediumFast node built. Decoded as the brain's own primary-channel content --
+ * same identity, no re-origination, the point of the exercise. */
+ZTEST(attachment, test_frame_from_another_preset_decodes_on_the_brain)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct meshtastic_attachment_info a;
+	const uint8_t here = meshtastic_channels_get_hash(0U);
+	const uint8_t there = meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF);
+
+	zassert_not_equal(here, there, "an unnamed slot hashes per preset (0x%02x)", here);
+	zassert_equal(meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_ST), here,
+		      "the active preset's hash is the cached one");
+	zassert_equal(meshtastic_channels_hash_for_preset(0U, MESHTASTIC_PRESET_UNKNOWN), here,
+		      "an unknown preset means the active one");
+
+	/* Tagged with the wrong preset by a head: nothing in the table matches. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1101U, "from MediumFast", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -95, 3, wire, len), "ingest");
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN, "not decodable as ShortTurbo");
+
+	/* Untagged (the legacy bearer inject): the active preset, so the same. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1102U, "from MediumFast", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	zassert_ok(meshtastic_radio_rx_inject(wire, (uint16_t)len, MESHTASTIC_BEARER_BLE_PEER));
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN, "not decodable untagged");
+
+	/* Tagged MediumFast by the head that heard it there: decoded. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1103U, "from MediumFast", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -95, 3, wire, len), "ingest");
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+	zassert_equal(rx.from, FAR_NODE_ID, "the origin's identity, not a relay's");
+	zassert_equal(rx.portnum, MESHTASTIC_PORT_TEXT_MESSAGE);
+	zassert_equal(rx.rssi, -95);
+	zassert_equal(rx.count, 1U);
+
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	zassert_equal(a.preset, (uint8_t)PRESET_MF, "the head now reports MediumFast");
+	zassert_equal(a.rx_frames, 2U, "both envelopes counted, one decoded");
 }
 
 /* T2b: two heads hear the same frame -- delivered once (the dup cache is keyed
@@ -373,8 +426,18 @@ ZTEST(attachment, test_set_preset_reaches_the_head)
 	zassert_equal(meshtastic_attachment_set_preset(0U, 1U), -EINVAL);
 	zassert_equal(meshtastic_attachment_set_preset(CONFIG_MESHTASTIC_ATTACHMENT_MAX, 1U),
 		      -ENOENT, "a slot nobody occupies");
+	/* Admit head 1 the way it always is: by hearing something through it. */
+	{
+		uint8_t wire[MESHTASTIC_PKT_MAX];
+		uint32_t len;
+
+		build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1801U, "hello", wire, &len);
+		zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -80, 6, wire, len), "ingest");
+		zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+	}
 	id = meshtastic_attachment_id_for_node(HEAD1_NODE);
-	zassert_true(id != 0U, "head 1 is known from the earlier cases");
+	zassert_true(id != 0U, "head 1 is known");
+	memset(&sent, 0, sizeof(sent));
 	zassert_ok(meshtastic_attachment_set_preset(id, 2U));
 	zassert_equal(sent.count, 1U);
 	zassert_equal(sent.node, HEAD1_NODE);
