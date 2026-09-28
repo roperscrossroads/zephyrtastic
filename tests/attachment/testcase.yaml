@@ -12,4 +12,31 @@ tests:
   # The brain (ATTACHMENT-DESIGN S1/S6): a real stack whose heads are scripted --
   # the test injects RX_FRAME envelopes as a head would and reads what the router
   # made of them. No BLE: the send seam is the __weak stub, as the relay's ear's is.
-  meshtastic.attachment.brain.native_sim: {}
+  meshtastic.attachment.brain.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=y
+      - CONFIG_MESHTASTIC_ATTACHMENT_MAX=2
+  # The head (S5): the real stack as a keyless radio head on the sim radio. What
+  # it hears is captured at the send seam as RX_FRAME envelopes; controls come
+  # in through on_envelope as the BLE glue would deliver them. The build itself
+  # is a test: keyless-assert.cmake refuses the ELF if any identity code linked.
+  meshtastic.attachment.head.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=n
+      - CONFIG_MESHTASTIC_ATTACHMENT_HEAD=y
+      - CONFIG_MESHTASTIC_ATTACHMENT_HEAD_STATUS_PERIOD_SEC=5
+      - CONFIG_MESHTASTIC_NODEDB=n
+      - CONFIG_MESHTASTIC_PKI=n
+      - CONFIG_MESHTASTIC_CLUSTER=n
+      - CONFIG_MESHTASTIC_POSITION=n
+      - CONFIG_MESHTASTIC_NODEINFO=n
+      - CONFIG_MESHTASTIC_STATUSMESSAGE=n
+      - CONFIG_MESHTASTIC_NEIGHBORINFO=n
+      - CONFIG_MESHTASTIC_MESHBEACON=n
+      - CONFIG_MESHTASTIC_TRAFFIC=n
+      - CONFIG_MESHTASTIC_MESSAGE=n
+      - CONFIG_MESHTASTIC_AIRTIME=n
+      - CONFIG_MESHTASTIC_ADMIN=n
+      - CONFIG_MESHTASTIC_TRACEROUTE=n
+      - CONFIG_MESHTASTIC_SCANNER=n
+      - CONFIG_MESHTASTIC_EXTNOTIFY=n

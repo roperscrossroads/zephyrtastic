@@ -200,6 +200,19 @@ tests:
       - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sig-required.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf"
     extra_configs:
       - CONFIG_ASSERT_VERBOSE=n
+  sample.meshtastic.fleet.c12:
+    # Class 12, XIAO keyless radio head (ATTACHMENT-DESIGN S5): the peer link and OTA,
+    # nothing that holds a key or speaks. The post-build keyless assert runs on this ELF.
+    tags: [meshtastic, fleet]
+    platform_allow: [xiao_ble/nrf52840]
+    integration_platforms: [xiao_ble/nrf52840]
+    sysbuild: true
+    extra_args:
+      - SHIELD=wio_sx1262_xiao
+      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-attachment-head.conf"
+    extra_configs:
+      - CONFIG_MESHTASTIC_FLEET_CLASS=12
+      - CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x0c"
   sample.meshtastic.fleet.c9:
     # Class 9, XIAO RF listener.
     tags: [meshtastic, fleet]

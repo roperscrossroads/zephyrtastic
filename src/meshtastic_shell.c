@@ -80,6 +80,9 @@
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
 #include "meshtastic_attachment.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+#include "meshtastic_attachment_head.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 #include "meshtastic_neighborinfo.h"
 #endif
@@ -2027,7 +2030,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  cmd_scan_reset),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_SCANNER */
+#endif /* CONFIG_MESHTASTIC_NODEDB */
 
+/* The RF commands read the radio, not the NodeDB: they must exist on an image
+ * without one (the keyless head is the first). */
 #if defined(CONFIG_MESHTASTIC_RF_PATH_REPORT)
 #include "meshtastic_rf_path.h"
 
@@ -2490,6 +2496,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_SUBCMD_SET_END);
 #endif
 
+#if defined(CONFIG_MESHTASTIC_NODEDB)
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodedb_cmds,
 			       SHELL_CMD(list, NULL, SHELL_HELP("List NodeDB entries.", NULL),
 					 cmd_nodedb_list),
@@ -3639,6 +3646,64 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_attach_forget, 2, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_ATTACHMENT_BRAIN */
+
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+/* `meshtastic attach` on a keyless head (ATTACHMENT-DESIGN S5): whose radio
+ * this is, and what has passed through. */
+static int cmd_attach_head_show(const struct shell *sh, size_t argc, char **argv)
+{
+	struct meshtastic_attachment_head_stats st;
+	uint32_t brain = meshtastic_attachment_head_get_brain();
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	meshtastic_attachment_head_stats_get(&st);
+	shell_print(sh, "role: keyless radio head (rx-only until phase 3)");
+	shell_print(sh, "brain: 0x%08x%s", brain, brain == 0U ? " (none: not forwarding)" : "");
+	shell_print(sh, "preset: %s (%u)", meshtastic_preset_display_name(mt.modem_preset, true),
+		    (unsigned int)mt.modem_preset);
+	shell_print(sh, "heard %u  forwarded %u  no_brain %u  queue_full %u  send_failed %u",
+		    st.heard, st.forwarded, st.no_brain, st.queue_full, st.send_failed);
+	shell_print(sh, "status_sent %u  controls %u  refused %u  rejected %u", st.status_sent,
+		    st.controls, st.refused, st.rejected);
+	return 0;
+}
+
+static int cmd_attach_head_brain(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t node = (uint32_t)strtoul(argv[1], NULL, 16);
+
+	ARG_UNUSED(argc);
+	meshtastic_attachment_head_set_brain(node);
+	shell_print(sh, "brain: 0x%08x%s", node, node == 0U ? " (forwarding stopped)" : "");
+	return 0;
+}
+
+static int cmd_attach_head_status(const struct shell *sh, size_t argc, char **argv)
+{
+	int ret = meshtastic_attachment_head_status_send();
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	if (ret != 0) {
+		shell_error(sh, "status not sent (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "status sent");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	meshtastic_attach_head_cmds,
+	SHELL_CMD(show, NULL, SHELL_HELP("Brain and counters.", NULL), cmd_attach_head_show),
+	SHELL_CMD_ARG(brain, NULL,
+		      SHELL_HELP("The brain's node number (0 stops forwarding).", "<hex node id>"),
+		      cmd_attach_head_brain, 2, 0),
+	SHELL_CMD(status, NULL, SHELL_HELP("Send a STATUS to the brain now.", NULL),
+		  cmd_attach_head_status),
+	SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_ATTACHMENT_HEAD */
 
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 /* `meshtastic neighbors` (agents-dnr4.19). Reads always; writes gated behind
@@ -7436,6 +7501,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
 	SHELL_CMD(attach, &meshtastic_attach_cmds,
 		  SHELL_HELP("Radio heads: list, status, preset, forget.", NULL), cmd_attach_list),
+#endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+	SHELL_CMD(attach, &meshtastic_attach_head_cmds,
+		  SHELL_HELP("This keyless radio head: show, brain, status.", NULL),
+		  cmd_attach_head_show),
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY)
 	SHELL_CMD(relay, &meshtastic_relay_cmds,

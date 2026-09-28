@@ -29,3 +29,14 @@ if(CONFIG_MESHTASTIC_FLEET_CLASS AND NOT CONFIG_MESHTASTIC_FLEET_CLASS EQUAL 0
       "expected to contain '${_want}' (set it in the variant's overlay next to the class).")
   endif()
 endif()
+
+# A radio head carries no identity code; prove it on the final ELF
+# (ATTACHMENT-DESIGN §4). The same script guards tests/attachment's head build.
+if(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+  # Zephyr's post_build_commands is not extensible from an application, and a
+  # POST_BUILD on the ELF target must be declared in zephyr/'s own directory;
+  # an ALL target that depends on the ELF is the portable hook.
+  add_custom_target(keyless_assert ALL DEPENDS ${logical_target_for_zephyr_elf}
+    COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DELF=${PROJECT_BINARY_DIR}/zephyr/${KERNEL_ELF_NAME}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/keyless-assert.cmake)
+endif()

@@ -23,6 +23,9 @@
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
 #include "meshtastic_attachment.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+#include "meshtastic_attachment_head.h"
+#endif
 #include "meshtastic_ble_registry.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_ext_ram.h"
@@ -1141,6 +1144,16 @@ static void ble_peer_frame_ingest(unsigned int index, const uint8_t *frame, size
 			return;
 		}
 		ret = meshtastic_attachment_ingest(rx.last.node_num, frame, len);
+#elif defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+		/* The brain's control (SET_PRESET; TX_FRAME in phase 3), taken only
+		 * from the link whose beat carries the brain's node number. */
+		struct meshtastic_ble_peer_rx rx;
+
+		if (!meshtastic_ble_peer_rx_get(index, &rx, NULL) || rx.last.node_num == 0U) {
+			LOG_WRN("BLE peer envelope (conn %u) before any beat: dropped", index);
+			return;
+		}
+		ret = meshtastic_attachment_head_on_envelope(rx.last.node_num, frame, len);
 #else
 		ret = -ENOTSUP;
 #endif

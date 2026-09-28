@@ -34,6 +34,9 @@
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_tx_power.h"
 #include "meshtastic_core.h"
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+#include "meshtastic_attachment_head.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 #include "meshtastic_scanner.h"
 #endif
@@ -712,6 +715,9 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 		mt.status.initialized = false;
 		return ret;
 	}
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+	meshtastic_attachment_head_start();
+#endif
 
 #if defined(CONFIG_MESHTASTIC_GNSS)
 	ret = meshtastic_gnss_init();
@@ -734,9 +740,11 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	}
 #endif
 
-#if defined(CONFIG_MESHTASTIC_BULK_STORE)
+#if defined(CONFIG_MESHTASTIC_BULK_STORE) && defined(CONFIG_MESHTASTIC_NODEDB)
 	/* Before the NodeDB, which restores its records from it. A store that will
-	 * not mount is not fatal: the NodeDB falls back to its settings records. */
+	 * not mount is not fatal: the NodeDB falls back to its settings records.
+	 * (Its header is included under NODEDB above: without a NodeDB there is
+	 * nothing to mount it for -- the keyless head is the first such image.) */
 	ret = meshtastic_bulk_init();
 	if (ret < 0) {
 		LOG_WRN("Bulk store unavailable (%d); node records stay in settings", ret);
@@ -923,6 +931,18 @@ static int mt_ws_build_wire_locked(uint8_t *wire, uint32_t *pkt_len,
 				   struct meshtastic_packet *local, uint8_t *local_payload,
 				   meshtastic_MeshPacket *tx_local)
 {
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+	/* A keyless head has no identity to originate with (ATTACHMENT-DESIGN S5).
+	 * The PhoneAPI and the shell still reach this step; refusing HERE, before
+	 * anything is built, is what keeps the frame builder (and every key it
+	 * would use) out of the image -- cmake/keyless-assert.cmake checks. */
+	ARG_UNUSED(wire);
+	ARG_UNUSED(pkt_len);
+	ARG_UNUSED(local);
+	ARG_UNUSED(local_payload);
+	ARG_UNUSED(tx_local);
+	return -EPERM;
+#else
 	meshtastic_MeshPacket *mesh = &mt_ws.tx_mesh;
 	uint8_t next_hop;
 	uint8_t relay_node;
@@ -987,6 +1007,7 @@ static int mt_ws_build_wire_locked(uint8_t *wire, uint32_t *pkt_len,
 	 * back into mt_ws.tx_mesh after we drop the lock. */
 	return meshtastic_mesh_pb_to_packet(mesh, local, local_payload,
 					    MESHTASTIC_MAX_PAYLOAD_LEN);
+#endif /* CONFIG_MESHTASTIC_ATTACHMENT_HEAD */
 }
 
 static int send_packet_complete(const struct meshtastic_packet *local,

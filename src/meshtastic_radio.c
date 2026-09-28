@@ -25,7 +25,11 @@
 #if defined(CONFIG_MESHTASTIC_RF_HIST)
 #include "meshtastic_rf_measure.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+#include "meshtastic_attachment_head.h"
+#else
 #include "meshtastic_router.h"
+#endif
 #include "meshtastic_airtime.h"
 #include "meshtastic_tx_power.h"
 #include "meshtastic_powermon.h"
@@ -838,6 +842,16 @@ static void mt_thread_fn(void *p1, void *p2, void *p3)
 
 		ret = k_msgq_get(&mt_rx_msgq, &slot, wait);
 		if (ret == 0) {
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+			/* A keyless head (ATTACHMENT-DESIGN S5): what the radio heard
+			 * goes to the brain undecoded. The router is not linked into
+			 * this image, and a frame from any other bearer has nowhere
+			 * to go. */
+			if (slot.bearer == MESHTASTIC_BEARER_LORA) {
+				meshtastic_attachment_head_on_rx(slot.buf, slot.len, slot.rssi,
+								 slot.snr, slot.preset, slot.rx_ms);
+			}
+#else
 			const struct meshtastic_rx_meta meta = {
 				.bearer = slot.bearer,
 				.attach = slot.attach,
@@ -848,6 +862,7 @@ static void mt_thread_fn(void *p1, void *p2, void *p3)
 			};
 
 			meshtastic_router_process_rx_meta(slot.buf, slot.len, &meta);
+#endif
 			continue;
 		}
 

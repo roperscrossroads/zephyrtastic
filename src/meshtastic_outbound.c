@@ -347,6 +347,13 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 		return -EINVAL;
 	}
 
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+	/* A keyless head has no identity to speak with: nothing it could build
+	 * here is its own, and a relay would need a decode it cannot do. The
+	 * brain's frames (phase 3) enter one layer down, at send_wire_now. */
+	return -EPERM;
+#endif
+
 #if defined(CONFIG_MESHTASTIC_DUTY_CYCLE)
 	/* The regulatory gate, at the one funnel every egress path reaches:
 	 * originated sends, relays, reliable retransmits, routing replies. Checked

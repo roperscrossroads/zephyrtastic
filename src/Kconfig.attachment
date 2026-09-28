@@ -30,12 +30,39 @@ config MESHTASTIC_ATTACHMENT_MAX
 
 config MESHTASTIC_ATTACHMENT_HEAD
 	bool "This node is a keyless radio head"
-	depends on MESHTASTIC_BLE_PEER
+	depends on !MESHTASTIC_ATTACHMENT_BRAIN
 	default n
 	help
-	  (Phase 2.) The radio forwards every frame it hears, undecoded, with its
-	  RSSI/SNR and preset, to the brain over the peer link, and transmits
-	  frames the brain hands it. The image carries no channel keys, no PKI,
-	  no NodeDB and no config beyond its preset and its brain.
+	  The radio forwards every frame it hears, undecoded, with its RSSI/SNR
+	  and preset, to its brain over the peer link (overlay-ble-peer.conf; on
+	  native_sim the send is a test seam), and retunes when the brain says
+	  so. Transmit for the brain is phase 3. The image carries no channel
+	  keys, no PKI, no NodeDB and no config beyond its preset and its brain:
+	  build with samples/meshtastic/overlay-attachment-head.conf, whose
+	  post-build step refuses an image in which any of those linked
+	  (cmake/keyless-assert.cmake). The router is never reached from the
+	  radio on a head; origination is refused at the outbound queue.
+
+config MESHTASTIC_ATTACHMENT_HEAD_BRAIN_ID
+	hex "The brain's node number (0 = set at runtime)"
+	depends on MESHTASTIC_ATTACHMENT_HEAD
+	default 0
+	help
+	  Baked-in brain. `meshtastic attach brain <id>` overrides it and the
+	  value persists (mtattach/brain) with MESHTASTIC_SETTINGS.
+
+config MESHTASTIC_ATTACHMENT_HEAD_STATUS_PERIOD_SEC
+	int "STATUS report period (s)"
+	depends on MESHTASTIC_ATTACHMENT_HEAD
+	default 60
+	range 5 3600
+
+config MESHTASTIC_ATTACHMENT_HEAD_QUEUE_SIZE
+	int "Frames queued for the brain"
+	depends on MESHTASTIC_ATTACHMENT_HEAD
+	default 4
+	range 1 16
+	help
+	  Between the RX thread and the forwarding work item. ~260 B each.
 
 endmenu
