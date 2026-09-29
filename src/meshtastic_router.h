@@ -150,7 +150,7 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
  * leaves by it. 0 = our own radio. */
 int meshtastic_routing_answer(uint32_t to, uint32_t request_id, uint8_t channel_index,
 			      uint8_t req_hop_limit, uint8_t req_hop_start, bool want_ack,
-			      meshtastic_Routing_Error err, uint8_t attach);
+			      meshtastic_Routing_Error err, uint8_t attach, bool pki);
 
 /** @brief The hop limit a reply to a request that arrived with these hop fields should carry. */
 uint8_t meshtastic_routing_reply_hop_limit(uint8_t req_hop_limit, uint8_t req_hop_start);

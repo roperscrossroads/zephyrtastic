@@ -70,12 +70,38 @@ static void on_recv(uint32_t from, uint32_t to, uint32_t portnum, const uint8_t 
 
 /* The test bearer (ATTACHMENT-SCOPE §4): what the brain sends is captured, and
  * what the bearer says about a link -- up, trusted -- is a knob per case. */
+#define SENT_RING 6U
 static struct {
 	uint32_t node;
 	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
 	size_t len;
 	uint32_t count;
+	/* The last SENT_RING envelopes too, newest last: a test that expects two
+	 * replies (an ACK and a NodeInfo request) must see both, not the last. */
+	struct {
+		uint32_t node;
+		uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+		size_t len;
+	} ring[SENT_RING];
+	uint32_t ring_head;
 } sent;
+
+static uint32_t sent_ring_count(void)
+{
+	return MIN(sent.ring_head, SENT_RING);
+}
+
+/* The i-th newest envelope (0 = newest), decoded. */
+static bool sent_ring_get(uint32_t i, struct meshtastic_attachment_msg *msg)
+{
+	uint32_t slot;
+
+	if (i >= sent_ring_count()) {
+		return false;
+	}
+	slot = (sent.ring_head - 1U - i) % SENT_RING;
+	return meshtastic_attachment_decode(sent.ring[slot].env, sent.ring[slot].len, msg) == 0;
+}
 
 static enum meshtastic_attach_auth test_auth = MESHTASTIC_ATTACH_AUTH_ENCRYPTED;
 
@@ -86,6 +112,10 @@ static int test_bearer_send(uint32_t node, const uint8_t *env, size_t len)
 	}
 	sent.node = node;
 	memcpy(sent.env, env, len);
+	sent.ring[sent.ring_head % SENT_RING].node = node;
+	memcpy(sent.ring[sent.ring_head % SENT_RING].env, env, len);
+	sent.ring[sent.ring_head % SENT_RING].len = len;
+	sent.ring_head++;
 	sent.len = len;
 	sent.count++;
 	return 0;
@@ -1289,4 +1319,115 @@ ZTEST(attachment, test_brain_is_deaf_while_its_cosited_head_transmits)
 	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
 	lora_sim_reset(head_radio);
 	lora_sim_reset(lora_dev);
+}
+
+/* Same as the reply test above, but with the bench's channel table: a NAMED primary
+ * (its hash is its name's, on every preset) and an unnamed default-PSK secondary in
+ * slot 1 -- the slot a MediumFast sender's frame actually decodes on. The replies
+ * (routing ACK, NodeInfo request) must carry slot 1's hash under the head's preset,
+ * not the primary's name hash: a request built on index 0 left the bench's brain as
+ * 0x0e ("ShortTurbo") through a MediumFast head, and the stock node there logged
+ * "No channel found for decoding, hash 0xe" and never learned the brain (2026-09-29).
+ * Reversal: nodeinfo's request back on index 0 (channel_index unset) fails this. */
+static void build_frame_on(uint8_t slot, uint32_t from, uint32_t to, uint32_t id,
+			   const char *text, uint8_t *wire, uint32_t *wire_len)
+{
+	struct meshtastic_packet packet = {
+		.from = from,
+		.to = to,
+		.id = id,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)text,
+		.payload_len = strlen(text),
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.channel_index = slot,
+	};
+
+	zassert_ok(meshtastic_build_wire_packet(&packet, wire, wire_len), "build_wire_packet");
+}
+
+ZTEST(attachment, test_replies_via_a_head_use_the_slot_the_frame_arrived_on_not_a_named_primary)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct meshtastic_attachment_msg msg;
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
+	uint8_t primary_hash;
+	uint8_t slot1_there;
+	uint32_t before;
+	int replies_seen = 0;
+
+	/* Name the primary, as the bench does ("ShortTurbo"), on the default PSK. */
+	ch.index = 0;
+	ch.role = meshtastic_Channel_Role_PRIMARY;
+	ch.has_settings = true;
+	ch.settings.psk.size = 1U;
+	ch.settings.psk.bytes[0] = 1U;
+	strcpy(ch.settings.name, "ShortTurbo");
+	zassert_ok(meshtastic_channels_set_slot(0U, &ch), "name slot 0");
+	primary_hash = meshtastic_channels_get_hash(0U);
+	/* Slot 1: an unnamed secondary on the same PSK -- named after whatever
+	 * preset it is used on, so its hash differs per preset. */
+	ch = (meshtastic_Channel)meshtastic_Channel_init_zero;
+	ch.index = 1;
+	ch.role = meshtastic_Channel_Role_SECONDARY;
+	ch.has_settings = true;
+	ch.settings.psk.size = 1U;
+	ch.settings.psk.bytes[0] = 1U;
+	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "set slot 1");
+	slot1_there = meshtastic_channels_hash_for_preset(1U, (uint8_t)PRESET_MF);
+	zassert_not_equal(slot1_there, primary_hash, "the two hashes must differ for the test to bite");
+	zassert_equal(meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF), primary_hash,
+		      "a named primary keeps its name's hash on every preset");
+
+	/* Admit head 1 on MediumFast, with a frame on slot 1's MF hash. */
+	build_frame_on(1U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2B00U, "admit", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = slot1_there;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -80, 6, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	drain_radio();
+	before = sent.count;
+
+	/* A want_ack DM from an UNKNOWN sender on slot 1, through the head: the
+	 * brain answers with a routing ACK and asks for NodeInfo -- both must be on
+	 * slot 1's hash under MediumFast, never the primary's name hash. */
+	build_frame_on(1U, FAR_NODE_ID + 7U, TEST_NODE_ID, 0x2B01U, "ack me via head", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = slot1_there;
+	((struct meshtastic_wire_header *)wire)->flags |= MESHTASTIC_FLAGS_WANT_ACK;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -80, 6, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "the DM is delivered");
+	for (int i = 0; i < 300 && sent.count < before + 2U; i++) {
+		k_msleep(10);
+	}
+	zassert_true(sent.count >= before + 2U, "two replies reached the head (ACK + NodeInfo request), got %u",
+		     (unsigned int)(sent.count - before));
+	k_msleep(300);
+	/* Every TX_FRAME handed since: to the sender, on slot 1's MediumFast hash. */
+	for (uint32_t i = 0; i < sent_ring_count(); i++) {
+		const struct meshtastic_wire_header *h;
+
+		if (!sent_ring_get(i, &msg)) {
+			continue;
+		}
+		if (msg.type != MESHTASTIC_ATTACHMENT_TX_FRAME) {
+			continue;
+		}
+		h = (const struct meshtastic_wire_header *)msg.u.tx.wire;
+		if (sys_le32_to_cpu(h->src) != TEST_NODE_ID || sys_le32_to_cpu(h->dest) != FAR_NODE_ID + 7U) {
+			continue;
+		}
+		replies_seen++;
+		zassert_equal(h->channel, slot1_there,
+			      "reply hashed under slot 1 on the head's preset (0x%02x), got 0x%02x",
+			      slot1_there, h->channel);
+		zassert_not_equal(h->channel, primary_hash, "never the named primary's hash");
+	}
+	zassert_true(replies_seen >= 2, "ACK and NodeInfo request both seen (%d)", replies_seen);
+	/* Leave the table as the fixture expects: slot 1 gone, slot 0 unnamed. */
+	ch = (meshtastic_Channel)meshtastic_Channel_init_zero;
+	ch.index = 1;
+	ch.role = meshtastic_Channel_Role_DISABLED;
+	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "clear slot 1");
+	set_default_primary();
 }

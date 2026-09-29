@@ -86,7 +86,8 @@ void meshtastic_dispatch_modules(const struct meshtastic_packet *packet,
 		 * is the "ignore" (no NAK) answer. */
 		(void)meshtastic_routing_answer(packet->from, packet->id, packet->channel_index,
 						packet->hop_limit, packet->hop_start, packet->want_ack,
-						meshtastic_Routing_Error_NO_RESPONSE, packet->rx_attach);
+						meshtastic_Routing_Error_NO_RESPONSE, packet->rx_attach,
+						packet->pki_encrypted);
 		return;
 	}
 	if (ret < 0) {

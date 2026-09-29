@@ -227,13 +227,13 @@ static void gen_x25519_pubkey(uint8_t pub[MESHTASTIC_PKI_KEY_LEN])
 /* Seed PEER's public key into the NodeDB via a NodeInfo (apply_user), the way
  * the stack learns a peer's key on the air. Required both for the admin_key
  * match and so PKC decrypt can look up the sender's key. */
-static void seed_peer_pubkey(const uint8_t key[MESHTASTIC_PKI_KEY_LEN])
+static void seed_pubkey_for(uint32_t node, const uint8_t key[MESHTASTIC_PKI_KEY_LEN])
 {
 	meshtastic_User user = meshtastic_User_init_zero;
 	uint8_t buf[128];
 	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
 	struct meshtastic_packet ni = {
-		.from = PEER_NODE_ID,
+		.from = node,
 		.to = MESHTASTIC_NODE_BROADCAST,
 		.portnum = MESHTASTIC_PORT_NODEINFO,
 		.channel_index = meshtastic_channels_primary_index(),
@@ -245,6 +245,11 @@ static void seed_peer_pubkey(const uint8_t key[MESHTASTIC_PKI_KEY_LEN])
 	ni.payload = buf;
 	ni.payload_len = os.bytes_written;
 	meshtastic_handle_inbound_packet(&ni, NULL, 0U, true);
+}
+
+static void seed_peer_pubkey(const uint8_t key[MESHTASTIC_PKI_KEY_LEN])
+{
+	seed_pubkey_for(PEER_NODE_ID, key);
 }
 
 static void set_admin_key(const uint8_t *key, size_t len)
@@ -3917,4 +3922,144 @@ ZTEST(admin_pki, test_a_peer_advertising_our_public_key_is_refused_and_warned_on
 		zassert_is_null(strstr(cn.message, "has advertised your public key"),
 				"the warning latch did not hold");
 	}
+}
+
+/* A ROUTING ACK for a PKC-received DM is itself PKC (wire hash 0), never a channel
+ * frame on index 0. The reference builds its ACK on channel index 0 and is saved by two
+ * stock nodes on one preset sharing an unnamed primary; a brain whose primary is NAMED,
+ * answering through a head on another preset, stamped the name's hash and the stock
+ * sender logged "No channel found for decoding, hash 0xe" (bench, 2026-09-29). The
+ * sender holds our key -- it just used it -- so PKC always decodes. Reversal: drop the
+ * pki_encrypted inheritance in routing_send_ack, or the (mesh->pki_encrypted || ...)
+ * clause in the wire builder, and the ACK comes out under the primary's hash. */
+#define BOB_NODE_ID 0x0B0B0B0BU
+/* The peer of this test holds RFC 7748's "Bob" keypair (as mesh_sim's harness does), so
+ * it can open what we encrypt to it: X25519(bob_priv, our_pub) -> SHA-256 -> AES-CCM with
+ * the 8-byte tag, nonce (id, src, extraNonce) exactly as meshtastic_pki_encrypt builds it. */
+static const uint8_t ack_peer_priv[32] = {
+	0x5d, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b, 0x79, 0xe1, 0x7f,
+	0x8b, 0x83, 0x80, 0x0e, 0xe6, 0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18,
+	0xb6, 0xfd, 0x1c, 0x2f, 0x8b, 0x27, 0xff, 0x88, 0xe0, 0xeb,
+};
+
+static bool ack_decrypt_as_peer(const uint8_t *frame, uint32_t len, uint8_t *plain,
+				size_t cap, size_t *plain_len)
+{
+	const struct meshtastic_wire_header *hdr = (const struct meshtastic_wire_header *)frame;
+	const uint8_t *enc = frame + MESHTASTIC_HDR_LEN;
+	size_t enc_len = len - MESHTASTIC_HDR_LEN;
+	psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
+	uint8_t our_pub[32], secret[32], aes[32], nonce[MESHTASTIC_PKI_NONCE_LEN];
+	psa_key_id_t kid;
+	size_t n;
+	bool ok;
+
+	if (len <= MESHTASTIC_HDR_LEN + 12U || meshtastic_pki_get_public_key(our_pub) != 32U) {
+		return false;
+	}
+	psa_set_key_type(&a, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
+	psa_set_key_bits(&a, 255);
+	psa_set_key_usage_flags(&a, PSA_KEY_USAGE_DERIVE);
+	psa_set_key_algorithm(&a, PSA_ALG_ECDH);
+	if (psa_import_key(&a, ack_peer_priv, sizeof(ack_peer_priv), &kid) != PSA_SUCCESS) {
+		return false;
+	}
+	ok = psa_raw_key_agreement(PSA_ALG_ECDH, kid, our_pub, 32, secret, sizeof(secret), &n) ==
+		     PSA_SUCCESS &&
+	     psa_hash_compute(PSA_ALG_SHA_256, secret, 32, aes, sizeof(aes), &n) == PSA_SUCCESS;
+	(void)psa_destroy_key(kid);
+	if (!ok) {
+		return false;
+	}
+	meshtastic_pki_nonce_build(nonce, sys_le32_to_cpu(hdr->id), sys_le32_to_cpu(hdr->src),
+				   sys_get_le32(enc + enc_len - 4U));
+	a = (psa_key_attributes_t)PSA_KEY_ATTRIBUTES_INIT;
+	psa_set_key_type(&a, PSA_KEY_TYPE_AES);
+	psa_set_key_bits(&a, 256);
+	psa_set_key_usage_flags(&a, PSA_KEY_USAGE_DECRYPT);
+	psa_set_key_algorithm(&a, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 8));
+	if (psa_import_key(&a, aes, sizeof(aes), &kid) != PSA_SUCCESS) {
+		return false;
+	}
+	ok = psa_aead_decrypt(kid, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 8), nonce,
+			      sizeof(nonce), NULL, 0, enc, enc_len - 4U, plain, cap,
+			      plain_len) == PSA_SUCCESS;
+	(void)psa_destroy_key(kid);
+	return ok;
+}
+
+/* Bob's public key, derived from the private key above with PSA. */
+static void ack_peer_pubkey(uint8_t pub[32])
+{
+	psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
+	psa_key_id_t kid;
+	size_t n = 0;
+
+	psa_set_key_type(&a, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
+	psa_set_key_bits(&a, 255);
+	psa_set_key_usage_flags(&a, PSA_KEY_USAGE_EXPORT | PSA_KEY_USAGE_DERIVE);
+	psa_set_key_algorithm(&a, PSA_ALG_ECDH);
+	zassert_equal(psa_import_key(&a, ack_peer_priv, sizeof(ack_peer_priv), &kid), PSA_SUCCESS);
+	zassert_equal(psa_export_public_key(kid, pub, 32, &n), PSA_SUCCESS);
+	(void)psa_destroy_key(kid);
+	zassert_equal(n, 32U);
+}
+
+ZTEST(admin_pki, test_ack_for_a_pkc_dm_is_pkc)
+{
+	uint8_t bob_pub[32];
+	static const char text[] = "ack me under my key";
+	uint8_t data[MESHTASTIC_MAX_PAYLOAD_LEN];
+	size_t data_len = 0;
+	uint8_t enc[MESHTASTIC_MAX_PAYLOAD_LEN + MESHTASTIC_PKI_OVERHEAD];
+	size_t enc_len = 0;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	struct meshtastic_wire_header *hdr = (struct meshtastic_wire_header *)wire;
+	const uint32_t id = 0x7A5C0001U;
+	const struct meshtastic_wire_header *ack;
+	uint8_t plain[MESHTASTIC_MAX_PAYLOAD_LEN];
+	size_t plain_len = 0;
+	meshtastic_Data d = meshtastic_Data_init_zero;
+	pb_istream_t is;
+	uint32_t before = mock_lora.send_count;
+
+	/* Bob is a node of his own: the NodeDB pins a known node's key and refuses a
+	 * change, so re-keying PEER_NODE_ID would silently keep the suite's peer key. */
+	ack_peer_pubkey(bob_pub);
+	seed_pubkey_for(BOB_NODE_ID, bob_pub);
+
+	zassert_ok(meshtastic_encode_data(MESHTASTIC_PORT_TEXT_MESSAGE, (const uint8_t *)text,
+					  sizeof(text) - 1U, data, sizeof(data), &data_len));
+	zassert_ok(meshtastic_pki_encrypt(BOB_NODE_ID, BOB_NODE_ID, id, data, data_len, enc,
+					  sizeof(enc), &enc_len),
+		   "PKC encrypt as Bob");
+	hdr->dest = sys_cpu_to_le32(TEST_NODE_ID);
+	hdr->src = sys_cpu_to_le32(BOB_NODE_ID);
+	hdr->id = sys_cpu_to_le32(id);
+	hdr->flags = 3U | (3U << MESHTASTIC_FLAGS_HOP_START_SHIFT) | MESHTASTIC_FLAGS_WANT_ACK;
+	hdr->channel = 0x00U; /* the PKC marker */
+	hdr->next_hop = 0U;
+	hdr->relay_node = 0U;
+	memcpy(wire + MESHTASTIC_HDR_LEN, enc, enc_len);
+	inject_rx_frame(wire, MESHTASTIC_HDR_LEN + (uint32_t)enc_len);
+
+	/* The ACK rides the outbound queue behind a contention delay. */
+	for (int i = 0; i < 300 && mock_lora.send_count == before; i++) {
+		k_sleep(K_MSEC(10));
+	}
+	zassert_true(mock_lora.send_count > before, "an ACK was transmitted");
+	ack = (const struct meshtastic_wire_header *)mock_lora.last_tx;
+	zassert_equal(sys_le32_to_cpu(ack->dest), BOB_NODE_ID, "to the sender");
+	zassert_equal(sys_le32_to_cpu(ack->src), TEST_NODE_ID, "from us");
+	zassert_equal(ack->channel, 0x00U, "the ACK is PKC (wire hash 0), got 0x%02x",
+		      ack->channel);
+	/* And it decrypts under the shared secret as a ROUTING reply to that id. */
+	zassert_true(ack_decrypt_as_peer(mock_lora.last_tx, mock_lora.last_tx_len, plain,
+					 sizeof(plain), &plain_len),
+		     "the ACK decrypts as the peer, under the shared secret");
+	is = pb_istream_from_buffer(plain, plain_len);
+	zassert_true(pb_decode(&is, meshtastic_Data_fields, &d), "Data decodes");
+	zassert_equal(d.portnum, meshtastic_PortNum_ROUTING_APP, "a ROUTING reply");
+	zassert_equal(d.request_id, id, "for the DM");
+	(void)meshtastic_nodedb_remove(BOB_NODE_ID);
 }

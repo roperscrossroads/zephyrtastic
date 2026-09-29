@@ -310,7 +310,16 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 		send_ret = nodeinfo_build_packet(from, true, 0U, payload, &nodeinfo_packet);
 		if (send_ret == 0) {
 			/* Ask on the radio we heard it on (P3 slice 2): a sender on
-			 * another preset cannot hear our own radio. */
+			 * another preset cannot hear our own radio. And on the CHANNEL
+			 * we heard it on (the reference's sendOurNodeInfo(from, true,
+			 * p->channel)): a request built on the primary leaves under the
+			 * primary's hash, and a NAMED primary keeps its name's hash on
+			 * every preset -- through a head on MediumFast, a stock node
+			 * there logged "No channel found for decoding, hash 0xe" and
+			 * never learned us (2026-09-29, rxri / pug2). */
+			if (packet->channel_index < MESHTASTIC_MAX_CHANNELS) {
+				nodeinfo_packet.channel_index = packet->channel_index;
+			}
 			nodeinfo_packet.tx_attach = packet->rx_attach;
 			(void)meshtastic_send_packet(&nodeinfo_packet, K_NO_WAIT);
 		}

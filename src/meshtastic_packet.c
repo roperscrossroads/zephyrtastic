@@ -871,12 +871,19 @@ int meshtastic_build_wire_from_mesh(const meshtastic_MeshPacket *mesh, uint8_t *
 		/* tx_no_pkc: the sender asked for channel encryption on purpose (a
 		 * key-verification bootstrap message carrying the very key the peer
 		 * lacks) -- the ONE case a unicast may go out on the channel. */
+		/* pki_encrypted on a packet WE build is a request: the reply to a
+		 * PKC-received packet (routing_send_reply) goes PKC whatever its port.
+		 * The reference keeps ROUTING/NODEINFO/POSITION/TRACEROUTE on the
+		 * channel; it can, because two stock nodes on one preset share an
+		 * unnamed primary. A brain answering through a head on another preset
+		 * cannot (2026-09-29, rxri: "No channel found for decoding, hash 0xe"). */
 		if (mesh->to != MESHTASTIC_NODE_BROADCAST && mesh->to != 0U &&
 		    meshtastic_pki_have_key() && !is_licensed && !mt_ws.tx_no_pkc &&
-		    mesh->decoded.portnum != meshtastic_PortNum_TRACEROUTE_APP &&
-		    mesh->decoded.portnum != meshtastic_PortNum_NODEINFO_APP &&
-		    mesh->decoded.portnum != meshtastic_PortNum_ROUTING_APP &&
-		    mesh->decoded.portnum != meshtastic_PortNum_POSITION_APP) {
+		    (mesh->pki_encrypted ||
+		     (mesh->decoded.portnum != meshtastic_PortNum_TRACEROUTE_APP &&
+		      mesh->decoded.portnum != meshtastic_PortNum_NODEINFO_APP &&
+		      mesh->decoded.portnum != meshtastic_PortNum_ROUTING_APP &&
+		      mesh->decoded.portnum != meshtastic_PortNum_POSITION_APP))) {
 			size_t pki_len;
 			int pret;
 

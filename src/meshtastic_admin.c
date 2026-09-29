@@ -125,6 +125,7 @@ static struct admin_ctx {
 	uint8_t hop_start;     /* limit is derived from them, as the reference's */
 	bool remote;	       /* true: reply over the mesh, not PhoneAPI */
 	uint8_t rx_attach;     /* the radio the request came in on: the answer leaves by it */
+	bool pki_encrypted; /* the request was PKC: so is the answer (wire hash 0, not index 0) */
 } admin_cur;
 
 /* begin_edit_settings ... commit_edit_settings transaction state (single local
@@ -377,7 +378,7 @@ static void admin_ack_write(meshtastic_Routing_Error err)
 		(void)meshtastic_routing_answer(admin_cur.from, admin_cur.id,
 						admin_cur.channel_index, admin_cur.hop_limit,
 						admin_cur.hop_start, admin_cur.want_ack, err,
-						admin_cur.rx_attach);
+						admin_cur.rx_attach, admin_cur.pki_encrypted);
 		return;
 	}
 
@@ -1982,7 +1983,7 @@ bool meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 		LOG_WRN("admin: remote admin from 0x%08x unauthorized (err=%d)", from,
 			(int)auth_err);
 		(void)meshtastic_routing_answer(from, id, channel_index, hop_limit, hop_start,
-						want_ack, auth_err, 0U);
+						want_ack, auth_err, 0U, pki_encrypted);
 		return true;
 	}
 
@@ -1995,6 +1996,7 @@ bool meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 				      .hop_start = hop_start,
 				      .remote = true,
 				      .rx_attach = pkt->rx_attach,
+				      .pki_encrypted = pki_encrypted,
 			      },
 			      payload, payload_len);
 }
