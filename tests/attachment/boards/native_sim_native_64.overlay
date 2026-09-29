@@ -9,3 +9,14 @@
 		status = "okay";
 	};
 };
+
+/* A second sim radio in the same enclosure (the co-site desense model,
+ * lora_sim_set_cosite): the OTHER board's radio -- the brain's, seen from a
+ * head; a head's, seen from the brain. The stack never drives it; a test
+ * marks it busy for a frame's airtime. */
+/ {
+	lora_sim1: lora-sim-1 {
+		compatible = "meshtastic,lora-sim";
+		status = "okay";
+	};
+};

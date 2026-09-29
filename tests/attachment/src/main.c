@@ -1265,3 +1265,28 @@ ZTEST(attachment, test_set_tx_power_reaches_the_head)
 	zassert_true((msg.u.policy.flags & MESHTASTIC_ATTACHMENT_POL_HAS_TX_POWER) != 0U);
 	zassert_equal(meshtastic_attachment_set_tx_power(2U, 2), -ENOENT, "no head 2");
 }
+
+/* The other direction of R3's sim half: the BRAIN's radio is deaf while its
+ * co-sited head transmits (a relay the brain itself handed over). What the
+ * brain misses is bounded by the head's airtime: a frame on the brain's own
+ * air during it is lost and counted; the same frame after it is delivered. */
+static const struct device *const head_radio = DEVICE_DT_GET(DT_NODELABEL(lora_sim1));
+
+ZTEST(attachment, test_brain_is_deaf_while_its_cosited_head_transmits)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+
+	zassert_ok(lora_sim_set_cosite(lora_dev, head_radio), "paired: the head's radio beside us");
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x5A00U, "during the head's tx", wire, &len);
+	lora_sim_set_busy(head_radio, 200U);
+	zassert_equal(lora_sim_inject(lora_dev, wire, (uint8_t)len, -70, 8), -ECANCELED, "blanked");
+	zassert_equal(lora_sim_rx_blanked(lora_dev), 1U);
+	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN, "lost, not delivered");
+
+	k_msleep(250);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -70, 8), "after the head's air");
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+	lora_sim_reset(head_radio);
+	lora_sim_reset(lora_dev);
+}

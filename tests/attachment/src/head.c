@@ -728,3 +728,50 @@ ZTEST(attachment_head, test_set_policy_sets_tx_power_from_the_brain_only)
 	zassert_equal(st.refused, 1U);
 	zassert_equal(st.controls, 1U);
 }
+
+/* R3's sim half (the co-site desense model, zt-ble-scan-claude's lora_sim
+ * pairing): a head in one enclosure with its brain is DEAF while the brain
+ * transmits. The stack's behaviour under that blanking: a neighbour's copy
+ * of a frame we hold a CANCEL relay of lands during the brain's transmission,
+ * so we never hear it -- and our relay must still go, because cancel-on-
+ * duplicate is about what we HEARD, not what was on the air. */
+static const struct device *const other_radio = DEVICE_DT_GET(DT_NODELABEL(lora_sim1));
+
+ZTEST(attachment_head, test_relay_is_not_cancelled_by_a_copy_masked_by_the_brains_tx)
+{
+	uint8_t wire[40];
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_head_stats st;
+	uint32_t rx_ms;
+
+	meshtastic_attachment_head_set_brain(BRAIN_NODE);
+	(void)k_sem_take(&sent.sem, K_MSEC(500));
+	wait_rx_armed();
+	zassert_ok(lora_sim_set_cosite(lora_dev, other_radio), "paired: the brain's radio beside us");
+
+	rx_ms = hear_and_forward(wire, sizeof(wire), 0x74U);
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, 500U, MESHTASTIC_ATTACHMENT_DUPE_CANCEL, 25U));
+	k_msleep(50);
+
+	/* The brain keys up (300 ms of air); a peer's copy lands meanwhile. */
+	lora_sim_set_busy(other_radio, 300U);
+	((struct meshtastic_wire_header *)wire)->relay_node = 0x57U;
+	((struct meshtastic_wire_header *)wire)->flags =
+		(uint8_t)((((struct meshtastic_wire_header *)wire)->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) | 2U);
+	zassert_equal(lora_sim_inject(lora_dev, wire, sizeof(wire), -70, 9), -ECANCELED,
+		      "blanked: we cannot hear while the brain transmits");
+	zassert_equal(lora_sim_rx_blanked(lora_dev), 1U);
+	zassert_equal(k_sem_take(&sent.sem, K_MSEC(300)), -EAGAIN, "nothing to forward: never heard");
+
+	/* Our relay still keys up: nothing we heard says a peer relayed it. */
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "relayed");
+	expect_result(25U, 0);
+	meshtastic_attachment_head_stats_get(&st);
+	zassert_equal(st.tx_cancelled, 0U, "no cancel on a copy we could not hear");
+
+	/* After the brain's air, we hear again. */
+	k_msleep(50);
+	zassert_ok(lora_sim_inject(lora_dev, wire, sizeof(wire), -70, 9), "unblanked");
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(2)), "forwarded");
+	lora_sim_reset(other_radio);
+}
