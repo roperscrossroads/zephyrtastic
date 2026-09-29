@@ -124,6 +124,7 @@ static struct admin_ctx {
 	uint8_t hop_limit;     /* the request's hop fields: a remote reply's hop */
 	uint8_t hop_start;     /* limit is derived from them, as the reference's */
 	bool remote;	       /* true: reply over the mesh, not PhoneAPI */
+	uint8_t rx_attach;     /* the radio the request came in on: the answer leaves by it */
 } admin_cur;
 
 /* begin_edit_settings ... commit_edit_settings transaction state (single local
@@ -336,6 +337,7 @@ static void admin_emit_reply(meshtastic_AdminMessage *resp)
 	pkt.to = admin_cur.from;
 	pkt.id = meshtastic_allocate_packet_id();
 	pkt.request_id = admin_cur.id;
+	pkt.tx_attach = admin_cur.rx_attach; /* back out the radio the request came in on */
 	pkt.payload = buf;
 	pkt.payload_len = stream.bytes_written;
 
@@ -374,7 +376,8 @@ static void admin_ack_write(meshtastic_Routing_Error err)
 		 * no lifetime coupling to the RX frame). */
 		(void)meshtastic_routing_answer(admin_cur.from, admin_cur.id,
 						admin_cur.channel_index, admin_cur.hop_limit,
-						admin_cur.hop_start, admin_cur.want_ack, err, 0U);
+						admin_cur.hop_start, admin_cur.want_ack, err,
+						admin_cur.rx_attach);
 		return;
 	}
 
@@ -391,6 +394,7 @@ static void admin_ack_write(meshtastic_Routing_Error err)
 	pkt.to = admin_cur.from;
 	pkt.id = meshtastic_allocate_packet_id();
 	pkt.request_id = admin_cur.id;
+	pkt.tx_attach = admin_cur.rx_attach; /* back out the radio the request came in on */
 	pkt.channel_index = 0U;
 	pkt.payload = buf;
 	pkt.payload_len = stream.bytes_written;
@@ -1990,6 +1994,7 @@ bool meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 				      .hop_limit = hop_limit,
 				      .hop_start = hop_start,
 				      .remote = true,
+				      .rx_attach = pkt->rx_attach,
 			      },
 			      payload, payload_len);
 }
