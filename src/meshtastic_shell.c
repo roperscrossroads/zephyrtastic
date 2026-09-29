@@ -398,7 +398,7 @@ static __unused int cmd_deferred_send(const struct shell *sh, size_t argc, char 
 	return enqueue_shell_work(sh, &item);
 }
 
-static int append_message_from_argv(uint8_t *buf, size_t buf_max, size_t argc, char **argv,
+static __unused int append_message_from_argv(uint8_t *buf, size_t buf_max, size_t argc, char **argv,
 				    size_t first_arg)
 {
 	size_t pos = 0;
@@ -424,7 +424,7 @@ static int append_message_from_argv(uint8_t *buf, size_t buf_max, size_t argc, c
 	return (int)pos;
 }
 
-static int32_t scaled_tenths(float value)
+static __unused int32_t scaled_tenths(float value)
 {
 	return (int32_t)(value * 10.0f);
 }
