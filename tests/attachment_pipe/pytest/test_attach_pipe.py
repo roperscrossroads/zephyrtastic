@@ -70,6 +70,7 @@ def test_x2_latency_and_loss_deliver_at_most_once(hub, images):
     start_brain(hub, images)
     pair(hub, images, lat=(50, 550), loss=0.10)
     m = hub.mark(BRAIN)
+    mh = hub.mark(HEAD1)
     n = 30
     for i in range(n):
         hub.rf(HEAD1, MEDIUM_FAST, -80, 6, airframe(FAR, 0x2000 + i, f"x2-{i}"))
@@ -77,11 +78,14 @@ def test_x2_latency_and_loss_deliver_at_most_once(hub, images):
     time.sleep(2.0)
 
     lost = [e for s, d, e in hub.dropped if s == HEAD1 and e[0] == 1]  # RX_FRAMEs only
+    # A frame played while the head's radio was keyed up (P3: the brain answers an
+    # unknown sender through the head) is never heard -- deaf, as on the bench.
+    deaf = hub.lines(HEAD1, mh, r"^rf lost")
     delivered = [l.split("text=")[1] for l in hub.lines(BRAIN, m, r"^rx from=0d0d0d0d ")]
     assert len(delivered) == len(set(delivered)), f"delivered twice: {delivered}"
     sent_through = [e for s, d, e in hub.forwarded if s == HEAD1 and e[0] == 1]
     assert len(delivered) == len(sent_through), (len(delivered), len(sent_through), len(lost))
-    assert len(sent_through) + len(lost) == n
+    assert len(sent_through) + len(lost) + len(deaf) == n, (len(sent_through), len(lost), len(deaf))
     assert lost, "the loss knob never fired: the test proves nothing about loss"
 
 

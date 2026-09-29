@@ -70,10 +70,11 @@ struct head_tx {
 static K_MUTEX_DEFINE(head_lock);
 K_MSGQ_DEFINE(head_q, sizeof(struct head_frame), CONFIG_MESHTASTIC_ATTACHMENT_HEAD_QUEUE_SIZE, 4);
 K_MSGQ_DEFINE(head_tx_q, sizeof(struct head_tx), CONFIG_MESHTASTIC_ATTACHMENT_HEAD_TX_QUEUE_SIZE, 4);
-static void head_tx_fn(struct k_work *work);
-static K_WORK_DEFINE(head_tx_work, head_tx_fn);
-static void head_tx_retry_fn(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(head_tx_retry, head_tx_retry_fn);
+/* The transmit thread (P3 slice 1/2): it sleeps through the contention window
+ * and blocks for the airtime, so it is nobody else's queue. */
+static K_THREAD_STACK_DEFINE(head_tx_stack, CONFIG_MESHTASTIC_ATTACHMENT_HEAD_TX_STACK_SIZE);
+static struct k_thread head_tx_thread;
+static uint8_t tx_env_buf[MESHTASTIC_ATTACHMENT_ENV_MAX]; /* the TX thread's own scratch */
 
 static void head_work_fn(struct k_work *work);
 static K_WORK_DEFINE(head_work, head_work_fn);
@@ -134,46 +135,38 @@ static int status_send_locked(uint32_t brain)
 /* Transmit what the brain handed us: the one funnel every transmit takes
  * (meshtastic_radio_send_wire_now: CAD/LBT, the scanner gate, tx_enabled,
  * radio_held), so a head keys up under exactly the rules its own image would.
- * DEFER re-queues, bounded as the brain's own worker bounds it. */
-static void head_tx_fn(struct k_work *work)
+ * An own frame (OWN_DELAY) waits its contention window first; DEFER is
+ * retried, bounded as the brain's own worker bounds it. On its own thread:
+ * the radio blocks for the airtime, and the forward path must keep draining. */
+static void head_tx_thread_fn(void *p1, void *p2, void *p3)
 {
-	static struct head_tx t; /* one worker: static keeps it off the stack */
+	struct head_tx t;
 
-	ARG_UNUSED(work);
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
 
-	while (k_msgq_get(&head_tx_q, &t, K_NO_WAIT) == 0) {
+	for (;;) {
 		int ret;
 
+		(void)k_msgq_get(&head_tx_q, &t, K_FOREVER);
 		if (t.not_before != 0U) {
 			int32_t left = (int32_t)(t.not_before - k_uptime_get_32());
 
 			if (left > 0) {
-				/* Not due: back on the queue, and come back then. One
-				 * frame in flight at a time keeps the order the brain
-				 * chose. */
-				if (k_msgq_put(&head_tx_q, &t, K_NO_WAIT) == 0) {
-					(void)k_work_schedule(&head_tx_retry, K_MSEC(left));
-					return;
-				}
-				ret = -ENOBUFS;
-				goto done;
+				k_msleep(left);
 			}
 		}
 		ret = meshtastic_radio_send_wire_now(t.wire, t.len);
-
-		if (ret == MESHTASTIC_TX_DEFER && t.defers < CONFIG_MESHTASTIC_TX_DEFER_MAX) {
+		while (ret == MESHTASTIC_TX_DEFER && t.defers < CONFIG_MESHTASTIC_TX_DEFER_MAX) {
 			t.defers++;
 			k_mutex_lock(&head_lock, K_FOREVER);
 			head.stats.tx_deferred++;
 			k_mutex_unlock(&head_lock);
-			if (k_msgq_put(&head_tx_q, &t, K_NO_WAIT) == 0) {
-				(void)k_work_schedule(&head_tx_retry, K_MSEC(20));
-				return;
-			}
-			ret = -ENOBUFS;
+			k_msleep(20);
+			ret = meshtastic_radio_send_wire_now(t.wire, t.len);
 		}
 
-done:
 		k_mutex_lock(&head_lock, K_FOREVER);
 		if (ret == 0) {
 			head.stats.tx_sent++;
@@ -187,10 +180,12 @@ done:
 				.defers = t.defers,
 				.tx_ms = (uint32_t)k_uptime_get(),
 			};
-			int elen = meshtastic_attachment_encode_tx_result(&r, env_buf, sizeof(env_buf));
+			int elen = meshtastic_attachment_encode_tx_result(&r, tx_env_buf,
+									  sizeof(tx_env_buf));
 
 			if (elen > 0) {
-				(void)meshtastic_attachment_head_send(head.brain, env_buf, (size_t)elen);
+				(void)meshtastic_attachment_head_send(head.brain, tx_env_buf,
+								      (size_t)elen);
 			}
 		}
 		k_mutex_unlock(&head_lock);
@@ -198,12 +193,6 @@ done:
 			LOG_DBG("head: tx seq %u failed (%d)", t.tx_seq, ret);
 		}
 	}
-}
-
-static void head_tx_retry_fn(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	head_submit(&head_tx_work);
 }
 
 static void head_work_fn(struct k_work *work)
@@ -453,7 +442,6 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 			break;
 		}
 		head.stats.controls++;
-		head_submit(&head_tx_work);
 		ret = 0;
 		break;
 	}
@@ -598,4 +586,7 @@ void meshtastic_attachment_head_start(void)
 	/* The first tick comes soon: the peer link restores its own saved intent
 	 * after this runs, and the tick's head_assert_dial() puts the brain back. */
 	(void)k_work_schedule(&head_status_timer, K_SECONDS(5));
+	k_thread_create(&head_tx_thread, head_tx_stack, K_THREAD_STACK_SIZEOF(head_tx_stack),
+			head_tx_thread_fn, NULL, NULL, NULL, K_PRIO_PREEMPT(8), 0, K_NO_WAIT);
+	k_thread_name_set(&head_tx_thread, "head_tx");
 }

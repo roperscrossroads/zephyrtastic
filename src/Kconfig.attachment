@@ -81,6 +81,17 @@ config MESHTASTIC_ATTACHMENT_HEAD_STATUS_PERIOD_SEC
 	default 60
 	range 5 3600
 
+config MESHTASTIC_ATTACHMENT_HEAD_TX_STACK_SIZE
+	int "Stack of the head's transmit thread (bytes)"
+	depends on MESHTASTIC_ATTACHMENT_HEAD
+	default 2048
+	help
+	  A transmit blocks for the frame's airtime (and its contention wait),
+	  so it runs on its own thread: the forward path -- the RX thread's
+	  queue and the work item that writes envelopes to the brain -- must
+	  keep draining while the radio is keyed up, or a busy preset overflows
+	  the head's RX queue. Sized like the brain's outbound worker.
+
 config MESHTASTIC_ATTACHMENT_HEAD_TX_QUEUE_SIZE
 	int "Frames the brain has handed this head, waiting to key up"
 	depends on MESHTASTIC_ATTACHMENT_HEAD

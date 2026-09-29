@@ -51,9 +51,16 @@ static uint32_t env_hex(const char *name, uint32_t dflt)
  * the bench (lora_sim compares the bandwidth as a uint8_t, hence the cast). */
 static void on_rf(const struct attach_pipe_rf *rf, const uint8_t *wire, size_t len)
 {
-	(void)lora_sim_inject_on(lora_dev, rf->freq_hz, rf->sf,
-				 (uint8_t)(enum lora_signal_bandwidth)rf->bw_khz, wire, (uint8_t)len,
-				 rf->rssi, rf->snr);
+	int rc = lora_sim_inject_on(lora_dev, rf->freq_hz, rf->sf,
+				    (uint8_t)(enum lora_signal_bandwidth)rf->bw_khz, wire,
+				    (uint8_t)len, rf->rssi, rf->snr);
+
+	/* A radio that is not listening -- keyed up (a head transmitting what
+	 * its brain handed it, P3), or tuned elsewhere -- does not hear the
+	 * frame, as on the bench. Say so, so a test can account for it. */
+	if (rc != 0) {
+		attach_pipe_event("rf lost rc=%d", rc);
+	}
 }
 
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
