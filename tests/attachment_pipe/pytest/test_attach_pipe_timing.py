@@ -93,8 +93,6 @@ def test_x6b_router_relays_early_and_a_late_decision_still_relays(hub, images, l
         time.sleep(0.4)
 
 
-@pytest.mark.xfail(strict=True, reason="D3 as revised 2026-09-29 (ATTACHMENT-SCOPE §6): a late "
-                                       "CLIENT relay the head heard no copy of is sent, not dropped")
 def test_x6c_a_late_client_decision_with_no_copy_heard_is_relayed(hub, images):
     """D3, revised: a CLIENT decision that reaches the head after its window
     (276 ms here; with 200 ms each way it arrives at ~400 ms) is judged by the

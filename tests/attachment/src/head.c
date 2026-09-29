@@ -776,39 +776,92 @@ ZTEST(attachment_head, test_relay_is_not_cancelled_by_a_copy_masked_by_the_brain
 	lora_sim_reset(other_radio);
 }
 
-/* D3 (ATTACHMENT-SCOPE §6, X6c): a CLIENT relay whose window had already closed when the
- * decision reached the head is dropped, with -ETIME and its own counter -- a late client
- * relay is the duplicate cancel-on-dupe exists to prevent. A ROUTER_LATE relay in the same
- * position still goes (a late relay is still a relay). */
-/* Named to sort LAST: ztest runs cases in name order, the head's periodic STATUS fires
+/* D3 as revised (ATTACHMENT-SCOPE §6, tooling 7d5f2a7): a CLIENT relay whose window had
+ * already closed when the decision reached the head applies its own cancel test. Three
+ * cases: late with no copy heard -> relayed now; late with a copy heard -> cancelled (the
+ * ordinary cancel-on-dupe); past orig_rx + 2 * worst(snr) -> stale, dropped with -ETIME and
+ * its own counter. A ROUTER_LATE relay in the stale position still goes.
+ * Named to sort LAST: ztest runs cases in name order, the head's periodic STATUS fires
  * every 5 s of suite time, and test_status_on_link_up_to_the_brain asserts that a
  * stranger's link-up sends nothing within 300 ms -- a case inserted earlier in the
  * order moved that timer into its window (2026-09-29). */
-ZTEST(attachment_head, test_zz_late_client_relay_is_dropped_router_still_goes)
+/* Like expect_result, but skips envelopes that are not a TX_RESULT (the head's periodic
+ * STATUS lands inside this case's long sleeps). */
+static void expect_result_skipping_status(uint16_t seq, int rc)
+{
+	struct meshtastic_attachment_msg msg;
+
+	for (int i = 0; i < 6; i++) {
+		zassert_ok(k_sem_take(&sent.sem, K_SECONDS(3)), "an envelope");
+		zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+		if (msg.type != MESHTASTIC_ATTACHMENT_TX_RESULT) {
+			continue;
+		}
+		zassert_equal(msg.u.result.tx_seq, seq, "seq %u, got %u", seq, msg.u.result.tx_seq);
+		zassert_equal(msg.u.result.rc, (int8_t)CLAMP(rc, -127, 127), "rc %d, got %d", rc,
+			      (int)msg.u.result.rc);
+		return;
+	}
+	zassert_true(false, "no TX_RESULT for seq %u", seq);
+}
+
+static uint32_t test_relay_worst_ms(int8_t snr)
+{
+	return meshtastic_contention_delay_relay_worst_ms(
+		snr, meshtastic_contention_effective_slot_ms(mt.modem.spread_factor,
+							     mt.modem.bandwidth_hz, false));
+}
+
+ZTEST(attachment_head, test_zz_late_client_relay_applies_its_own_cancel_test)
 {
 	uint8_t wire[40];
 	struct lora_sim_frame f;
 	struct meshtastic_attachment_head_stats st;
 	uint32_t rx_ms;
+	const int8_t snr = 9;
+	const uint32_t worst = test_relay_worst_ms(snr);
+	const uint32_t window = MAX(worst / 2U, 40U);
 
 	meshtastic_attachment_head_set_brain(BRAIN_NODE);
 	(void)k_sem_take(&sent.sem, K_MSEC(500));
 	wait_rx_armed();
-	/* The head heard the frame 500 ms ago; the brain's decision names a 200 ms
-	 * window -- it closed 300 ms before the TX_FRAME arrived. */
+	zassert_true(worst >= 80U, "worst-case window %u ms too small for the timing here", worst);
+
+	/* (a) Late, no copy heard, inside the staleness cap: relayed now. */
 	rx_ms = hear_and_forward(wire, sizeof(wire), 0x73U);
-	k_msleep(500);
-	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, 200U, MESHTASTIC_ATTACHMENT_DUPE_CANCEL, 24U));
-	expect_result(24U, -ETIME);
+	k_msleep(window + 30U);
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, window, MESHTASTIC_ATTACHMENT_DUPE_CANCEL, 24U));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "a late CLIENT relay with no copy heard goes out");
+	expect_result_skipping_status(24U, 0);
+
+	/* (b) Late, a peer's copy heard meanwhile: cancelled, never sent. */
+	rx_ms = hear_and_forward(wire, sizeof(wire), 0x74U);
+	k_msleep(window / 2U);
+	((struct meshtastic_wire_header *)wire)->relay_node = 0x57U;
+	((struct meshtastic_wire_header *)wire)->flags =
+		(uint8_t)((((struct meshtastic_wire_header *)wire)->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) | 2U);
+	zassert_ok(lora_sim_inject(lora_dev, wire, sizeof(wire), -70, snr), "a peer relayed it first");
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(2)), "that copy is forwarded too");
+	k_msleep(window / 2U + 30U);
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, window, MESHTASTIC_ATTACHMENT_DUPE_CANCEL, 25U));
+	expect_result_skipping_status(25U, -ECANCELED);
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing keyed up");
+
+	/* (c) Past orig_rx + 2 * worst: stale, dropped. */
+	rx_ms = hear_and_forward(wire, sizeof(wire), 0x75U);
+	k_msleep(2U * worst + 60U);
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, window, MESHTASTIC_ATTACHMENT_DUPE_CANCEL, 26U));
+	expect_result_skipping_status(26U, -ETIME);
 	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing keyed up");
 	meshtastic_attachment_head_stats_get(&st);
-	zassert_equal(st.tx_late_dropped, 1U, "counted as dropped-late");
-	/* The twin: ROUTER_LATE, same lateness, still relays. */
-	rx_ms = hear_and_forward(wire, sizeof(wire), 0x74U);
-	k_msleep(500);
-	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, 200U, MESHTASTIC_ATTACHMENT_DUPE_LATE, 25U));
+	zassert_equal(st.tx_late_dropped, 1U, "only the stale one is counted as dropped-late");
+
+	/* The twin: ROUTER_LATE in the stale position still relays. */
+	rx_ms = hear_and_forward(wire, sizeof(wire), 0x76U);
+	k_msleep(2U * worst + 60U);
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, window, MESHTASTIC_ATTACHMENT_DUPE_LATE, 27U));
 	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "a late ROUTER relay still goes");
-	expect_result(25U, 0);
+	expect_result_skipping_status(27U, 0);
 	meshtastic_attachment_head_stats_get(&st);
 	zassert_equal(st.tx_late_dropped, 1U, "not counted for a router");
 }

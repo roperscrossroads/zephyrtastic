@@ -286,12 +286,18 @@ static void head_tx_thread_fn(void *p1, void *p2, void *p3)
 
 		(void)k_msgq_get(&head_tx_q, &t, K_FOREVER);
 		is_relay = (t.flags & MESHTASTIC_ATTACHMENT_TXF_RELAY) != 0U;
-		/* D3 (ATTACHMENT-SCOPE §6): a CLIENT relay whose window has already
-		 * closed when the decision reaches us is dropped -- a late client
-		 * relay is the duplicate cancel-on-dupe exists to prevent. ROUTER and
-		 * ROUTER_LATE send late (a late relay is still a relay). X6c. */
+		/* D3 as revised (ATTACHMENT-SCOPE §6, tooling 7d5f2a7): a CLIENT relay
+		 * whose window has already closed when the decision reaches us applies
+		 * its own cancel test, not a blind drop -- the head KNOWS whether a peer
+		 * relayed the frame. A copy heard since the original: dropped, the
+		 * ordinary cancel-on-dupe (the check after the wait). No copy: send now,
+		 * after CAD, as the on-time CLIENT would have (the wait ends at once).
+		 * Past orig_rx + 2 * worst(snr): stale, dropped (-ETIME, late_dropped).
+		 * Never promoted to ROUTER_LATE (relaying despite a heard copy).
+		 * ROUTER / ROUTER_LATE unchanged: they send late. */
 		if (is_relay && t.dupe == MESHTASTIC_ATTACHMENT_DUPE_CANCEL && t.not_before != 0U &&
-		    (int32_t)(t.not_before - k_uptime_get_32()) < 0) {
+		    (int32_t)(t.not_before - k_uptime_get_32()) < 0 &&
+		    (int32_t)(k_uptime_get_32() - (t.orig_rx_ms + 2U * relay_worst_ms(t.snr))) > 0) {
 			k_mutex_lock(&head_lock, K_FOREVER);
 			head.stats.tx_late_dropped++;
 			k_mutex_unlock(&head_lock);
