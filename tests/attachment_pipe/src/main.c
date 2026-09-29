@@ -60,6 +60,10 @@ static void on_rf(const struct attach_pipe_rf *rf, const uint8_t *wire, size_t l
 	 * frame, as on the bench. Say so, so a test can account for it. */
 	if (rc != 0) {
 		attach_pipe_event("rf lost rc=%d t=%lld", rc, k_uptime_get());
+	} else {
+		/* When this radio heard it, on this image's clock: the start of a
+		 * relay window (X6). */
+		attach_pipe_event("rf heard t=%lld", k_uptime_get());
 	}
 }
 
@@ -145,6 +149,10 @@ static void on_cmd(const char *cmd)
 
 		attach_pipe_event("preset rc=%d",
 				  meshtastic_attachment_set_preset((uint8_t)id, (uint8_t)p));
+	} else if (strncmp(cmd, "role ", 5) == 0) {
+		meshtastic_set_device_role(
+			(meshtastic_Config_DeviceConfig_Role)strtoul(&cmd[5], NULL, 10));
+		attach_pipe_event("role rc=0 role=%u", meshtastic_device_role());
 	} else if (strncmp(cmd, "allow ", 6) == 0) {
 		attach_pipe_event("allow rc=%d", meshtastic_attachment_allow_add(
 							  (uint32_t)strtoul(&cmd[6], NULL, 16)));

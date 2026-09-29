@@ -19,4 +19,5 @@ tests:
     harness_config:
       pytest_root:
         - "pytest/test_attach_pipe.py"
+        - "pytest/test_attach_pipe_timing.py"
     timeout: 300

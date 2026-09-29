@@ -93,3 +93,38 @@ def us_tuning(preset, channel_name=None):
     num_slots = (US_END_HZ - US_START_HZ + width // 2) // width
     slot = djb2(channel_name or PRESET_NAMES[preset]) % num_slots
     return US_START_HZ + width // 2 + slot * width, sf, bw_khz
+
+
+# ---- the reference's relay window (RadioInterface.cpp), for X6 --------------
+# computeSlotTimeMsec: max(2.25, NUM_SYM_CAD + 0.5) * 2^sf / bw + 7.6 ms, as an
+# integer; getCWsize: Arduino map(snr, -20, 10, CWmin 3, CWmax 8);
+# getTxDelayMsecWeighted: a ROUTER waits random(0, 2*CW) slots, everyone else
+# 2*CWmax slots and then random(0, 2^CW) more (random's upper bound is
+# exclusive).
+
+NUM_SYM_CAD, CW_MIN, CW_MAX = 2, 3, 8
+
+
+def slot_ms(preset):
+    sf, bw_khz = PRESET_MODEM[preset]
+    return int(max(2.25, NUM_SYM_CAD + 0.5) * (2 ** sf) / bw_khz + 7.6)
+
+
+def cw_size(snr):
+    v = int((snr + 20) * (CW_MAX - CW_MIN) / 30) + CW_MIN  # Arduino map: truncates
+    return max(CW_MIN, min(CW_MAX, v))
+
+
+def relay_window(preset, snr, router=False):
+    """(earliest, latest) key-up after the frame was heard, in ms."""
+    s, cw = slot_ms(preset), cw_size(snr)
+    if router:
+        return 0, (2 * cw - 1) * s
+    return 2 * CW_MAX * s, 2 * CW_MAX * s + (2 ** cw - 1) * s
+
+
+def relay_worst(preset, snr):
+    """getTxDelayMsecWeightedWorst: 2*CWmax slots + 2^CW slots. What
+    clampToLateRebroadcastWindow adds to the moment the duplicate is heard."""
+    s = slot_ms(preset)
+    return 2 * CW_MAX * s + (2 ** cw_size(snr)) * s
