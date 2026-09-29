@@ -559,6 +559,31 @@ int meshtastic_attachment_relay(uint8_t id, const uint8_t *wire, size_t len, uin
 	return attachment_send_env(id, env, (size_t)elen, true);
 }
 
+int meshtastic_attachment_set_tx_power(uint8_t id, int8_t dbm)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_SET_POLICY_LEN];
+	const struct meshtastic_attachment_policy pol = {
+		.flags = MESHTASTIC_ATTACHMENT_POL_HAS_TX_POWER,
+		.tx_power = dbm,
+	};
+	int elen;
+
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (!used[id]) {
+		k_mutex_unlock(&tab_lock);
+		return -ENOENT;
+	}
+	k_mutex_unlock(&tab_lock);
+	elen = meshtastic_attachment_encode_set_policy(&pol, env, sizeof(env));
+	if (elen < 0) {
+		return elen;
+	}
+	return attachment_send_env(id, env, (size_t)elen, false);
+}
+
 int meshtastic_attachment_cancel(uint8_t id, uint32_t src, uint32_t pkt_id)
 {
 	uint8_t env[MESHTASTIC_ATTACHMENT_TX_CANCEL_LEN];

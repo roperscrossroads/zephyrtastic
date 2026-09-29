@@ -156,6 +156,18 @@ int meshtastic_attachment_encode_tx_cancel(uint32_t src, uint32_t id, uint8_t *o
 	return (int)MESHTASTIC_ATTACHMENT_TX_CANCEL_LEN;
 }
 
+int meshtastic_attachment_encode_set_policy(const struct meshtastic_attachment_policy *m,
+					    uint8_t *out, size_t out_size)
+{
+	if (m == NULL || out == NULL || out_size < MESHTASTIC_ATTACHMENT_SET_POLICY_LEN) {
+		return -EMSGSIZE;
+	}
+	out[0] = MESHTASTIC_ATTACHMENT_SET_POLICY;
+	out[1] = m->flags;
+	out[2] = (uint8_t)m->tx_power;
+	return (int)MESHTASTIC_ATTACHMENT_SET_POLICY_LEN;
+}
+
 int meshtastic_attachment_encode_set_preset(uint8_t preset, uint8_t *out, size_t out_size)
 {
 	if (out == NULL) {
@@ -222,6 +234,13 @@ int meshtastic_attachment_decode(const uint8_t *env, size_t len,
 		}
 		out->u.cancel.src = get_u32(&env[1]);
 		out->u.cancel.id = get_u32(&env[5]);
+		return 0;
+	case MESHTASTIC_ATTACHMENT_SET_POLICY:
+		if (len < MESHTASTIC_ATTACHMENT_SET_POLICY_LEN) {
+			return -EBADMSG;
+		}
+		out->u.policy.flags = env[1];
+		out->u.policy.tx_power = (int8_t)env[2];
 		return 0;
 	case MESHTASTIC_ATTACHMENT_TX_RESULT:
 		if (len < MESHTASTIC_ATTACHMENT_TX_RESULT_LEN) {

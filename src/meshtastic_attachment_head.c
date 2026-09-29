@@ -30,6 +30,7 @@
 #include "meshtastic_airtime.h"
 #endif
 #include "meshtastic_core.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_preset.h"
 #include "meshtastic_packet.h"
 #include <zephyr/sys/byteorder.h>
@@ -607,6 +608,46 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 		}
 		head.stats.controls++;
 		ret = 0;
+		break;
+	}
+	case MESHTASTIC_ATTACHMENT_SET_POLICY: {
+		struct meshtastic_attach_link_info info;
+		bool trusted;
+
+		/* The brain configures its head's radio: the same gate as SET_PRESET. */
+		if (node != head.brain) {
+			head.stats.refused++;
+			ret = -EPERM;
+			break;
+		}
+		trusted = ((b != NULL) ? b->link_info(node, &info)
+				       : meshtastic_attach_bearer_link_info(node, &info, NULL)) &&
+			  info.up && info.auth != MESHTASTIC_ATTACH_AUTH_NONE;
+		if (!trusted) {
+			head.stats.untrusted++;
+			ret = -EACCES;
+			break;
+		}
+		ret = 0;
+		if ((msg.u.policy.flags & MESHTASTIC_ATTACHMENT_POL_HAS_TX_POWER) != 0U) {
+			/* The console's own pattern: read the LoRa section, change the
+			 * field, write it back -- applied now, persisted, region-clamped
+			 * by the store. */
+			meshtastic_Config cfg;
+
+			ret = meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg);
+			if (ret == 0) {
+				cfg.which_payload_variant = meshtastic_Config_lora_tag;
+				cfg.payload_variant.lora.tx_power = msg.u.policy.tx_power;
+				ret = meshtastic_config_store_set_config(&cfg);
+			}
+		}
+		if (ret == 0) {
+			head.stats.controls++;
+			if (status_send_locked(node) == 0) {
+				head.stats.status_sent++;
+			}
+		}
 		break;
 	}
 	case MESHTASTIC_ATTACHMENT_TX_CANCEL: {

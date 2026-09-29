@@ -71,6 +71,10 @@ int meshtastic_attachment_tx(uint8_t id, const uint8_t *wire, size_t len, uint8_
 int meshtastic_attachment_relay(uint8_t id, const uint8_t *wire, size_t len, uint32_t src,
 				uint32_t pkt_id, uint32_t rx_ms, uint32_t not_before_ms,
 				uint8_t dupe);
+/* Configure head @p id's radio: its transmit power in dBm at the antenna (0 =
+ * the region's maximum). A head runs no phone service, so its brain is the
+ * only thing that can set this. The head answers with STATUS. */
+int meshtastic_attachment_set_tx_power(uint8_t id, int8_t dbm);
 /* Withdraw a relay handed to head @p id (a duplicate reached the brain first). */
 int meshtastic_attachment_cancel(uint8_t id, uint32_t src, uint32_t pkt_id);
 /* The modem the head's preset implies (for the relay window). false = unknown. */

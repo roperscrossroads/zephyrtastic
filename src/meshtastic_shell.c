@@ -3665,6 +3665,27 @@ static int cmd_attach_preset(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_attach_power(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long id = strtoul(argv[1], NULL, 10);
+	long dbm = strtol(argv[2], NULL, 10);
+	int ret;
+
+	ARG_UNUSED(argc);
+	if (id == 0U || id > CONFIG_MESHTASTIC_ATTACHMENT_MAX || dbm < -128 || dbm > 127) {
+		shell_error(sh, "usage: meshtastic attach power <id> <dBm> (0 = region max)");
+		return -EINVAL;
+	}
+	ret = meshtastic_attachment_set_tx_power((uint8_t)id, (int8_t)dbm);
+	if (ret < 0) {
+		shell_error(sh, "set_policy failed (%d)", ret);
+		return ret;
+	}
+	shell_print(sh, "asked attachment %lu to transmit at %ld dBm (it persists it and reports)", id,
+		    dbm);
+	return 0;
+}
+
 static int cmd_attach_forget(const struct shell *sh, size_t argc, char **argv)
 {
 	unsigned long id = strtoul(argv[1], NULL, 10);
@@ -3686,6 +3707,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  cmd_attach_list),
 	SHELL_CMD_ARG(status, NULL, SHELL_HELP("One attachment in detail.", "<id>"),
 		      cmd_attach_status, 2, 0),
+	SHELL_CMD_ARG(power, NULL, SHELL_HELP("Set a head's transmit power.", "<id> <dBm>"),
+		      cmd_attach_power, 3, 0),
 	SHELL_CMD_ARG(preset, NULL, SHELL_HELP("Ask a head to retune.", "<id> <preset number>"),
 		      cmd_attach_preset, 3, 0),
 	SHELL_CMD_ARG(allow, NULL,

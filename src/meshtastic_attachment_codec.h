@@ -29,6 +29,9 @@
  *   5 SET_PRESET [1]preset
  *   6 TIME_BEAT  reserved (C007)
  *   7 TX_CANCEL  [1..4]src [5..8]id   (the brain withdraws a relay it handed over)
+ *   8 SET_POLICY [1]flags (bit0 HAS_TX_POWER) [2]tx_power i8 dBm (0 = region max)
+ *                (the brain configures its head's radio; a head runs no phone
+ *                service, so this is the only path to it; answered with STATUS)
  *
  * The wire in RX_FRAME/TX_FRAME is a Meshtastic airframe, encrypted, untouched:
  * a head never decodes it (it holds no keys) and never builds one. Who a frame
@@ -62,12 +65,16 @@ enum meshtastic_attachment_type {
 	MESHTASTIC_ATTACHMENT_SET_PRESET = 5,
 	MESHTASTIC_ATTACHMENT_TIME_BEAT = 6,
 	MESHTASTIC_ATTACHMENT_TX_CANCEL = 7,
+	MESHTASTIC_ATTACHMENT_SET_POLICY = 8,
 };
 
 #define MESHTASTIC_ATTACHMENT_RX_HDR_LEN     10U
 #define MESHTASTIC_ATTACHMENT_TX_HDR_LEN     5U
 #define MESHTASTIC_ATTACHMENT_TX_RELAY_HDR_LEN 22U
 #define MESHTASTIC_ATTACHMENT_TX_CANCEL_LEN  9U
+#define MESHTASTIC_ATTACHMENT_SET_POLICY_LEN 3U
+/* SET_POLICY flags */
+#define MESHTASTIC_ATTACHMENT_POL_HAS_TX_POWER 0x01U
 #define MESHTASTIC_ATTACHMENT_TX_RESULT_LEN  9U
 #define MESHTASTIC_ATTACHMENT_STATUS_LEN     27U
 #define MESHTASTIC_ATTACHMENT_STATUS_POS_LEN 39U
@@ -124,6 +131,11 @@ struct meshtastic_attachment_tx_cancel {
 	uint32_t id;
 };
 
+struct meshtastic_attachment_policy {
+	uint8_t flags;    /* MESHTASTIC_ATTACHMENT_POL_* */
+	int8_t tx_power;  /* dBm at the antenna, 0 = the region's maximum */
+};
+
 struct meshtastic_attachment_tx_result {
 	uint16_t tx_seq;
 	int8_t rc;
@@ -153,6 +165,7 @@ struct meshtastic_attachment_msg {
 		struct meshtastic_attachment_tx_result result;
 		struct meshtastic_attachment_status status;
 		struct meshtastic_attachment_tx_cancel cancel;
+		struct meshtastic_attachment_policy policy;
 		uint8_t preset; /* SET_PRESET */
 	} u;
 };
@@ -171,6 +184,8 @@ int meshtastic_attachment_encode_status(const struct meshtastic_attachment_statu
 int meshtastic_attachment_encode_set_preset(uint8_t preset, uint8_t *out, size_t out_size);
 int meshtastic_attachment_encode_tx_cancel(uint32_t src, uint32_t id, uint8_t *out,
 					   size_t out_size);
+int meshtastic_attachment_encode_set_policy(const struct meshtastic_attachment_policy *m,
+					    uint8_t *out, size_t out_size);
 
 /* Decode one envelope. Returns 0, -EINVAL on NULL/short input, -EBADMSG on an
  * unknown type or a length that does not fit the type. The wire pointers in

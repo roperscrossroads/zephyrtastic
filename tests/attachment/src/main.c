@@ -1241,3 +1241,27 @@ ZTEST(attachment, test_relay_goes_through_the_head_that_heard_it)
 	zassert_equal(msg.u.cancel.id, 0x3A02U);
 	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "still nothing on our radio");
 }
+
+/* The brain's side of SET_POLICY: one envelope to the head, and nothing to
+ * a head that is not there. */
+ZTEST(attachment, test_set_tx_power_reaches_the_head)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct meshtastic_attachment_msg msg;
+	uint32_t before;
+
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x4A00U, "admit", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_ST, -90, 5, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	k_msleep(300);
+	before = sent.count;
+	zassert_ok(meshtastic_attachment_set_tx_power(1U, 2));
+	zassert_equal(sent.count, before + 1U);
+	zassert_equal(sent.node, HEAD1_NODE);
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_SET_POLICY);
+	zassert_equal(msg.u.policy.tx_power, 2);
+	zassert_true((msg.u.policy.flags & MESHTASTIC_ATTACHMENT_POL_HAS_TX_POWER) != 0U);
+	zassert_equal(meshtastic_attachment_set_tx_power(2U, 2), -ENOENT, "no head 2");
+}

@@ -700,3 +700,31 @@ ZTEST(attachment_head, test_tx_cancel_withdraws_a_relay)
 	expect_result(24U, -ECANCELED);
 	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "withdrawn");
 }
+
+/* SET_POLICY: the brain sets its head's transmit power -- a head runs no phone
+ * service, so this is the only path -- through the config store (applied,
+ * persisted, region-clamped), and the head reports. A stranger is refused. */
+ZTEST(attachment_head, test_set_policy_sets_tx_power_from_the_brain_only)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	struct meshtastic_attachment_msg msg;
+	struct meshtastic_attachment_head_stats st;
+	const struct meshtastic_attachment_policy pol = {
+		.flags = MESHTASTIC_ATTACHMENT_POL_HAS_TX_POWER, .tx_power = 2,
+	};
+	int len;
+
+	meshtastic_attachment_head_set_brain(BRAIN_NODE);
+	(void)k_sem_take(&sent.sem, K_MSEC(500));
+	len = meshtastic_attachment_encode_set_policy(&pol, env, sizeof(env));
+	zassert_true(len > 0);
+	zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, STRANGER, env, (size_t)len), -EPERM);
+	zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len));
+	zassert_equal(mt.tx_power, 2, "applied now (%d dBm)", mt.tx_power);
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(1)), "STATUS follows");
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_STATUS);
+	meshtastic_attachment_head_stats_get(&st);
+	zassert_equal(st.refused, 1U);
+	zassert_equal(st.controls, 1U);
+}
