@@ -256,6 +256,13 @@ class Hub:
         self.wait_event(node, end_pattern, timeout, since=m)
         return self.lines(node, since=m)
 
+    def ask(self, node, cmd, pattern, timeout=5):
+        """Send @p cmd and return the one line that answers it (matching
+        @p pattern): other events -- rx, tx, rf lost -- may land in between."""
+        m = self.mark(node)
+        self.cmd(node, cmd)
+        return self.wait_event(node, pattern, timeout, since=m)
+
     def wait_node(self, node, timeout=10):
         deadline = time.monotonic() + timeout
         with self.cond:

@@ -86,6 +86,18 @@ def test_x2_latency_and_loss_deliver_at_most_once(hub, images):
     sent_through = [e for s, d, e in hub.forwarded if s == HEAD1 and e[0] == 1]
     assert len(delivered) == len(sent_through), (len(delivered), len(sent_through), len(lost))
     assert len(sent_through) + len(lost) + len(deaf) == n, (len(sent_through), len(lost), len(deaf))
+    # Deafness has one cause: the head keyed up for its brain. Every frame it
+    # missed must fall inside one of its own transmissions (start .. start +
+    # airtime, on the head's clock, with a slot's margin for the settle and
+    # the RX re-arm) -- a head deaf for any other reason, e.g. while merely
+    # waiting out a contention window, would otherwise hide in this count.
+    keyed = [(int(f["t"]), int(f["air"])) for f in
+             (dict(kv.split("=", 1) for kv in l.split()[1:]) for l in hub.lines(HEAD1, mh, r"^tx "))]
+    margin = 30
+    for l in deaf:
+        t = int(l.split("t=")[1])
+        assert any(s - margin <= t <= s + air + margin for s, air in keyed), \
+            f"head deaf at t={t} with no transmission around it: {keyed}"
     assert lost, "the loss knob never fired: the test proves nothing about loss"
 
 
@@ -158,7 +170,7 @@ def test_x5_a_stranger_on_the_link_is_refused(hub, images):
     hub.env_from(stranger, BRAIN, env)
     time.sleep(1.0)
     assert rx_lines(hub, m, "x5-evil") == []
-    stats = hub.query(BRAIN, "stats", r"^stats ")[-1]
+    stats = hub.ask(BRAIN, "stats", r"^stats ")
     assert "refused=0 " not in stats, stats
     assert stranger not in attach_rows(hub)
 
@@ -170,7 +182,7 @@ def test_x5_a_stranger_on_the_link_is_refused(hub, images):
 
 
 def head_heard(hub, node):
-    line = hub.query(node, "stats", r"^head ")[-1]
+    line = hub.ask(node, "stats", r"^head ")
     return int(line.split("heard=")[1].split()[0])
 
 
