@@ -93,15 +93,45 @@ def test_x6b_router_relays_early_and_a_late_decision_still_relays(hub, images, l
         time.sleep(0.4)
 
 
-def test_x6c_a_late_client_decision_is_dropped(hub, images):
-    """A CLIENT's window here closes 276 ms after the head heard the frame; with
-    200 ms each way the decision arrives at ~400 ms. D3: a late client relay is
-    the duplicate cancel-on-dupe exists to prevent, so it is dropped. Twin:
-    X6a, the same client relaying on time."""
+@pytest.mark.xfail(strict=True, reason="D3 as revised 2026-09-29 (ATTACHMENT-SCOPE §6): a late "
+                                       "CLIENT relay the head heard no copy of is sent, not dropped")
+def test_x6c_a_late_client_decision_with_no_copy_heard_is_relayed(hub, images):
+    """D3, revised: a CLIENT decision that reaches the head after its window
+    (276 ms here; with 200 ms each way it arrives at ~400 ms) is judged by the
+    CLIENT's own rule at arrival. The head heard no other copy -- nobody in
+    earshot relayed the frame -- so it relays now, as it would have on time.
+    Within the staleness cap: 2 x worst = 576 ms."""
     setup(hub, images, 200, ROLE_CLIENT)
+    cap = 2 * relay_worst(MEDIUM_FAST, SNR)
     pid = 0x6C01
     d, tx = head_heard_then_tx(hub, pid, blind(pid), timeout=2)
-    assert tx is None, f"a late CLIENT relay went out {d} ms after the head heard the frame"
+    assert tx is not None, "a late CLIENT relay nobody else made was dropped"
+    assert 2 * 200 - EARLY_MS <= d <= cap + LATE_MS, d
+
+
+def test_x6c_a_late_client_decision_after_a_copy_is_dropped(hub, images):
+    """Twin: the same late decision, but the head heard a neighbour relay the
+    frame at 300 ms -- after the window, before the decision arrived. The
+    CLIENT's cancel-on-dupe applies at arrival: dropped. A CLIENT is never
+    promoted to ROUTER_LATE (which would relay anyway)."""
+    setup(hub, images, 200, ROLE_CLIENT)
+    pid = 0x6C02
+    mh = hub.mark(HEAD1)
+    hub.rf(HEAD1, MEDIUM_FAST, -110, SNR, blind(pid))
+    time.sleep(0.3)
+    hub.rf(HEAD1, MEDIUM_FAST, -100, SNR, blind(pid, hop_limit=2, relay_node=0x55))
+    time.sleep(1.5)
+    assert hub.lines(HEAD1, mh, rf"^tx src=0d0d0d0d .*id={pid:08x}") == [], \
+        "a late CLIENT relayed a frame a neighbour had already relayed"
+
+
+def test_x6c_a_stale_client_decision_is_dropped(hub, images):
+    """Past the staleness cap (2 x worst = 576 ms; 350 ms each way puts the
+    decision at ~700 ms) the flood has moved on: dropped, copy or not."""
+    setup(hub, images, 350, ROLE_CLIENT)
+    pid = 0x6C03
+    d, tx = head_heard_then_tx(hub, pid, blind(pid), timeout=2)
+    assert tx is None, f"a stale CLIENT relay went out {d} ms after the head heard the frame"
 
 
 def test_x6d_a_client_head_cancels_on_a_heard_duplicate(hub, images):
