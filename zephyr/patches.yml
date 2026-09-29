@@ -370,7 +370,7 @@ patches:
 
       No behaviour change on a healthy radio: the read does not fail.
   - path: 0010-gnss-nmea-generic-enlarge-uart-rx-buffer.patch
-    sha256sum: 41fa89c7fa48627bcf6be2a8c0bbd22fd3593e1682c9bcbdd9bc8ec689c5f8a7
+    sha256sum: e6b60d78ba956fee1f64df04949042e34abed220d95d95a2028f85630ec55bc5
     module: zephyr
     author: Adam Roper
     email: adam.r.roper@gmail.com

@@ -30,6 +30,12 @@ The `sha256sum` in `patches.yml` must match the file, or `west patch apply`
 refuses it. Verify a patch matches the current tree without a destructive
 clean/apply cycle: `cd zephyr && git apply --reverse --check ../main/zephyr/patches/<file>`.
 
+**This includes a hand edit to an existing patch**, even a one-word comment
+fix. `2f7e877` reworded a comment in 0010 without re-hashing it; every local
+build stayed green (the tree was already patched, so nothing re-ran the hash
+check) and CI's fresh `west patch apply` failed with `sha256 mismatch`.
+Re-hash after *any* edit to a file in this directory.
+
 **If any of `<files>` already has an earlier carried patch applied** (check
 `grep -l <file> *.patch` in this dir first), a plain `git diff <files>` is
 **wrong** — it captures the earlier patch's content *and* the new change
