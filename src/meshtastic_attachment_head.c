@@ -112,6 +112,31 @@ struct cancelled {
 };
 static struct cancelled cancels[4];
 
+/* The relay the TX thread is waiting to key up, so the RX path can act on a
+ * duplicate THE MOMENT it is heard (X6e): the reference clamps ROUTER_LATE to
+ * tx_after = now + worst when the copy lands (clampToLateRebroadcastWindow),
+ * and a CLIENT drops there and then. Published under head_lock by the TX
+ * thread while it waits; cleared when it stops waiting. */
+static struct {
+	uint32_t src;
+	uint32_t id;
+	uint32_t orig_rx_ms;
+	uint32_t not_before;
+	uint8_t dupe;
+	int8_t snr;
+	bool set;
+	bool clamped;
+	bool cancel;
+} pending;
+static K_SEM_DEFINE(head_tx_wake, 0, 1);
+
+static uint32_t relay_worst_ms(int8_t snr)
+{
+	return meshtastic_contention_delay_relay_worst_ms(
+		snr, meshtastic_contention_effective_slot_ms(mt.modem.spread_factor,
+							     mt.modem.bandwidth_hz, false));
+}
+
 static void heard_note_locked(const uint8_t *wire, uint16_t len, int8_t snr, uint32_t rx_ms)
 {
 	const struct meshtastic_wire_header *h = (const struct meshtastic_wire_header *)wire;
@@ -128,6 +153,20 @@ static void heard_note_locked(const uint8_t *wire, uint16_t len, int8_t snr, uin
 			heard_ring[i].last_ms = rx_ms;
 			if (heard_ring[i].count < 255U) {
 				heard_ring[i].count++;
+			}
+			/* A peer's copy of the relay we are waiting to send: decide NOW,
+			 * on this copy's reception time, and wake the TX thread. */
+			if (pending.set && pending.src == src && pending.id == id &&
+			    (int32_t)(rx_ms - pending.orig_rx_ms) > 0) {
+				if (pending.dupe == MESHTASTIC_ATTACHMENT_DUPE_CANCEL) {
+					pending.cancel = true;
+					k_sem_give(&head_tx_wake);
+				} else if (pending.dupe == MESHTASTIC_ATTACHMENT_DUPE_LATE &&
+					   !pending.clamped) {
+					pending.not_before = rx_ms + relay_worst_ms(pending.snr);
+					pending.clamped = true;
+					k_sem_give(&head_tx_wake);
+				}
 			}
 			return;
 		}
@@ -241,15 +280,67 @@ static void head_tx_thread_fn(void *p1, void *p2, void *p3)
 	for (;;) {
 		int ret;
 
-		(void)k_msgq_get(&head_tx_q, &t, K_FOREVER);
-		if (t.not_before != 0U) {
-			int32_t left = (int32_t)(t.not_before - k_uptime_get_32());
+		bool is_relay;
+		bool clamped = false;
+		bool heard_cancel = false;
 
-			if (left > 0) {
-				k_msleep(left);
-			}
+		(void)k_msgq_get(&head_tx_q, &t, K_FOREVER);
+		is_relay = (t.flags & MESHTASTIC_ATTACHMENT_TXF_RELAY) != 0U;
+		/* D3 (ATTACHMENT-SCOPE §6): a CLIENT relay whose window has already
+		 * closed when the decision reaches us is dropped -- a late client
+		 * relay is the duplicate cancel-on-dupe exists to prevent. ROUTER and
+		 * ROUTER_LATE send late (a late relay is still a relay). X6c. */
+		if (is_relay && t.dupe == MESHTASTIC_ATTACHMENT_DUPE_CANCEL && t.not_before != 0U &&
+		    (int32_t)(t.not_before - k_uptime_get_32()) < 0) {
+			k_mutex_lock(&head_lock, K_FOREVER);
+			head.stats.tx_late_dropped++;
+			k_mutex_unlock(&head_lock);
+			ret = -ETIME;
+			goto report;
 		}
-		if ((t.flags & MESHTASTIC_ATTACHMENT_TXF_RELAY) != 0U) {
+		if (t.not_before != 0U) {
+			/* Wait out the window on this radio's clock -- wakeable: a copy of
+			 * a pending relay heard meanwhile cancels it or moves the deadline
+			 * (heard_note_locked), which the old k_msleep could not see. */
+			k_mutex_lock(&head_lock, K_FOREVER);
+			if (is_relay) {
+				pending.src = t.relay_src;
+				pending.id = t.relay_id;
+				pending.orig_rx_ms = t.orig_rx_ms;
+				pending.not_before = t.not_before;
+				pending.dupe = t.dupe;
+				pending.snr = t.snr;
+				pending.clamped = false;
+				pending.cancel = false;
+				pending.set = true;
+				k_sem_reset(&head_tx_wake);
+			}
+			k_mutex_unlock(&head_lock);
+			for (;;) {
+				uint32_t deadline = t.not_before;
+				int32_t left;
+
+				k_mutex_lock(&head_lock, K_FOREVER);
+				if (is_relay) {
+					deadline = pending.not_before;
+					heard_cancel = pending.cancel;
+				}
+				k_mutex_unlock(&head_lock);
+				left = (int32_t)(deadline - k_uptime_get_32());
+				if (heard_cancel || left <= 0) {
+					break;
+				}
+				(void)k_sem_take(&head_tx_wake, K_MSEC(left));
+			}
+			k_mutex_lock(&head_lock, K_FOREVER);
+			if (is_relay) {
+				clamped = pending.clamped;
+				heard_cancel = pending.cancel;
+				pending.set = false;
+			}
+			k_mutex_unlock(&head_lock);
+		}
+		if (is_relay) {
 			/* The reference's cancel-on-duplicate / late clamp, on THIS
 			 * radio's hearing and clock (ATTACHMENT-DESIGN §12): a copy we
 			 * heard after the one this relay is of means a peer relayed it
@@ -262,20 +353,25 @@ static void head_tx_thread_fn(void *p1, void *p2, void *p3)
 			withdrawn = cancelled_take_locked(t.relay_src, t.relay_id);
 			again = heard_again_locked(t.relay_src, t.relay_id, t.orig_rx_ms);
 			k_mutex_unlock(&head_lock);
-			if (withdrawn || (again && t.dupe == MESHTASTIC_ATTACHMENT_DUPE_CANCEL)) {
+			if (withdrawn || heard_cancel ||
+			    (again && t.dupe == MESHTASTIC_ATTACHMENT_DUPE_CANCEL)) {
 				k_mutex_lock(&head_lock, K_FOREVER);
 				head.stats.tx_cancelled++;
 				k_mutex_unlock(&head_lock);
 				ret = -ECANCELED;
 				goto report;
 			}
-			if (again && t.dupe == MESHTASTIC_ATTACHMENT_DUPE_LATE) {
+			if (clamped) {
+				/* Already waited to dup_rx + worst (X6e): count it, send. */
+				k_mutex_lock(&head_lock, K_FOREVER);
+				head.stats.tx_late++;
+				k_mutex_unlock(&head_lock);
+			} else if (again && t.dupe == MESHTASTIC_ATTACHMENT_DUPE_LATE) {
+				/* A copy heard before the wait was published: the old rule,
+				 * to the end of the worst-case window from now. */
 				/* To the end of the worst-case window, from now, with this
 				 * modem and the SNR we heard the original at. */
-				uint32_t late = meshtastic_contention_delay_relay_worst_ms(
-					t.snr, meshtastic_contention_effective_slot_ms(
-						       mt.modem.spread_factor, mt.modem.bandwidth_hz,
-						       false));
+				uint32_t late = relay_worst_ms(t.snr);
 
 				k_mutex_lock(&head_lock, K_FOREVER);
 				head.stats.tx_late++;

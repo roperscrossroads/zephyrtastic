@@ -42,6 +42,7 @@ struct meshtastic_attachment_head_stats {
 	uint32_t tx_queue_full;
 	uint32_t tx_cancelled;   /* a relay withdrawn: by the brain, or by a copy we heard first */
 	uint32_t tx_late;        /* a relay pushed to the end of the window by a copy we heard */
+	uint32_t tx_late_dropped; /* a CLIENT relay whose window had closed when it reached us (D3) */
 	uint32_t tx_duty_blocked; /* refused by THIS radio's regulatory duty gate */
 };
 

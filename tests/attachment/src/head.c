@@ -775,3 +775,40 @@ ZTEST(attachment_head, test_relay_is_not_cancelled_by_a_copy_masked_by_the_brain
 	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(2)), "forwarded");
 	lora_sim_reset(other_radio);
 }
+
+/* D3 (ATTACHMENT-SCOPE §6, X6c): a CLIENT relay whose window had already closed when the
+ * decision reached the head is dropped, with -ETIME and its own counter -- a late client
+ * relay is the duplicate cancel-on-dupe exists to prevent. A ROUTER_LATE relay in the same
+ * position still goes (a late relay is still a relay). */
+/* Named to sort LAST: ztest runs cases in name order, the head's periodic STATUS fires
+ * every 5 s of suite time, and test_status_on_link_up_to_the_brain asserts that a
+ * stranger's link-up sends nothing within 300 ms -- a case inserted earlier in the
+ * order moved that timer into its window (2026-09-29). */
+ZTEST(attachment_head, test_zz_late_client_relay_is_dropped_router_still_goes)
+{
+	uint8_t wire[40];
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_head_stats st;
+	uint32_t rx_ms;
+
+	meshtastic_attachment_head_set_brain(BRAIN_NODE);
+	(void)k_sem_take(&sent.sem, K_MSEC(500));
+	wait_rx_armed();
+	/* The head heard the frame 500 ms ago; the brain's decision names a 200 ms
+	 * window -- it closed 300 ms before the TX_FRAME arrived. */
+	rx_ms = hear_and_forward(wire, sizeof(wire), 0x73U);
+	k_msleep(500);
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, 200U, MESHTASTIC_ATTACHMENT_DUPE_CANCEL, 24U));
+	expect_result(24U, -ETIME);
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing keyed up");
+	meshtastic_attachment_head_stats_get(&st);
+	zassert_equal(st.tx_late_dropped, 1U, "counted as dropped-late");
+	/* The twin: ROUTER_LATE, same lateness, still relays. */
+	rx_ms = hear_and_forward(wire, sizeof(wire), 0x74U);
+	k_msleep(500);
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, 200U, MESHTASTIC_ATTACHMENT_DUPE_LATE, 25U));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "a late ROUTER relay still goes");
+	expect_result(25U, 0);
+	meshtastic_attachment_head_stats_get(&st);
+	zassert_equal(st.tx_late_dropped, 1U, "not counted for a router");
+}

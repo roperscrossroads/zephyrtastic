@@ -3745,9 +3745,9 @@ static int cmd_attach_head_show(const struct shell *sh, size_t argc, char **argv
 		    st.heard, st.forwarded, st.no_brain, st.queue_full, st.send_failed);
 	shell_print(sh, "status_sent %u  controls %u  refused %u  untrusted %u  rejected %u",
 		    st.status_sent, st.controls, st.refused, st.untrusted, st.rejected);
-	shell_print(sh, "tx: sent %u  failed %u  deferred %u  queue_full %u  cancelled %u  late %u  duty_blocked %u",
+	shell_print(sh, "tx: sent %u  failed %u  deferred %u  queue_full %u  cancelled %u  late %u  late_dropped %u  duty_blocked %u",
 		    st.tx_sent, st.tx_failed, st.tx_deferred, st.tx_queue_full, st.tx_cancelled,
-		    st.tx_late, st.tx_duty_blocked);
+		    st.tx_late, st.tx_late_dropped, st.tx_duty_blocked);
 	return 0;
 }
 

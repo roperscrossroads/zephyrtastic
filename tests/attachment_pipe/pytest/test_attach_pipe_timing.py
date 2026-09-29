@@ -93,8 +93,6 @@ def test_x6b_router_relays_early_and_a_late_decision_still_relays(hub, images, l
         time.sleep(0.4)
 
 
-@pytest.mark.xfail(strict=True, reason="D3 not implemented: a head sends a late CLIENT relay "
-                                       "at once instead of dropping it (ATTACHMENT-SCOPE §6 D3)")
 def test_x6c_a_late_client_decision_is_dropped(hub, images):
     """A CLIENT's window here closes 276 ms after the head heard the frame; with
     200 ms each way the decision arrives at ~400 ms. D3: a late client relay is
@@ -122,9 +120,6 @@ def test_x6d_a_client_head_cancels_on_a_heard_duplicate(hub, images):
         "the head relayed a frame a neighbour had already relayed"
 
 
-@pytest.mark.xfail(strict=True, reason="the head applies the ROUTER_LATE clamp when its own timer "
-                                       "expires, not when it hears the duplicate: ~130-215 ms "
-                                       "later than the reference")
 def test_x6e_router_late_clamps_to_the_end_of_the_window(hub, images):
     """ROUTER_LATE hears the duplicate and does not cancel: the reference
     (RadioLibInterface::clampToLateRebroadcastWindow) moves its relay to
