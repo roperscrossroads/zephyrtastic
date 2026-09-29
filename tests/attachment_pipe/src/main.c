@@ -59,8 +59,39 @@ static void on_rf(const struct attach_pipe_rf *rf, const uint8_t *wire, size_t l
 	 * its brain handed it, P3), or tuned elsewhere -- does not hear the
 	 * frame, as on the bench. Say so, so a test can account for it. */
 	if (rc != 0) {
-		attach_pipe_event("rf lost rc=%d", rc);
+		attach_pipe_event("rf lost rc=%d t=%lld", rc, k_uptime_get());
 	}
+}
+
+/* Everything this image's OWN radio transmits, with its start and airtime on
+ * this image's clock: a test can say "not relayed here" and mean it, and can
+ * check that a frame the radio missed ("rf lost") fell while it was keyed up. */
+static void tx_watch_fn(void *a, void *b, void *c)
+{
+	struct lora_sim_frame f;
+
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+	for (;;) {
+		if (lora_sim_take_tx(lora_dev, &f, K_MSEC(200)) != 0 || f.len < MESHTASTIC_HDR_LEN) {
+			continue;
+		}
+		const struct meshtastic_wire_header *h = (const struct meshtastic_wire_header *)f.data;
+
+		attach_pipe_event("tx src=%08x dest=%08x id=%08x hops=%u ch=%02x len=%u t=%lld air=%u",
+				  sys_le32_to_cpu(h->src), sys_le32_to_cpu(h->dest),
+				  sys_le32_to_cpu(h->id), h->flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK,
+				  h->channel, f.len, f.t_ms, f.air_ms);
+	}
+}
+K_THREAD_STACK_DEFINE(tx_watch_stack, 2048);
+static struct k_thread tx_watch;
+
+static void tx_watch_start(void)
+{
+	k_thread_create(&tx_watch, tx_watch_stack, K_THREAD_STACK_SIZEOF(tx_watch_stack),
+			tx_watch_fn, NULL, NULL, NULL, K_PRIO_PREEMPT(6), 0, K_NO_WAIT);
 }
 
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
@@ -82,29 +113,6 @@ static void on_recv(uint32_t from, uint32_t to, uint32_t portnum, const uint8_t 
 			  portnum, rssi, snr, (portnum == 1U) ? text : "");
 }
 
-/* Everything the brain's OWN radio transmits, so a test can say "not relayed
- * here" and mean it. */
-static void tx_watch_fn(void *a, void *b, void *c)
-{
-	struct lora_sim_frame f;
-
-	ARG_UNUSED(a);
-	ARG_UNUSED(b);
-	ARG_UNUSED(c);
-	for (;;) {
-		if (lora_sim_take_tx(lora_dev, &f, K_MSEC(200)) != 0 || f.len < MESHTASTIC_HDR_LEN) {
-			continue;
-		}
-		const struct meshtastic_wire_header *h = (const struct meshtastic_wire_header *)f.data;
-
-		attach_pipe_event("tx src=%08x dest=%08x id=%08x hops=%u ch=%02x len=%u",
-				  sys_le32_to_cpu(h->src), sys_le32_to_cpu(h->dest),
-				  sys_le32_to_cpu(h->id), h->flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK,
-				  h->channel, f.len);
-	}
-}
-K_THREAD_STACK_DEFINE(tx_watch_stack, 2048);
-static struct k_thread tx_watch;
 
 static void on_cmd(const char *cmd)
 {
@@ -170,8 +178,7 @@ static int role_start(uint32_t node)
 		return ret;
 	}
 	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_ALL);
-	k_thread_create(&tx_watch, tx_watch_stack, K_THREAD_STACK_SIZEOF(tx_watch_stack),
-			tx_watch_fn, NULL, NULL, NULL, K_PRIO_PREEMPT(6), 0, K_NO_WAIT);
+	tx_watch_start();
 	ret = attach_pipe_start(ATTACH_PIPE_ROLE_BRAIN, node, on_rf, on_cmd);
 	attach_pipe_event("ready role=brain node=%08x preset=%u", node, mt.modem_preset);
 	return ret;
@@ -206,6 +213,7 @@ static int role_start(uint32_t node)
 	if (ret != 0) {
 		return ret;
 	}
+	tx_watch_start();
 	ret = attach_pipe_start(ATTACH_PIPE_ROLE_HEAD, node, on_rf, on_cmd);
 	meshtastic_attachment_head_set_brain(env_hex("ATTACH_PIPE_BRAIN", 0U));
 	attach_pipe_event("ready role=head node=%08x preset=%u brain=%08x", node, mt.modem_preset,
