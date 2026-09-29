@@ -109,7 +109,14 @@ static int status_send_locked(uint32_t brain)
 {
 	struct meshtastic_attachment_status st = {
 		.preset = (uint8_t)mt.modem_preset,
+		/* RX_ONLY only when transmit is compiled out of this image: since P3
+		 * a head keys up what its brain hands it, and the brain refuses to
+		 * hand anything to a head that says receive-only. */
+#if defined(CONFIG_MESHTASTIC_SCANNER_RX_ONLY) || defined(CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY)
 		.flags = MESHTASTIC_ATTACHMENT_ST_IS_HEAD | MESHTASTIC_ATTACHMENT_ST_RX_ONLY,
+#else
+		.flags = MESHTASTIC_ATTACHMENT_ST_IS_HEAD,
+#endif
 		.hwid = mt.node_id,
 		.brain = brain,
 		.rx_frames = head.stats.forwarded,

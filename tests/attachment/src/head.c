@@ -211,8 +211,9 @@ ZTEST(attachment_head, test_set_preset_from_the_brain_only)
 	zassert_equal(msg.u.status.hwid, TEST_NODE_ID, "the head's own id");
 	zassert_equal(msg.u.status.brain, BRAIN_NODE);
 	zassert_true((msg.u.status.flags & MESHTASTIC_ATTACHMENT_ST_IS_HEAD) != 0U, "a head");
-	zassert_true((msg.u.status.flags & MESHTASTIC_ATTACHMENT_ST_RX_ONLY) != 0U,
-		     "rx-only until phase 3");
+	zassert_true((msg.u.status.flags & MESHTASTIC_ATTACHMENT_ST_RX_ONLY) == 0U,
+		     "a head with a transmitter says so (P3): the brain hands it frames");
+	zassert_true((msg.u.status.flags & MESHTASTIC_ATTACHMENT_ST_TX_ENABLED) != 0U, "tx enabled");
 
 	meshtastic_attachment_head_stats_get(&st);
 	zassert_equal(st.refused, 1U);
