@@ -378,8 +378,12 @@ static int parse_optional_dest(const struct shell *sh, size_t argc, char **argv,
 	return -EINVAL;
 }
 
-static int cmd_deferred_send(const struct shell *sh, size_t argc, char **argv,
-			     enum shell_work_op op)
+/* Shared by the position / metrics / environment / nodeinfo "send" commands. A keyless
+ * head (class 12) compiles all four out, and the fleet lane builds with -Werror, so the
+ * helper is __unused there rather than guarded by a list of callers that would rot
+ * (found by the lane 2026-09-29). */
+static __unused int cmd_deferred_send(const struct shell *sh, size_t argc, char **argv,
+				      enum shell_work_op op)
 {
 	struct shell_work_item item = {
 		.op = op,
@@ -425,12 +429,13 @@ static int32_t scaled_tenths(float value)
 	return (int32_t)(value * 10.0f);
 }
 
-static int32_t scaled_whole(int32_t scaled, int32_t divisor)
+static __unused int32_t scaled_whole(int32_t scaled, int32_t divisor)
 {
 	return scaled / divisor;
 }
 
-static uint32_t scaled_fraction(int32_t scaled, int32_t divisor)
+/* __unused: a keyless head (class 12) compiles every caller out (-Werror, fleet lane). */
+static __unused uint32_t scaled_fraction(int32_t scaled, int32_t divisor)
 {
 	int32_t fraction = scaled % divisor;
 
