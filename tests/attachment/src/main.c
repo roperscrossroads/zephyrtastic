@@ -1034,3 +1034,101 @@ ZTEST(attachment, test_tx_through_a_head_leaves_as_tx_frame)
 	zassert_equal(meshtastic_radio_send_wire_after_on(wire, len, MT_SCHED_TIER_NORMAL, 0U, 1U),
 		      -EHOSTUNREACH, "refused at enqueue");
 }
+
+/* P3 slice 2, reply-on-arrival: a want_ack DM heard through a head on
+ * MediumFast gets its ACK handed to THAT head, with the channel byte hashed
+ * under MediumFast (decodable where the sender listens), and nothing leaves
+ * our own radio. The twin: a DM heard on our own radio is ACKed on our own
+ * radio, and the head sees nothing. A head that reports itself receive-only
+ * gets no reply and neither does our radio: a reply on another preset is
+ * noise, not a fallback. */
+ZTEST(attachment, test_reply_leaves_by_the_radio_the_request_came_in_on)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_msg msg;
+	const uint8_t here = meshtastic_channels_get_hash(0U);
+	const uint8_t there = meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF);
+	uint32_t before;
+
+	/* Admit head 1 on MediumFast. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2A00U, "admit", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -80, 6, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	drain_radio();
+	before = sent.count;
+
+	/* A want_ack DM to us, through the head. */
+	build_frame(FAR_NODE_ID, TEST_NODE_ID, 0x2A01U, "ack me via head", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	((struct meshtastic_wire_header *)wire)->flags |= MESHTASTIC_FLAGS_WANT_ACK;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -80, 6, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "the DM is delivered");
+	for (int i = 0; i < 100 && sent.count == before; i++) {
+		k_msleep(10);
+	}
+	zassert_true(sent.count > before, "a reply reached the head");
+	k_msleep(300);
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(100)), 0,
+			  "nothing left on our own radio");
+	/* The last envelope to the head is one of the replies (the routing ACK,
+	 * or the NodeInfo request to an unknown sender): to the sender, hashed
+	 * under the head's preset, an own frame the head times itself. */
+	zassert_equal(sent.node, HEAD1_NODE);
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_FRAME);
+	zassert_equal(msg.u.tx.preset, (uint8_t)PRESET_MF);
+	zassert_true((msg.u.tx.flags & MESHTASTIC_ATTACHMENT_TXF_OWN_DELAY) != 0U, "own delay");
+	{
+		const struct meshtastic_wire_header *h =
+			(const struct meshtastic_wire_header *)msg.u.tx.wire;
+
+		zassert_equal(sys_le32_to_cpu(h->dest), FAR_NODE_ID, "to the sender");
+		zassert_equal(sys_le32_to_cpu(h->src), TEST_NODE_ID, "from us");
+		zassert_equal(h->channel, there, "hashed under the HEAD's preset (0x%02x vs 0x%02x)",
+			      h->channel, there);
+		zassert_not_equal(h->channel, here);
+	}
+
+	/* The twin: through our own radio, the ACK leaves on our own radio. */
+	before = sent.count;
+	build_frame(FAR_NODE_ID, TEST_NODE_ID, 0x2A02U, "ack me locally", wire, &len);
+	((struct meshtastic_wire_header *)wire)->flags |= MESHTASTIC_FLAGS_WANT_ACK;
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -70, 8));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "the ACK on our radio");
+	{
+		const struct meshtastic_wire_header *h = (const struct meshtastic_wire_header *)f.data;
+
+		zassert_equal(sys_le32_to_cpu(h->dest), FAR_NODE_ID);
+		zassert_equal(h->channel, here, "hashed under OUR preset");
+	}
+	k_msleep(200);
+	zassert_equal(sent.count, before, "nothing to the head");
+
+	/* A receive-only head: the reply is dropped, not misrouted. */
+	{
+		uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+		const struct meshtastic_attachment_status st = {
+			.preset = (uint8_t)PRESET_MF,
+			.flags = MESHTASTIC_ATTACHMENT_ST_IS_HEAD | MESHTASTIC_ATTACHMENT_ST_RX_ONLY,
+			.hwid = HEAD1_NODE, .brain = TEST_NODE_ID,
+		};
+		int elen = meshtastic_attachment_encode_status(&st, env, sizeof(env));
+
+		zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, HEAD1_NODE, env, (size_t)elen));
+	}
+	drain_radio();
+	before = sent.count;
+	build_frame(FAR_NODE_ID, TEST_NODE_ID, 0x2A03U, "ack me, head rx-only", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	((struct meshtastic_wire_header *)wire)->flags |= MESHTASTIC_FLAGS_WANT_ACK;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -80, 6, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "still delivered");
+	k_msleep(400);
+	zassert_equal(sent.count, before, "no reply to a receive-only head");
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(100)), 0,
+			  "and none on our own radio either");
+}

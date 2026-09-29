@@ -52,6 +52,10 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len);
  */
 int meshtastic_radio_send_wire_after_on(uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
 					uint32_t delay_ms, uint8_t attach);
+/* The blocking twin: returns when the frame was handed to the head (its
+ * TX_RESULT arrives later), or -EAGAIN on @p timeout. */
+int meshtastic_radio_send_wire_wait_prio_on(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
+					    k_timeout_t timeout, uint8_t attach);
 
 /**
  * @brief "Not now" — meshtastic_radio_send_wire_now()'s answer when the air is in use.

@@ -288,7 +288,9 @@ static void mt_outbound_thread_fn(void *p1, void *p2, void *p3)
 				/* The head's radio, the head's preset, the head's
 				 * clock: nothing below applies. The head answers
 				 * with TX_RESULT; DEFER is its own affair. */
-				ret = meshtastic_attachment_tx(cur.attach, cur.wire, cur.len, true);
+				ret = meshtastic_attachment_tx(cur.attach, cur.wire, cur.len,
+							       MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT |
+								       MESHTASTIC_ATTACHMENT_TXF_OWN_DELAY);
 			} else
 #endif
 			ret = meshtastic_ble_peer_tx_try_divert(cur.wire, cur.len);
@@ -523,6 +525,12 @@ int meshtastic_radio_send_wire_after_on(uint8_t *pkt, uint32_t pkt_len, uint8_t 
 					uint32_t delay_ms, uint8_t attach)
 {
 	return outbound_enqueue(pkt, pkt_len, tier, K_NO_WAIT, delay_ms, attach);
+}
+
+int meshtastic_radio_send_wire_wait_prio_on(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
+					    k_timeout_t timeout, uint8_t attach)
+{
+	return outbound_enqueue(pkt, pkt_len, tier, timeout, 0U, attach);
 }
 
 uint8_t meshtastic_outbound_pending(void)

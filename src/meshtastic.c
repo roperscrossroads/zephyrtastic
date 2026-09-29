@@ -1088,10 +1088,27 @@ static void duty_nak_to_phone(const struct meshtastic_packet *blocked)
  * longer touched here, so the blocking radio submit runs without the workspace lock. */
 static int send_wire_tail(const struct meshtastic_packet *local,
 			  const meshtastic_MeshPacket *mesh, uint8_t *wire, uint32_t pkt_len,
-			  k_timeout_t wait)
+			  k_timeout_t wait, uint8_t attach)
 {
 	uint8_t tier = meshtastic_sched_tier_for(local->portnum);
 	int ret;
+
+	if (attach != 0U) {
+		/* Through a radio head (ATTACHMENT-P3-PLAN slice 2): the head keys
+		 * up on its own clock with its own contention window and CAD; the
+		 * brain's airtime gate and own-CW below are its own radio's. A
+		 * blocking caller waits for the hand-over to the head, not for the
+		 * air. */
+		if (K_TIMEOUT_EQ(wait, K_NO_WAIT)) {
+			ret = meshtastic_radio_send_wire_after_on(wire, pkt_len, tier, 0U, attach);
+		} else {
+			ret = meshtastic_radio_send_wire_wait_prio_on(wire, pkt_len, tier, wait, attach);
+		}
+		if (ret == -EHOSTUNREACH) {
+			LOG_DBG("TX via attachment %u refused: head not ready", (unsigned int)attach);
+		}
+		return ret;
+	}
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 	/* Airtime gate: throttle only the node's own periodic background beacons
@@ -1203,16 +1220,18 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 		mt_ws.tx_mesh.channel = send_index;
 		mt_ws.tx_zero_hop = packet->zero_hop;
 		mt_ws.tx_no_pkc = packet->no_pkc;
+		mt_ws.tx_attach = packet->tx_attach;
 		ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
 		mt_ws.tx_zero_hop = false;
 		mt_ws.tx_no_pkc = false;
+		mt_ws.tx_attach = 0U;
 	}
 	k_mutex_unlock(&mt_ws.lock);
 	if (ret < 0) {
 		return ret;
 	}
 
-	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait);
+	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait, packet->tx_attach);
 }
 
 int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t wait)
@@ -1255,7 +1274,7 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 		return ret;
 	}
 
-	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait);
+	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait, 0U);
 }
 
 int meshtastic_send_data(uint32_t dest, uint32_t portnum, const uint8_t *payload,

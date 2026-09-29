@@ -16,6 +16,7 @@
 #include <zephyr/meshtastic/meshtastic.h>
 #include "meshtastic_core.h"
 #include "meshtastic_attachment.h"
+#include "meshtastic_channels.h"
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 #include "meshtastic_ble_peer_codec.h" /* the ENV_MAX cross-check only */
 #endif
@@ -442,11 +443,28 @@ bool meshtastic_attachment_tx_ready(uint8_t id)
 	return ready;
 }
 
-int meshtastic_attachment_tx(uint8_t id, const uint8_t *wire, size_t len, bool want_result)
+uint8_t meshtastic_attachment_tx_hash(uint8_t id, uint8_t index)
+{
+	uint8_t preset = MESHTASTIC_PRESET_UNKNOWN;
+
+	if (id != 0U && id < ARRAY_SIZE(tab)) {
+		k_mutex_lock(&tab_lock, K_FOREVER);
+		if (used[id]) {
+			preset = tab[id].preset;
+		}
+		k_mutex_unlock(&tab_lock);
+	}
+	if (preset == MESHTASTIC_PRESET_UNKNOWN) {
+		return meshtastic_channels_get_hash(index);
+	}
+	return meshtastic_channels_hash_for_preset(index, preset);
+}
+
+int meshtastic_attachment_tx(uint8_t id, const uint8_t *wire, size_t len, uint8_t flags)
 {
 	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
 	struct meshtastic_attachment_tx_frame tx = {
-		.flags = want_result ? MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT : 0U,
+		.flags = flags,
 		.wire = wire,
 		.wire_len = (uint16_t)len,
 	};

@@ -169,6 +169,10 @@ struct meshtastic_workspace {
 	 * wire build does not fill 0 with the node default. Guarded by @ref lock; every
 	 * staging path resets it. */
 	bool tx_zero_hop;
+	/* The attachment the frame being built leaves by (packet.tx_attach): the
+	 * wire builders stamp an unnamed slot's channel hash under THAT radio's
+	 * preset. 0 = our own radio. Reset by every staging path. */
+	uint8_t tx_attach;
 	/* The sender opted out of PKC for this unicast (meshtastic_packet.no_pkc):
 	 * the wire build encrypts on the channel instead of refusing. Reset by
 	 * every staging path. */

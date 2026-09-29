@@ -19,6 +19,9 @@
 #include <pb_encode.h>
 
 #include "meshtastic_channels.h"
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#include "meshtastic_attachment.h"
+#endif
 #include "meshtastic_clock.h"
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
@@ -733,7 +736,8 @@ int meshtastic_try_decode_wire_packet_on(const uint8_t *buf, int len, int16_t rs
 							MESHTASTIC_DECODE_FAIL_PKI_UNKNOWN_PUBKEY;
 					}
 #if defined(CONFIG_MESHTASTIC_NODEINFO)
-					(void)meshtastic_nodeinfo_request(packet->from);
+					(void)meshtastic_nodeinfo_request_via(packet->from,
+									      packet->rx_attach);
 #endif
 				}
 #endif
@@ -840,7 +844,12 @@ int meshtastic_build_wire_from_mesh(const meshtastic_MeshPacket *mesh, uint8_t *
 		return ret;
 	}
 
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+	wire_hash = (mt_ws.tx_attach != 0U) ? meshtastic_attachment_tx_hash(mt_ws.tx_attach, ch_index)
+					    : meshtastic_channels_get_hash(ch_index);
+#else
 	wire_hash = meshtastic_channels_get_hash(ch_index);
+#endif
 	payload_len = encoded_len;
 
 #if defined(CONFIG_MESHTASTIC_PKI)
@@ -1018,7 +1027,17 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 		 * decoded-path PKI branch in meshtastic_build_wire_packet. */
 		hdr->channel = 0x00U;
 	} else if (mesh->channel < MESHTASTIC_MAX_CHANNELS) {
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+		/* Leaving by a radio head: an unnamed slot is named after the preset
+		 * it is used on, so hash it under the HEAD's preset (S2, P3 slice 2).
+		 * The nonce is (id, from): the ciphertext does not change. */
+		hdr->channel = (mt_ws.tx_attach != 0U)
+				       ? meshtastic_attachment_tx_hash(mt_ws.tx_attach,
+								       (uint8_t)mesh->channel)
+				       : meshtastic_channels_get_hash((uint8_t)mesh->channel);
+#else
 		hdr->channel = meshtastic_channels_get_hash((uint8_t)mesh->channel);
+#endif
 	} else {
 		hdr->channel = (mesh->channel != 0U) ? (uint8_t)mesh->channel : mt.ch_hash;
 	}

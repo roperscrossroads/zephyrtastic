@@ -75,6 +75,9 @@ uint32_t meshtastic_nodeinfo_interval_secs(void);
  * @retval -EIO     Crypto or radio transmission failed.
  */
 int meshtastic_nodeinfo_request(uint32_t peer);
+/* The same, asking on attachment @p attach (the radio the peer was heard on;
+ * 0 = our own). */
+int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t attach);
 
 #ifdef __cplusplus
 }

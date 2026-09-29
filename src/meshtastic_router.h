@@ -146,9 +146,11 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
  * generic ACK for the same request (agents-dnr4.32; reference ReliableRouter::sniffReceived
  * acks only when no module replied).
  */
+/* @p attach: the radio the request arrived on (packet.rx_attach); the answer
+ * leaves by it. 0 = our own radio. */
 int meshtastic_routing_answer(uint32_t to, uint32_t request_id, uint8_t channel_index,
 			      uint8_t req_hop_limit, uint8_t req_hop_start, bool want_ack,
-			      meshtastic_Routing_Error err);
+			      meshtastic_Routing_Error err, uint8_t attach);
 
 /** @brief The hop limit a reply to a request that arrived with these hop fields should carry. */
 uint8_t meshtastic_routing_reply_hop_limit(uint8_t req_hop_limit, uint8_t req_hop_start);
@@ -176,7 +178,7 @@ void meshtastic_routing_note_own_echo(uint32_t id, uint8_t relay_node);
  * payload decode; @p wire_hash selects the reply channel.
  */
 void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire_hash,
-					uint8_t hop_limit, uint8_t hop_start);
+					uint8_t hop_limit, uint8_t hop_start, uint8_t attach);
 
 #ifdef __cplusplus
 }

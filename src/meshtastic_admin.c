@@ -374,7 +374,7 @@ static void admin_ack_write(meshtastic_Routing_Error err)
 		 * no lifetime coupling to the RX frame). */
 		(void)meshtastic_routing_answer(admin_cur.from, admin_cur.id,
 						admin_cur.channel_index, admin_cur.hop_limit,
-						admin_cur.hop_start, admin_cur.want_ack, err);
+						admin_cur.hop_start, admin_cur.want_ack, err, 0U);
 		return;
 	}
 
@@ -1978,7 +1978,7 @@ bool meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 		LOG_WRN("admin: remote admin from 0x%08x unauthorized (err=%d)", from,
 			(int)auth_err);
 		(void)meshtastic_routing_answer(from, id, channel_index, hop_limit, hop_start,
-						want_ack, auth_err);
+						want_ack, auth_err, 0U);
 		return true;
 	}
 

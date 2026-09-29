@@ -25,6 +25,10 @@
 #include "meshtastic_attachment_codec.h"
 #include "meshtastic_attachment_head.h"
 #include "meshtastic_outbound.h"
+#include "meshtastic_contention.h"
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+#include "meshtastic_airtime.h"
+#endif
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
@@ -56,6 +60,10 @@ struct head_tx {
 	uint16_t tx_seq;
 	uint8_t flags;
 	uint8_t defers;
+	/* k_uptime_get_32() before which this frame must not key up: the own-TX
+	 * contention window (OWN_DELAY), drawn HERE with this radio's modem --
+	 * the brain's clock and modem are not this radio's. 0 = now. */
+	uint32_t not_before;
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 };
 
@@ -134,7 +142,24 @@ static void head_tx_fn(struct k_work *work)
 	ARG_UNUSED(work);
 
 	while (k_msgq_get(&head_tx_q, &t, K_NO_WAIT) == 0) {
-		int ret = meshtastic_radio_send_wire_now(t.wire, t.len);
+		int ret;
+
+		if (t.not_before != 0U) {
+			int32_t left = (int32_t)(t.not_before - k_uptime_get_32());
+
+			if (left > 0) {
+				/* Not due: back on the queue, and come back then. One
+				 * frame in flight at a time keeps the order the brain
+				 * chose. */
+				if (k_msgq_put(&head_tx_q, &t, K_NO_WAIT) == 0) {
+					(void)k_work_schedule(&head_tx_retry, K_MSEC(left));
+					return;
+				}
+				ret = -ENOBUFS;
+				goto done;
+			}
+		}
+		ret = meshtastic_radio_send_wire_now(t.wire, t.len);
 
 		if (ret == MESHTASTIC_TX_DEFER && t.defers < CONFIG_MESHTASTIC_TX_DEFER_MAX) {
 			t.defers++;
@@ -148,6 +173,7 @@ static void head_tx_fn(struct k_work *work)
 			ret = -ENOBUFS;
 		}
 
+done:
 		k_mutex_lock(&head_lock, K_FOREVER);
 		if (ret == 0) {
 			head.stats.tx_sent++;
@@ -401,6 +427,25 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 		t.tx_seq = msg.u.tx.tx_seq;
 		t.flags = msg.u.tx.flags;
 		t.defers = 0U;
+		t.not_before = 0U;
+		if ((t.flags & MESHTASTIC_ATTACHMENT_TXF_OWN_DELAY) != 0U) {
+			/* An own frame of the brain's: the reference's own-TX window
+			 * (getTxDelayMsec), with THIS radio's slot time and, when the
+			 * image measures it, its channel utilisation. */
+			struct meshtastic_contention_plan plan;
+			uint8_t util = 0U;
+
+#if defined(CONFIG_MESHTASTIC_AIRTIME)
+			util = (uint8_t)meshtastic_airtime_channel_util_percent();
+#endif
+			meshtastic_contention_plan_own(util, mt.modem.spread_factor,
+						       mt.modem.bandwidth_hz, false, &plan);
+			if (plan.delay_ms != 0U) {
+				uint32_t due = k_uptime_get_32() + plan.delay_ms;
+
+				t.not_before = (due == 0U) ? 1U : due;
+			}
+		}
 		memcpy(t.wire, msg.u.tx.wire, msg.u.tx.wire_len);
 		if (k_msgq_put(&head_tx_q, &t, K_NO_WAIT) != 0) {
 			head.stats.tx_queue_full++;

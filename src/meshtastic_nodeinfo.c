@@ -165,7 +165,14 @@ int meshtastic_send_node_info(uint32_t dest)
  * Returns -EAGAIN when the cooldown suppresses the request; callers treat that
  * as success-equivalent (we already asked this peer recently).
  */
+int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t attach);
+
 int meshtastic_nodeinfo_request(uint32_t peer)
+{
+	return meshtastic_nodeinfo_request_via(peer, 0U);
+}
+
+int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t attach)
 {
 	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	struct meshtastic_packet packet;
@@ -204,6 +211,7 @@ int meshtastic_nodeinfo_request(uint32_t peer)
 
 	/* K_NO_WAIT: callers run on the RX thread, where a blocking send would
 	 * stall inbound processing until the TX queue drains. */
+	packet.tx_attach = attach;
 	return meshtastic_send_packet(&packet, K_NO_WAIT);
 }
 
@@ -301,6 +309,9 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 		LOG_INF("Heard unknown node 0x%08x, asking for NodeInfo", from);
 		send_ret = nodeinfo_build_packet(from, true, 0U, payload, &nodeinfo_packet);
 		if (send_ret == 0) {
+			/* Ask on the radio we heard it on (P3 slice 2): a sender on
+			 * another preset cannot hear our own radio. */
+			nodeinfo_packet.tx_attach = packet->rx_attach;
 			(void)meshtastic_send_packet(&nodeinfo_packet, K_NO_WAIT);
 		}
 	}

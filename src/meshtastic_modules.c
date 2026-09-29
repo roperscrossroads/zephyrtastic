@@ -86,7 +86,7 @@ void meshtastic_dispatch_modules(const struct meshtastic_packet *packet,
 		 * is the "ignore" (no NAK) answer. */
 		(void)meshtastic_routing_answer(packet->from, packet->id, packet->channel_index,
 						packet->hop_limit, packet->hop_start, packet->want_ack,
-						meshtastic_Routing_Error_NO_RESPONSE);
+						meshtastic_Routing_Error_NO_RESPONSE, packet->rx_attach);
 		return;
 	}
 	if (ret < 0) {
@@ -97,6 +97,8 @@ void meshtastic_dispatch_modules(const struct meshtastic_packet *packet,
 	meshtastic_packet_set_reply_to(&reply, packet);
 
 	LOG_INF("Module '%s' sending want_response reply", handler->name);
+	/* Back out the radio the request came in on (P3 slice 2). */
+	reply.tx_attach = packet->rx_attach;
 	ret = meshtastic_send_packet(&reply, K_NO_WAIT);
 	if (ret < 0) {
 		LOG_WRN("Reply send failed (%d)", ret);

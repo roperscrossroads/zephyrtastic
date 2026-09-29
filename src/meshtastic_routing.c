@@ -123,7 +123,7 @@ static bool routing_ack_should_request_ack(const struct meshtastic_packet *req,
  * never blocks the receive thread (the reference queues NAKs fire-and-forget). */
 static int routing_send_reply(uint32_t to, uint32_t request_id, uint8_t ch_index,
 			      meshtastic_Routing_Error err, uint8_t hop_limit, bool want_ack,
-			      k_timeout_t wait)
+			      k_timeout_t wait, uint8_t attach)
 {
 	meshtastic_Routing routing = meshtastic_Routing_init_zero;
 	uint8_t rbuf[16];
@@ -150,6 +150,8 @@ static int routing_send_reply(uint32_t to, uint32_t request_id, uint8_t ch_index
 		.hop_start = hop_limit,
 		.want_ack = want_ack,
 		.channel_index = ch_index,
+		/* Back out the radio the request came in on (P3 slice 2). */
+		.tx_attach = attach,
 	};
 
 	LOG_DBG("Sending ROUTING reply err=%d to 0x%08x for id=0x%08x ch=%u want_ack=%u hop=%u",
@@ -198,11 +200,11 @@ static int routing_send_ack(const struct meshtastic_packet *req, const meshtasti
 	 * send_error) with no mesh, so the struct is its natural input there. */
 	return routing_send_reply(from, id, ch_index, meshtastic_Routing_Error_NONE,
 				  routing_hop_limit_for_reply(req),
-				  routing_ack_should_request_ack(req, mesh), K_FOREVER);
+				  routing_ack_should_request_ack(req, mesh), K_FOREVER, req->rx_attach);
 }
 
 void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire_hash,
-					uint8_t hop_limit, uint8_t hop_start)
+					uint8_t hop_limit, uint8_t hop_start, uint8_t attach)
 {
 	struct meshtastic_packet req = {
 		.from = from,
@@ -218,7 +220,7 @@ void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire
 	 * re-ACK is recoverable — the sender's next retransmission triggers
 	 * another. Never request an ACK for an ACK. */
 	(void)routing_send_reply(from, id, ch_index, meshtastic_Routing_Error_NONE,
-				 routing_hop_limit_for_reply(&req), false, K_NO_WAIT);
+				 routing_hop_limit_for_reply(&req), false, K_NO_WAIT, attach);
 }
 
 void meshtastic_routing_send_error(const struct meshtastic_packet *req,
@@ -232,7 +234,7 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
 	 * the primary channel (as the reference does). Never request an ACK for a NAK
 	 * (avoid ack storms), and send fire-and-forget so we don't block RX. */
 	(void)routing_send_reply(req->from, req->id, meshtastic_channels_primary_index(), err,
-				 routing_hop_limit_for_reply(req), false, K_NO_WAIT);
+				 routing_hop_limit_for_reply(req), false, K_NO_WAIT, req->rx_attach);
 }
 
 uint8_t meshtastic_routing_reply_hop_limit(uint8_t req_hop_limit, uint8_t req_hop_start)
@@ -247,7 +249,7 @@ uint8_t meshtastic_routing_reply_hop_limit(uint8_t req_hop_limit, uint8_t req_ho
 
 int meshtastic_routing_answer(uint32_t to, uint32_t request_id, uint8_t channel_index,
 			      uint8_t req_hop_limit, uint8_t req_hop_start, bool want_ack,
-			      meshtastic_Routing_Error err)
+			      meshtastic_Routing_Error err, uint8_t attach)
 {
 	if (to == 0U || to == mt.node_id) {
 		return -EINVAL;
@@ -258,7 +260,7 @@ int meshtastic_routing_answer(uint32_t to, uint32_t request_id, uint8_t channel_
 					  ? channel_index
 					  : meshtastic_channels_primary_index(),
 				  err, meshtastic_routing_reply_hop_limit(req_hop_limit, req_hop_start),
-				  want_ack, K_NO_WAIT);
+				  want_ack, K_NO_WAIT, attach);
 }
 
 void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet,

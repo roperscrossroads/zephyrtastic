@@ -61,8 +61,12 @@ struct meshtastic_attachment_info {
  * here. */
 bool meshtastic_attachment_tx_ready(uint8_t id);
 /* Hand @p wire to head @p id as a TX_FRAME on its preset. Called from the
- * outbound worker. @p want_result asks the head for a TX_RESULT. */
-int meshtastic_attachment_tx(uint8_t id, const uint8_t *wire, size_t len, bool want_result);
+ * outbound worker. @p flags are MESHTASTIC_ATTACHMENT_TXF_*. */
+int meshtastic_attachment_tx(uint8_t id, const uint8_t *wire, size_t len, uint8_t flags);
+/* The channel hash a frame leaving by attachment @p id must carry for slot
+ * @p index: an unnamed slot hashes under THAT radio's preset (S2). Falls back
+ * to the local hash when the head's preset is unknown. */
+uint8_t meshtastic_attachment_tx_hash(uint8_t id, uint8_t index);
 
 /* The router noted that attachment @p id delivered a copy of a frame the local
  * radio had delivered @p ms earlier. */

@@ -494,3 +494,42 @@ ZTEST(attachment_head, test_tx_frame_from_the_brain_is_transmitted)
 	zassert_equal(st.tx_sent, 2U);
 	zassert_equal(st.untrusted, 1U);
 }
+
+/* P3 slice 2: an own frame of the brain's (OWN_DELAY) waits the reference's
+ * own-TX contention window, drawn on THIS radio, before it keys up -- and then
+ * goes out, with the result reporting the wait as no defer. */
+ZTEST(attachment_head, test_own_delay_is_drawn_on_the_head)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	uint8_t wire[40];
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_msg msg;
+	int64_t t0;
+	int len;
+
+	meshtastic_attachment_head_set_brain(BRAIN_NODE);
+	(void)k_sem_take(&sent.sem, K_MSEC(500));
+	wait_rx_armed();
+	some_frame(wire, sizeof(wire), 0x60U);
+	{
+		const struct meshtastic_attachment_tx_frame tx = {
+			.preset = (uint8_t)PRESET_ST,
+			.flags = MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT | MESHTASTIC_ATTACHMENT_TXF_OWN_DELAY,
+			.tx_seq = 11U, .wire = wire, .wire_len = sizeof(wire),
+		};
+		len = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
+		zassert_true(len > 0);
+		t0 = k_uptime_get();
+		zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len));
+	}
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "keyed up after the window");
+	zassert_true(k_uptime_get() - t0 < 1000, "within the widest own-TX window (%lld ms)",
+		     (long long)(k_uptime_get() - t0));
+	zassert_mem_equal(f.data, wire, sizeof(wire));
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(1)), "TX_RESULT");
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_RESULT);
+	zassert_equal(msg.u.result.tx_seq, 11U);
+	zassert_equal(msg.u.result.rc, 0);
+	zassert_equal(msg.u.result.defers, 0U, "a contention wait is not a defer");
+}

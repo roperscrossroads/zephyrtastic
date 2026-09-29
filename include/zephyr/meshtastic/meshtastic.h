@@ -228,6 +228,14 @@ struct meshtastic_packet {
 	 * topology (next hops, neighbours) is true for THAT radio only.
 	 */
 	uint8_t rx_attach;
+	/**
+	 * The attachment this frame leaves by: 0 = this board's own radio, else a
+	 * radio head's id. A reply sets it from the request's rx_attach so it goes
+	 * back out the radio -- and on the preset -- the request came in on
+	 * (ATTACHMENT-P3-PLAN slice 2). A head that is down or receive-only makes
+	 * the send fail (-EHOSTUNREACH): a reply on another preset is noise.
+	 */
+	uint8_t tx_attach;
 	/** On-air channel hash from the wire header. */
 	uint8_t channel;
 	/**

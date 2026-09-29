@@ -718,7 +718,7 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 		    hop_start == rx_hop_limit) {
 			LOG_DBG("Re-ACK repeated reliable id=0x%08x from 0x%08x", pkt_id, src);
 			meshtastic_routing_reack_duplicate(src, pkt_id, hdr->channel, rx_hop_limit,
-							   hop_start);
+							   hop_start, meta->attach);
 		}
 
 		/* Redundancy accounting reasons about peers RELAYING on the air; a

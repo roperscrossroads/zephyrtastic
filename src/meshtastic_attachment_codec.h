@@ -68,6 +68,10 @@ enum meshtastic_attachment_type {
 
 /* TX_FRAME flags */
 #define MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT 0x01U
+/* An own frame (an origination or a reply): the head draws the reference's
+ * own-TX contention delay with ITS modem and channel utilisation before it
+ * keys up. Absent: a relay, timed by not_before (slice 3). */
+#define MESHTASTIC_ATTACHMENT_TXF_OWN_DELAY   0x02U
 /* STATUS flags */
 #define MESHTASTIC_ATTACHMENT_ST_TX_ENABLED 0x01U
 #define MESHTASTIC_ATTACHMENT_ST_RADIO_HELD 0x02U
