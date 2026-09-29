@@ -40,6 +40,8 @@ struct meshtastic_attachment_head_stats {
 	uint32_t tx_failed;    /* ...that the radio refused for good */
 	uint32_t tx_deferred;  /* radio said DEFER; re-queued */
 	uint32_t tx_queue_full;
+	uint32_t tx_cancelled;   /* a relay withdrawn: by the brain, or by a copy we heard first */
+	uint32_t tx_late;        /* a relay pushed to the end of the window by a copy we heard */
 };
 
 /* The radio's frame, from the RX thread: queued, forwarded from a work queue

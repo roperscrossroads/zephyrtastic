@@ -89,6 +89,8 @@ struct meshtastic_dup_entry {
 			     * 0xFF = no longer that copy, after a hop upgrade) */
 	uint8_t relay_node; /* the first copy's relay byte: a later copy with another
 			     * relayer or hop budget is a rebroadcast, not the same air */
+	uint8_t relay_attach; /* the head we handed our relay of this (src,id) to, 0 = none/local */
+	uint32_t attach_rx_ms; /* the head's own clock of that first copy (echoed in the relay) */
 	bool relayed;       /* we transmitted a relay of this (src,id) */
 };
 

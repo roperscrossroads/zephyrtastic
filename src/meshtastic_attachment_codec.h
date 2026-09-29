@@ -19,12 +19,16 @@
  *   [0] type
  *   1 RX_FRAME   [1]preset [2..3]rssi i16 [4]snr i8 [5..8]rx_ms u32 [9]flags  + wire
  *   2 TX_FRAME   [1]preset [2]flags [3..4]tx_seq u16                         + wire
+ *                with flag RELAY: [5..8]relay_src [9..12]relay_id [13..16]rx_ms
+ *                (the head's, of the frame being relayed) [17..20]not_before_ms
+ *                (relative to that rx_ms) [21]dupe (KEEP/CANCEL/LATE)  + wire
  *   3 TX_RESULT  [1..2]tx_seq [3]rc i8 [4]defers u8 [5..8]tx_ms u32
  *   4 STATUS     [1]preset [2]flags [3..6]hwid [7..10]brain [11..14]rx_frames
  *                [15..18]tx_frames [19..22]uptime_s [23..26]rx_dropped
  *                [27..30]lat [31..34]lon [35..38]alt   (the three only with HAS_POS)
  *   5 SET_PRESET [1]preset
  *   6 TIME_BEAT  reserved (C007)
+ *   7 TX_CANCEL  [1..4]src [5..8]id   (the brain withdraws a relay it handed over)
  *
  * The wire in RX_FRAME/TX_FRAME is a Meshtastic airframe, encrypted, untouched:
  * a head never decodes it (it holds no keys) and never builds one. Who a frame
@@ -57,10 +61,13 @@ enum meshtastic_attachment_type {
 	MESHTASTIC_ATTACHMENT_STATUS = 4,
 	MESHTASTIC_ATTACHMENT_SET_PRESET = 5,
 	MESHTASTIC_ATTACHMENT_TIME_BEAT = 6,
+	MESHTASTIC_ATTACHMENT_TX_CANCEL = 7,
 };
 
 #define MESHTASTIC_ATTACHMENT_RX_HDR_LEN     10U
 #define MESHTASTIC_ATTACHMENT_TX_HDR_LEN     5U
+#define MESHTASTIC_ATTACHMENT_TX_RELAY_HDR_LEN 22U
+#define MESHTASTIC_ATTACHMENT_TX_CANCEL_LEN  9U
 #define MESHTASTIC_ATTACHMENT_TX_RESULT_LEN  9U
 #define MESHTASTIC_ATTACHMENT_STATUS_LEN     27U
 #define MESHTASTIC_ATTACHMENT_STATUS_POS_LEN 39U
@@ -72,6 +79,15 @@ enum meshtastic_attachment_type {
  * own-TX contention delay with ITS modem and channel utilisation before it
  * keys up. Absent: a relay, timed by not_before (slice 3). */
 #define MESHTASTIC_ATTACHMENT_TXF_OWN_DELAY   0x02U
+/* A relay (ATTACHMENT-DESIGN §12): the header carries relay_of {src, id, the
+ * head's rx_ms} and not_before_ms relative to that rx_ms -- the window runs
+ * on the HEAD's clock of reception -- and what to do if the head hears the
+ * same frame again before it keys up. */
+#define MESHTASTIC_ATTACHMENT_TXF_RELAY       0x04U
+/* TX_FRAME.dupe: the brain's relay_dupe_action for this frame. */
+#define MESHTASTIC_ATTACHMENT_DUPE_KEEP   0U
+#define MESHTASTIC_ATTACHMENT_DUPE_CANCEL 1U
+#define MESHTASTIC_ATTACHMENT_DUPE_LATE   2U
 /* STATUS flags */
 #define MESHTASTIC_ATTACHMENT_ST_TX_ENABLED 0x01U
 #define MESHTASTIC_ATTACHMENT_ST_RADIO_HELD 0x02U
@@ -93,8 +109,19 @@ struct meshtastic_attachment_tx_frame {
 	uint8_t preset;
 	uint8_t flags;    /* MESHTASTIC_ATTACHMENT_TXF_* */
 	uint16_t tx_seq;
+	/* With TXF_RELAY only. */
+	uint32_t relay_src;
+	uint32_t relay_id;
+	uint32_t rx_ms;         /* the head's uptime when it heard the original */
+	uint32_t not_before_ms; /* key up no earlier than rx_ms + this, on the head's clock */
+	uint8_t dupe;           /* MESHTASTIC_ATTACHMENT_DUPE_* */
 	const uint8_t *wire;
 	uint16_t wire_len;
+};
+
+struct meshtastic_attachment_tx_cancel {
+	uint32_t src;
+	uint32_t id;
 };
 
 struct meshtastic_attachment_tx_result {
@@ -125,6 +152,7 @@ struct meshtastic_attachment_msg {
 		struct meshtastic_attachment_tx_frame tx;
 		struct meshtastic_attachment_tx_result result;
 		struct meshtastic_attachment_status status;
+		struct meshtastic_attachment_tx_cancel cancel;
 		uint8_t preset; /* SET_PRESET */
 	} u;
 };
@@ -141,6 +169,8 @@ int meshtastic_attachment_encode_tx_result(const struct meshtastic_attachment_tx
 int meshtastic_attachment_encode_status(const struct meshtastic_attachment_status *m,
 					uint8_t *out, size_t out_size);
 int meshtastic_attachment_encode_set_preset(uint8_t preset, uint8_t *out, size_t out_size);
+int meshtastic_attachment_encode_tx_cancel(uint32_t src, uint32_t id, uint8_t *out,
+					   size_t out_size);
 
 /* Decode one envelope. Returns 0, -EINVAL on NULL/short input, -EBADMSG on an
  * unknown type or a length that does not fit the type. The wire pointers in

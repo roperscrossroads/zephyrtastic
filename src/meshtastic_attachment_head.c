@@ -31,6 +31,8 @@
 #endif
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
+#include "meshtastic_packet.h"
+#include <zephyr/sys/byteorder.h>
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 #include "meshtastic_ble_peer.h" /* meshtastic_ble_work_submit only */
 #endif
@@ -60,6 +62,13 @@ struct head_tx {
 	uint16_t tx_seq;
 	uint8_t flags;
 	uint8_t defers;
+	/* A relay (TXF_RELAY): what it is a relay of, and the rule if we hear
+	 * that frame again before we key up. */
+	uint32_t relay_src;
+	uint32_t relay_id;
+	uint32_t orig_rx_ms;
+	uint8_t dupe;
+	int8_t snr;
 	/* k_uptime_get_32() before which this frame must not key up: the own-TX
 	 * contention window (OWN_DELAY), drawn HERE with this radio's modem --
 	 * the brain's clock and modem are not this radio's. 0 = now. */
@@ -75,6 +84,80 @@ K_MSGQ_DEFINE(head_tx_q, sizeof(struct head_tx), CONFIG_MESHTASTIC_ATTACHMENT_HE
 static K_THREAD_STACK_DEFINE(head_tx_stack, CONFIG_MESHTASTIC_ATTACHMENT_HEAD_TX_STACK_SIZE);
 static struct k_thread head_tx_thread;
 static uint8_t tx_env_buf[MESHTASTIC_ATTACHMENT_ENV_MAX]; /* the TX thread's own scratch */
+
+/* The heard-history ring (ATTACHMENT-DESIGN §12): every frame this radio hears,
+ * by (src, id), with when and how often -- a keyless head can read the
+ * plaintext header. A relay the brain handed us for (src, id) is cancelled or
+ * clamped if the ring says we heard that frame AGAIN after the copy the relay
+ * is of: someone else relayed it first. */
+struct heard {
+	uint32_t src;
+	uint32_t id;
+	uint32_t first_ms;
+	uint32_t last_ms;
+	int8_t snr;
+	uint8_t count;
+};
+#define HEARD_RING 16U
+static struct heard heard_ring[HEARD_RING];
+static uint8_t heard_next;
+
+/* Relays the brain withdrew (TX_CANCEL) that may still sit in the TX queue. */
+struct cancelled {
+	uint32_t src;
+	uint32_t id;
+	bool set;
+};
+static struct cancelled cancels[4];
+
+static void heard_note_locked(const uint8_t *wire, uint16_t len, int8_t snr, uint32_t rx_ms)
+{
+	const struct meshtastic_wire_header *h = (const struct meshtastic_wire_header *)wire;
+	uint32_t src;
+	uint32_t id;
+
+	if (len < MESHTASTIC_HDR_LEN) {
+		return;
+	}
+	src = sys_le32_to_cpu(h->src);
+	id = sys_le32_to_cpu(h->id);
+	for (unsigned int i = 0U; i < HEARD_RING; i++) {
+		if (heard_ring[i].count != 0U && heard_ring[i].src == src && heard_ring[i].id == id) {
+			heard_ring[i].last_ms = rx_ms;
+			if (heard_ring[i].count < 255U) {
+				heard_ring[i].count++;
+			}
+			return;
+		}
+	}
+	heard_ring[heard_next] = (struct heard){
+		.src = src, .id = id, .first_ms = rx_ms, .last_ms = rx_ms, .snr = snr, .count = 1U,
+	};
+	heard_next = (uint8_t)((heard_next + 1U) % HEARD_RING);
+}
+
+/* Did we hear (src, id) again after @p since_ms? */
+static bool heard_again_locked(uint32_t src, uint32_t id, uint32_t since_ms)
+{
+	for (unsigned int i = 0U; i < HEARD_RING; i++) {
+		if (heard_ring[i].count > 1U && heard_ring[i].src == src && heard_ring[i].id == id &&
+		    (int32_t)(heard_ring[i].last_ms - since_ms) > 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool cancelled_take_locked(uint32_t src, uint32_t id)
+{
+	for (unsigned int i = 0U; i < ARRAY_SIZE(cancels); i++) {
+		if (cancels[i].set && cancels[i].src == src && cancels[i].id == id) {
+			cancels[i].set = false;
+			return true;
+		}
+	}
+	return false;
+}
 
 static void head_work_fn(struct k_work *work);
 static K_WORK_DEFINE(head_work, head_work_fn);
@@ -164,6 +247,47 @@ static void head_tx_thread_fn(void *p1, void *p2, void *p3)
 				k_msleep(left);
 			}
 		}
+		if ((t.flags & MESHTASTIC_ATTACHMENT_TXF_RELAY) != 0U) {
+			/* The reference's cancel-on-duplicate / late clamp, on THIS
+			 * radio's hearing and clock (ATTACHMENT-DESIGN §12): a copy we
+			 * heard after the one this relay is of means a peer relayed it
+			 * first. The brain's own withdrawal (a copy that reached it by
+			 * another radio) arrives as TX_CANCEL. */
+			bool withdrawn;
+			bool again;
+
+			k_mutex_lock(&head_lock, K_FOREVER);
+			withdrawn = cancelled_take_locked(t.relay_src, t.relay_id);
+			again = heard_again_locked(t.relay_src, t.relay_id, t.orig_rx_ms);
+			k_mutex_unlock(&head_lock);
+			if (withdrawn || (again && t.dupe == MESHTASTIC_ATTACHMENT_DUPE_CANCEL)) {
+				k_mutex_lock(&head_lock, K_FOREVER);
+				head.stats.tx_cancelled++;
+				k_mutex_unlock(&head_lock);
+				ret = -ECANCELED;
+				goto report;
+			}
+			if (again && t.dupe == MESHTASTIC_ATTACHMENT_DUPE_LATE) {
+				/* To the end of the worst-case window, from now, with this
+				 * modem and the SNR we heard the original at. */
+				uint32_t late = meshtastic_contention_delay_relay_worst_ms(
+					t.snr, meshtastic_contention_effective_slot_ms(
+						       mt.modem.spread_factor, mt.modem.bandwidth_hz,
+						       false));
+
+				k_mutex_lock(&head_lock, K_FOREVER);
+				head.stats.tx_late++;
+				k_mutex_unlock(&head_lock);
+				k_msleep(late);
+				k_mutex_lock(&head_lock, K_FOREVER);
+				withdrawn = cancelled_take_locked(t.relay_src, t.relay_id);
+				k_mutex_unlock(&head_lock);
+				if (withdrawn) {
+					ret = -ECANCELED;
+					goto report;
+				}
+			}
+		}
 		ret = meshtastic_radio_send_wire_now(t.wire, t.len);
 		while (ret == MESHTASTIC_TX_DEFER && t.defers < CONFIG_MESHTASTIC_TX_DEFER_MAX) {
 			t.defers++;
@@ -174,10 +298,11 @@ static void head_tx_thread_fn(void *p1, void *p2, void *p3)
 			ret = meshtastic_radio_send_wire_now(t.wire, t.len);
 		}
 
+report:
 		k_mutex_lock(&head_lock, K_FOREVER);
 		if (ret == 0) {
 			head.stats.tx_sent++;
-		} else {
+		} else if (ret != -ECANCELED) {
 			head.stats.tx_failed++;
 		}
 		if ((t.flags & MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT) != 0U && head.brain != 0U) {
@@ -314,6 +439,7 @@ void meshtastic_attachment_head_on_rx(const uint8_t *wire, uint16_t len, int16_t
 
 	k_mutex_lock(&head_lock, K_FOREVER);
 	head.stats.heard++;
+	heard_note_locked(wire, len, snr, rx_ms);
 	if (head.brain == 0U) {
 		head.stats.no_brain++;
 		k_mutex_unlock(&head_lock);
@@ -424,6 +550,37 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 		t.flags = msg.u.tx.flags;
 		t.defers = 0U;
 		t.not_before = 0U;
+		t.relay_src = 0U;
+		t.relay_id = 0U;
+		t.orig_rx_ms = 0U;
+		t.dupe = MESHTASTIC_ATTACHMENT_DUPE_KEEP;
+		t.snr = 0;
+		if ((t.flags & MESHTASTIC_ATTACHMENT_TXF_RELAY) != 0U) {
+			/* The window runs from OUR reception of the original: the brain
+			 * echoes the rx_ms we stamped on it. A stamp that is not recent
+			 * (a stale or foreign clock) is replaced by now. */
+			uint32_t now = k_uptime_get_32();
+			uint32_t base = msg.u.tx.rx_ms;
+			int32_t age = (int32_t)(now - base);
+			uint32_t due;
+
+			if (age < 0 || age > 60000) {
+				base = now;
+			}
+			due = base + msg.u.tx.not_before_ms;
+			t.not_before = (due == 0U) ? 1U : due;
+			t.relay_src = msg.u.tx.relay_src;
+			t.relay_id = msg.u.tx.relay_id;
+			t.orig_rx_ms = base;
+			t.dupe = msg.u.tx.dupe;
+			for (unsigned int i = 0U; i < HEARD_RING; i++) {
+				if (heard_ring[i].count != 0U && heard_ring[i].src == t.relay_src &&
+				    heard_ring[i].id == t.relay_id) {
+					t.snr = heard_ring[i].snr;
+					break;
+				}
+			}
+		}
 		if ((t.flags & MESHTASTIC_ATTACHMENT_TXF_OWN_DELAY) != 0U) {
 			/* An own frame of the brain's: the reference's own-TX window
 			 * (getTxDelayMsec), with THIS radio's slot time and, when the
@@ -448,6 +605,30 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 			ret = -ENOBUFS;
 			break;
 		}
+		head.stats.controls++;
+		ret = 0;
+		break;
+	}
+	case MESHTASTIC_ATTACHMENT_TX_CANCEL: {
+		unsigned int slot = ARRAY_SIZE(cancels);
+
+		if (node != head.brain) {
+			head.stats.refused++;
+			ret = -EPERM;
+			break;
+		}
+		for (unsigned int i = 0U; i < ARRAY_SIZE(cancels); i++) {
+			if (!cancels[i].set) {
+				slot = i;
+				break;
+			}
+		}
+		if (slot == ARRAY_SIZE(cancels)) {
+			slot = 0U; /* the oldest gives way */
+		}
+		cancels[slot] = (struct cancelled){
+			.src = msg.u.cancel.src, .id = msg.u.cancel.id, .set = true,
+		};
 		head.stats.controls++;
 		ret = 0;
 		break;
@@ -575,6 +756,9 @@ void meshtastic_attachment_head_stats_get(struct meshtastic_attachment_head_stat
 
 void meshtastic_attachment_head_reset(void)
 {
+	memset(heard_ring, 0, sizeof(heard_ring));
+	heard_next = 0U;
+	memset(cancels, 0, sizeof(cancels));
 	k_msgq_purge(&head_q);
 	k_mutex_lock(&head_lock, K_FOREVER);
 	head.brain = CONFIG_MESHTASTIC_ATTACHMENT_HEAD_BRAIN_ID;

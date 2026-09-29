@@ -180,6 +180,20 @@ static void note_possible_redundant_relay(const struct meshtastic_wire_header *h
 	 * runs on the LoRa RX path, matching the reference's TRANSPORT_LORA gate.
 	 * Nothing happens when our copy is already on air, the common case for a
 	 * short window. */
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+	if (e->relay_attach != 0U) {
+		/* Our relay sits on a head. The head cancels or clamps itself on a
+		 * copy IT hears; this copy reached us by another radio, so tell it
+		 * -- for CANCEL. LATE and KEEP still relay: nothing to say. */
+		if (relay_dupe_action(src, sys_le32_to_cpu(hdr->dest)) == RELAY_DUPE_CANCEL &&
+		    meshtastic_attachment_cancel(e->relay_attach, src, id) == 0) {
+			meshtastic_sched_stat_relay_cancelled();
+			LOG_DBG("Cancelled our relay of (src=0x%08x id=0x%08x) on attachment %u",
+				src, id, (unsigned int)e->relay_attach);
+		}
+		return;
+	}
+#endif
 	switch (relay_dupe_action(src, sys_le32_to_cpu(hdr->dest))) {
 	case RELAY_DUPE_CANCEL:
 		if (meshtastic_outbound_cancel(src, id) > 0) {
@@ -208,8 +222,10 @@ static void note_possible_redundant_relay(const struct meshtastic_wire_header *h
 }
 
 static void dup_add(uint32_t src, uint32_t id, uint8_t hop_limit, uint8_t attach,
-		    uint8_t relay_node)
+		    uint8_t relay_node, uint32_t attach_rx_ms)
 {
+	mt.dup_cache[mt.dup_head].relay_attach = 0U;
+	mt.dup_cache[mt.dup_head].attach_rx_ms = attach_rx_ms;
 	mt.dup_cache[mt.dup_head].src = src;
 	mt.dup_cache[mt.dup_head].id = id;
 	mt.dup_cache[mt.dup_head].ms = k_uptime_get_32();
@@ -359,7 +375,7 @@ static enum relay_dupe_action relay_dupe_action(uint32_t from, uint32_t to)
 }
 
 static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wire_header *hdr,
-			 uint8_t hop_limit, int8_t snr)
+			 uint8_t hop_limit, int8_t snr, uint8_t attach)
 {
 	uint8_t relay_buf[MESHTASTIC_PKT_MAX];
 	struct meshtastic_wire_header *relay_hdr;
@@ -388,6 +404,58 @@ static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wi
 	 * unlearned destination still resolves to 0 = flood. */
 	relay_hdr->next_hop = meshtastic_nodedb_get_next_hop(sys_le32_to_cpu(hdr->dest));
 
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+	if (attach != 0U) {
+		/* Through the head that heard it (ATTACHMENT-DESIGN §12): the brain
+		 * decides WHETHER and by what rule; the head decides WHEN, on its own
+		 * clock of reception, with its own CAD. The window is planned with
+		 * the HEAD's modem and the SNR the HEAD heard the frame at. */
+		const struct meshtastic_dup_entry *e = dup_find(sys_le32_to_cpu(hdr->src),
+								sys_le32_to_cpu(hdr->id));
+		uint8_t sf;
+		uint32_t bw;
+		uint8_t dupe;
+
+		if (e == NULL || !meshtastic_attachment_modem(attach, &sf, &bw)) {
+			LOG_DBG("Not relaying id=0x%08x via attachment %u: no modem/entry",
+				(unsigned int)sys_le32_to_cpu(hdr->id), (unsigned int)attach);
+			return;
+		}
+		meshtastic_contention_plan_relay(snr, relay_early_like_router(), sf, bw, false, &plan);
+		switch (relay_dupe_action(sys_le32_to_cpu(hdr->src), sys_le32_to_cpu(hdr->dest))) {
+		case RELAY_DUPE_KEEP:
+			dupe = MESHTASTIC_ATTACHMENT_DUPE_KEEP;
+			break;
+		case RELAY_DUPE_LATE:
+			dupe = MESHTASTIC_ATTACHMENT_DUPE_LATE;
+			break;
+		default:
+			dupe = MESHTASTIC_ATTACHMENT_DUPE_CANCEL;
+			break;
+		}
+		ret = meshtastic_attachment_relay(attach, relay_buf, (size_t)len,
+						  sys_le32_to_cpu(hdr->src), sys_le32_to_cpu(hdr->id),
+						  e->attach_rx_ms, plan.delay_ms, dupe);
+		if (ret < 0) {
+			LOG_DBG("Relay via attachment %u failed (%d)", (unsigned int)attach, ret);
+		} else {
+			struct meshtastic_dup_entry *me = dup_find(sys_le32_to_cpu(hdr->src),
+								   sys_le32_to_cpu(hdr->id));
+
+			mt.status.relayed_packets++;
+			dup_mark_relayed(sys_le32_to_cpu(hdr->src), sys_le32_to_cpu(hdr->id));
+			if (me != NULL) {
+				me->relay_attach = attach;
+			}
+			LOG_DBG("Relay handed to attachment %u id=0x%08x not_before %u ms (cw=%u slot=%u snr=%d)",
+				(unsigned int)attach, (unsigned int)sys_le32_to_cpu(hdr->id),
+				plan.delay_ms, plan.cw, plan.slot_ms, snr);
+		}
+		return;
+	}
+#else
+	ARG_UNUSED(attach);
+#endif
 	/* Contention window. wide_lora is false to match how the modem itself is
 	 * configured (meshtastic.c resolves the preset with wide_lora=false); if
 	 * 2.4 GHz support ever lands, both call sites move together. */
@@ -549,7 +617,7 @@ void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *h
 	 * (rx_mesh->rx_snr == (float)packet->snr by construction), else the flat struct on
 	 * the encrypted-relay / DUP_UPGRADE / inject paths that carry no MeshPacket. */
 	relay_packet(wire, (int)wire_len, hdr, hop_limit,
-		     mesh != NULL ? (int8_t)mesh->rx_snr : packet->snr);
+		     mesh != NULL ? (int8_t)mesh->rx_snr : packet->snr, packet->rx_attach);
 }
 
 static meshtastic_Routing_Error decode_fail_to_routing_err(enum meshtastic_decode_fail r)
@@ -766,12 +834,14 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 			.from = src,
 			.to = sys_le32_to_cpu(hdr->dest),
 			.id = pkt_id,
+			.rx_attach = meta->attach,
 		};
 
 		if (rf) {
 			note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
 		}
-		if (relay_local_ok(bearer)) {
+		if (relay_local_ok(bearer) ||
+		    (IS_ENABLED(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN) && meta->attach != 0U)) {
 			LOG_DBG("Hop-upgraded duplicate (src=0x%08x id=0x%08x hops=%u): relay",
 				src, pkt_id, rx_hop_limit);
 			meshtastic_routing_sniff_rebroadcast(hdr, buf, (size_t)len, &upgraded,
@@ -786,7 +856,7 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 		break;
 	}
 
-	dup_add(src, pkt_id, rx_hop_limit, meta->attach, hdr->relay_node);
+	dup_add(src, pkt_id, rx_hop_limit, meta->attach, hdr->relay_node, meta->rx_ms);
 
 	ret = meshtastic_try_decode_wire_packet_on(buf, len, rssi, snr, meta->preset, &packet,
 						   payload, sizeof(payload), &decoded, &fail_reason,
@@ -930,7 +1000,7 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 	}
 
 	dup_add(work.from, work.id, (uint8_t)(work.hop_limit & MESHTASTIC_FLAGS_HOP_LIMIT_MASK), 0U,
-		0U);
+		0U, 0U);
 
 	local = (work.to == mt.node_id || work.to == MESHTASTIC_NODE_BROADCAST);
 	relay = (work.to != mt.node_id &&
@@ -1181,10 +1251,14 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 
 	/* A relay goes back out on the air the frame came in on: relay_local_ok()
 	 * says whether this board's radio is that air. */
-	if (hdr != NULL && !suppress_relay && relay_local_ok(bearer)) {
+	if (hdr != NULL && !suppress_relay &&
+	    (relay_local_ok(bearer) ||
+	     (IS_ENABLED(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN) && pkt->rx_attach != 0U))) {
 		/* Phase 4b: decoded_mesh is NULL on the encrypted-relay path (no decode) and
 		 * the public inject/test path -> struct-fallback for snr inside. Phase 4c: pkt is
-		 * the materialised struct on the decoded RF path, else the passed-in struct. */
+		 * the materialised struct on the decoded RF path, else the passed-in struct.
+		 * A head's frame relays THROUGH that head (relay_packet, P3 slice 3),
+		 * never on our own radio. */
 		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, pkt, decoded_mesh);
 	}
 }

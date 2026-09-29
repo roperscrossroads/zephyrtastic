@@ -17,6 +17,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_attachment.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_region_presets.h"
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 #include "meshtastic_ble_peer_codec.h" /* the ENV_MAX cross-check only */
 #endif
@@ -499,6 +500,106 @@ int meshtastic_attachment_tx(uint8_t id, const uint8_t *wire, size_t len, uint8_
 	}
 	k_mutex_unlock(&tab_lock);
 	return ret;
+}
+
+static int attachment_send_env(uint8_t id, const uint8_t *env, size_t len, bool count_tx)
+{
+	uint32_t node;
+	int ret;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	node = tab[id].node;
+	k_mutex_unlock(&tab_lock);
+	ret = meshtastic_attachment_send(node, env, len);
+	if (count_tx) {
+		k_mutex_lock(&tab_lock, K_FOREVER);
+		if (used[id]) {
+			if (ret == 0) {
+				tab[id].tx_frames++;
+			} else {
+				tab[id].tx_failed++;
+			}
+		}
+		k_mutex_unlock(&tab_lock);
+	}
+	return ret;
+}
+
+int meshtastic_attachment_relay(uint8_t id, const uint8_t *wire, size_t len, uint32_t src,
+				uint32_t pkt_id, uint32_t rx_ms, uint32_t not_before_ms,
+				uint8_t dupe)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	struct meshtastic_attachment_tx_frame tx = {
+		.flags = MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT | MESHTASTIC_ATTACHMENT_TXF_RELAY,
+		.relay_src = src,
+		.relay_id = pkt_id,
+		.rx_ms = rx_ms,
+		.not_before_ms = not_before_ms,
+		.dupe = dupe,
+		.wire = wire,
+		.wire_len = (uint16_t)len,
+	};
+	int elen;
+
+	if (wire == NULL || len == 0U || len > MESHTASTIC_ATTACHMENT_WIRE_MAX) {
+		return -EINVAL;
+	}
+	if (!meshtastic_attachment_tx_ready(id)) {
+		return -EHOSTUNREACH;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	tx.preset = tab[id].preset;
+	tx.tx_seq = ++tab[id].tx_seq;
+	k_mutex_unlock(&tab_lock);
+	elen = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
+	if (elen < 0) {
+		return elen;
+	}
+	return attachment_send_env(id, env, (size_t)elen, true);
+}
+
+int meshtastic_attachment_cancel(uint8_t id, uint32_t src, uint32_t pkt_id)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_TX_CANCEL_LEN];
+	int elen;
+
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (!used[id] || !tab[id].link_up) {
+		k_mutex_unlock(&tab_lock);
+		return -ENOTCONN;
+	}
+	k_mutex_unlock(&tab_lock);
+	elen = meshtastic_attachment_encode_tx_cancel(src, pkt_id, env, sizeof(env));
+	if (elen < 0) {
+		return elen;
+	}
+	return attachment_send_env(id, env, (size_t)elen, false);
+}
+
+bool meshtastic_attachment_modem(uint8_t id, uint8_t *spread_factor, uint32_t *bandwidth_hz)
+{
+	struct meshtastic_modem_params p;
+	uint8_t preset = MESHTASTIC_PRESET_UNKNOWN;
+
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return false;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (used[id]) {
+		preset = tab[id].preset;
+	}
+	k_mutex_unlock(&tab_lock);
+	if (preset == MESHTASTIC_PRESET_UNKNOWN ||
+	    meshtastic_preset_to_params((meshtastic_Config_LoRaConfig_ModemPreset)preset, false, &p) != 0) {
+		return false;
+	}
+	*spread_factor = p.spread_factor;
+	*bandwidth_hz = p.bandwidth_hz;
+	return true;
 }
 
 int meshtastic_attachment_set_preset(uint8_t id, uint8_t preset)

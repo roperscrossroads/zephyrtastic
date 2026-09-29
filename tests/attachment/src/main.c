@@ -29,6 +29,7 @@
 #include "meshtastic_neighborinfo.h"
 #include <zephyr/meshtastic/nodedb.h>
 #include "meshtastic_packet.h"
+#include "meshtastic_contention.h"
 #include "meshtastic_preset.h"
 #include "meshtastic_reliable.h"
 #include "meshtastic_sched.h"
@@ -144,15 +145,24 @@ static void build_frame(uint32_t from, uint32_t to, uint32_t id, const char *tex
 
 /* What a head does: the frame it heard, its preset, its signal -- as an envelope,
  * through the brain's ingest, exactly the path the BLE glue takes. */
+static int head_hears_at(uint32_t head, uint8_t preset, int16_t rssi, int8_t snr,
+			 const uint8_t *wire, uint32_t wire_len, uint32_t rx_ms);
+
 static int head_hears(uint32_t head, uint8_t preset, int16_t rssi, int8_t snr,
 		      const uint8_t *wire, uint32_t wire_len)
+{
+	return head_hears_at(head, preset, rssi, snr, wire, wire_len, (uint32_t)k_uptime_get());
+}
+
+static int head_hears_at(uint32_t head, uint8_t preset, int16_t rssi, int8_t snr,
+			 const uint8_t *wire, uint32_t wire_len, uint32_t rx_ms)
 {
 	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
 	const struct meshtastic_attachment_rx_frame m = {
 		.preset = preset,
 		.rssi = rssi,
 		.snr = snr,
-		.rx_ms = (uint32_t)k_uptime_get(),
+		.rx_ms = rx_ms,
 		.wire = wire,
 		.wire_len = (uint16_t)wire_len,
 	};
@@ -970,6 +980,12 @@ ZTEST(attachment, test_tx_through_a_head_leaves_as_tx_frame)
 	zassert_false(meshtastic_attachment_tx_ready(2U), "no head 2");
 
 	build_frame(TEST_NODE_ID, FAR_NODE_ID, 0x1C01U, "via head", wire, &len);
+	k_msleep(300); /* let any relay of the admit frame (a broadcast) go first */
+	zassert_true(meshtastic_attachment_get(1U, &a));
+	{
+		const uint16_t seq0 = a.tx_seq;
+		const uint32_t handed0 = a.tx_frames;
+
 	before = sent.count;
 	zassert_ok(meshtastic_radio_send_wire_after_on(wire, len, MT_SCHED_TIER_NORMAL, 0U, 1U),
 		   "enqueue for head 1");
@@ -983,18 +999,19 @@ ZTEST(attachment, test_tx_through_a_head_leaves_as_tx_frame)
 	zassert_equal(msg.u.tx.preset, (uint8_t)PRESET_ST, "the head's preset");
 	zassert_equal(msg.u.tx.wire_len, len);
 	zassert_mem_equal(msg.u.tx.wire, wire, len, "the bytes as built");
-	zassert_equal(msg.u.tx.tx_seq, 1U);
+	zassert_equal(msg.u.tx.tx_seq, (uint16_t)(seq0 + 1U));
 	zassert_true((msg.u.tx.flags & MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT) != 0U);
 	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing on our radio");
 	zassert_true(meshtastic_attachment_get(1U, &a));
-	zassert_equal(a.tx_frames, 1U);
-	zassert_equal(a.tx_seq, 1U);
+	zassert_equal(a.tx_frames, handed0 + 1U);
+	zassert_equal(a.tx_seq, (uint16_t)(seq0 + 1U));
+	}
 
 	/* The head reports back. */
 	{
 		uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
 		const struct meshtastic_attachment_tx_result r = {
-			.tx_seq = 1U, .rc = 0, .defers = 1U, .tx_ms = 1234U,
+			.tx_seq = a.tx_seq, .rc = 0, .defers = 1U, .tx_ms = 1234U,
 		};
 		int elen = meshtastic_attachment_encode_tx_result(&r, env, sizeof(env));
 
@@ -1002,7 +1019,7 @@ ZTEST(attachment, test_tx_through_a_head_leaves_as_tx_frame)
 		zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, HEAD1_NODE, env, (size_t)elen));
 	}
 	zassert_true(meshtastic_attachment_get(1U, &a));
-	zassert_equal(a.tx_results, 1U);
+	zassert_true(a.tx_results >= 1U);
 	zassert_equal(a.last_tx_rc, 0);
 	zassert_equal(a.last_tx_defers, 1U);
 	zassert_equal(a.tx_failed, 0U);
@@ -1131,4 +1148,96 @@ ZTEST(attachment, test_reply_leaves_by_the_radio_the_request_came_in_on)
 	zassert_equal(sent.count, before, "no reply to a receive-only head");
 	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(100)), 0,
 			  "and none on our own radio either");
+}
+
+/* P3 slice 3: a flood heard through a head is relayed THROUGH that head -- never
+ * on our own radio -- as a TX_FRAME{RELAY}: the relay as we built it (one hop
+ * fewer, our relay byte), relay_of the frame with the head's own rx_ms echoed,
+ * and a window planned with the head's modem and the SNR the head heard it at.
+ * Two heads on one preset: one relay. A copy that reaches us by our own radio
+ * withdraws it (CLIENT: cancel-on-duplicate) with a TX_CANCEL to the head. */
+ZTEST(attachment, test_relay_goes_through_the_head_that_heard_it)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_msg msg;
+	const uint8_t there = meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF);
+	uint32_t relayed_before;
+	uint32_t before;
+
+	/* Admit heads 1 and 2 on MediumFast (broadcasts: relayed through them too). */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x3A00U, "admit 1", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -80, 6, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x3A01U, "admit 2", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	zassert_ok(head_hears(HEAD2_NODE, PRESET_MF, -90, 2, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	k_msleep(300);
+	drain_radio();
+	before = sent.count;
+	relayed_before = mt.status.relayed_packets;
+
+	/* A flood from FAR, 3 hops, heard by head 1 at its uptime 5000 ms. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x3A02U, "relay me", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	zassert_ok(head_hears_at(HEAD1_NODE, PRESET_MF, -80, 6, wire, len, 5000U));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+	for (int i = 0; i < 100 && sent.count == before; i++) {
+		k_msleep(10);
+	}
+	zassert_equal(sent.count, before + 1U, "one relay handed to head 1 (%u)", sent.count - before);
+	zassert_equal(sent.node, HEAD1_NODE);
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_FRAME);
+	zassert_true((msg.u.tx.flags & MESHTASTIC_ATTACHMENT_TXF_RELAY) != 0U, "a relay");
+	zassert_true((msg.u.tx.flags & MESHTASTIC_ATTACHMENT_TXF_OWN_DELAY) == 0U, "not an own frame");
+	zassert_equal(msg.u.tx.relay_src, FAR_NODE_ID);
+	zassert_equal(msg.u.tx.relay_id, 0x3A02U);
+	zassert_equal(msg.u.tx.rx_ms, 5000U, "the head's own clock of reception, echoed");
+	zassert_equal(msg.u.tx.dupe, MESHTASTIC_ATTACHMENT_DUPE_CANCEL, "a CLIENT cancels on a dupe");
+	{
+		/* Planned with MediumFast's slot time and the head's SNR (6 dB). */
+		uint32_t slot = meshtastic_contention_effective_slot_ms(9U, 250000U, false);
+		uint32_t worst = meshtastic_contention_delay_relay_worst_ms(6, slot);
+		const struct meshtastic_wire_header *h =
+			(const struct meshtastic_wire_header *)msg.u.tx.wire;
+
+		zassert_true(msg.u.tx.not_before_ms <= worst, "inside the window (%u <= %u)",
+			     msg.u.tx.not_before_ms, worst);
+		zassert_equal(h->flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK, 2U, "one hop fewer");
+		zassert_equal(h->relay_node, (uint8_t)(TEST_NODE_ID & 0xFFU), "our relay byte");
+		zassert_equal(sys_le32_to_cpu(h->src), FAR_NODE_ID);
+		zassert_equal(h->channel, there, "still the head's preset's hash");
+	}
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing on our radio");
+	zassert_equal(mt.status.relayed_packets, relayed_before + 1U, "counted as relayed");
+
+	/* Head 2 hears the same frame: a duplicate, no second relay. */
+	before = sent.count;
+	zassert_ok(head_hears_at(HEAD2_NODE, PRESET_MF, -90, 2, wire, len, 7000U));
+	k_msleep(300);
+	zassert_equal(sent.count, before, "one relayer per preset");
+
+	/* Our own radio hears a neighbour's rebroadcast of it: withdraw the head's. */
+	{
+		struct meshtastic_wire_header *h = (struct meshtastic_wire_header *)wire;
+
+		h->relay_node = 0x77U;
+		set_hop_limit(wire, 2U);
+	}
+	before = sent.count;
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -70, 8));
+	for (int i = 0; i < 100 && sent.count == before; i++) {
+		k_msleep(10);
+	}
+	zassert_equal(sent.count, before + 1U, "a TX_CANCEL reached head 1");
+	zassert_equal(sent.node, HEAD1_NODE);
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_CANCEL);
+	zassert_equal(msg.u.cancel.src, FAR_NODE_ID);
+	zassert_equal(msg.u.cancel.id, 0x3A02U);
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "still nothing on our radio");
 }

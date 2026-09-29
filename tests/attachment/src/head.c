@@ -28,6 +28,9 @@
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_attachment_codec.h"
 #include "meshtastic_attachment_head.h"
+#include "meshtastic_packet.h"
+#include "meshtastic_contention.h"
+#include <zephyr/sys/byteorder.h>
 #include "meshtastic_core.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_preset.h"
@@ -533,4 +536,167 @@ ZTEST(attachment_head, test_own_delay_is_drawn_on_the_head)
 	zassert_equal(msg.u.result.tx_seq, 11U);
 	zassert_equal(msg.u.result.rc, 0);
 	zassert_equal(msg.u.result.defers, 0U, "a contention wait is not a defer");
+}
+
+/* P3 slice 3, the head's side of a relay (ATTACHMENT-DESIGN §12): the window runs
+ * on THIS radio's clock of reception -- rx_ms + not_before -- and this radio's
+ * own hearing decides: a copy heard again before key-up cancels (CANCEL) or
+ * clamps to the end of the window (LATE); the brain's TX_CANCEL withdraws. */
+static uint32_t hear_and_forward(uint8_t *wire, uint8_t len, uint8_t seed)
+{
+	struct meshtastic_attachment_msg msg;
+
+	some_frame(wire, len, seed);
+	/* A plausible header: src/id at the usual offsets, hop budget 3. */
+	{
+		struct meshtastic_wire_header *h = (struct meshtastic_wire_header *)wire;
+
+		h->dest = sys_cpu_to_le32(0xFFFFFFFFU);
+		h->src = sys_cpu_to_le32(0x0D0D0D0DU);
+		h->id = sys_cpu_to_le32(0x3B00U + seed);
+		h->flags = 3U | (3U << MESHTASTIC_FLAGS_HOP_START_SHIFT);
+		h->relay_node = 0x0DU;
+	}
+	zassert_ok(lora_sim_inject(lora_dev, wire, len, -85, 4), "heard");
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(2)), "forwarded");
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_RX_FRAME);
+	return msg.u.rx.rx_ms;
+}
+
+static int hand_relay(const uint8_t *wire, uint8_t len, uint32_t rx_ms, uint32_t not_before,
+		      uint8_t dupe, uint16_t seq)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	uint8_t relay[MESHTASTIC_PKT_MAX];
+	struct meshtastic_wire_header *h = (struct meshtastic_wire_header *)relay;
+	int elen;
+
+	memcpy(relay, wire, len);
+	h->flags = (uint8_t)((h->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) | 2U);
+	h->relay_node = (uint8_t)(BRAIN_NODE & 0xFFU);
+	{
+		const struct meshtastic_attachment_tx_frame tx = {
+			.preset = (uint8_t)PRESET_ST,
+			.flags = MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT | MESHTASTIC_ATTACHMENT_TXF_RELAY,
+			.tx_seq = seq,
+			.relay_src = sys_le32_to_cpu(h->src),
+			.relay_id = sys_le32_to_cpu(h->id),
+			.rx_ms = rx_ms,
+			.not_before_ms = not_before,
+			.dupe = dupe,
+			.wire = relay,
+			.wire_len = len,
+		};
+		elen = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
+	}
+	zassert_true(elen > 0);
+	return meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)elen);
+}
+
+static void expect_result(uint16_t seq, int rc)
+{
+	struct meshtastic_attachment_msg msg;
+
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(3)), "TX_RESULT");
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_RESULT, "type %u", msg.type);
+	zassert_equal(msg.u.result.tx_seq, seq);
+	zassert_equal(msg.u.result.rc, rc, "rc %d", msg.u.result.rc);
+}
+
+ZTEST(attachment_head, test_relay_keys_up_on_the_heads_clock)
+{
+	uint8_t wire[40];
+	struct lora_sim_frame f;
+	uint32_t rx_ms;
+	int64_t t_tx;
+
+	meshtastic_attachment_head_set_brain(BRAIN_NODE);
+	(void)k_sem_take(&sent.sem, K_MSEC(500));
+	wait_rx_armed();
+	rx_ms = hear_and_forward(wire, sizeof(wire), 0x70U);
+
+	/* A relay of it: not before rx_ms + 300 ms, KEEP. */
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, 300U, MESHTASTIC_ATTACHMENT_DUPE_KEEP, 21U));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "keyed up");
+	t_tx = k_uptime_get();
+	zassert_true(t_tx - (int64_t)rx_ms >= 290, "not before the window (%lld ms after rx)",
+		     (long long)(t_tx - (int64_t)rx_ms));
+	zassert_true(t_tx - (int64_t)rx_ms < 1200, "and not long after (%lld ms)",
+		     (long long)(t_tx - (int64_t)rx_ms));
+	{
+		const struct meshtastic_wire_header *h = (const struct meshtastic_wire_header *)f.data;
+
+		zassert_equal(h->flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK, 2U, "the relay as built");
+		zassert_equal(h->relay_node, (uint8_t)(BRAIN_NODE & 0xFFU), "the brain's relay byte");
+	}
+	expect_result(21U, 0);
+}
+
+ZTEST(attachment_head, test_relay_cancels_or_clamps_on_a_copy_heard_first)
+{
+	uint8_t wire[40];
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_head_stats st;
+	uint32_t rx_ms;
+	int64_t t0;
+
+	meshtastic_attachment_head_set_brain(BRAIN_NODE);
+	(void)k_sem_take(&sent.sem, K_MSEC(500));
+	wait_rx_armed();
+
+	/* CANCEL: a neighbour's copy lands inside our window -> we drop ours. */
+	rx_ms = hear_and_forward(wire, sizeof(wire), 0x71U);
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, 400U, MESHTASTIC_ATTACHMENT_DUPE_CANCEL, 22U));
+	k_msleep(100);
+	((struct meshtastic_wire_header *)wire)->relay_node = 0x55U;
+	((struct meshtastic_wire_header *)wire)->flags =
+		(uint8_t)((((struct meshtastic_wire_header *)wire)->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) | 2U);
+	zassert_ok(lora_sim_inject(lora_dev, wire, sizeof(wire), -70, 9), "a peer relayed it first");
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(2)), "that copy is forwarded too");
+	expect_result(22U, -ECANCELED);
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing keyed up");
+	meshtastic_attachment_head_stats_get(&st);
+	zassert_equal(st.tx_cancelled, 1U);
+
+	/* LATE: the same, but a router-late relay still goes -- after the window. */
+	rx_ms = hear_and_forward(wire, sizeof(wire), 0x72U);
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, 200U, MESHTASTIC_ATTACHMENT_DUPE_LATE, 23U));
+	k_msleep(50);
+	((struct meshtastic_wire_header *)wire)->relay_node = 0x56U;
+	((struct meshtastic_wire_header *)wire)->flags =
+		(uint8_t)((((struct meshtastic_wire_header *)wire)->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) | 2U);
+	t0 = k_uptime_get();
+	zassert_ok(lora_sim_inject(lora_dev, wire, sizeof(wire), -70, 9));
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(2)));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(5)), "still keyed up, late");
+	zassert_true(k_uptime_get() - t0 > 150, "pushed past the copy (%lld ms)",
+		     (long long)(k_uptime_get() - t0));
+	expect_result(23U, 0);
+	meshtastic_attachment_head_stats_get(&st);
+	zassert_equal(st.tx_late, 1U);
+}
+
+ZTEST(attachment_head, test_tx_cancel_withdraws_a_relay)
+{
+	uint8_t wire[40];
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	struct lora_sim_frame f;
+	uint32_t rx_ms;
+	int elen;
+
+	meshtastic_attachment_head_set_brain(BRAIN_NODE);
+	(void)k_sem_take(&sent.sem, K_MSEC(500));
+	wait_rx_armed();
+	rx_ms = hear_and_forward(wire, sizeof(wire), 0x73U);
+	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, 500U, MESHTASTIC_ATTACHMENT_DUPE_KEEP, 24U));
+	k_msleep(100);
+	elen = meshtastic_attachment_encode_tx_cancel(0x0D0D0D0DU, 0x3B00U + 0x73U, env, sizeof(env));
+	zassert_true(elen > 0);
+	zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, STRANGER, env, (size_t)elen), -EPERM,
+		      "only the brain withdraws");
+	zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)elen));
+	expect_result(24U, -ECANCELED);
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "withdrawn");
 }

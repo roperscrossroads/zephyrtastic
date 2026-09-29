@@ -63,6 +63,18 @@ bool meshtastic_attachment_tx_ready(uint8_t id);
 /* Hand @p wire to head @p id as a TX_FRAME on its preset. Called from the
  * outbound worker. @p flags are MESHTASTIC_ATTACHMENT_TXF_*. */
 int meshtastic_attachment_tx(uint8_t id, const uint8_t *wire, size_t len, uint8_t flags);
+/* Hand a RELAY to head @p id (ATTACHMENT-DESIGN §12): @p wire is the relay as
+ * the brain built it (hop decremented, our relay byte); the head keys up no
+ * earlier than @p not_before_ms after ITS reception of the original (@p rx_ms,
+ * the head's stamp on that RX_FRAME) and applies @p dupe if it hears the
+ * frame again first. */
+int meshtastic_attachment_relay(uint8_t id, const uint8_t *wire, size_t len, uint32_t src,
+				uint32_t pkt_id, uint32_t rx_ms, uint32_t not_before_ms,
+				uint8_t dupe);
+/* Withdraw a relay handed to head @p id (a duplicate reached the brain first). */
+int meshtastic_attachment_cancel(uint8_t id, uint32_t src, uint32_t pkt_id);
+/* The modem the head's preset implies (for the relay window). false = unknown. */
+bool meshtastic_attachment_modem(uint8_t id, uint8_t *spread_factor, uint32_t *bandwidth_hz);
 /* The channel hash a frame leaving by attachment @p id must carry for slot
  * @p index: an unnamed slot hashes under THAT radio's preset (S2). Falls back
  * to the local hash when the head's preset is unknown. */

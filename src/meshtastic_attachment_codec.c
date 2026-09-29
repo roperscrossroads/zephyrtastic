@@ -71,7 +71,11 @@ int meshtastic_attachment_encode_tx_frame(const struct meshtastic_attachment_tx_
 	if (m->wire_len > MESHTASTIC_ATTACHMENT_WIRE_MAX) {
 		return -EMSGSIZE;
 	}
-	len = MESHTASTIC_ATTACHMENT_TX_HDR_LEN + m->wire_len;
+	const size_t hdr = ((m->flags & MESHTASTIC_ATTACHMENT_TXF_RELAY) != 0U)
+				   ? MESHTASTIC_ATTACHMENT_TX_RELAY_HDR_LEN
+				   : MESHTASTIC_ATTACHMENT_TX_HDR_LEN;
+
+	len = hdr + m->wire_len;
 	if (out_size < len) {
 		return -EMSGSIZE;
 	}
@@ -80,7 +84,14 @@ int meshtastic_attachment_encode_tx_frame(const struct meshtastic_attachment_tx_
 	out[1] = m->preset;
 	out[2] = m->flags;
 	put_u16(&out[3], m->tx_seq);
-	memcpy(&out[MESHTASTIC_ATTACHMENT_TX_HDR_LEN], m->wire, m->wire_len);
+	if (hdr == MESHTASTIC_ATTACHMENT_TX_RELAY_HDR_LEN) {
+		put_u32(&out[5], m->relay_src);
+		put_u32(&out[9], m->relay_id);
+		put_u32(&out[13], m->rx_ms);
+		put_u32(&out[17], m->not_before_ms);
+		out[21] = m->dupe;
+	}
+	memcpy(&out[hdr], m->wire, m->wire_len);
 	return (int)len;
 }
 
@@ -133,6 +144,18 @@ int meshtastic_attachment_encode_status(const struct meshtastic_attachment_statu
 	return (int)len;
 }
 
+int meshtastic_attachment_encode_tx_cancel(uint32_t src, uint32_t id, uint8_t *out,
+					   size_t out_size)
+{
+	if (out == NULL || out_size < MESHTASTIC_ATTACHMENT_TX_CANCEL_LEN) {
+		return -EMSGSIZE;
+	}
+	out[0] = MESHTASTIC_ATTACHMENT_TX_CANCEL;
+	put_u32(&out[1], src);
+	put_u32(&out[5], id);
+	return (int)MESHTASTIC_ATTACHMENT_TX_CANCEL_LEN;
+}
+
 int meshtastic_attachment_encode_set_preset(uint8_t preset, uint8_t *out, size_t out_size)
 {
 	if (out == NULL) {
@@ -170,16 +193,35 @@ int meshtastic_attachment_decode(const uint8_t *env, size_t len,
 		out->u.rx.wire = &env[MESHTASTIC_ATTACHMENT_RX_HDR_LEN];
 		out->u.rx.wire_len = (uint16_t)(len - MESHTASTIC_ATTACHMENT_RX_HDR_LEN);
 		return 0;
-	case MESHTASTIC_ATTACHMENT_TX_FRAME:
-		if (len <= MESHTASTIC_ATTACHMENT_TX_HDR_LEN ||
-		    len > MESHTASTIC_ATTACHMENT_TX_HDR_LEN + MESHTASTIC_ATTACHMENT_WIRE_MAX) {
+	case MESHTASTIC_ATTACHMENT_TX_FRAME: {
+		size_t hdr = MESHTASTIC_ATTACHMENT_TX_HDR_LEN;
+
+		if (len > 2U && (env[2] & MESHTASTIC_ATTACHMENT_TXF_RELAY) != 0U) {
+			hdr = MESHTASTIC_ATTACHMENT_TX_RELAY_HDR_LEN;
+		}
+		if (len <= hdr || len > hdr + MESHTASTIC_ATTACHMENT_WIRE_MAX) {
 			return -EBADMSG;
 		}
 		out->u.tx.preset = env[1];
 		out->u.tx.flags = env[2];
 		out->u.tx.tx_seq = get_u16(&env[3]);
-		out->u.tx.wire = &env[MESHTASTIC_ATTACHMENT_TX_HDR_LEN];
-		out->u.tx.wire_len = (uint16_t)(len - MESHTASTIC_ATTACHMENT_TX_HDR_LEN);
+		if (hdr == MESHTASTIC_ATTACHMENT_TX_RELAY_HDR_LEN) {
+			out->u.tx.relay_src = get_u32(&env[5]);
+			out->u.tx.relay_id = get_u32(&env[9]);
+			out->u.tx.rx_ms = get_u32(&env[13]);
+			out->u.tx.not_before_ms = get_u32(&env[17]);
+			out->u.tx.dupe = env[21];
+		}
+		out->u.tx.wire = &env[hdr];
+		out->u.tx.wire_len = (uint16_t)(len - hdr);
+		return 0;
+	}
+	case MESHTASTIC_ATTACHMENT_TX_CANCEL:
+		if (len < MESHTASTIC_ATTACHMENT_TX_CANCEL_LEN) {
+			return -EBADMSG;
+		}
+		out->u.cancel.src = get_u32(&env[1]);
+		out->u.cancel.id = get_u32(&env[5]);
 		return 0;
 	case MESHTASTIC_ATTACHMENT_TX_RESULT:
 		if (len < MESHTASTIC_ATTACHMENT_TX_RESULT_LEN) {
