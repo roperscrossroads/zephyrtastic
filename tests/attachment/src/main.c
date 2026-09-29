@@ -1443,3 +1443,99 @@ ZTEST(attachment, test_replies_via_a_head_use_the_slot_the_frame_arrived_on_not_
 	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "clear slot 1");
 	set_default_primary();
 }
+
+/* DESIGN §13, the placement guard. FAST-HEAD: a head whose preset's slot time is shorter
+ * than our own radio's -- the fastest preset an identity serves belongs on the brain. */
+static bool attach_info_for(uint32_t node, struct meshtastic_attachment_info *out)
+{
+	for (uint8_t id = 1U; id <= CONFIG_MESHTASTIC_ATTACHMENT_MAX; id++) {
+		if (meshtastic_attachment_get(id, out) && out->node == node) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void head_reports_preset(uint32_t node, uint8_t preset)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	const struct meshtastic_attachment_status st = {
+		.preset = preset,
+		.flags = MESHTASTIC_ATTACHMENT_ST_TX_ENABLED | MESHTASTIC_ATTACHMENT_ST_IS_HEAD,
+		.hwid = node,
+		.brain = TEST_NODE_ID,
+	};
+	int len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
+
+	zassert_true(len > 0);
+	zassert_ok(meshtastic_attachment_ingest(node, env, (size_t)len), "status ingest");
+}
+
+ZTEST(attachment, test_guard_flags_a_head_faster_than_our_own_radio)
+{
+	struct meshtastic_attachment_info a;
+
+	/* We are on MediumFast; a head on ShortTurbo is faster than us. */
+	zassert_ok(meshtastic_preset_switch(PRESET_MF, NULL), "preset");
+	head_reports_preset(HEAD1_NODE, (uint8_t)PRESET_ST);
+	zassert_true(attach_info_for(HEAD1_NODE, &a));
+	zassert_true(a.warn_fast_head, "ShortTurbo head on a MediumFast brain: FAST-HEAD");
+	/* The same head retuned to LongFast: slower than us, no warning. */
+	head_reports_preset(HEAD1_NODE, (uint8_t)meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST);
+	zassert_true(attach_info_for(HEAD1_NODE, &a));
+	zassert_false(a.warn_fast_head, "a LongFast head on a MediumFast brain is fine");
+	/* Back on ShortTurbo ourselves (the fixture's preset), a MediumFast head is fine. */
+	zassert_ok(meshtastic_preset_switch(PRESET_ST, NULL), "preset");
+	head_reports_preset(HEAD1_NODE, (uint8_t)PRESET_MF);
+	zassert_true(attach_info_for(HEAD1_NODE, &a));
+	zassert_false(a.warn_fast_head, "the bench's layout: brain ShortTurbo, head MediumFast");
+}
+
+/* LAG: the head reports, per relay, how long the decision took to reach it (its own clock);
+ * the brain keeps a 16-sample ring. Warn when p90 exceeds half the head preset's ROUTER
+ * window AND our role relays early; suppressed under CLIENT, where it cannot bite. */
+static void head_reports_lag(uint32_t node, uint16_t seq, uint16_t lag_ms)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	const struct meshtastic_attachment_tx_result r = {
+		.tx_seq = seq, .rc = 0, .defers = 0, .tx_ms = 1000U, .has_lag = true, .lag_ms = lag_ms,
+	};
+	int len = meshtastic_attachment_encode_tx_result(&r, env, sizeof(env));
+
+	zassert_equal(len, (int)MESHTASTIC_ATTACHMENT_TX_RESULT_LAG_LEN, "the lag rides appended");
+	zassert_ok(meshtastic_attachment_ingest(node, env, (size_t)len), "result ingest");
+}
+
+ZTEST(attachment, test_guard_flags_link_lag_over_half_the_router_window_for_a_router_only)
+{
+	struct meshtastic_attachment_info a;
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	const struct meshtastic_attachment_tx_result old_head = {
+		.tx_seq = 99U, .rc = 0, .defers = 0, .tx_ms = 1000U, .has_lag = false,
+	};
+
+	/* A MediumFast head (slot 12 ms, ROUTER window 60 ms, threshold 30 ms). */
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	head_reports_preset(HEAD1_NODE, (uint8_t)PRESET_MF);
+	for (uint16_t i = 0U; i < 16U; i++) {
+		head_reports_lag(HEAD1_NODE, i, (i == 15U) ? 200U : 40U);
+	}
+	zassert_true(attach_info_for(HEAD1_NODE, &a));
+	zassert_equal(a.lag_n, 16U);
+	zassert_equal(a.lag_p50_ms, 40U);
+	zassert_equal(a.lag_p90_ms, 40U, "p90 of 16 is the 2nd largest, not the one outlier");
+	zassert_equal(a.lag_max_ms, 200U);
+	zassert_false(a.warn_lag, "under CLIENT the lag cannot bite");
+	/* As a ROUTER the same samples warn. */
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+	head_reports_lag(HEAD1_NODE, 16U, 40U);
+	zassert_true(attach_info_for(HEAD1_NODE, &a));
+	zassert_true(a.warn_lag, "40 ms p90 > 30 ms (half of MediumFast's 60 ms ROUTER window)");
+	/* An older head's 9-byte result still decodes and adds no sample. */
+	zassert_equal(meshtastic_attachment_encode_tx_result(&old_head, env, sizeof(env)),
+		      (int)MESHTASTIC_ATTACHMENT_TX_RESULT_LEN);
+	zassert_ok(meshtastic_attachment_ingest(HEAD1_NODE, env, MESHTASTIC_ATTACHMENT_TX_RESULT_LEN));
+	zassert_true(attach_info_for(HEAD1_NODE, &a));
+	zassert_equal(a.lag_n, 16U, "no sample from a result without the field");
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+}

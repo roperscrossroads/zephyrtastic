@@ -16,6 +16,7 @@
 #include <zephyr/meshtastic/meshtastic.h>
 #include "meshtastic_core.h"
 #include "meshtastic_attachment.h"
+#include "meshtastic_contention.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_region_presets.h"
@@ -209,6 +210,84 @@ static struct meshtastic_attachment_info *find_locked(uint32_t node)
 	return NULL;
 }
 
+
+/* DESIGN §13: slot time and ROUTER window of a preset, on this board's modem
+ * rules (CW 3, the tightest case: (2*CW - 1) slots). 0 when unknown. */
+static uint32_t preset_slot_ms(uint8_t preset)
+{
+	struct meshtastic_modem_params p;
+
+	if (preset > (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX ||
+	    meshtastic_preset_to_params((meshtastic_Config_LoRaConfig_ModemPreset)preset, false, &p) != 0) {
+		return 0U;
+	}
+	return meshtastic_contention_effective_slot_ms(p.spread_factor, p.bandwidth_hz, false);
+}
+
+static uint32_t router_window_ms(uint8_t preset)
+{
+	return (2U * 3U - 1U) * preset_slot_ms(preset);
+}
+
+static bool role_relays_early(void)
+{
+	meshtastic_Config_DeviceConfig_Role r = meshtastic_device_role();
+
+	return r == meshtastic_Config_DeviceConfig_Role_ROUTER ||
+	       r == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE;
+}
+
+/* Recompute the ring's p50/p90/max and the LAG guard, tab_lock held. */
+static void lag_recompute_locked(struct meshtastic_attachment_info *a)
+{
+	uint16_t v[ARRAY_SIZE(a->lag)];
+	unsigned int n = a->lag_n;
+
+	if (n == 0U) {
+		return;
+	}
+	memcpy(v, a->lag, sizeof(v));
+	/* Insertion sort: n <= 16. */
+	for (unsigned int i = 1U; i < n; i++) {
+		uint16_t x = v[i];
+		unsigned int j = i;
+
+		while (j > 0U && v[j - 1U] > x) {
+			v[j] = v[j - 1U];
+			j--;
+		}
+		v[j] = x;
+	}
+	a->lag_p50_ms = v[(n - 1U) / 2U];
+	a->lag_p90_ms = v[((n * 9U + 9U) / 10U) - 1U]; /* ceil(0.9 n) - 1: the 2nd largest of 16 */
+	a->lag_max_ms = v[n - 1U];
+	a->warn_lag = role_relays_early() && a->preset != MESHTASTIC_PRESET_UNKNOWN &&
+		      (uint32_t)a->lag_p90_ms > router_window_ms(a->preset) / 2U;
+	if (a->warn_lag && !a->warned_lag) {
+		a->warned_lag = true;
+		LOG_WRN("attach %u: link lag p90 %u ms is over half the preset-%u ROUTER window (%u ms) "
+			"-- a ROUTER's relays through this head land late; a fast preset belongs on "
+			"the brain's radio (DESIGN §13)",
+			a->id, a->lag_p90_ms, a->preset, router_window_ms(a->preset));
+	}
+}
+
+/* The FAST-HEAD guard, tab_lock held: the head's slot time against our own radio's. */
+static void fast_head_check_locked(struct meshtastic_attachment_info *a)
+{
+	uint32_t ours = meshtastic_contention_effective_slot_ms(mt.modem.spread_factor,
+								 mt.modem.bandwidth_hz, false);
+	uint32_t theirs = preset_slot_ms(a->preset);
+
+	a->warn_fast_head = (theirs != 0U && ours != 0U && theirs < ours);
+	if (a->warn_fast_head && !a->warned_fast_head) {
+		a->warned_fast_head = true;
+		LOG_WRN("attach %u: head preset %u (slot %u ms) is faster than our own (slot %u ms) -- "
+			"the fastest preset an identity serves belongs on the brain's radio (DESIGN §13)",
+			a->id, a->preset, theirs, ours);
+	}
+}
+
 static struct meshtastic_attachment_info *admit_locked(uint32_t node)
 {
 	for (unsigned int i = 1U; i < ARRAY_SIZE(tab); i++) {
@@ -326,6 +405,7 @@ int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, 
 		a->status = msg.u.status;
 		a->have_status = true;
 		a->preset = msg.u.status.preset;
+		fast_head_check_locked(a);
 		ret = 0;
 		break;
 	case MESHTASTIC_ATTACHMENT_TX_RESULT:
@@ -334,6 +414,14 @@ int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, 
 		a->last_tx_defers = msg.u.result.defers;
 		if (msg.u.result.rc != 0) {
 			a->tx_failed++;
+		}
+		if (msg.u.result.has_lag) {
+			a->lag[a->lag_next] = msg.u.result.lag_ms;
+			a->lag_next = (uint8_t)((a->lag_next + 1U) % ARRAY_SIZE(a->lag));
+			if (a->lag_n < ARRAY_SIZE(a->lag)) {
+				a->lag_n++;
+			}
+			lag_recompute_locked(a);
 		}
 		ret = 0;
 		break;

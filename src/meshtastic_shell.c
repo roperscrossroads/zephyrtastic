@@ -3557,6 +3557,10 @@ static void attach_print_row(const struct shell *sh, const struct meshtastic_att
 		    a->have_status ? "  status" : "",
 		    (a->have_status &&
 		     (a->status.flags & MESHTASTIC_ATTACHMENT_ST_IS_HEAD) != 0U) ? " head" : " ear");
+	if (a->warn_fast_head || a->warn_lag) {
+		shell_print(sh, "     %s%s  (DESIGN §13: the fastest preset belongs on the brain's radio)",
+			    a->warn_fast_head ? "FAST-HEAD " : "", a->warn_lag ? "LAG " : "");
+	}
 	if (!a->link_up) {
 		shell_print(sh, "     link DOWN %lld s (evicted after %d s)",
 			    (long long)((k_uptime_get() - a->down_ms) / 1000),
@@ -3635,6 +3639,11 @@ static int cmd_attach_status(const struct shell *sh, size_t argc, char **argv)
 			shell_print(sh, "  position: lat=%d lon=%d alt=%d", a.status.lat,
 				    a.status.lon, a.status.alt);
 		}
+	}
+	if (a.lag_n != 0U) {
+		shell_print(sh, "  link lag (relay decisions, head's clock): n %u  p50 %u  p90 %u  max %u ms%s%s",
+			    a.lag_n, a.lag_p50_ms, a.lag_p90_ms, a.lag_max_ms,
+			    a.warn_lag ? "  LAG" : "", a.warn_fast_head ? "  FAST-HEAD" : "");
 	}
 	shell_print(sh, "  last envelope %lld ms ago  rejected %u  tx_results %u",
 		    (long long)(k_uptime_get() - a.last_ms), a.rejected, a.tx_results);

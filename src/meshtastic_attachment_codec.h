@@ -76,6 +76,7 @@ enum meshtastic_attachment_type {
 /* SET_POLICY flags */
 #define MESHTASTIC_ATTACHMENT_POL_HAS_TX_POWER 0x01U
 #define MESHTASTIC_ATTACHMENT_TX_RESULT_LEN  9U
+#define MESHTASTIC_ATTACHMENT_TX_RESULT_LAG_LEN 11U /* + [9..10] arrival lag u16 (§13) */
 #define MESHTASTIC_ATTACHMENT_STATUS_LEN     27U
 #define MESHTASTIC_ATTACHMENT_STATUS_POS_LEN 39U
 #define MESHTASTIC_ATTACHMENT_SET_PRESET_LEN 2U
@@ -141,6 +142,12 @@ struct meshtastic_attachment_tx_result {
 	int8_t rc;
 	uint8_t defers;
 	uint32_t tx_ms;
+	/* Appended (DESIGN §13): for a RELAY, the head's clock at TX_FRAME arrival
+	 * minus its rx_ms of the frame the relay is of -- the peer link's cost on
+	 * the head's clock alone. Absent (has_lag false, 9-byte result) from an
+	 * older head or for a frame that is not a relay. */
+	bool has_lag;
+	uint16_t lag_ms;
 };
 
 struct meshtastic_attachment_status {

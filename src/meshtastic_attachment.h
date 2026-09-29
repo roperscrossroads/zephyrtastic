@@ -54,6 +54,23 @@ struct meshtastic_attachment_info {
 	int8_t last_tx_rc;
 	uint8_t last_tx_defers;
 	uint32_t tx_failed;   /* TX_RESULTs with rc != 0 */
+	/* DESIGN §13: the peer link's cost per relay, as the head reports it in
+	 * TX_RESULT (arrival of the decision minus its reception of the frame, on
+	 * its clock). A 16-sample ring; p50/p90/max recomputed per sample. */
+	uint16_t lag[16];
+	uint8_t lag_n;
+	uint8_t lag_next;
+	uint16_t lag_p50_ms;
+	uint16_t lag_p90_ms;
+	uint16_t lag_max_ms;
+	/* The placement guard (§13): FAST-HEAD -- the head's slot time is shorter
+	 * than our own radio's (a fast preset belongs on the brain); LAG -- the
+	 * lag p90 exceeds half the head preset's ROUTER window while our role
+	 * relays early (ROUTER / ROUTER_LATE). Each warns once per admission. */
+	bool warn_fast_head;
+	bool warn_lag;
+	bool warned_fast_head;
+	bool warned_lag;
 };
 
 /* Can a frame be handed to attachment @p id right now: known, link up, and

@@ -75,6 +75,9 @@ struct head_tx {
 	 * contention window (OWN_DELAY), drawn HERE with this radio's modem --
 	 * the brain's clock and modem are not this radio's. 0 = now. */
 	uint32_t not_before;
+	/* k_uptime_get_32() when the TX_FRAME arrived: with orig_rx_ms, the peer
+	 * link's cost for a relay, on this clock alone (DESIGN §13). */
+	uint32_t arrived_ms;
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 };
 
@@ -431,6 +434,9 @@ report:
 				.rc = (int8_t)CLAMP(ret, -127, 127),
 				.defers = t.defers,
 				.tx_ms = (uint32_t)k_uptime_get(),
+				.has_lag = is_relay,
+				.lag_ms = is_relay ? (uint16_t)MIN(t.arrived_ms - t.orig_rx_ms, 0xFFFEU)
+						   : 0U,
 			};
 			int elen = meshtastic_attachment_encode_tx_result(&r, tx_env_buf,
 									  sizeof(tx_env_buf));
@@ -692,6 +698,7 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 			t.relay_src = msg.u.tx.relay_src;
 			t.relay_id = msg.u.tx.relay_id;
 			t.orig_rx_ms = base;
+			t.arrived_ms = now;
 			t.dupe = msg.u.tx.dupe;
 			for (unsigned int i = 0U; i < HEARD_RING; i++) {
 				if (heard_ring[i].count != 0U && heard_ring[i].src == t.relay_src &&

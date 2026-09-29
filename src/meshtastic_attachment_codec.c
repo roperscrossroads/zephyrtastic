@@ -110,6 +110,10 @@ int meshtastic_attachment_encode_tx_result(const struct meshtastic_attachment_tx
 	out[3] = (uint8_t)m->rc;
 	out[4] = m->defers;
 	put_u32(&out[5], m->tx_ms);
+	if (m->has_lag && out_size >= MESHTASTIC_ATTACHMENT_TX_RESULT_LAG_LEN) {
+		put_u16(&out[9], m->lag_ms);
+		return (int)MESHTASTIC_ATTACHMENT_TX_RESULT_LAG_LEN;
+	}
 	return (int)MESHTASTIC_ATTACHMENT_TX_RESULT_LEN;
 }
 
@@ -250,6 +254,9 @@ int meshtastic_attachment_decode(const uint8_t *env, size_t len,
 		out->u.result.rc = (int8_t)env[3];
 		out->u.result.defers = env[4];
 		out->u.result.tx_ms = get_u32(&env[5]);
+		/* Known-prefix rule: an older head sends 9 bytes; the lag rides after. */
+		out->u.result.has_lag = (len >= MESHTASTIC_ATTACHMENT_TX_RESULT_LAG_LEN);
+		out->u.result.lag_ms = out->u.result.has_lag ? get_u16(&env[9]) : 0U;
 		return 0;
 	case MESHTASTIC_ATTACHMENT_STATUS: {
 		bool pos;
