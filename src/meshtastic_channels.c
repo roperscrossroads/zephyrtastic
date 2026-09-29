@@ -370,9 +370,17 @@ uint8_t meshtastic_channels_hash_for_preset(uint8_t index, uint8_t preset)
 	 * the cached hash is under the name "Custom", which is what every node on
 	 * that modem stamps -- recomputing under the preset's display name would
 	 * stop our own radio's frames decoding (review F2). */
-	if ((ch->has_settings && ch->settings.name[0] != '\0') ||
+	if ((ch->has_settings && ch->settings.name[0] != '\0' &&
+	     strcmp(ch->settings.name,
+		    meshtastic_preset_display_name(mt.modem_preset, true)) != 0) ||
 	    preset > (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX ||
 	    preset == (uint8_t)mt.modem_preset) {
+		/* A slot named after the preset this node is ON is the default channel
+		 * under that preset in every way that reaches the air (the reference
+		 * substitutes exactly that name for an unnamed one, so the hash is the
+		 * same byte), and it re-hashes under another preset like an unnamed
+		 * slot would. The bench's brains carry "ShortTurbo" on slot 0: every
+		 * reply through a MediumFast head left as 0x0e until this (2026-09-29). */
 		return channel_hashes[index];
 	}
 	if (channel_get_key(index, &key) < 0) {

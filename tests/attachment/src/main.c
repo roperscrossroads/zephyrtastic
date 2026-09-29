@@ -1358,13 +1358,25 @@ ZTEST(attachment, test_replies_via_a_head_use_the_slot_the_frame_arrived_on_not_
 	uint32_t before;
 	int replies_seen = 0;
 
-	/* Name the primary, as the bench does ("ShortTurbo"), on the default PSK. */
+	/* First, the bench's own table: the primary NAMED after the preset the node is
+	 * on ("ShortTurbo", on ShortTurbo). That is the default channel under this
+	 * preset by any test that reaches the air -- the same hash byte as an unnamed
+	 * slot -- so under the head's preset it re-hashes like an unnamed slot. */
 	ch.index = 0;
 	ch.role = meshtastic_Channel_Role_PRIMARY;
 	ch.has_settings = true;
 	ch.settings.psk.size = 1U;
 	ch.settings.psk.bytes[0] = 1U;
 	strcpy(ch.settings.name, "ShortTurbo");
+	zassert_ok(meshtastic_channels_set_slot(0U, &ch), "name slot 0 after the preset");
+	zassert_equal(meshtastic_channels_get_hash(0U),
+		      meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_ST),
+		      "on our own preset the name IS the default channel's hash");
+	zassert_not_equal(meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF),
+			  meshtastic_channels_get_hash(0U),
+			  "under the head's preset a preset-named slot re-hashes like an unnamed one");
+	/* Now a TRULY named primary ("Private"): its hash is its own on every preset. */
+	strcpy(ch.settings.name, "Private");
 	zassert_ok(meshtastic_channels_set_slot(0U, &ch), "name slot 0");
 	primary_hash = meshtastic_channels_get_hash(0U);
 	/* Slot 1: an unnamed secondary on the same PSK -- named after whatever
