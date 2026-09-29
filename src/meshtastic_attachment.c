@@ -16,6 +16,7 @@
 #include <zephyr/meshtastic/meshtastic.h>
 #include "meshtastic_core.h"
 #include "meshtastic_attachment.h"
+#include "meshtastic_ext_ram.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_region_presets.h"
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
@@ -34,7 +35,10 @@ BUILD_ASSERT(MESHTASTIC_ATTACHMENT_ENV_MAX == MESHTASTIC_BLE_PEER_ENV_MAX,
 #endif
 
 /* [0] is the local radio and never admitted or forgotten. */
-static struct meshtastic_attachment_info tab[CONFIG_MESHTASTIC_ATTACHMENT_MAX + 1U];
+/* PSRAM on the V4 family (a no-op elsewhere): mutex-guarded, CPU-only, never
+ * touched from an ISR or DMA -- the rules in meshtastic_ext_ram.h. The R8
+ * brain sits at 99.7 % of internal RAM; this is where a table lives. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR struct meshtastic_attachment_info tab[CONFIG_MESHTASTIC_ATTACHMENT_MAX + 1U];
 static bool used[CONFIG_MESHTASTIC_ATTACHMENT_MAX + 1U] = { true };
 static struct meshtastic_attachment_stats stats;
 static uint32_t allow[CONFIG_MESHTASTIC_ATTACHMENT_ALLOW_MAX];

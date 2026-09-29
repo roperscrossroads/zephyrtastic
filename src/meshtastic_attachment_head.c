@@ -26,6 +26,7 @@
 #include "meshtastic_attachment_head.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_contention.h"
+#include "meshtastic_duty.h"
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 #include "meshtastic_airtime.h"
 #endif
@@ -287,6 +288,22 @@ static void head_tx_thread_fn(void *p1, void *p2, void *p3)
 					ret = -ECANCELED;
 					goto report;
 				}
+			}
+		}
+		{
+			/* The regulatory gate, at THIS radio (ATTACHMENT-SCOPE A4): the
+			 * brain's duty ledger prices its own channel, not this one.
+			 * A stub (false) on an image without the airtime ledger. */
+			uint8_t silent = 0U;
+
+			if (meshtastic_duty_blocked(&silent)) {
+				k_mutex_lock(&head_lock, K_FOREVER);
+				head.stats.tx_duty_blocked++;
+				k_mutex_unlock(&head_lock);
+				LOG_WRN("head: tx seq %u refused by the duty gate (%u min silent)",
+					t.tx_seq, silent);
+				ret = -ECANCELED;
+				goto report;
 			}
 		}
 		ret = meshtastic_radio_send_wire_now(t.wire, t.len);
