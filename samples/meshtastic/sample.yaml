@@ -213,6 +213,20 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_FLEET_CLASS=12
       - CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x0c"
+  sample.meshtastic.fleet.c13:
+    # Class 13, Heltec V3 keyless radio head (ATTACHMENT-DESIGN S5, review plan R7): the
+    # XIAO head's role on the V3 (no PSRAM, CP210x console). The V3's shared profile with
+    # the network off, the peer link, and the head overlay; the keyless assert runs on
+    # this ELF too. dram0 ~76 %: the board has room a brain does not.
+    tags: [meshtastic, fleet]
+    platform_allow: [heltec_wifi_lora32_v3/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v3/esp32s3/procpu]
+    sysbuild: true
+    extra_args:
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-ble-peer.conf;overlay-rf.conf;overlay-led-status.conf;overlay-attachment-head.conf"
+    extra_configs:
+      - CONFIG_MESHTASTIC_FLEET_CLASS=13
+      - CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x0d"
   sample.meshtastic.fleet.c9:
     # Class 9, XIAO RF listener.
     tags: [meshtastic, fleet]
