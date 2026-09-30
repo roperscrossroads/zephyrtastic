@@ -21,4 +21,5 @@ tests:
         - "pytest/test_attach_pipe.py"
         - "pytest/test_attach_pipe_timing.py"
         - "pytest/test_attach_pipe_guard.py"
+        - "pytest/test_attach_pipe_reply.py"
     timeout: 300

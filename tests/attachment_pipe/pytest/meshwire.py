@@ -50,11 +50,11 @@ def data_pb(portnum, payload):
 
 
 def airframe(sender, packet_id, text, *, dest=BROADCAST, preset=MEDIUM_FAST, hop_limit=3,
-             hop_start=3, relay_node=None, name=None, key=DEFAULT_KEY):
-    """A text broadcast as a stock node on @p preset would send it on its
-    default (unnamed) channel."""
+             hop_start=3, relay_node=None, name=None, key=DEFAULT_KEY, want_ack=False):
+    """A text message as a stock node on @p preset would send it on its
+    default (unnamed) channel: a broadcast, or with @p dest a channel DM."""
     ch = channel_hash(name if name is not None else PRESET_NAMES[preset], key)
-    flags = (hop_limit & 7) | ((hop_start & 7) << 5)
+    flags = (hop_limit & 7) | ((hop_start & 7) << 5) | (0x08 if want_ack else 0)
     relay = (sender & 0xFF) if relay_node is None else relay_node
     hdr = struct.pack("<IIIBBBB", dest, sender, packet_id, flags, ch, 0, relay)
     return hdr + encrypt(key, packet_id, sender, data_pb(PORT_TEXT, text.encode()))
@@ -128,3 +128,57 @@ def relay_worst(preset, snr):
     clampToLateRebroadcastWindow adds to the moment the duplicate is heard."""
     s = slot_ms(preset)
     return 2 * CW_MAX * s + (2 ** cw_size(snr)) * s
+
+
+# ---- reading a frame back (what an image transmitted) -----------------------
+
+PORT_ROUTING = 5
+
+
+def parse_pb(buf):
+    """A protobuf message as {field: [values]}: varints as int, fixed32 as
+    int, length-delimited as bytes. Enough for Data and Routing."""
+    out, i = {}, 0
+    while i < len(buf):
+        tag, i = _varint(buf, i)
+        field, wt = tag >> 3, tag & 7
+        if wt == 0:
+            v, i = _varint(buf, i)
+        elif wt == 5:
+            v, i = struct.unpack_from("<I", buf, i)[0], i + 4
+        elif wt == 1:
+            v, i = struct.unpack_from("<Q", buf, i)[0], i + 8
+        elif wt == 2:
+            n, i = _varint(buf, i)
+            v, i = buf[i:i + n], i + n
+        else:
+            raise ValueError(f"wire type {wt}")
+        out.setdefault(field, []).append(v)
+    return out
+
+
+def _varint(buf, i):
+    v = shift = 0
+    while True:
+        b = buf[i]
+        i += 1
+        v |= (b & 0x7F) << shift
+        shift += 7
+        if not b & 0x80:
+            return v, i
+
+
+def read_airframe(raw, key=DEFAULT_KEY):
+    """Header fields plus the decrypted Data of a channel frame ({} when it
+    does not parse under @p key -- a PKC frame, another channel)."""
+    dest, src, pid, flags, ch, next_hop, relay = struct.unpack_from("<IIIBBBB", raw)
+    f = {"dest": dest, "src": src, "id": pid, "ch": ch, "hop_limit": flags & 7,
+         "want_ack": bool(flags & 0x08), "relay_node": relay}
+    try:
+        data = parse_pb(encrypt(key, pid, src, raw[16:]))  # CTR: decrypt = encrypt
+        f["port"] = data.get(1, [None])[0]
+        f["request_id"] = data.get(6, [None])[0]
+        f["payload"] = data.get(2, [b""])[0]
+    except (ValueError, IndexError, struct.error):
+        f["port"] = None
+    return f

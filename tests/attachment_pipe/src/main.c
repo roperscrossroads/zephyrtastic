@@ -12,6 +12,7 @@
  * ATTACH_PIPE_PRESET (the preset it listens on, a ModemPreset number).
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -87,6 +88,16 @@ static void tx_watch_fn(void *a, void *b, void *c)
 				  sys_le32_to_cpu(h->src), sys_le32_to_cpu(h->dest),
 				  sys_le32_to_cpu(h->id), h->flags & MESHTASTIC_FLAGS_HOP_LIMIT_MASK,
 				  h->channel, f.len, f.t_ms, f.air_ms);
+		/* The frame itself (up to 80 bytes, what an EVENT line holds), so a
+		 * test can decrypt a reply and check what it answers. */
+		char hex[2U * 80U + 1U];
+		size_t n = MIN((size_t)f.len, (size_t)80U);
+
+		for (size_t i = 0U; i < n; i++) {
+			snprintf(&hex[2U * i], 3, "%02x", f.data[i]);
+		}
+		hex[2U * n] = '\0';
+		attach_pipe_event("txhex id=%08x hex=%s", sys_le32_to_cpu(h->id), hex);
 	}
 }
 K_THREAD_STACK_DEFINE(tx_watch_stack, 2048);
