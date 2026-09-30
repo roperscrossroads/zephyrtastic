@@ -177,7 +177,7 @@ tests:
     platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
     extra_args:
-      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-scanner.conf;overlay-listener.conf;overlay-v4r8-listener.conf"
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-scanner.conf;overlay-listener.conf;overlay-v4r8-listener.conf;overlay-led-status.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
   sample.meshtastic.fleet.c1:
     # Class 1, XIAO cluster member. Binds on the MCUboot app slot (733,034 B).
