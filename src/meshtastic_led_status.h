@@ -3,20 +3,43 @@
 #ifndef MESHTASTIC_LED_STATUS_H_
 #define MESHTASTIC_LED_STATUS_H_
 
-/*
- * Bench diagnostic: led0 driven straight from CONFIG_MESHTASTIC_BLE_PEER's
- * live link state, independent of the app/config-driven external
- * notification module (Kconfig.led_status explains the split and why the two
- * are mutually exclusive).
- *
- * Solid: powered on, no active peer link.
- * 1 Hz blink (on CONFIG_MESHTASTIC_LED_STATUS_TICK_MS): at least one peer
- * link — inbound or outbound — is up.
- */
+#include <stdbool.h>
+#include <stdint.h>
 
-/* Starts the periodic tick. Idempotent-safe to call once at boot, same as
- * every other module's _init(). Returns 0, or a negative errno if led0 is
- * declared but not ready. */
+/*
+ * Bench diagnostic: the board LED says whether this node is in use, so a hub
+ * of identical boards can be read at a glance (Kconfig.led_status). The host
+ * sets the mode -- from the bench's claims -- and the node keeps it across a
+ * reboot; locate is a timed override that falls back to the saved mode.
+ *
+ *            XIAO (RGB)            one-LED board (Heltec white)
+ *   idle     red, slow blink       slow blink
+ *   in-use   green, solid          off
+ *   locate   blue, fast blink      fast blink
+ *   off      dark                  dark
+ */
+enum meshtastic_led_mode {
+	MESHTASTIC_LED_IDLE = 0,
+	MESHTASTIC_LED_IN_USE = 1,
+	MESHTASTIC_LED_OFF = 2,
+};
+
+/* Starts the pattern in the saved mode (idle if none). Returns 0, or a
+ * negative errno if led0 is declared but not ready. */
 int meshtastic_led_status_init(void);
+
+/* Set and persist the mode (ends a locate). -EINVAL for an unknown mode. */
+int meshtastic_led_status_set_mode(enum meshtastic_led_mode mode);
+enum meshtastic_led_mode meshtastic_led_status_get_mode(void);
+
+/* Blink "here I am" for @p seconds (0: stop), then return to the mode. */
+void meshtastic_led_status_locate(uint32_t seconds);
+/* Seconds of locate left, 0 when not locating. */
+uint32_t meshtastic_led_status_locate_left(void);
+
+/* True when the board has the green and blue LEDs the colours need. */
+bool meshtastic_led_status_has_color(void);
+
+const char *meshtastic_led_mode_name(enum meshtastic_led_mode mode);
 
 #endif /* MESHTASTIC_LED_STATUS_H_ */

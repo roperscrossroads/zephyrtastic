@@ -1,34 +1,34 @@
 menuconfig MESHTASTIC_LED_STATUS
-	bool "Board LED reflects BLE peer-link state (bench diagnostic)"
+	bool "Board LED says whether the node is in use (bench diagnostic)"
 	default n
 	depends on GPIO
-	depends on MESHTASTIC_BLE_PEER
 	depends on !MESHTASTIC_EXTNOTIFY
 	help
-	  Drives led0 directly, independent of the Meshtastic app/config: solid
-	  while powered with no active BLE peer link, 1 Hz blink (1 s on, 1 s
-	  off) while at least one peer link — inbound or outbound — is up and
-	  exchanging beats/notifications.
+	  Drives the board LED(s) directly, independent of the Meshtastic
+	  app/config, to answer the bench's question at a glance: which of
+	  these identical boards is in a test, which is free, and which one is
+	  the node called rzr5. The host sets the mode from the bench's claims
+	  (`meshtastic led mode ...`, tools/leds.sh); the node remembers it.
 
-	  A bench-visibility aid for the node-to-node BLE peer link
-	  (CONFIG_MESHTASTIC_BLE_PEER), built to answer "which of these boards
-	  are actually meshing over Bluetooth right now" at a glance, without a
-	  console open on every one of them.
+	    idle     slow blink (red on a XIAO)       -- free, available
+	    in-use   solid green on a XIAO, off on a one-LED board
+	    locate   fast blink (blue on a XIAO) for a while, then back
+	    off      dark
+
+	  A board with green and blue LEDs (led1/led2, the XIAO's RGB) uses the
+	  colours; a board with one LED (the Heltecs' white led0) uses the
+	  patterns alone.
 
 	  Mutually exclusive with CONFIG_MESHTASTIC_EXTNOTIFY: both want sole
-	  ownership of led0, and this module does not arbitrate with it. Turn
-	  extnotify off in the same build to use this.
+	  ownership of led0, and this module does not arbitrate with it.
 
 if MESHTASTIC_LED_STATUS
 
-config MESHTASTIC_LED_STATUS_TICK_MS
-	int "Poll/toggle tick (ms)"
-	default 1000
-	range 100 5000
+config MESHTASTIC_LED_STATUS_LOCATE_SEC
+	int "Default locate duration (s)"
+	default 30
+	range 1 600
 	help
-	  How often the peer-link state is checked, and — while meshing — the
-	  half-period of the blink. 1000 ms gives the documented 1 s on / 1 s
-	  off pattern. A shorter tick makes the "solid -> blink" transition
-	  snappier at the cost of more frequent GPIO writes; both are cheap.
+	  How long `meshtastic led locate` blinks when no duration is given.
 
 endif # MESHTASTIC_LED_STATUS

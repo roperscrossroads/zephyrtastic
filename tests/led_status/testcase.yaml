@@ -1,0 +1,25 @@
+common:
+  tags:
+    - meshtastic
+    - native_sim
+    - led_status
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # A one-LED board (the Heltecs' white led0): patterns only.
+  meshtastic.led_status.mono.native_sim: {}
+  # The XIAO's RGB: colours.
+  meshtastic.led_status.rgb.native_sim:
+    extra_args:
+      - EXTRA_DTC_OVERLAY_FILE=boards/rgb.overlay
+  # The mode survives a reboot (mtled/mode) on real NVS.
+  meshtastic.led_status.settings.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS_NVS=y

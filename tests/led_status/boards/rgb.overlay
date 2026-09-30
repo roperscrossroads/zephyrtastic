@@ -1,0 +1,23 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+/* The XIAO's shape: led0 red, led1 green, led2 blue, all active low, on the
+ * emulated GPIO controller next to native_sim's own led0. */
+/ {
+	aliases {
+		led0 = &rgb_red;
+		led1 = &rgb_green;
+		led2 = &rgb_blue;
+	};
+
+	rgb_leds {
+		compatible = "gpio-leds";
+		rgb_red: rgb_red {
+			gpios = <&gpio0 10 GPIO_ACTIVE_LOW>;
+		};
+		rgb_green: rgb_green {
+			gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
+		};
+		rgb_blue: rgb_blue {
+			gpios = <&gpio0 12 GPIO_ACTIVE_LOW>;
+		};
+	};
+};

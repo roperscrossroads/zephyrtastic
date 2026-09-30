@@ -80,6 +80,9 @@
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
 #include "meshtastic_attachment.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_LED_STATUS)
+#include "meshtastic_led_status.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
 #include "meshtastic_attachment_head.h"
 #endif
@@ -3733,6 +3736,68 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_attach_forget, 2, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_ATTACHMENT_BRAIN */
+
+#if defined(CONFIG_MESHTASTIC_LED_STATUS)
+/* `meshtastic led`: the bench LED (meshtastic_led_status.h) -- is this board
+ * in use, and which one is it. The host sets the mode from the bench's claims. */
+static int cmd_led_show(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t left = meshtastic_led_status_locate_left();
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	shell_print(sh, "mode: %s  (%s)", meshtastic_led_mode_name(meshtastic_led_status_get_mode()),
+		    meshtastic_led_status_has_color() ? "RGB: idle red, in-use green, locate blue"
+						      : "one LED: idle slow blink, in-use off, "
+							"locate fast blink");
+	if (left != 0U) {
+		shell_print(sh, "locating: %u s left", left);
+	}
+	return 0;
+}
+
+static int cmd_led_mode(const struct shell *sh, size_t argc, char **argv)
+{
+	enum meshtastic_led_mode m;
+
+	ARG_UNUSED(argc);
+	if (strcmp(argv[1], "idle") == 0) {
+		m = MESHTASTIC_LED_IDLE;
+	} else if (strcmp(argv[1], "in-use") == 0) {
+		m = MESHTASTIC_LED_IN_USE;
+	} else if (strcmp(argv[1], "off") == 0) {
+		m = MESHTASTIC_LED_OFF;
+	} else {
+		shell_error(sh, "mode: idle, in-use or off");
+		return -EINVAL;
+	}
+	(void)meshtastic_led_status_set_mode(m);
+	shell_print(sh, "mode: %s (saved)", meshtastic_led_mode_name(m));
+	return 0;
+}
+
+static int cmd_led_locate(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t s = (argc > 1) ? (uint32_t)strtoul(argv[1], NULL, 10)
+				: CONFIG_MESHTASTIC_LED_STATUS_LOCATE_SEC;
+
+	meshtastic_led_status_locate(s);
+	if (s == 0U) {
+		shell_print(sh, "locate: stopped");
+	} else {
+		shell_print(sh, "locate: %u s", s);
+	}
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	meshtastic_led_cmds,
+	SHELL_CMD_ARG(mode, NULL, SHELL_HELP("Set and save the mode.", "<idle|in-use|off>"),
+		      cmd_led_mode, 2, 0),
+	SHELL_CMD_ARG(locate, NULL, SHELL_HELP("Blink \"here I am\"; 0 stops.", "[seconds]"),
+		      cmd_led_locate, 1, 1),
+	SHELL_SUBCMD_SET_END);
+#endif /* CONFIG_MESHTASTIC_LED_STATUS */
 
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
 /* `meshtastic attach` on a keyless head (ATTACHMENT-DESIGN S5): whose radio
@@ -7596,6 +7661,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(attach, &meshtastic_attach_head_cmds,
 		  SHELL_HELP("This keyless radio head: show, brain, status.", NULL),
 		  cmd_attach_head_show),
+#endif
+#if defined(CONFIG_MESHTASTIC_LED_STATUS)
+	SHELL_CMD(led, &meshtastic_led_cmds,
+		  SHELL_HELP("Bench LED: show, mode, locate.", NULL), cmd_led_show),
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY)
 	SHELL_CMD(relay, &meshtastic_relay_cmds,
