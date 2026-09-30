@@ -5,7 +5,7 @@
 #   target_sources(app PRIVATE ${ATTACH_PIPE_SOURCES})
 #   target_include_directories(app PRIVATE ${ATTACH_PIPE_INCLUDE})
 set(ATTACH_PIPE_DIR ${CMAKE_CURRENT_LIST_DIR})
-set(ATTACH_PIPE_SOURCES ${ATTACH_PIPE_DIR}/attach_pipe.c)
+set(ATTACH_PIPE_SOURCES ${ATTACH_PIPE_DIR}/attach_pipe.c ${ATTACH_PIPE_DIR}/attach_pipe_radio.c)
 set(ATTACH_PIPE_INCLUDE ${ATTACH_PIPE_DIR})
 # The socket half runs against the HOST's libc, outside the Zephyr image.
 target_sources(native_simulator INTERFACE ${ATTACH_PIPE_DIR}/attach_pipe_bottom.c)

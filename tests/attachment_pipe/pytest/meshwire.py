@@ -50,14 +50,15 @@ def data_pb(portnum, payload):
 
 
 def airframe(sender, packet_id, text, *, dest=BROADCAST, preset=MEDIUM_FAST, hop_limit=3,
-             hop_start=3, relay_node=None, name=None, key=DEFAULT_KEY, want_ack=False):
+             hop_start=3, relay_node=None, name=None, key=DEFAULT_KEY, want_ack=False,
+             port=PORT_TEXT):
     """A text message as a stock node on @p preset would send it on its
     default (unnamed) channel: a broadcast, or with @p dest a channel DM."""
     ch = channel_hash(name if name is not None else PRESET_NAMES[preset], key)
     flags = (hop_limit & 7) | ((hop_start & 7) << 5) | (0x08 if want_ack else 0)
     relay = (sender & 0xFF) if relay_node is None else relay_node
     hdr = struct.pack("<IIIBBBB", dest, sender, packet_id, flags, ch, 0, relay)
-    return hdr + encrypt(key, packet_id, sender, data_pb(PORT_TEXT, text.encode()))
+    return hdr + encrypt(key, packet_id, sender, data_pb(port, text.encode()))
 
 
 # ---- attachment envelopes (meshtastic_attachment_codec.h) -------------------

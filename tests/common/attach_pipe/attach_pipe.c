@@ -28,6 +28,7 @@ static struct {
 	struct pipe_link links[PIPE_LINKS_MAX];
 	attach_pipe_rf_cb rf;
 	attach_pipe_cmd_cb cmd;
+	attach_pipe_wire_cb wire;
 	uint8_t rx[2U * (PIPE_HDR_LEN + PIPE_BODY_MAX)];
 	size_t rx_len;
 	uint32_t crc_errors;
@@ -78,7 +79,7 @@ static struct pipe_link *link_find_locked(uint32_t peer)
 	return NULL;
 }
 
-static int pipe_send(uint32_t peer, const uint8_t *env, size_t len)
+static bool link_up(uint32_t peer)
 {
 	bool up;
 
@@ -87,7 +88,26 @@ static int pipe_send(uint32_t peer, const uint8_t *env, size_t len)
 
 	up = (l != NULL) && l->info.up;
 	k_mutex_unlock(&pipe_lock);
-	if (!up) {
+	return up;
+}
+
+int attach_pipe_send_wire(uint32_t peer, const uint8_t *wire, size_t len)
+{
+	if (!link_up(peer)) {
+		return -EHOSTUNREACH;
+	}
+	return pipe_write(ATTACH_PIPE_WIRE, peer, wire, len);
+}
+
+void attach_pipe_set_wire_cb(attach_pipe_wire_cb cb)
+{
+	pipe.wire = cb;
+}
+
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+static int pipe_send(uint32_t peer, const uint8_t *env, size_t len)
+{
+	if (!link_up(peer)) {
 		return -EHOSTUNREACH;
 	}
 	return pipe_write(ATTACH_PIPE_ENV, peer, env, len);
@@ -113,6 +133,7 @@ const struct meshtastic_attach_bearer attach_pipe_bearer = {
 	.send = pipe_send,
 	.link_info = pipe_link_info,
 };
+#endif /* CONFIG_MESHTASTIC_ATTACH_BEARER */
 
 /* ---- RX -------------------------------------------------------------------- */
 
@@ -146,6 +167,7 @@ static void on_link(uint32_t peer, const uint8_t *p, size_t len)
 		l->info.rtt_ms = sys_get_le16(&p[3]);
 	}
 	k_mutex_unlock(&pipe_lock);
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
 	if (l != NULL && was_up && !up) {
 		meshtastic_attach_bearer_link_down(&attach_pipe_bearer, peer);
 	}
@@ -154,6 +176,7 @@ static void on_link(uint32_t peer, const uint8_t *p, size_t len)
 		 * brain comes up, as over BLE. */
 		meshtastic_attach_bearer_link_up(&attach_pipe_bearer, peer);
 	}
+#endif
 }
 
 static void on_frame(const uint8_t *body, size_t len)
@@ -165,13 +188,24 @@ static void on_frame(const uint8_t *body, size_t len)
 
 	switch (kind) {
 	case ATTACH_PIPE_ENV: {
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
 		int ret = meshtastic_attach_bearer_rx(&attach_pipe_bearer, peer, p, plen);
+#else
+		/* No attachment code in this image (the relay's receiving half):
+		 * an envelope has nowhere to go, as over BLE. */
+		int ret = -ENOTSUP;
+#endif
 
 		if (ret < 0) {
 			attach_pipe_event("pipe env_rx peer=%08x rc=%d", peer, ret);
 		}
 		break;
 	}
+	case ATTACH_PIPE_WIRE:
+		if (pipe.wire != NULL) {
+			pipe.wire(peer, p, plen);
+		}
+		break;
 	case ATTACH_PIPE_LINK:
 		on_link(peer, p, plen);
 		break;
@@ -287,7 +321,6 @@ int attach_pipe_start(enum attach_pipe_role role, uint32_t node, attach_pipe_rf_
 {
 	const char *path = attach_pipe_getenv("ATTACH_PIPE_SOCK", NULL);
 	const uint8_t hello = (uint8_t)role;
-	int ret;
 
 	if (path == NULL) {
 		return -EINVAL;
@@ -298,10 +331,13 @@ int attach_pipe_start(enum attach_pipe_role role, uint32_t node, attach_pipe_rf_
 	}
 	pipe.rf = rf;
 	pipe.cmd = cmd;
-	ret = meshtastic_attach_bearer_register(&attach_pipe_bearer);
+#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+	int ret = meshtastic_attach_bearer_register(&attach_pipe_bearer);
+
 	if (ret < 0) {
 		return ret;
 	}
+#endif
 	k_thread_create(&pipe_thread, pipe_stack, K_THREAD_STACK_SIZEOF(pipe_stack), pipe_thread_fn,
 			NULL, NULL, NULL, K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
 	k_thread_name_set(&pipe_thread, "attach_pipe");

@@ -23,7 +23,7 @@ import time
 
 from meshwire import us_tuning
 
-ENV, HELLO, LINK, RF, CMD, EVENT = range(6)
+ENV, HELLO, LINK, RF, CMD, EVENT, WIRE = range(7)
 AUTH_NONE, AUTH_PHYSICAL, AUTH_ENCRYPTED = range(3)
 
 
@@ -76,6 +76,8 @@ class Hub:
         self.knobs = {}             # (src, dst) -> dict(lat=(lo, hi) ms, loss=p)
         self.dropped = []           # (src, dst, env) the hub lost on purpose
         self.forwarded = []         # (src, dst, env)
+        self.wires_forwarded = []   # (src, dst, wire): bare peer-link frames
+        self.wires_dropped = []
         self.q = []                 # (due, seq, conn, data)
         self.seq = 0
         self.rng = random.Random(1234)
@@ -134,18 +136,22 @@ class Hub:
             with self.cond:
                 self.events.setdefault(c.node, []).append((time.monotonic(), line))
                 self.cond.notify_all()
-        elif kind == ENV:
-            self._route(c.node, peer, payload)
+        elif kind in (ENV, WIRE):
+            self._route(c.node, peer, payload, kind)
 
-    def _route(self, src, dst, env):
+    def _route(self, src, dst, env, kind=ENV):
+        """Envelopes (ENV) and bare peer-link frames (WIRE) take the same
+        knobs; forwarded/dropped hold envelopes, wires_* the bare frames."""
         k = self.knobs.get((src, dst), {})
+        lost, sent = (self.dropped, self.forwarded) if kind == ENV else \
+            (self.wires_dropped, self.wires_forwarded)
         if self.rng.random() < k.get("loss", 0.0):
-            self.dropped.append((src, dst, env))
+            lost.append((src, dst, env))
             return
         lo, hi = k.get("lat", (0, 0))
         due = time.monotonic() + self.rng.uniform(lo, hi) / 1000.0
-        self.forwarded.append((src, dst, env))
-        self._schedule(due, dst, frame(ENV, src, env))
+        sent.append((src, dst, env))
+        self._schedule(due, dst, frame(kind, src, env))
 
     def _schedule(self, due, dst, data):
         with self.cond:
@@ -199,17 +205,19 @@ class Hub:
         with self.cond:
             self.cond.notify_all()
 
-    def link(self, a, b, up=True, auth=AUTH_ENCRYPTED, lat=(0, 0), loss=0.0):
-        """A link between a and b: tell both ends, set both directions' knobs."""
+    def link(self, a, b, up=True, auth=AUTH_ENCRYPTED, lat=(0, 0), loss=0.0, takes_env=True):
+        """A link between a and b: tell both ends, set both directions' knobs.
+        @p takes_env is what each end learns about the other (on BLE, the
+        peer's beat ATTACH flag): a brain says yes, a relay half no."""
         for x, y in ((a, b), (b, a)):
             self.knobs[(x, y)] = {"lat": lat, "loss": loss}
-            self.tell_link(x, y, up, auth)
+            self.tell_link(x, y, up, auth, takes_env=takes_env)
 
-    def tell_link(self, node, peer, up=True, auth=AUTH_ENCRYPTED, rtt_ms=0):
+    def tell_link(self, node, peer, up=True, auth=AUTH_ENCRYPTED, rtt_ms=0, takes_env=True):
         c = self.nodes.get(node)
         if c is None:
             raise KeyError(f"{node:08x} is not connected to the hub")
-        c.send(frame(LINK, peer, struct.pack("<BBBH", int(up), auth, 1, rtt_ms)))
+        c.send(frame(LINK, peer, struct.pack("<BBBH", int(up), auth, int(takes_env), rtt_ms)))
 
     def rf(self, node, preset, rssi, snr, wire, tuning=None):
         """@p node's radio hears @p wire, sent on @p tuning (freq_hz, sf,
