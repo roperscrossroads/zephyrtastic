@@ -128,9 +128,11 @@ static void on_cmd(const char *cmd)
 				continue;
 			}
 			attach_pipe_event("attach id=%u node=%08x preset=%u rx=%u dropped=%u "
-					  "rejected=%u rssi=%d snr=%d up=%d status=%d",
+					  "rejected=%u rssi=%d snr=%d up=%d status=%d lag_n=%u "
+					  "lag_p50=%u lag_p90=%u fast_head=%d lag_warn=%d",
 					  id, a.node, a.preset, a.rx_frames, a.rx_dropped, a.rejected,
-					  a.last_rssi, a.last_snr, a.link_up, a.have_status);
+					  a.last_rssi, a.last_snr, a.link_up, a.have_status, a.lag_n,
+					  a.lag_p50_ms, a.lag_p90_ms, a.warn_fast_head, a.warn_lag);
 		}
 		attach_pipe_event("attach end count=%u", meshtastic_attachment_count());
 	} else if (strcmp(cmd, "stats") == 0) {
@@ -181,7 +183,11 @@ static int role_start(uint32_t node)
 
 	meshtastic_set_recv_cb(on_recv);
 	set_default_primary();
-	ret = meshtastic_preset_switch(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO, NULL);
+	/* ShortTurbo unless the test says otherwise (ATTACH_PIPE_PRESET). */
+	ret = meshtastic_preset_switch(
+		(meshtastic_Config_LoRaConfig_ModemPreset)env_hex(
+			"ATTACH_PIPE_PRESET", meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO),
+		NULL);
 	if (ret != 0) {
 		return ret;
 	}

@@ -20,4 +20,5 @@ tests:
       pytest_root:
         - "pytest/test_attach_pipe.py"
         - "pytest/test_attach_pipe_timing.py"
+        - "pytest/test_attach_pipe_guard.py"
     timeout: 300

@@ -142,12 +142,11 @@ def test_x4_head_restart(hub, images):
     assert attach_rows(hub)[HEAD1]["up"] == "0"
 
     pair(hub, images)
-    # The restarted head's first STATUS goes out at boot, before it has a
-    # link, and is lost; the brain learns it is back from the next one (the
-    # STATUS period, 5 s in this build, 60 s on hardware).
-    deadline = time.time() + 12
+    # The restarted head introduces itself with STATUS when its link comes up,
+    # not at the next STATUS period (5 s here, 60 s on hardware).
+    deadline = time.time() + 2
     while attach_rows(hub).get(HEAD1, {}).get("up") != "1" and time.time() < deadline:
-        time.sleep(0.5)
+        time.sleep(0.2)
     assert attach_rows(hub)[HEAD1]["up"] == "1", "the restarted head never reached the brain"
 
     m = hub.mark(BRAIN)

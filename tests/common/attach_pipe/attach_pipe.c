@@ -149,6 +149,11 @@ static void on_link(uint32_t peer, const uint8_t *p, size_t len)
 	if (l != NULL && was_up && !up) {
 		meshtastic_attach_bearer_link_down(&attach_pipe_bearer, peer);
 	}
+	if (l != NULL && !was_up && up) {
+		/* A head introduces itself (STATUS) the moment its link to the
+		 * brain comes up, as over BLE. */
+		meshtastic_attach_bearer_link_up(&attach_pipe_bearer, peer);
+	}
 }
 
 static void on_frame(const uint8_t *body, size_t len)

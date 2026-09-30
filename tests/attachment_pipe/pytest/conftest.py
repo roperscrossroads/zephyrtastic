@@ -76,8 +76,9 @@ def pytest_runtest_makereport(item, call):
     setattr(item, "rep_" + rep.when, rep)
 
 
-def start_brain(hub, images):
-    return hub.start(images["brain"], BRAIN, name="brain")
+def start_brain(hub, images, preset=None):
+    env = {} if preset is None else {"ATTACH_PIPE_PRESET": f"{preset:x}"}
+    return hub.start(images["brain"], BRAIN, name="brain", extra_env=env)
 
 
 def start_head(hub, images, node, preset, brain=BRAIN):
