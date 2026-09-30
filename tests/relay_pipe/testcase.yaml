@@ -1,0 +1,21 @@
+common:
+  tags:
+    - meshtastic
+    - lora_sim
+    - native_sim
+    - relay
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # The cross-preset relay's bench pair as two images (sysbuild builds both):
+  # a real ear and a real receiving half, joined through the attachment pipe.
+  # The pytest driver is the hub, as for tests/attachment_pipe.
+  meshtastic.relay_pipe.native_sim:
+    sysbuild: true
+    harness: pytest
+    harness_config:
+      pytest_root:
+        - "pytest/test_relay_pipe.py"
+    timeout: 300
