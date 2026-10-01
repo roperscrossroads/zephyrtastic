@@ -137,9 +137,17 @@ struct meshtastic_attachment_policy {
 	int8_t tx_power;  /* dBm at the antenna, 0 = the region's maximum */
 };
 
+/* TX_RESULT rc for a relay the head withdrew -- a copy heard, or the brain's
+ * CANCEL -- which is the system working, not a failure. A code of its own
+ * because rc is one byte: -ECANCELED is -140 on the boards (picolibc), so it
+ * used to clamp to -127 and be counted as a failure, while on native_sim the
+ * host's 125 fit and no test saw it (agents-pcs2.4). Other errnos still travel
+ * as -errno, clamped to -127. */
+#define MESHTASTIC_ATTACHMENT_RC_CANCELLED (-128)
+
 struct meshtastic_attachment_tx_result {
 	uint16_t tx_seq;
-	int8_t rc;
+	int8_t rc; /* 0, -errno clamped to -127, or MESHTASTIC_ATTACHMENT_RC_CANCELLED */
 	uint8_t defers;
 	uint32_t tx_ms;
 	/* Appended (DESIGN §13): for a RELAY, the head's clock at TX_FRAME arrival

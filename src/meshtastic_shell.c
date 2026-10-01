@@ -3655,8 +3655,10 @@ static int cmd_attach_status(const struct shell *sh, size_t argc, char **argv)
 			    a.lat_n, a.lat_min_ms, a.lat_sum_ms / a.lat_n, a.lat_max_ms);
 	}
 	if (a.id != 0U) {
-		shell_print(sh, "  tx: handed %u (seq %u)  results %u  failed %u  last rc %d after %u defers%s",
-			    a.tx_frames, a.tx_seq, a.tx_results, a.tx_failed, a.last_tx_rc,
+		shell_print(sh, "  tx: handed %u (seq %u)  results %u  cancelled %u  late %u  failed %u  "
+				"last rc %d after %u defers%s",
+			    a.tx_frames, a.tx_seq, a.tx_results, a.tx_cancelled, a.tx_late,
+			    a.tx_failed, a.last_tx_rc,
 			    a.last_tx_defers, meshtastic_attachment_tx_ready(a.id) ? "" : "  [not ready]");
 	}
 	return 0;

@@ -452,7 +452,8 @@ report:
 		if ((t.flags & MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT) != 0U && head.brain != 0U) {
 			const struct meshtastic_attachment_tx_result r = {
 				.tx_seq = t.tx_seq,
-				.rc = (int8_t)CLAMP(ret, -127, 127),
+				.rc = ret == -ECANCELED ? MESHTASTIC_ATTACHMENT_RC_CANCELLED
+							: (int8_t)CLAMP(ret, -127, 127),
 				.defers = t.defers,
 				.tx_ms = (uint32_t)k_uptime_get(),
 				.has_lag = is_relay,

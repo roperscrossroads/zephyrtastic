@@ -53,7 +53,9 @@ struct meshtastic_attachment_info {
 	uint16_t tx_seq;
 	int8_t last_tx_rc;
 	uint8_t last_tx_defers;
-	uint32_t tx_failed;   /* TX_RESULTs with rc != 0 */
+	uint32_t tx_failed;    /* TX_RESULTs that are a real failure */
+	uint32_t tx_cancelled; /* relays withdrawn on a heard copy or a CANCEL */
+	uint32_t tx_late;      /* relays dropped as stale on arrival (-ETIME) */
 	/* DESIGN §13: the peer link's cost per relay, as the head reports it in
 	 * TX_RESULT (arrival of the decision minus its reception of the frame, on
 	 * its clock). A 16-sample ring; p50/p90/max recomputed per sample. */

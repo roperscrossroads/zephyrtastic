@@ -412,7 +412,13 @@ int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, 
 		a->tx_results++;
 		a->last_tx_rc = msg.u.result.rc;
 		a->last_tx_defers = msg.u.result.defers;
-		if (msg.u.result.rc != 0) {
+		/* A withdrawn relay and a stale one are the relay rules at work, not
+		 * the head failing to transmit: counted apart, so 'failed' means it. */
+		if (msg.u.result.rc == MESHTASTIC_ATTACHMENT_RC_CANCELLED) {
+			a->tx_cancelled++;
+		} else if (msg.u.result.rc == -ETIME) {
+			a->tx_late++;
+		} else if (msg.u.result.rc != 0) {
 			a->tx_failed++;
 		}
 		if (msg.u.result.has_lag) {

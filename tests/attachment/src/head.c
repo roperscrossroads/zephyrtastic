@@ -655,7 +655,7 @@ ZTEST(attachment_head, test_relay_cancels_or_clamps_on_a_copy_heard_first)
 		(uint8_t)((((struct meshtastic_wire_header *)wire)->flags & ~MESHTASTIC_FLAGS_HOP_LIMIT_MASK) | 2U);
 	zassert_ok(lora_sim_inject(lora_dev, wire, sizeof(wire), -70, 9), "a peer relayed it first");
 	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(2)), "that copy is forwarded too");
-	expect_result(22U, -ECANCELED);
+	expect_result(22U, MESHTASTIC_ATTACHMENT_RC_CANCELLED);
 	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing keyed up");
 	meshtastic_attachment_head_stats_get(&st);
 	zassert_equal(st.tx_cancelled, 1U);
@@ -697,7 +697,7 @@ ZTEST(attachment_head, test_tx_cancel_withdraws_a_relay)
 	zassert_equal(meshtastic_attach_bearer_rx(&test_bearer, STRANGER, env, (size_t)elen), -EPERM,
 		      "only the brain withdraws");
 	zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)elen));
-	expect_result(24U, -ECANCELED);
+	expect_result(24U, MESHTASTIC_ATTACHMENT_RC_CANCELLED);
 	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "withdrawn");
 }
 
@@ -798,7 +798,9 @@ static void expect_result_skipping_status(uint16_t seq, int rc)
 			continue;
 		}
 		zassert_equal(msg.u.result.tx_seq, seq, "seq %u, got %u", seq, msg.u.result.tx_seq);
-		zassert_equal(msg.u.result.rc, (int8_t)CLAMP(rc, -127, 127), "rc %d, got %d", rc,
+		zassert_equal(msg.u.result.rc,
+			      rc == MESHTASTIC_ATTACHMENT_RC_CANCELLED ? rc : (int8_t)CLAMP(rc, -127, 127),
+			      "rc %d, got %d", rc,
 			      (int)msg.u.result.rc);
 		return;
 	}
@@ -844,7 +846,7 @@ ZTEST(attachment_head, test_zz_late_client_relay_applies_its_own_cancel_test)
 	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(2)), "that copy is forwarded too");
 	k_msleep(window / 2U + 30U);
 	zassert_ok(hand_relay(wire, sizeof(wire), rx_ms, window, MESHTASTIC_ATTACHMENT_DUPE_CANCEL, 25U));
-	expect_result_skipping_status(25U, -ECANCELED);
+	expect_result_skipping_status(25U, MESHTASTIC_ATTACHMENT_RC_CANCELLED);
 	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing keyed up");
 
 	/* (c) Past orig_rx + 2 * worst: stale, dropped. */

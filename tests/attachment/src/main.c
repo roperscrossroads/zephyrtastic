@@ -1054,6 +1054,29 @@ ZTEST(attachment, test_tx_through_a_head_leaves_as_tx_frame)
 	zassert_equal(a.last_tx_defers, 1U);
 	zassert_equal(a.tx_failed, 0U);
 
+	/* agents-pcs2.4: a withdrawn relay and a stale one are the relay rules at
+	 * work, counted apart; only a real error is a failure. */
+	{
+		static const int8_t rcs[] = {MESHTASTIC_ATTACHMENT_RC_CANCELLED, -ETIME, -EIO};
+		uint32_t c0 = a.tx_cancelled, l0 = a.tx_late, f0 = a.tx_failed;
+
+		for (size_t i = 0; i < ARRAY_SIZE(rcs); i++) {
+			uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+			const struct meshtastic_attachment_tx_result r = {
+				.tx_seq = a.tx_seq, .rc = rcs[i], .tx_ms = 1235U,
+			};
+			int elen = meshtastic_attachment_encode_tx_result(&r, env, sizeof(env));
+
+			zassert_true(elen > 0);
+			zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, HEAD1_NODE, env,
+							       (size_t)elen));
+		}
+		zassert_true(meshtastic_attachment_get(1U, &a));
+		zassert_equal(a.tx_cancelled, c0 + 1U, "cancelled");
+		zassert_equal(a.tx_late, l0 + 1U, "late");
+		zassert_equal(a.tx_failed, f0 + 1U, "only -EIO is a failure");
+	}
+
 	/* The twin: attachment 0 is our own radio. */
 	build_frame(TEST_NODE_ID, FAR_NODE_ID, 0x1C02U, "local", wire, &len);
 	before = sent.count;
