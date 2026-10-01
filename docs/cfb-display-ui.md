@@ -76,7 +76,7 @@ Pages (all read-only):
 
 | Page | Shows | Source |
 |---|---|---|
-| Device | `<short> H<hop>` · `ID xxxxxxxx` · `F<MHz> <chan>` | `meshtastic_short_name()`, `meshtastic_get_node_id()`, `meshtastic_runtime_frequency/channel_name/hop_limit()` |
+| Device | `<short>` · `ID xxxxxxxx` · `F<MHz> <chan>` | `meshtastic_short_name()`, `meshtastic_get_node_id()`, `meshtastic_runtime_frequency/channel_name()` |
 | Nodes | count, then `<cursor><*fav><short> <±snr>` per node; long-press for detail | `meshtastic_nodedb_count()` / `…_get_by_index()` |
 | ↳ node detail | long name · `<id> <role>` · `<±snr> h<hops> M K` | `meshtastic_nodedb_get_by_index()` (long_name, num, role, snr, hops, via_mqtt, public_key) |
 | Status | `TX` · `RX` · `RSSI` · uptime + `BLE` flag | `meshtastic_get_status()`, `k_uptime_get()` |

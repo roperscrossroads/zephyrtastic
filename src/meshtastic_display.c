@@ -130,8 +130,7 @@ static void page_device(void)
 	const char *ch = meshtastic_runtime_channel_name();
 	uint32_t freq = meshtastic_runtime_frequency();
 
-	draw_row(0, "%s H%u", (sn && sn[0]) ? sn : "Meshtastic",
-		 meshtastic_runtime_hop_limit());
+	draw_row(0, "%s", (sn && sn[0]) ? sn : "Meshtastic");
 	draw_row(1, "ID %08X", meshtastic_get_node_id());
 	draw_row(2, "F%u.%u %s", freq / 1000000U, (freq % 1000000U) / 100000U,
 		 (ch && ch[0]) ? ch : "-");
