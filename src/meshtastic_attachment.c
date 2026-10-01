@@ -237,6 +237,16 @@ static bool role_relays_early(void)
 	       r == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE;
 }
 
+/* The LAG guard: under a role that relays early, a lag p90 over half the
+ * preset's ROUTER window. Role-dependent, so it is judged when read as well as
+ * when a sample lands -- a brain whose role went back to CLIENT must stop
+ * showing LAG without waiting for the next relay (agents-pcs2.5). */
+static bool lag_bites(const struct meshtastic_attachment_info *a)
+{
+	return a->lag_n != 0U && role_relays_early() && a->preset != MESHTASTIC_PRESET_UNKNOWN &&
+	       (uint32_t)a->lag_p90_ms > router_window_ms(a->preset) / 2U;
+}
+
 /* Recompute the ring's p50/p90/max and the LAG guard, tab_lock held. */
 static void lag_recompute_locked(struct meshtastic_attachment_info *a)
 {
@@ -261,8 +271,7 @@ static void lag_recompute_locked(struct meshtastic_attachment_info *a)
 	a->lag_p50_ms = v[(n - 1U) / 2U];
 	a->lag_p90_ms = v[((n * 9U + 9U) / 10U) - 1U]; /* ceil(0.9 n) - 1: the 2nd largest of 16 */
 	a->lag_max_ms = v[n - 1U];
-	a->warn_lag = role_relays_early() && a->preset != MESHTASTIC_PRESET_UNKNOWN &&
-		      (uint32_t)a->lag_p90_ms > router_window_ms(a->preset) / 2U;
+	a->warn_lag = lag_bites(a);
 	if (a->warn_lag && !a->warned_lag) {
 		a->warned_lag = true;
 		LOG_WRN("attach %u: link lag p90 %u ms is over half the preset-%u ROUTER window (%u ms) "
@@ -486,6 +495,7 @@ bool meshtastic_attachment_get(uint8_t id, struct meshtastic_attachment_info *ou
 	k_mutex_lock(&tab_lock, K_FOREVER);
 	if (used[id]) {
 		*out = tab[id];
+		out->warn_lag = lag_bites(out);
 		if (id == 0U) {
 			out->preset = (uint8_t)mt.modem_preset;
 			out->last_rssi = mt.status.last_rssi;

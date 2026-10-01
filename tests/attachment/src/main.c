@@ -1554,6 +1554,14 @@ ZTEST(attachment, test_guard_flags_link_lag_over_half_the_router_window_for_a_ro
 	head_reports_lag(HEAD1_NODE, 16U, 40U);
 	zassert_true(attach_info_for(HEAD1_NODE, &a));
 	zassert_true(a.warn_lag, "40 ms p90 > 30 ms (half of MediumFast's 60 ms ROUTER window)");
+	/* Back to CLIENT: the flag goes with the role, no new sample needed
+	 * (agents-pcs2.5 -- it used to stay set until the next relay). */
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
+	zassert_true(attach_info_for(HEAD1_NODE, &a));
+	zassert_false(a.warn_lag, "CLIENT again: LAG clears on read");
+	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
+	zassert_true(attach_info_for(HEAD1_NODE, &a));
+	zassert_true(a.warn_lag, "and returns with ROUTER");
 	/* An older head's 9-byte result still decodes and adds no sample. */
 	zassert_equal(meshtastic_attachment_encode_tx_result(&old_head, env, sizeof(env)),
 		      (int)MESHTASTIC_ATTACHMENT_TX_RESULT_LEN);
