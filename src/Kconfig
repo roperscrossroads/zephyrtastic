@@ -110,10 +110,18 @@ rsource "Kconfig.storage"
 menuconfig MESHTASTIC_SETTINGS
 	bool "Persist Meshtastic configuration with Zephyr settings"
 	select SETTINGS
+	imply SETTINGS_NVS_NAME_CACHE
+	imply NVS_LOOKUP_CACHE
 	help
 	  Store Meshtastic owner, channel, config and module settings through
 	  Zephyr's settings subsystem. The selected settings backend remains
 	  controlled by the application or board configuration.
+
+	  Implies the two NVS caches (agents-pcs2.1). Without them every key a
+	  save writes scans every stored name (settings_nvs_save), and every one
+	  of those reads walks the NVS log backwards (nvs_read): a whole-config
+	  save froze an ESP32 node for 17-27 s and a XIAO for ~6 s, LoRa, BLE and
+	  shell included, because each ESP32 flash op also masks interrupts.
 
 if MESHTASTIC_SETTINGS
 
