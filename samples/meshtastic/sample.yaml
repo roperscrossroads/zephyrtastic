@@ -111,6 +111,14 @@ tests:
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+  sample.meshtastic.fleet.c4.brain:
+    # Class 4 as a brain (rig B): the V4 member plus overlay-attachment-brain.conf.
+    tags: [meshtastic, fleet]
+    platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    extra_args:
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-attachment-brain.conf"
+      - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
   sample.meshtastic.fleet.c4.no_reboot_trace:
     # MESHTASTIC_REBOOT_TRACE=n: the admin, fatal and watchdog paths called the note
     # function unguarded, and native_sim compiles none of them.
@@ -162,6 +170,15 @@ tests:
     integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-ota-shell.conf;overlay-smp-central.conf;overlay-depot.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf"
+      - "EXTRA_DTC_OVERLAY_FILE=depot.overlay"
+  sample.meshtastic.fleet.c2.brain:
+    # Class 2 as a brain (rig A): the courier plus overlay-attachment-brain.conf. The image
+    # that overflowed dram0 by 560 B on 2026-10-01 with no lane scenario to catch it (agents-pcs2.7).
+    tags: [meshtastic, fleet]
+    platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    extra_args:
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-ota-shell.conf;overlay-smp-central.conf;overlay-depot.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-attachment-brain.conf"
       - "EXTRA_DTC_OVERLAY_FILE=depot.overlay"
   sample.meshtastic.fleet.c6:
     # Class 6, V4-R8 cluster member.
