@@ -5706,6 +5706,45 @@ static int cmd_crashinfo(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+/* `meshtastic lora power <dBm>`: this node's own transmit power, at the
+ * antenna, from its console. Until 2026-10-01 only the phone API could set
+ * it -- a brain could set a head's (`attach power`) but nothing could set its
+ * own without a BLE config write, which is how the bench's brains sat at
+ * 14 dBm while every head was at 2. Same pattern as the head's SET_POLICY:
+ * read the LoRa section, change the field, write it back -- applied now,
+ * persisted, region-clamped by the store. 0 = the region's maximum. */
+static int cmd_lora_power_set(const struct shell *sh, const char *arg)
+{
+	meshtastic_Config cfg;
+	char *end;
+	long dbm = strtol(arg, &end, 10);
+	int ret;
+
+	if (shell_config_write_refused(sh)) {
+		return -EACCES;
+	}
+	if (end == arg || *end != '\0' || dbm < 0 || dbm > 30) {
+		shell_error(sh, "usage: meshtastic lora power <0..30 dBm>  (0 = region maximum)");
+		return -EINVAL;
+	}
+	ret = meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg);
+	if (ret < 0) {
+		shell_error(sh, "lora get failed: %d", ret);
+		return ret;
+	}
+	cfg.which_payload_variant = meshtastic_Config_lora_tag;
+	cfg.payload_variant.lora.tx_power = (int32_t)dbm;
+	ret = meshtastic_config_store_set_config(&cfg);
+	if (ret < 0) {
+		shell_error(sh, "lora power set failed: %d", ret);
+		return ret;
+	}
+	cmd_lora_show(sh);
+	return 0;
+}
+#endif
+
 static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc == 1U) {
@@ -5713,8 +5752,9 @@ static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 		return 0;
 	}
 	if (argc != 3U ||
-	    (strcmp(argv[1], "preset") != 0 && strcmp(argv[1], "tx") != 0)) {
-		shell_error(sh, "usage: meshtastic lora [preset <name>] [tx on|off]");
+	    (strcmp(argv[1], "preset") != 0 && strcmp(argv[1], "tx") != 0 &&
+	     strcmp(argv[1], "power") != 0)) {
+		shell_error(sh, "usage: meshtastic lora [preset <name>] [tx on|off] [power <dBm>]");
 		return -EINVAL;
 	}
 #if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
@@ -5724,6 +5764,9 @@ static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 #else
 	if (strcmp(argv[1], "tx") == 0) {
 		return cmd_lora_tx_set(sh, argv[2]);
+	}
+	if (strcmp(argv[1], "power") == 0) {
+		return cmd_lora_power_set(sh, argv[2]);
 	}
 	return cmd_lora_preset_set(sh, argv[2]);
 #endif
@@ -7539,9 +7582,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  cmd_fleet_status),
 #endif
 	SHELL_CMD(lora, NULL,
-		  SHELL_HELP("Show or set the LoRa modem preset (reboot to apply) "
-			     "or the TX-enable switch (applies live).",
-			     "[preset <name>] [tx on|off]"),
+		  SHELL_HELP("Show or set the LoRa modem preset (reboot to apply), "
+			     "the TX-enable switch or the TX power (both apply live).",
+			     "[preset <name>] [tx on|off] [power <dBm>]"),
 		  cmd_lora),
 #if defined(CONFIG_MESHTASTIC_BOOTLOG)
 	SHELL_CMD(resets, NULL,

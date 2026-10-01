@@ -363,6 +363,37 @@ ZTEST(meshtastic_shell, test_lora_tx_seed_follows_kconfig)
 		      "seeded tx_enabled should match MESHTASTIC_TX_ENABLED_DEFAULT");
 }
 
+/* `lora power` sets this node's own transmit power from the console: stored,
+ * shown, and 0 restores the region maximum. Before it, only the phone API
+ * could, and the bench's brains sat at 14 dBm beside 2 dBm heads. */
+ZTEST(meshtastic_shell, test_lora_power_sets_stores_and_reads_back)
+{
+	meshtastic_Config cfg;
+	const char *out;
+	int32_t before;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg), "");
+	before = cfg.payload_variant.lora.tx_power;
+
+	zassert_ok(run_cmd("meshtastic lora power 2", &out), "power set failed");
+	zassert_not_null(strstr(out, "2 dBm at the antenna"), "show should say 2 dBm, got: %s", out);
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg), "");
+	zassert_equal(cfg.payload_variant.lora.tx_power, 2, "stored %d",
+		      (int)cfg.payload_variant.lora.tx_power);
+
+	zassert_not_equal(run_cmd("meshtastic lora power 31", NULL), 0, "above 30 is refused");
+	zassert_not_equal(run_cmd("meshtastic lora power x", NULL), 0, "a non-number is refused");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg), "");
+	zassert_equal(cfg.payload_variant.lora.tx_power, 2, "a refused value changes nothing");
+
+	zassert_ok(run_cmd("meshtastic lora power 0", &out), "");
+	zassert_not_null(strstr(out, "[region default]"), "0 is the region maximum, got: %s", out);
+
+	cfg.payload_variant.lora.tx_power = before;
+	cfg.which_payload_variant = meshtastic_Config_lora_tag;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "restore");
+}
+
 /* `lora tx off` is the safety switch for a node with damaged RF hardware
  * (agents-a4it.8): it must persist to the stored LoRaConfig, apply live (no
  * reboot — set_config runs apply_core), and read back as receive-only. */
