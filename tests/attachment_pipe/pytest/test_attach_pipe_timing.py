@@ -190,3 +190,45 @@ def test_x6f_two_heads_one_preset_relay_once(hub, images):
         tx1 = hub.lines(HEAD1, m1, rf"^tx src=0d0d0d0d .*id={pid:08x}")
         tx2 = hub.lines(HEAD2, m2, rf"^tx src=0d0d0d0d .*id={pid:08x}")
         assert len(tx1) + len(tx2) == 1, f"frame {pid:08x}: head1 sent {len(tx1)}, head2 sent {len(tx2)}"
+
+
+def head_tx_stats(hub, node):
+    line = hub.ask(node, "stats", r"^head ")
+    return {k: int(v) for k, v in (f.split("=") for f in line.split()[1:])}
+
+
+def test_x6g_a_deferred_client_relay_still_cancels_on_a_duplicate(hub, images):
+    """The channel is busy when the head's moment comes (a peer is on air), so
+    its listen-before-talk defers. A neighbour's relay of the SAME frame is
+    heard during the wait. The CLIENT relay must be cancelled, as the reference
+    cancels a packet still waiting in its queue -- not sent once the channel
+    clears (bench, 2026-09-30: a head sent the second relay in 3 of 24 floods).
+    Twin: the same deferral with no duplicate still sends, after the channel
+    clears -- the deferral path ran."""
+    setup(hub, images, 0, ROLE_CLIENT)
+
+    # Twin first: busy over the whole window, no duplicate -> deferred, then sent.
+    before = head_tx_stats(hub, HEAD1)
+    pid = 0x6A60
+    mh = hub.mark(HEAD1)
+    hub.rf(HEAD1, MEDIUM_FAST, -110, SNR, blind(pid))
+    hub.ask(HEAD1, "busy 600", r"^busy rc=0")
+    tx = hub.wait_event(HEAD1, rf"^tx src=0d0d0d0d .*id={pid:08x}", 4, since=mh)
+    after = head_tx_stats(hub, HEAD1)
+    assert after["tx_deferred"] > before["tx_deferred"], "the channel never deferred the relay"
+    time.sleep(0.5)
+
+    # The case: busy over the window, a neighbour's copy heard during it.
+    before = head_tx_stats(hub, HEAD1)
+    pid = 0x6A61
+    mh = hub.mark(HEAD1)
+    hub.rf(HEAD1, MEDIUM_FAST, -110, SNR, blind(pid))
+    hub.ask(HEAD1, "busy 600", r"^busy rc=0")
+    time.sleep(0.35)  # past the window's start (192 ms): the head is deferring
+    hub.rf(HEAD1, MEDIUM_FAST, -100, SNR, blind(pid, hop_limit=2, relay_node=0x55))
+    time.sleep(2.0)
+    after = head_tx_stats(hub, HEAD1)
+    assert hub.lines(HEAD1, mh, rf"^tx src=0d0d0d0d .*id={pid:08x}") == [], \
+        "a deferred CLIENT relay went out after a neighbour had relayed the frame"
+    assert after["tx_deferred"] > before["tx_deferred"], "the relay was never deferred"
+    assert after["tx_cancelled"] == before["tx_cancelled"] + 1, (before, after)

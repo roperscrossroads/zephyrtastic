@@ -151,16 +151,21 @@ static int role_start(uint32_t node)
 
 static void on_cmd(const char *cmd)
 {
-	if (strcmp(cmd, "stats") == 0) {
+	if (strncmp(cmd, "busy ", 5) == 0) {
+		/* Hold this radio's channel busy (LBT/CAD) for N ms: a peer on air. */
+		lora_sim_set_busy(lora_dev, (uint32_t)strtoul(&cmd[5], NULL, 10));
+		attach_pipe_event("busy rc=0");
+	} else if (strcmp(cmd, "stats") == 0) {
 		struct meshtastic_attachment_head_stats s;
 
 		meshtastic_attachment_head_stats_get(&s);
 		attach_pipe_event("head heard=%u forwarded=%u no_brain=%u queue_full=%u "
 				  "send_failed=%u status_sent=%u controls=%u refused=%u "
-				  "untrusted=%u rejected=%u preset=%u",
+				  "untrusted=%u rejected=%u preset=%u tx_sent=%u tx_deferred=%u "
+				  "tx_cancelled=%u",
 				  s.heard, s.forwarded, s.no_brain, s.queue_full, s.send_failed,
 				  s.status_sent, s.controls, s.refused, s.untrusted, s.rejected,
-				  mt.modem_preset);
+				  mt.modem_preset, s.tx_sent, s.tx_deferred, s.tx_cancelled);
 	} else {
 		attach_pipe_event("cmd unknown %s", cmd);
 	}

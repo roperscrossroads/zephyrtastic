@@ -418,6 +418,27 @@ static void head_tx_thread_fn(void *p1, void *p2, void *p3)
 			head.stats.tx_deferred++;
 			k_mutex_unlock(&head_lock);
 			k_msleep(20);
+			if (is_relay) {
+				/* The channel was busy at key-up -- and the commonest reason
+				 * on air is a peer relaying THIS frame. The reference keeps a
+				 * deferred packet in its queue, where a duplicate heard
+				 * meanwhile still cancels it (perhapsCancelDupe); without this
+				 * re-check a CLIENT head waited out the peer's relay and then
+				 * sent a second one (bench, 2026-09-30: 3 of 24 floods). */
+				bool withdrawn;
+				bool again;
+
+				k_mutex_lock(&head_lock, K_FOREVER);
+				withdrawn = cancelled_take_locked(t.relay_src, t.relay_id);
+				again = heard_again_locked(t.relay_src, t.relay_id, t.orig_rx_ms);
+				if (withdrawn || (again && t.dupe == MESHTASTIC_ATTACHMENT_DUPE_CANCEL)) {
+					head.stats.tx_cancelled++;
+					k_mutex_unlock(&head_lock);
+					ret = -ECANCELED;
+					break;
+				}
+				k_mutex_unlock(&head_lock);
+			}
 			ret = meshtastic_radio_send_wire_now(t.wire, t.len);
 		}
 
