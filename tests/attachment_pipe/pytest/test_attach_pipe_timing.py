@@ -166,3 +166,27 @@ def test_x6e_router_late_clamps_to_the_end_of_the_window(hub, images):
     d = int(tx.split(" t=")[1].split()[0]) - dup_heard
     assert worst - EARLY_MS <= d <= worst + LATE_MS, \
         f"ROUTER_LATE keyed up {d} ms after hearing the copy; the reference says {worst}"
+
+
+def test_x6f_two_heads_one_preset_relay_once(hub, images):
+    """Two heads on one preset both hear a flood (the second 50 ms later). The
+    identity relays it once, through one head (ATTACHMENT-DESIGN §12: one relay
+    per identity), whatever order the copies arrive in. The heads cannot hear
+    each other here, so their own cancel-on-duplicate cannot hide a brain that
+    handed the frame to both."""
+    from conftest import HEAD2
+    setup(hub, images, 0, ROLE_CLIENT)
+    start_head(hub, images, HEAD2, MEDIUM_FAST)
+    hub.link(BRAIN, HEAD2)
+    time.sleep(0.5)
+    for i in range(5):
+        pid = 0x6F00 + i
+        m1, m2 = hub.mark(HEAD1), hub.mark(HEAD2)
+        first, second = (HEAD1, HEAD2) if i % 2 == 0 else (HEAD2, HEAD1)
+        hub.rf(first, MEDIUM_FAST, -110, SNR, blind(pid))
+        time.sleep(0.05)
+        hub.rf(second, MEDIUM_FAST, -100, SNR, blind(pid))
+        time.sleep(1.5)
+        tx1 = hub.lines(HEAD1, m1, rf"^tx src=0d0d0d0d .*id={pid:08x}")
+        tx2 = hub.lines(HEAD2, m2, rf"^tx src=0d0d0d0d .*id={pid:08x}")
+        assert len(tx1) + len(tx2) == 1, f"frame {pid:08x}: head1 sent {len(tx1)}, head2 sent {len(tx2)}"
