@@ -133,6 +133,22 @@ config MESHTASTIC_SETTINGS_SAVE_DELAY_MS
 	  Delay used to coalesce runtime configuration changes before saving
 	  the Meshtastic settings subtree.
 
+config MESHTASTIC_SETTINGS_SAVE_TRACK_ENTRIES
+	int "Records the coalesced save tracks, to write only what changed"
+	default 96
+	range 0 1024
+	help
+	  The coalesced save writes only the records whose plaintext changed
+	  since they were last loaded or saved, judged by a CRC of the name and
+	  of the value (12 B per record; in PSRAM on boards that have it). A
+	  record past capacity is simply always written. 0 turns tracking off:
+	  every save rewrites the whole subtree, as before.
+
+	  This matters most under lockdown: a sealed record is re-encrypted on
+	  every write, so an unchanged value never reads back identical and NVS
+	  cannot skip it -- one changed setting rewrote all ~66 records.
+	  meshtastic_settings_flush() always writes everything.
+
 endif # MESHTASTIC_SETTINGS
 
 module = MESHTASTIC

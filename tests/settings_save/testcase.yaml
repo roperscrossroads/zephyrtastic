@@ -1,0 +1,21 @@
+# agents-pcs2.1: the coalesced settings save writes only the records that
+# changed (and the NVS caches are on). Stack + sim radio + real NVS.
+common:
+  tags:
+    - meshtastic
+    - settings
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.settings_save.native_sim: {}
+  # Tracking off: every save rewrites the subtree, as before -- still correct.
+  meshtastic.settings_save.untracked:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SETTINGS_SAVE_TRACK_ENTRIES=0
+  # A table far smaller than the subtree: the overflow is simply always written.
+  meshtastic.settings_save.tiny_table:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SETTINGS_SAVE_TRACK_ENTRIES=4

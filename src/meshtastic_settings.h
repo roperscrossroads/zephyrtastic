@@ -6,6 +6,7 @@
 #define ZEPHYR_SUBSYS_MESHTASTIC_SETTINGS_H_
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,13 @@ extern "C" {
 int meshtastic_settings_init(void);
 void meshtastic_settings_schedule_save(void);
 int meshtastic_settings_flush(void);
+
+/**
+ * @brief Records the coalesced saves wrote, and found unchanged and skipped,
+ *        since boot (agents-pcs2.1). A flush writes everything and counts in
+ *        neither. Either pointer may be NULL.
+ */
+void meshtastic_settings_save_stats(uint32_t *written, uint32_t *unchanged);
 
 /**
  * @brief Is a coalesced save still waiting to reach flash?

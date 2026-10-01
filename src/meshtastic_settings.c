@@ -7,9 +7,11 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/crc.h>
 #include <zephyr/sys/util.h>
 
 #include "meshtastic_config_store.h"
+#include "meshtastic_ext_ram.h"
 #include "meshtastic_lockdown.h"
 #include "meshtastic_settings.h"
 #if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
@@ -25,6 +27,103 @@ static void save_work_handler(struct k_work *work);
 
 static K_WORK_DELAYABLE_DEFINE(save_work, save_work_handler);
 static int (*active_export_func)(const char *name, const void *val, size_t val_len);
+
+/*
+ * What each record held when it last reached (or came from) flash, so the
+ * coalesced save writes only the records that changed (agents-pcs2.1).
+ *
+ * Keyed by the CRC of the unprefixed name, judged by the CRC and length of the
+ * PLAINTEXT value: under lockdown the bytes on flash are re-sealed with a fresh
+ * nonce on every write, so comparing them could never say "unchanged". Touched
+ * only by the save path, the load callback and the wipe -- all on the settings
+ * side of the store, none inside a flash operation -- so PSRAM is fine.
+ */
+#define TRACK_CAP CONFIG_MESHTASTIC_SETTINGS_SAVE_TRACK_ENTRIES
+
+struct track_entry {
+	uint32_t name_crc;
+	uint32_t val_crc;
+	uint16_t len;
+	bool used;
+};
+
+#if TRACK_CAP > 0
+static MESHTASTIC_EXT_RAM_BSS_ATTR struct track_entry track[TRACK_CAP];
+#endif
+static K_MUTEX_DEFINE(track_lock);
+static uint32_t save_written;
+static uint32_t save_skipped;
+
+#if TRACK_CAP > 0
+static uint32_t track_name_crc(const char *name)
+{
+	return crc32_ieee((const uint8_t *)name, strlen(name));
+}
+#endif
+
+/* Remember @p name as holding @p val on flash. A table that is full leaves the
+ * record untracked, which only means it is always written. */
+static void track_note(const char *name, const void *val, size_t len)
+{
+#if TRACK_CAP > 0
+	uint32_t nc = track_name_crc(name);
+	struct track_entry *slot = NULL;
+
+	k_mutex_lock(&track_lock, K_FOREVER);
+	for (size_t i = 0; i < TRACK_CAP; i++) {
+		if (track[i].used && track[i].name_crc == nc) {
+			slot = &track[i];
+			break;
+		}
+		if (!track[i].used && slot == NULL) {
+			slot = &track[i];
+		}
+	}
+	if (slot != NULL) {
+		slot->name_crc = nc;
+		slot->val_crc = crc32_ieee(val, len);
+		slot->len = (uint16_t)len;
+		slot->used = true;
+	}
+	k_mutex_unlock(&track_lock);
+#else
+	ARG_UNUSED(name);
+	ARG_UNUSED(val);
+	ARG_UNUSED(len);
+#endif
+}
+
+/* True when flash is known to hold exactly @p val for @p name already. */
+static bool track_unchanged(const char *name, const void *val, size_t len)
+{
+	bool same = false;
+#if TRACK_CAP > 0
+	uint32_t nc = track_name_crc(name);
+
+	k_mutex_lock(&track_lock, K_FOREVER);
+	for (size_t i = 0; i < TRACK_CAP; i++) {
+		if (track[i].used && track[i].name_crc == nc) {
+			same = track[i].len == len && track[i].val_crc == crc32_ieee(val, len);
+			break;
+		}
+	}
+	k_mutex_unlock(&track_lock);
+#else
+	ARG_UNUSED(name);
+	ARG_UNUSED(val);
+	ARG_UNUSED(len);
+#endif
+	return same;
+}
+
+static void track_clear(void)
+{
+#if TRACK_CAP > 0
+	k_mutex_lock(&track_lock, K_FOREVER);
+	memset(track, 0, sizeof(track));
+	k_mutex_unlock(&track_lock);
+#endif
+}
 
 static int settings_get_cb(const char *key, char *val, int val_len_max)
 {
@@ -56,6 +155,16 @@ static int settings_set_cb(const char *key, size_t len, settings_read_cb read_cb
 	}
 	len = (size_t)read;
 
+	/* What flash holds now. Not under lockdown: a plaintext leftover there must
+	 * still be re-sealed at the next save, so nothing is taken as already on
+	 * flash until a save has written it under the current sealing. */
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+	if (!meshtastic_lockdown_active())
+#endif
+	{
+		track_note(key, buf, len);
+	}
+
 	ret = meshtastic_config_store_setting_set(key, buf, len);
 	if (ret < 0) {
 		LOG_WRN("Ignoring invalid Meshtastic setting '%s' (%d)", key, ret);
@@ -74,7 +183,40 @@ static int settings_export_prefixed(const char *name, const void *val, size_t va
 		return -EINVAL;
 	}
 
-	return meshtastic_lockdown_export(active_export_func, full_name, val, val_len);
+	ret = meshtastic_lockdown_export(active_export_func, full_name, val, val_len);
+	if (ret == 0) {
+		track_note(name, val, val_len);
+	}
+	return ret;
+}
+
+/* The coalesced save's writer: only what changed, and a tick off the CPU after
+ * each real write. The save runs on the cooperative system workqueue, so
+ * without the sleep a save that does write (a sealed store, an NVS garbage
+ * collection) holds every other thread off for its whole length -- the LoRa
+ * receive path and the BLE host among them. */
+static int save_changed_one(const char *name, const void *val, size_t val_len)
+{
+	char full_name[SETTINGS_MAX_NAME_LEN + SETTINGS_EXTRA_LEN + 1];
+	int ret;
+
+	if (track_unchanged(name, val, val_len)) {
+		save_skipped++;
+		return 0;
+	}
+
+	ret = snprintk(full_name, sizeof(full_name), MESHTASTIC_SETTINGS_SUBTREE "/%s", name);
+	if (ret < 0 || ret >= sizeof(full_name)) {
+		return -EINVAL;
+	}
+
+	ret = meshtastic_lockdown_save_one(full_name, val, val_len);
+	if (ret == 0) {
+		track_note(name, val, val_len);
+		save_written++;
+		k_sleep(K_TICKS(1));
+	}
+	return ret;
 }
 
 static int settings_export_cb(int (*export_func)(const char *name, const void *val, size_t val_len))
@@ -121,7 +263,13 @@ static void save_work_handler(struct k_work *work)
 		return;
 	}
 
-	ret = settings_save_subtree(MESHTASTIC_SETTINGS_SUBTREE);
+	{
+		uint32_t w0 = save_written, s0 = save_skipped;
+
+		ret = meshtastic_config_store_export(save_changed_one);
+		LOG_DBG("Meshtastic settings save: %u written, %u unchanged",
+			save_written - w0, save_skipped - s0);
+	}
 	if (ret < 0) {
 		LOG_WRN("Meshtastic settings save failed (%d)", ret);
 	}
@@ -214,6 +362,17 @@ int meshtastic_settings_wipe(bool preserve_security)
 	wipe_preserve_security = preserve_security;
 	ret = meshtastic_config_store_export(settings_wipe_one);
 	wipe_preserve_security = false;
+	track_clear();
 
 	return ret;
+}
+
+void meshtastic_settings_save_stats(uint32_t *written, uint32_t *unchanged)
+{
+	if (written != NULL) {
+		*written = save_written;
+	}
+	if (unchanged != NULL) {
+		*unchanged = save_skipped;
+	}
 }

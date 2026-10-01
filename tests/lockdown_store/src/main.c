@@ -31,6 +31,7 @@
 #include "meshtastic_lockdown.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_pki.h"
+#include "meshtastic_settings.h"
 #include "meshtastic_storage.h"
 
 /* Declared privately by meshtastic.c: the NodeDB's boot, which a staged boot must repeat. */
@@ -437,6 +438,40 @@ ZTEST(lockdown_store, test_nodedb_records_are_sealed_and_come_back_after_unlock)
 	k_sleep(K_SECONDS(3));
 	zassert_true(raw_read(name, &r), "key record still there after the deferred prune");
 	zassert_true(raw_read(rec_name, &r), "node record still there after the deferred prune");
+}
+
+/* agents-pcs2.1: a sealed record is re-encrypted with a fresh nonce on every
+ * write, so NVS can never see it as unchanged. Before the coalesced save learnt
+ * to write only what changed, one changed setting re-sealed all ~66 records.
+ * Now a change to the owner leaves an untouched sealed record byte-identical. */
+ZTEST(lockdown_store, test_a_coalesced_save_reseals_only_what_changed)
+{
+	struct raw lora_before, lora_after, owner_before, owner_after;
+	uint32_t w0, w1;
+
+	zassert_ok(meshtastic_lockdown_provision(PP, PPLEN, 0U, 0U, 0U), "");
+	wait_idle(); /* the eager seal-all */
+	zassert_true(raw_read("meshtastic/config/lora", &lora_before), "");
+	zassert_true(meshtastic_lockdown_is_sealed(lora_before.buf, lora_before.len), "");
+	zassert_true(raw_read("meshtastic/owner", &owner_before), "");
+
+	meshtastic_settings_save_stats(&w0, NULL);
+	set_long_name("changed name"); /* schedules the coalesced save */
+	k_sleep(K_MSEC(CONFIG_MESHTASTIC_SETTINGS_SAVE_DELAY_MS + 500));
+	meshtastic_settings_save_stats(&w1, NULL);
+
+	zassert_true(raw_read("meshtastic/owner", &owner_after), "");
+	zassert_true(meshtastic_lockdown_is_sealed(owner_after.buf, owner_after.len), "");
+	zassert_false(owner_before.len == owner_after.len &&
+			      memcmp(owner_before.buf, owner_after.buf, owner_before.len) == 0,
+		      "the owner record was rewritten");
+	zassert_true(raw_read("meshtastic/config/lora", &lora_after), "");
+	zassert_mem_equal(lora_before.buf, lora_after.buf, lora_before.len,
+			  "an unchanged sealed record was not re-sealed");
+	zassert_equal(w1 - w0, 1U, "the owner record alone (wrote %u)", w1 - w0);
+
+	stage_boot();
+	zassert_str_equal(long_name(), "changed name", "and it opens on an unlocked boot");
 }
 
 ZTEST(lockdown_store, test_disable_writes_everything_back_in_the_clear)
