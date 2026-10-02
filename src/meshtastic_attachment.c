@@ -19,6 +19,7 @@
 #include "meshtastic_contention.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_config_store.h"
 #include "meshtastic_region_presets.h"
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 #include "meshtastic_ble_peer_codec.h" /* the ENV_MAX cross-check only */
@@ -297,6 +298,93 @@ static void fast_head_check_locked(struct meshtastic_attachment_info *a)
 	}
 }
 
+/* A preset's chat, created when a head on that preset first speaks
+ * (agents-pcs2.11). Upstream makes one default channel because it has one
+ * radio; a brain has a radio per preset, so each preset a head brings gets its
+ * default channel too: named after the preset, the well-known key in its
+ * one-byte form (what the app shows without a lock), in the first free slot,
+ * saved. An existing slot of that name is left exactly as it is, and nothing
+ * is ever removed: a channel whose head has gone refuses the send instead.
+ *
+ * Done on the system workqueue: it writes the config store, which the bearer's
+ * receive path must not wait on. */
+static uint32_t auto_ch_pending; /* bit per preset; under tab_lock */
+
+static void auto_channel_work_fn(struct k_work *work)
+{
+	uint32_t pending;
+
+	ARG_UNUSED(work);
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	pending = auto_ch_pending;
+	auto_ch_pending = 0U;
+	k_mutex_unlock(&tab_lock);
+
+	for (uint8_t p = 0U; p <= (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX; p++) {
+		meshtastic_Channel ch = meshtastic_Channel_init_zero;
+		int slot = -1;
+		bool have = false;
+		int ret;
+
+		if ((pending & BIT(p)) == 0U || p == (uint8_t)mt.modem_preset) {
+			continue; /* our own preset is the primary's */
+		}
+		for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
+			const meshtastic_Channel *c = meshtastic_channels_get(i);
+
+			if (meshtastic_channels_named_for_preset(i, p)) {
+				have = true;
+				break;
+			}
+			if (slot < 0 && i != 0U && c != NULL &&
+			    c->role == meshtastic_Channel_Role_DISABLED) {
+				slot = (int)i;
+			}
+		}
+		if (have) {
+			continue;
+		}
+		if (slot < 0) {
+			LOG_WRN("attach: no free channel slot for preset %u", (unsigned int)p);
+			continue;
+		}
+
+		ch.index = (int8_t)slot;
+		ch.role = meshtastic_Channel_Role_SECONDARY;
+		ch.has_settings = true;
+		ch.settings.psk.size = 1U;
+		ch.settings.psk.bytes[0] = 1U;
+		strncpy(ch.settings.name,
+			meshtastic_preset_display_name((meshtastic_Config_LoRaConfig_ModemPreset)p,
+						       true),
+			sizeof(ch.settings.name) - 1U);
+		ret = meshtastic_config_store_set_channel((uint8_t)slot, &ch);
+		if (ret < 0) {
+			LOG_WRN("attach: channel for preset %u not created (%d)", (unsigned int)p,
+				ret);
+		} else {
+			LOG_INF("attach: channel \"%s\" created in slot %d for a head's preset",
+				ch.settings.name, slot);
+		}
+	}
+}
+
+static K_WORK_DEFINE(auto_channel_work, auto_channel_work_fn);
+
+/* Record the preset head @p a is on. Caller holds tab_lock. */
+static void note_preset_locked(struct meshtastic_attachment_info *a, uint8_t preset)
+{
+	if (a->preset == preset) {
+		return;
+	}
+	a->preset = preset;
+	if (preset <= (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX) {
+		auto_ch_pending |= BIT(preset);
+		(void)k_work_submit(&auto_channel_work);
+	}
+}
+
 static struct meshtastic_attachment_info *admit_locked(uint32_t node)
 {
 	for (unsigned int i = 1U; i < ARRAY_SIZE(tab); i++) {
@@ -397,7 +485,7 @@ int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, 
 			.rx_ms = msg.u.rx.rx_ms,
 		};
 
-		a->preset = msg.u.rx.preset;
+		note_preset_locked(a, msg.u.rx.preset);
 		a->last_rssi = msg.u.rx.rssi;
 		a->last_snr = msg.u.rx.snr;
 		a->rssi_min = MIN(a->rssi_min, msg.u.rx.rssi);
@@ -413,7 +501,7 @@ int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, 
 	case MESHTASTIC_ATTACHMENT_STATUS:
 		a->status = msg.u.status;
 		a->have_status = true;
-		a->preset = msg.u.status.preset;
+		note_preset_locked(a, msg.u.status.preset);
 		fast_head_check_locked(a);
 		ret = 0;
 		break;

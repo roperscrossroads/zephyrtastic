@@ -284,6 +284,16 @@ static void attachment_before(void *fixture)
 	 * relaying like a stock node -- without ALL nothing in this suite would
 	 * ever relay, and "not relayed" could not fail (review F6). */
 	set_default_primary();
+	/* A head's preset gets a channel of its own (auto-created); none of them
+	 * may leak into the next test. */
+	for (uint8_t i = 1U; i < MESHTASTIC_MAX_CHANNELS; i++) {
+		meshtastic_Channel off = meshtastic_Channel_init_zero;
+
+		off.index = (int8_t)i;
+		off.role = meshtastic_Channel_Role_DISABLED;
+		off.has_settings = true;
+		zassert_ok(meshtastic_channels_set_slot(i, &off), "");
+	}
 	mt.use_preset = true;
 	zassert_ok(meshtastic_preset_switch(PRESET_ST, NULL), "preset");
 	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_ALL);
@@ -550,6 +560,85 @@ ZTEST(attachment, test_a_send_on_a_preset_channel_leaves_through_that_presets_he
 	ch.settings.name[0] = '\0';
 	ch.settings.psk.size = 0U;
 	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "restore");
+}
+
+/* How many enabled slots are named after @p preset, and the first one. */
+static unsigned int preset_slots(uint8_t preset, int *first)
+{
+	unsigned int n = 0U;
+
+	*first = -1;
+	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
+		if (meshtastic_channels_named_for_preset(i, preset)) {
+			if (n++ == 0U) {
+				*first = (int)i;
+			}
+		}
+	}
+	return n;
+}
+
+/* A head brings its preset's default channel with it: the first time a head on
+ * another preset speaks, the brain creates that preset's channel -- named after
+ * the preset, the well-known key in its one-byte form -- in the first free
+ * slot. A head on OUR preset creates nothing (the primary is that channel), a
+ * slot that already has the name is left exactly as it is, and a second head
+ * on the same preset adds nothing. */
+ZTEST(attachment, test_a_heads_preset_gets_its_default_channel)
+{
+	const uint8_t sf = (uint8_t)meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST;
+	meshtastic_Channel mine = meshtastic_Channel_init_zero;
+	const meshtastic_Channel *ch;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	int slot;
+
+	zassert_equal(preset_slots((uint8_t)PRESET_MF, &slot), 0U, "starts without one");
+
+	/* The operator's own "ShortFast" slot, with a private key, in slot 2. */
+	mine.index = 2;
+	mine.role = meshtastic_Channel_Role_SECONDARY;
+	mine.has_settings = true;
+	mine.settings.psk.size = 16U;
+	memset(mine.settings.psk.bytes, 0x5A, 16U);
+	strcpy(mine.settings.name, "ShortFast");
+	zassert_ok(meshtastic_channels_set_slot(2U, &mine), "");
+
+	/* A head on our own preset: nothing is created. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2C00U, "st", wire, &len);
+	zassert_ok(head_hears(HEAD2_NODE, PRESET_ST, -90, 5, wire, len));
+	k_msleep(200);
+	for (uint8_t i = 1U; i < MESHTASTIC_MAX_CHANNELS; i++) {
+		if (i != 2U) {
+			zassert_equal(meshtastic_channels_get(i)->role,
+				      meshtastic_Channel_Role_DISABLED, "slot %u untouched", i);
+		}
+	}
+
+	/* A head on MediumFast: its channel appears in the first free slot. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2C01U, "mf", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -90, 5, wire, len));
+	k_msleep(200);
+	zassert_equal(preset_slots((uint8_t)PRESET_MF, &slot), 1U, "one MediumFast channel");
+	zassert_equal(slot, 1, "in the first free slot");
+	ch = meshtastic_channels_get(1U);
+	zassert_equal(ch->role, meshtastic_Channel_Role_SECONDARY);
+	zassert_equal(ch->settings.psk.size, 1U, "the one-byte default key");
+	zassert_equal(ch->settings.psk.bytes[0], 1U);
+	zassert_true(meshtastic_attachment_for_channel(1U) > 0, "and a send on it has a head");
+
+	/* That head moves to ShortFast: the operator's slot is the ShortFast
+	 * channel already, key and all. */
+	zassert_ok(head_hears(HEAD1_NODE, sf, -90, 5, wire, len));
+	k_msleep(200);
+	zassert_equal(preset_slots(sf, &slot), 1U, "no second ShortFast channel");
+	zassert_equal(slot, 2);
+	zassert_equal(meshtastic_channels_get(2U)->settings.psk.size, 16U, "left as it was");
+
+	/* A second head on MediumFast adds nothing. */
+	zassert_ok(head_hears(HEAD2_NODE, PRESET_MF, -90, 5, wire, len));
+	k_msleep(200);
+	zassert_equal(preset_slots((uint8_t)PRESET_MF, &slot), 1U, "still one");
 }
 
 /* A want_ack send that left through a head is retransmitted through THAT head,
