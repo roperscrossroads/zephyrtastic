@@ -212,9 +212,13 @@ static void st_roles(struct st *s)
 			if (!meshtastic_attachment_get(id, &a)) {
 				continue;
 			}
-			st_out(s, "%s{\"a\":%u,\"node\":\"0x%08x\",\"p\":%d,\"up\":%d}",
-			       first ? "" : ",", (unsigned int)a.id, a.node,
-			       a.preset == MESHTASTIC_PRESET_UNKNOWN ? -1 : (int)a.preset,
+			uint8_t w = meshtastic_attachment_wanted_preset(a.node);
+
+			/* p is the preset the head reports, w the one stored for it. */
+			st_out(s, "%s{\"a\":%u,\"node\":\"0x%08x\",\"p\":%d,", first ? "" : ",",
+			       (unsigned int)a.id, a.node,
+			       a.preset == MESHTASTIC_PRESET_UNKNOWN ? -1 : (int)a.preset);
+			st_out(s, "\"w\":%d,\"up\":%d}", w == MESHTASTIC_PRESET_UNKNOWN ? -1 : (int)w,
 			       a.link_up ? 1 : 0);
 			first = false;
 		}

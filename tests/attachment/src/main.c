@@ -317,6 +317,7 @@ static void attachment_before(void *fixture)
 	}
 	test_auth = MESHTASTIC_ATTACH_AUTH_ENCRYPTED;
 	meshtastic_attachment_allow_clear();
+	meshtastic_attachment_want_clear();
 	/* Fresh dup cache per case so the same (src,id) can be reused. */
 	memset(mt.dup_cache, 0, sizeof(mt.dup_cache));
 	mt.dup_head = 0U;
@@ -1310,6 +1311,95 @@ ZTEST(attachment, test_set_preset_reaches_the_head)
 	zassert_equal(meshtastic_attachment_id_for_node(HEAD1_NODE), 0U);
 }
 
+static void head_status(uint32_t node, uint8_t preset)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	const struct meshtastic_attachment_status st = {
+		.preset = preset,
+		.flags = MESHTASTIC_ATTACHMENT_ST_TX_ENABLED | MESHTASTIC_ATTACHMENT_ST_IS_HEAD,
+		.hwid = node,
+		.brain = TEST_NODE_ID,
+	};
+	int len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
+
+	zassert_true(len > 0);
+	zassert_ok(meshtastic_attachment_ingest(node, env, (size_t)len), "status ingest");
+}
+
+/* The brain owns a head's preset (agents-pcs2.12): a head does not store it, so one that
+ * reboots or is reflashed comes back on its image's default. The brain stores what was
+ * asked of each head and asks again when the head reports anything else. */
+ZTEST(attachment, test_a_head_that_comes_back_on_another_preset_is_put_back)
+{
+	struct meshtastic_attachment_msg msg;
+	uint8_t id;
+
+	head_status(HEAD1_NODE, (uint8_t)PRESET_ST);
+	id = meshtastic_attachment_id_for_node(HEAD1_NODE);
+	zassert_true(id != 0U);
+	zassert_equal(meshtastic_attachment_wanted_preset(HEAD1_NODE), MESHTASTIC_PRESET_UNKNOWN,
+		      "nothing is wanted of a head until someone says so");
+	k_sleep(K_MSEC(50));
+	zassert_equal(sent.count, 0U, "and a head nothing is wanted of is left alone");
+
+	/* A number that is no preset is refused, and stores nothing. */
+	zassert_equal(meshtastic_attachment_set_preset(id, 200U), -EINVAL);
+	zassert_equal(meshtastic_attachment_wanted_preset(HEAD1_NODE), MESHTASTIC_PRESET_UNKNOWN);
+
+	zassert_ok(meshtastic_attachment_set_preset(id, (uint8_t)PRESET_MF));
+	zassert_equal(sent.count, 1U, "the wish is sent at once");
+	zassert_equal(meshtastic_attachment_wanted_preset(HEAD1_NODE), (uint8_t)PRESET_MF);
+
+	/* The head obeys: nothing more to say. */
+	head_status(HEAD1_NODE, (uint8_t)PRESET_MF);
+	k_sleep(K_MSEC(50));
+	zassert_equal(sent.count, 1U, "a head on its preset is not asked again");
+
+	/* It reboots: the link drops, and it comes back on its image's default. */
+	meshtastic_attachment_link_down(NULL, HEAD1_NODE);
+	memset(&sent, 0, sizeof(sent));
+	head_status(HEAD1_NODE, (uint8_t)PRESET_ST);
+	k_sleep(K_MSEC(50));
+	zassert_equal(sent.count, 1U, "asked again, unprompted");
+	zassert_equal(sent.node, HEAD1_NODE);
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_SET_PRESET);
+	zassert_equal(msg.u.preset, (uint8_t)PRESET_MF);
+
+	/* Still on the wrong one a moment later (the envelope was lost): not asked on every
+	 * frame it forwards, but asked again once the retry time has passed. */
+	head_status(HEAD1_NODE, (uint8_t)PRESET_ST);
+	k_sleep(K_MSEC(50));
+	zassert_equal(sent.count, 1U, "paced");
+	k_sleep(K_MSEC(5100));
+	head_status(HEAD1_NODE, (uint8_t)PRESET_ST);
+	k_sleep(K_MSEC(50));
+	zassert_equal(sent.count, 2U, "and retried");
+
+	/* Dropped from the table and admitted afresh (a long reflash): the wish is by
+	 * identity, not by slot. */
+	zassert_ok(meshtastic_attachment_forget(id));
+	memset(&sent, 0, sizeof(sent));
+	head_status(HEAD1_NODE, (uint8_t)PRESET_ST);
+	k_sleep(K_MSEC(50));
+	zassert_equal(sent.count, 1U, "a head admitted again is put back too");
+
+	/* Another head is nobody's business. */
+	memset(&sent, 0, sizeof(sent));
+	head_status(HEAD2_NODE, (uint8_t)PRESET_ST);
+	k_sleep(K_MSEC(50));
+	zassert_equal(sent.count, 0U);
+
+	/* "none" forgets the wish. */
+	id = meshtastic_attachment_id_for_node(HEAD1_NODE);
+	zassert_ok(meshtastic_attachment_set_preset(id, MESHTASTIC_PRESET_UNKNOWN));
+	zassert_equal(sent.count, 0U, "forgetting sends nothing");
+	k_sleep(K_MSEC(5100));
+	head_status(HEAD1_NODE, (uint8_t)PRESET_ST);
+	k_sleep(K_MSEC(50));
+	zassert_equal(sent.count, 0U, "and the head is left where it is");
+}
+
 /* R2's instrument (ATTACHMENT-SCOPE F5): when the brain's own radio hears a
  * frame and a head then delivers the same frame, the gap between the two
  * arrivals on the brain's clock is that head's link latency -- both radios
@@ -2026,3 +2116,65 @@ ZTEST(attachment, test_guard_flags_link_lag_over_half_the_router_window_for_a_ro
 	zassert_equal(a.lag_n, 16U, "no sample from a result without the field");
 	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 }
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include <zephyr/settings/settings.h>
+
+struct want_rec {
+	uint32_t node;
+	uint8_t preset;
+	uint8_t pad[3];
+};
+
+struct want_read {
+	struct want_rec rec[CONFIG_MESHTASTIC_ATTACHMENT_MAX];
+	ssize_t len;
+};
+
+static int want_read_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+			void *param)
+{
+	struct want_read *r = param;
+
+	ARG_UNUSED(key);
+	r->len = read_cb(cb_arg, r->rec, MIN(len, sizeof(r->rec)));
+	return 0;
+}
+
+/* The wish outlives the brain's own reboot: it is a record in flash, by the head's link
+ * identity, and a boot loads it. */
+ZTEST(attachment, test_the_wanted_preset_is_stored_in_flash_and_loaded)
+{
+	struct want_read r = {0};
+	uint8_t id;
+
+	head_status(HEAD1_NODE, (uint8_t)PRESET_ST);
+	id = meshtastic_attachment_id_for_node(HEAD1_NODE);
+	zassert_ok(meshtastic_attachment_set_preset(id, (uint8_t)PRESET_MF));
+
+	zassert_ok(settings_load_subtree_direct("mtattach/want", want_read_cb, &r));
+	zassert_equal(r.len, (ssize_t)sizeof(r.rec), "one record, the whole table");
+	zassert_equal(r.rec[0].node, HEAD1_NODE);
+	zassert_equal(r.rec[0].preset, (uint8_t)PRESET_MF);
+
+	/* What a boot does: the record in flash becomes the table. */
+	r.rec[0].preset = (uint8_t)PRESET_ST;
+	r.rec[1] = (struct want_rec){.node = HEAD2_NODE, .preset = (uint8_t)PRESET_MF};
+	zassert_ok(settings_save_one("mtattach/want", r.rec, sizeof(r.rec)));
+	zassert_ok(settings_load_subtree("mtattach"));
+	zassert_equal(meshtastic_attachment_wanted_preset(HEAD1_NODE), (uint8_t)PRESET_ST);
+	zassert_equal(meshtastic_attachment_wanted_preset(HEAD2_NODE), (uint8_t)PRESET_MF);
+
+	/* And the loaded wish is acted on. */
+	memset(&sent, 0, sizeof(sent));
+	head_status(HEAD2_NODE, (uint8_t)PRESET_ST);
+	k_sleep(K_MSEC(50));
+	zassert_equal(sent.count, 1U, "a head the brain never spoke to this boot is put back");
+	zassert_equal(sent.node, HEAD2_NODE);
+
+	meshtastic_attachment_want_clear();
+	memset(&r, 0, sizeof(r));
+	zassert_ok(settings_load_subtree_direct("mtattach/want", want_read_cb, &r));
+	zassert_equal(r.rec[0].node, 0U, "cleared in flash too");
+}
+#endif /* CONFIG_MESHTASTIC_SETTINGS */

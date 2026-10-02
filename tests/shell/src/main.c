@@ -1836,3 +1836,62 @@ ZTEST(meshtastic_shell, test_api_is_absent_without_config_write)
 #endif
 
 #endif /* CONFIG_MESHTASTIC_SHELL_PHONEAPI */
+
+/* ---- `meshtastic attach preset`: names, numbers, and nothing else ------------ */
+
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+
+#include "meshtastic_attachment.h"
+#include "meshtastic_attachment_codec.h"
+
+#define SHELL_HEAD_NODE 0x00E10001U
+
+/* agents-pcs2.12: `attach preset 1 ShortFast` used to parse the name as the number 0 and
+ * put the head on LongFast. */
+ZTEST(meshtastic_shell, test_attach_preset_takes_a_name_or_a_number_and_refuses_junk)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	const struct meshtastic_attachment_status st = {
+		.preset = (uint8_t)meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST,
+		.flags = MESHTASTIC_ATTACHMENT_ST_IS_HEAD,
+		.hwid = SHELL_HEAD_NODE,
+	};
+	const char *out = NULL;
+	char json[1024];
+	int len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
+
+	/* A head, admitted by the allow-list: there is no link in this build to trust. */
+	zassert_ok(meshtastic_attachment_allow_add(SHELL_HEAD_NODE));
+	zassert_ok(meshtastic_attachment_ingest(SHELL_HEAD_NODE, env, (size_t)len));
+	zassert_equal(meshtastic_attachment_id_for_node(SHELL_HEAD_NODE), 1U);
+
+	zassert_not_equal(run_cmd("meshtastic attach preset 1 Bogus", &out), 0);
+	zassert_not_null(strstr(out, "unknown preset"), "%s", out);
+	zassert_not_equal(run_cmd("meshtastic attach preset 1 6x", &out), 0, "a number and more");
+	zassert_not_equal(run_cmd("meshtastic attach preset 1 99", &out), 0, "no such preset");
+	zassert_not_equal(run_cmd("meshtastic attach preset one 6", &out), 0, "an id is a number");
+	zassert_equal(meshtastic_attachment_wanted_preset(SHELL_HEAD_NODE),
+		      MESHTASTIC_PRESET_UNKNOWN, "a refused command stores nothing");
+
+	zassert_ok(run_cmd("meshtastic attach preset 1 ShortFast", &out), "%s", out);
+	zassert_equal(meshtastic_attachment_wanted_preset(SHELL_HEAD_NODE),
+		      (uint8_t)meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST,
+		      "the name is the preset, not the number 0");
+	zassert_ok(run_cmd("meshtastic attach list", &out));
+	zassert_not_null(strstr(out, "wanted preset 6  (NOT there yet)"), "%s", out);
+
+	/* The state line says what the head reports and what is wanted of it. */
+	state_json(json, sizeof(json));
+	zassert_not_null(strstr(json, "\"node\":\"0x00e10001\",\"p\":4,\"w\":6,"), "%s", json);
+
+	zassert_ok(run_cmd("meshtastic attach preset 1 4", &out), "a number still works");
+	zassert_equal(meshtastic_attachment_wanted_preset(SHELL_HEAD_NODE), 4U);
+	zassert_ok(run_cmd("meshtastic attach preset 1 none", &out));
+	zassert_equal(meshtastic_attachment_wanted_preset(SHELL_HEAD_NODE),
+		      MESHTASTIC_PRESET_UNKNOWN);
+
+	zassert_ok(meshtastic_attachment_forget(1U));
+	meshtastic_attachment_allow_clear();
+}
+
+#endif /* CONFIG_MESHTASTIC_ATTACHMENT_BRAIN */

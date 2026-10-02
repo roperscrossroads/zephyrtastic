@@ -95,6 +95,13 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_TX_ENABLED_DEFAULT=n
 
+  # `meshtastic attach` and the brain's part of `meshtastic state`. The attachment suite
+  # builds without the shell, so this is where the commands compile and run on native_sim.
+  meshtastic.shell.attachment_brain.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=y
+      - CONFIG_MESHTASTIC_ATTACHMENT_MAX=2
+
   # `meshtastic relay` (agents-jbrq.12). The relay is default-N and its own
   # suite builds without the shell, so this is where its commands compile and run.
   meshtastic.shell.relay.native_sim:

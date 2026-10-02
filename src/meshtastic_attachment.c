@@ -46,7 +46,19 @@ static MESHTASTIC_EXT_RAM_BSS_ATTR struct meshtastic_attachment_info tab[CONFIG_
 static bool used[CONFIG_MESHTASTIC_ATTACHMENT_MAX + 1U] = { true };
 static struct meshtastic_attachment_stats stats;
 static uint32_t allow[CONFIG_MESHTASTIC_ATTACHMENT_ALLOW_MAX];
+/* The preset wanted of each head, by link identity (mtattach/want). node 0 = free. */
+static struct attach_want {
+	uint32_t node;
+	uint8_t preset;
+	uint8_t pad[3];
+} want[CONFIG_MESHTASTIC_ATTACHMENT_MAX];
 static K_MUTEX_DEFINE(tab_lock);
+
+/* A head on the wrong preset is asked again no more often than this. */
+#define WANT_RETRY_MS 5000
+
+static void want_fn(struct k_work *work);
+static K_WORK_DEFINE(want_work, want_fn);
 
 static void evict_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(evict_work, evict_fn);
@@ -71,10 +83,30 @@ static void allow_save_locked(void)
 	}
 }
 
+static void want_save_locked(void)
+{
+	if (settings_save_one("mtattach/want", want, sizeof(want)) != 0) {
+		LOG_WRN("attach: wanted presets save failed");
+	}
+}
+
 static int attach_settings_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	uint32_t tmp[CONFIG_MESHTASTIC_ATTACHMENT_ALLOW_MAX] = { 0 };
 
+	if (strcmp(key, "want") == 0) {
+		struct attach_want w[ARRAY_SIZE(want)] = { 0 };
+
+		/* A record from a build with another table size: take what fits. */
+		len = MIN(len, sizeof(w)) / sizeof(w[0]) * sizeof(w[0]);
+		if (read_cb(cb_arg, w, len) != (ssize_t)len) {
+			return -EINVAL;
+		}
+		k_mutex_lock(&tab_lock, K_FOREVER);
+		memcpy(want, w, sizeof(want));
+		k_mutex_unlock(&tab_lock);
+		return 0;
+	}
 	if (strcmp(key, "allow") != 0) {
 		return -ENOENT;
 	}
@@ -90,6 +122,10 @@ static int attach_settings_set(const char *key, size_t len, settings_read_cb rea
 SETTINGS_STATIC_HANDLER_DEFINE(mt_attach_brain, "mtattach", NULL, attach_settings_set, NULL, NULL);
 #else
 static void allow_save_locked(void)
+{
+}
+
+static void want_save_locked(void)
 {
 }
 #endif
@@ -387,6 +423,125 @@ static void note_preset_locked(struct meshtastic_attachment_info *a, uint8_t pre
 	}
 }
 
+/* ---- the wanted presets ----------------------------------------------------- */
+
+static struct attach_want *want_find_locked(uint32_t node)
+{
+	for (unsigned int i = 0U; i < ARRAY_SIZE(want); i++) {
+		if (want[i].node == node) {
+			return &want[i];
+		}
+	}
+	return NULL;
+}
+
+/* The head just said which preset it is on. If that is not the one wanted of it, have the
+ * work item tell it: not from here, this is the bearer's receive path. Caller holds
+ * tab_lock. */
+static void want_check_locked(struct meshtastic_attachment_info *a)
+{
+	const struct attach_want *w = want_find_locked(a->node);
+	int64_t now = k_uptime_get();
+
+	if (w == NULL || a->preset == w->preset) {
+		a->want_asked_ms = 0;
+		return;
+	}
+	if (a->want_asked_ms != 0 && now - a->want_asked_ms < WANT_RETRY_MS) {
+		return;
+	}
+	a->want_asked_ms = now;
+	a->want_due = true;
+	(void)k_work_submit(&want_work);
+}
+
+static void want_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	for (unsigned int i = 1U; i < ARRAY_SIZE(tab); i++) {
+		uint8_t env[MESHTASTIC_ATTACHMENT_SET_PRESET_LEN];
+		const struct attach_want *w;
+		uint32_t node = 0U;
+		uint8_t preset = 0U;
+		int len;
+
+		k_mutex_lock(&tab_lock, K_FOREVER);
+		if (used[i] && tab[i].want_due) {
+			tab[i].want_due = false;
+			w = want_find_locked(tab[i].node);
+			if (w != NULL && w->preset != tab[i].preset) {
+				node = tab[i].node;
+				preset = w->preset;
+			}
+		}
+		k_mutex_unlock(&tab_lock);
+		if (node == 0U) {
+			continue;
+		}
+		len = meshtastic_attachment_encode_set_preset(preset, env, sizeof(env));
+		if (len > 0) {
+			int ret = meshtastic_attachment_send(node, env, (size_t)len);
+
+			LOG_INF("attach: head 0x%08x is not on preset %u, as wanted: asked (%d)",
+				node, (unsigned int)preset, ret);
+		}
+	}
+}
+
+void meshtastic_attachment_want_clear(void)
+{
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	memset(want, 0, sizeof(want));
+	want_save_locked();
+	k_mutex_unlock(&tab_lock);
+}
+
+uint8_t meshtastic_attachment_wanted_preset(uint32_t node)
+{
+	const struct attach_want *w;
+	uint8_t preset = MESHTASTIC_PRESET_UNKNOWN;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	w = (node != 0U) ? want_find_locked(node) : NULL;
+	if (w != NULL) {
+		preset = w->preset;
+	}
+	k_mutex_unlock(&tab_lock);
+	return preset;
+}
+
+/* Store (or, for MESHTASTIC_PRESET_UNKNOWN, forget) the preset wanted of @p node. A full
+ * table gives up the wish for a head that is not attached. Caller holds tab_lock. */
+static int want_set_locked(uint32_t node, uint8_t preset)
+{
+	struct attach_want *w = want_find_locked(node);
+
+	if (preset == MESHTASTIC_PRESET_UNKNOWN) {
+		if (w != NULL) {
+			memset(w, 0, sizeof(*w));
+			want_save_locked();
+		}
+		return 0;
+	}
+	if (w == NULL) {
+		w = want_find_locked(0U);
+	}
+	for (unsigned int i = 0U; w == NULL && i < ARRAY_SIZE(want); i++) {
+		if (find_locked(want[i].node) == NULL) {
+			w = &want[i];
+		}
+	}
+	if (w == NULL) {
+		return -ENOSPC;
+	}
+	if (w->node != node || w->preset != preset) {
+		*w = (struct attach_want){.node = node, .preset = preset};
+		want_save_locked();
+	}
+	return 0;
+}
+
 static struct meshtastic_attachment_info *admit_locked(uint32_t node)
 {
 	for (unsigned int i = 1U; i < ARRAY_SIZE(tab); i++) {
@@ -488,6 +643,7 @@ int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, 
 		};
 
 		note_preset_locked(a, msg.u.rx.preset);
+		want_check_locked(a);
 		a->last_rssi = msg.u.rx.rssi;
 		a->last_snr = msg.u.rx.snr;
 		a->rssi_min = MIN(a->rssi_min, msg.u.rx.rssi);
@@ -504,6 +660,7 @@ int meshtastic_attachment_ingest_from(const struct meshtastic_attach_bearer *b, 
 		a->status = msg.u.status;
 		a->have_status = true;
 		note_preset_locked(a, msg.u.status.preset);
+		want_check_locked(a);
 		fast_head_check_locked(a);
 		ret = 0;
 		break;
@@ -942,6 +1099,10 @@ int meshtastic_attachment_set_preset(uint8_t id, uint8_t preset)
 	if (id == 0U) {
 		return -EINVAL;
 	}
+	if (preset != MESHTASTIC_PRESET_UNKNOWN &&
+	    preset > (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX) {
+		return -EINVAL;
+	}
 	if (id >= ARRAY_SIZE(tab)) {
 		return -ENOENT;
 	}
@@ -951,7 +1112,14 @@ int meshtastic_attachment_set_preset(uint8_t id, uint8_t preset)
 		return -ENOENT;
 	}
 	node = tab[id].node;
+	len = want_set_locked(node, preset);
+	/* The explicit send below is this wish's first asking. */
+	tab[id].want_asked_ms = k_uptime_get();
+	tab[id].want_due = false;
 	k_mutex_unlock(&tab_lock);
+	if (len < 0 || preset == MESHTASTIC_PRESET_UNKNOWN) {
+		return len;
+	}
 
 	len = meshtastic_attachment_encode_set_preset(preset, env, sizeof(env));
 	if (len < 0) {

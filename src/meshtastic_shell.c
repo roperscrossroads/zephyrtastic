@@ -3601,6 +3601,14 @@ static void attach_print_row(const struct shell *sh, const struct meshtastic_att
 		    a->have_status ? "  status" : "",
 		    (a->have_status &&
 		     (a->status.flags & MESHTASTIC_ATTACHMENT_ST_IS_HEAD) != 0U) ? " head" : " ear");
+	{
+		uint8_t wanted = meshtastic_attachment_wanted_preset(a->node);
+
+		if (wanted != MESHTASTIC_PRESET_UNKNOWN) {
+			shell_print(sh, "     wanted preset %u%s", (unsigned int)wanted,
+				    wanted == a->preset ? "" : "  (NOT there yet)");
+		}
+	}
 	if (a->warn_fast_head || a->warn_lag) {
 		shell_print(sh, "     %s%s  (DESIGN §13: the fastest preset belongs on the brain's radio)",
 			    a->warn_fast_head ? "FAST-HEAD " : "", a->warn_lag ? "LAG " : "");
@@ -3705,23 +3713,69 @@ static int cmd_attach_status(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* Defined further down, with `lora preset`: one list of accepted spellings. */
+static int shell_parse_modem_preset(const char *name,
+				    meshtastic_Config_LoRaConfig_ModemPreset *out);
+
+/* A preset as a name (ShortFast), its number (6), or "none". Anything else is refused: a
+ * name used to parse as the number 0, which is LongFast, and put the head there. */
+static int attach_parse_preset(const char *s, uint8_t *out)
+{
+	meshtastic_Config_LoRaConfig_ModemPreset named;
+	unsigned long n;
+	char *end;
+
+	if (strcmp(s, "none") == 0) {
+		*out = MESHTASTIC_PRESET_UNKNOWN;
+		return 0;
+	}
+	if (shell_parse_modem_preset(s, &named) == 0) {
+		*out = (uint8_t)named;
+		return 0;
+	}
+	n = strtoul(s, &end, 10);
+	if (end == s || *end != '\0' ||
+	    n > (unsigned long)_meshtastic_Config_LoRaConfig_ModemPreset_MAX) {
+		return -EINVAL;
+	}
+	*out = (uint8_t)n;
+	return 0;
+}
+
 static int cmd_attach_preset(const struct shell *sh, size_t argc, char **argv)
 {
-	unsigned long id = strtoul(argv[1], NULL, 10);
-	unsigned long preset = strtoul(argv[2], NULL, 10);
+	char *end;
+	unsigned long id = strtoul(argv[1], &end, 10);
+	uint8_t preset;
 	int ret;
 
 	ARG_UNUSED(argc);
-	if (id == 0U || id > CONFIG_MESHTASTIC_ATTACHMENT_MAX || preset > 0xFFU) {
-		shell_error(sh, "usage: meshtastic attach preset <id> <preset number>");
+	if (end == argv[1] || *end != '\0' || id == 0U || id > CONFIG_MESHTASTIC_ATTACHMENT_MAX) {
+		shell_error(sh, "usage: meshtastic attach preset <id> <name|number|none>");
 		return -EINVAL;
 	}
-	ret = meshtastic_attachment_set_preset((uint8_t)id, (uint8_t)preset);
-	if (ret < 0) {
+	if (attach_parse_preset(argv[2], &preset) < 0) {
+		shell_error(sh, "unknown preset '%s' (a name as `meshtastic lora` prints it, "
+				"e.g. ShortFast; its number; or none)", argv[2]);
+		return -EINVAL;
+	}
+	ret = meshtastic_attachment_set_preset((uint8_t)id, preset);
+	if (preset == MESHTASTIC_PRESET_UNKNOWN) {
+		if (ret == 0) {
+			shell_print(sh, "attachment %lu: no preset wanted of it any more", id);
+		} else {
+			shell_error(sh, "failed (%d)", ret);
+		}
+		return ret;
+	}
+	if (ret == -EINVAL || ret == -ENOENT || ret == -ENOSPC) {
 		shell_error(sh, "set_preset failed (%d)", ret);
 		return ret;
 	}
-	shell_print(sh, "asked attachment %lu to retune to preset %lu", id, preset);
+	shell_print(sh, "attachment %lu: preset %u wanted and stored; %s", id,
+		    (unsigned int)preset,
+		    ret == 0 ? "asked it to retune"
+			     : "the link is down, it is asked when it next speaks");
 	return 0;
 }
 
@@ -3769,7 +3823,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_attach_status, 2, 0),
 	SHELL_CMD_ARG(power, NULL, SHELL_HELP("Set a head's transmit power.", "<id> <dBm>"),
 		      cmd_attach_power, 3, 0),
-	SHELL_CMD_ARG(preset, NULL, SHELL_HELP("Ask a head to retune.", "<id> <preset number>"),
+	SHELL_CMD_ARG(preset, NULL,
+		      SHELL_HELP("Put a head on a preset and keep it there (stored; re-sent "
+				 "when the head comes back on another).",
+				 "<id> <name|number|none>"),
 		      cmd_attach_preset, 3, 0),
 	SHELL_CMD_ARG(allow, NULL,
 		      SHELL_HELP("Heads admitted on an untrusted link: show, add, clear.",

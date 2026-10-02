@@ -17,6 +17,19 @@ tests:
       - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=y
       - CONFIG_MESHTASTIC_ATTACHMENT_MAX=2
       - CONFIG_MESHTASTIC_ATTACHMENT_EVICT_SEC=2
+  # The brain on real NVS: what it stores about its heads (the preset wanted of each,
+  # agents-pcs2.12) is read back from flash and loaded as a boot would.
+  meshtastic.attachment.brain_settings.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=y
+      - CONFIG_MESHTASTIC_ATTACHMENT_MAX=2
+      - CONFIG_MESHTASTIC_ATTACHMENT_EVICT_SEC=2
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS_NVS=y
   # The head (S5): the real stack as a keyless radio head on the sim radio. What
   # it hears is captured at the send seam as RX_FRAME envelopes; controls come
   # in through on_envelope as the BLE glue would deliver them. The build itself

@@ -69,6 +69,10 @@ struct meshtastic_attachment_info {
 	 * than our own radio's (a fast preset belongs on the brain); LAG -- the
 	 * lag p90 exceeds half the head preset's ROUTER window while our role
 	 * relays early (ROUTER / ROUTER_LATE). Each warns once per admission. */
+	/* k_uptime when SET_PRESET last went out because the head was not on the preset
+	 * wanted of it (0 = never): the retry is paced on this. */
+	int64_t want_asked_ms;
+	bool want_due;
 	bool warn_fast_head;
 	bool warn_lag;
 	bool warned_fast_head;
@@ -189,9 +193,18 @@ uint8_t meshtastic_attachment_id_for_node(uint32_t node);
 /* Forget a head (its link went down for good, or the operator says so). */
 int meshtastic_attachment_forget(uint8_t id);
 
-/* Ask a head to retune. Sends SET_PRESET; the head answers with STATUS.
- * Returns the send result; -ENOENT for an unknown id, -EINVAL for id 0. */
+/* Put a head on a preset, and keep it there. The preset is stored against the head's link
+ * identity (mtattach/want) and SET_PRESET is sent now; whenever that head later reports
+ * another preset (it rebooted, it was reflashed, it is a replacement that kept the
+ * identity) SET_PRESET is sent again. A head does not store its preset: the brain owns it.
+ * MESHTASTIC_PRESET_UNKNOWN forgets the wish and sends nothing.
+ * Returns the send result (the wish is stored even if the link is down); -ENOENT for an
+ * unknown id, -EINVAL for id 0 or a number that is not a preset. */
 int meshtastic_attachment_set_preset(uint8_t id, uint8_t preset);
+/* Forget every stored wish (a factory path, and the tests' clean slate). */
+void meshtastic_attachment_want_clear(void);
+/* The preset wanted of the head with this link identity, or MESHTASTIC_PRESET_UNKNOWN. */
+uint8_t meshtastic_attachment_wanted_preset(uint32_t node);
 
 /* The send seam: deliver an envelope to the head with this link identity. The
  * default sends it as frame kind ATTACH over the BLE peer link, or -ENOTSUP
