@@ -5977,6 +5977,8 @@ static bool duty_api_registered;
 
 /* Pop everything queued for the phone and report the routing error the first
  * ROUTING_APP frame carried, or -1 if there was none. */
+static uint32_t duty_routing_from;
+
 static int duty_take_routing_error(uint32_t *request_id)
 {
 	struct meshtastic_phoneapi_frame frame;
@@ -6003,6 +6005,7 @@ static int duty_take_routing_error(uint32_t *request_id)
 		}
 		if (err < 0) {
 			err = (int)routing.error_reason;
+			duty_routing_from = from.packet.from;
 			if (request_id != NULL) {
 				*request_id = from.packet.decoded.request_id;
 			}
@@ -6010,6 +6013,102 @@ static int duty_take_routing_error(uint32_t *request_id)
 	}
 
 	return err;
+}
+
+/* How many transmissions of our packet @p id leave within @p window_ms. Other
+ * traffic (a periodic beacon) is taken and ignored. */
+static unsigned int count_tx_of(uint32_t id, int64_t window_ms)
+{
+	struct lora_sim_frame f;
+	int64_t end = k_uptime_get() + window_ms;
+	unsigned int n = 0U;
+
+	while (k_uptime_get() < end) {
+		if (lora_sim_take_tx(lora_dev, &f, K_MSEC(end - k_uptime_get())) != 0) {
+			break;
+		}
+		if (((const struct meshtastic_wire_header *)f.data)->id == id) {
+			n++;
+		}
+	}
+	return n;
+}
+
+/* A text typed in the phone app is a want_ack BROADCAST. Its only delivery
+ * report is the implicit ACK: we hear a neighbour relay it and hand the app a
+ * ROUTING ACK from ourselves (upstream perhapsGenerateImplicitAckForOwnOverheard).
+ * Unrelayed, it gets upstream's three attempts and then MAX_RETRANSMIT. Without
+ * either the app shows the message as waiting for ever. */
+ZTEST(mesh_sim, test_a_want_ack_broadcast_is_reported_to_the_phone)
+{
+	struct lora_sim_frame f;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t request_id = 0U;
+	uint8_t len;
+	struct meshtastic_packet pkt = {
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.id = 0xBC01U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"bc",
+		.payload_len = 2U,
+		.want_ack = true,
+	};
+
+	if (!duty_api_registered) {
+		meshtastic_phoneapi_init(&duty_api, "duty-test", duty_q, DUTY_TEST_QUEUE, NULL,
+					 NULL, NULL, NULL, &duty_to_scratch,
+					 &duty_from_scratch);
+		meshtastic_phoneapi_register(&duty_api);
+		duty_api_registered = true;
+	}
+	/* The retransmit interval is left adaptive (it must exceed the frame's
+	 * airtime, during which the radio cannot hear the relay), so the waits
+	 * below are in seconds of simulated time. */
+	meshtastic_reliable_reset();
+
+	/* 1. Relayed: one transmission, and the phone hears about it once. */
+	zassert_ok(meshtastic_send_packet(&pkt, K_NO_WAIT));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "the broadcast left");
+	zassert_equal(meshtastic_reliable_pending(), 1U, "a want_ack broadcast is tracked");
+	meshtastic_phoneapi_reset(&duty_api);
+
+	len = (uint8_t)f.len;
+	memcpy(wire, f.data, len);
+	((struct meshtastic_wire_header *)wire)->relay_node = 0x77U;
+	((struct meshtastic_wire_header *)wire)->flags -= 1U; /* one hop spent */
+	wait_rx_armed(); /* a transmit ends by re-arming RX */
+	zassert_ok(lora_sim_inject(lora_dev, wire, len, -50, 7), "inject failed");
+	k_msleep(150);
+	zassert_equal(meshtastic_reliable_pending(), 0U, "the relay resolves it");
+	zassert_equal(duty_take_routing_error(&request_id), (int)meshtastic_Routing_Error_NONE,
+		      "the phone must get an ACK for a relayed broadcast");
+	zassert_equal(request_id, 0xBC01U, "naming the packet");
+	zassert_equal(duty_routing_from, mt.node_id, "from ourselves: an implicit ACK");
+	zassert_equal(count_tx_of(0xBC01U, 6000), 0U, "no retransmit");
+
+	wait_rx_armed();
+	zassert_ok(lora_sim_inject(lora_dev, wire, len, -50, 7), "inject failed");
+	k_msleep(150);
+	zassert_equal(duty_take_routing_error(NULL), -1, "a second echo reports nothing more");
+
+	/* 2. Nobody relays: three attempts in all, then MAX_RETRANSMIT. */
+	pkt.id = 0xBC02U;
+	zassert_ok(meshtastic_send_packet(&pkt, K_NO_WAIT));
+	zassert_equal(count_tx_of(0xBC02U, 15000), 3U, "three attempts in all");
+	/* It is given up one interval after the last attempt. */
+	for (int i = 0; i < 150 && meshtastic_reliable_pending() != 0U; i++) {
+		k_msleep(100);
+	}
+	zassert_equal(meshtastic_reliable_pending(), 0U, "given up");
+	zassert_equal(count_tx_of(0xBC02U, 100), 0U, "and no fourth");
+	zassert_equal(duty_take_routing_error(&request_id),
+		      (int)meshtastic_Routing_Error_MAX_RETRANSMIT,
+		      "an unrelayed broadcast must end as a failure, not hang");
+	zassert_equal(request_id, 0xBC02U);
+	zassert_equal(duty_routing_from, mt.node_id, "from ourselves, as upstream's is");
+
+	meshtastic_reliable_reset();
+	meshtastic_phoneapi_reset(&duty_api);
 }
 
 ZTEST(mesh_sim, test_duty_cycle_refuses_all_egress_and_tells_the_phone)

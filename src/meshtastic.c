@@ -1153,6 +1153,11 @@ static int send_wire_tail(const struct meshtastic_packet *local,
 		if (ret == -EHOSTUNREACH) {
 			LOG_DBG("TX via attachment %u refused: head not ready", (unsigned int)attach);
 		}
+		if (ret >= 0) {
+			/* Retransmits, and the implicit ACK heard back through the
+			 * head, belong to this radio. */
+			meshtastic_reliable_on_tx(local, wire, pkt_len, mesh, attach);
+		}
 		return ret;
 	}
 
@@ -1217,9 +1222,9 @@ static int send_wire_tail(const struct meshtastic_packet *local,
 #endif
 
 	if (ret >= 0) {
-		/* Track for retransmission if it is a want_ack unicast we originate
+		/* Track for retransmission if it is a want_ack packet we originate
 		 * (the hook self-filters everything else). */
-		meshtastic_reliable_on_tx(local, wire, pkt_len, mesh);
+		meshtastic_reliable_on_tx(local, wire, pkt_len, mesh, 0U);
 	}
 
 	return send_packet_complete(local, mesh, wire, pkt_len, ret, K_TIMEOUT_EQ(wait, K_FOREVER));

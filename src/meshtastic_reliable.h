@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0
  *
- * Sender-side reliable delivery: retransmit want_ack unicast packets this node
+ * Sender-side reliable delivery: retransmit want_ack packets this node
  * originates until they are acknowledged (explicitly by a ROUTING ACK, or
  * implicitly by hearing a neighbour rebroadcast them) or the retry budget runs
  * out. See Kconfig.reliable and the scheduler knobs reliable.retries /
@@ -23,17 +23,21 @@ extern "C" {
 
 /**
  * Register a just-transmitted packet for reliable delivery, if it qualifies:
- * originated by us, want_ack set, unicast (not broadcast, not to ourselves) and
- * not a ROUTING control packet. Non-qualifying packets are ignored.
+ * originated by us, want_ack set, not to ourselves and not a ROUTING control
+ * packet. Non-qualifying packets are ignored. A broadcast qualifies: it gets
+ * upstream's three attempts, and its delivery report is the implicit ACK.
  *
  * @param local  Flat-struct view of the packet as sent (fallback source).
  * @param wire   The exact on-air bytes to retransmit.
  * @param wire_len Length of @p wire.
  * @param mesh   The outgoing MeshPacket when the send engine supplied one, else NULL;
  *               read in preference to @p local (C3 Phase 7d currency).
+ * @param attach The radio it left by: 0 = this board's, else an attachment id.
+ *               Its retransmits leave by the same radio.
  */
 void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint8_t *wire,
-			       uint32_t wire_len, const meshtastic_MeshPacket *mesh);
+			       uint32_t wire_len, const meshtastic_MeshPacket *mesh,
+			       uint8_t attach);
 
 /**
  * Consume a decoded ROUTING packet addressed to us. If its request_id matches a
@@ -50,12 +54,13 @@ void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing,
 /**
  * Note that we heard our own packet @p id rebroadcast on-air (wire src == our
  * node id). This is an implicit ACK: a neighbour received and is forwarding it,
- * so stop retransmitting locally.
+ * so stop retransmitting locally and hand the connected app a ROUTING ACK from
+ * ourselves for that id (once).
  */
 void meshtastic_reliable_on_implicit_ack(uint32_t id);
 
 /**
- * @brief How many originated want_ack unicasts are still awaiting an ACK.
+ * @brief How many originated want_ack packets are still awaiting an ACK.
  *
  * The preset-hop interlock reads this (docs/MULTI-PRESET-OPERATION.md §4.4):
  * a retransmit is only useful if the destination is still listening on the
@@ -71,12 +76,13 @@ void meshtastic_reliable_reset(void);
 
 static inline void meshtastic_reliable_on_tx(const struct meshtastic_packet *local,
 					     const uint8_t *wire, uint32_t wire_len,
-					     const meshtastic_MeshPacket *mesh)
+					     const meshtastic_MeshPacket *mesh, uint8_t attach)
 {
 	ARG_UNUSED(local);
 	ARG_UNUSED(wire);
 	ARG_UNUSED(wire_len);
 	ARG_UNUSED(mesh);
+	ARG_UNUSED(attach);
 }
 
 static inline void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing,

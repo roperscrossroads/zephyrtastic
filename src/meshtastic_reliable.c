@@ -2,19 +2,24 @@
  *
  * Sender-side reliable delivery. See meshtastic_reliable.h.
  *
- * A want_ack unicast packet this node originates is copied (wire bytes) into a
- * pending table and retransmitted every reliable.timeout ms, up to
- * reliable.retries times. Retransmission stops on:
+ * A want_ack packet this node originates is copied (wire bytes) into a pending
+ * table and retransmitted every reliable.timeout ms, up to reliable.retries
+ * times (a broadcast: at most BROADCAST_RETRIES, upstream's NUM_RELIABLE_RETX
+ * of three attempts). Retransmission stops on:
  *   - an explicit ROUTING ACK (error_reason NONE) addressed to us whose
  *     request_id matches the pending id  -> delivered,
  *   - a ROUTING NAK (any other error_reason)                 -> failed-by-peer,
  *   - an implicit ACK: hearing a neighbour rebroadcast our packet (wire src is
- *     our node id) -> the mesh has taken it, stop retransmitting,
+ *     our node id) -> the mesh has taken it, stop retransmitting, and hand
+ *     the connected app a ROUTING ACK from ourselves for that packet id (what
+ *     upstream's perhapsGenerateImplicitAckForOwnOverheard does; it is the only
+ *     delivery report a broadcast ever gets),
  *   - exhausting the retry budget -> emit MESHTASTIC_EVENT_TX_FAILED and hand
  *     the connected app a MAX_RETRANSMIT routing error for that packet id.
  *
  * Retransmits reuse the stored wire bytes, so the packet id and ciphertext are
- * unchanged and other nodes dedup them correctly.
+ * unchanged and other nodes dedup them correctly. A packet that left through a
+ * radio head is retransmitted through that head, on that head's timing.
  */
 
 #include <errno.h>
@@ -30,6 +35,7 @@
 #include "meshtastic/mesh.pb.h"
 
 #include "meshtastic_airtime.h"
+#include "meshtastic_attachment.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_contention.h"
 #include "meshtastic_core.h"
@@ -44,6 +50,10 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 #define PEND_MAX CONFIG_MESHTASTIC_RELIABLE_MAX_PENDING
 
+/* Retransmits of a want_ack broadcast: upstream's NUM_RELIABLE_RETX is three
+ * attempts in all. */
+#define BROADCAST_RETRIES 2U
+
 struct pending {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint16_t wire_len;
@@ -52,6 +62,8 @@ struct pending {
 	int64_t next_due; /* k_uptime_get() ms of the next retransmit */
 	uint8_t retries_left;
 	uint8_t tier;
+	uint8_t attach;  /* the radio it left by: 0 = ours, else a head */
+	uint8_t channel; /* channel slot, for the report to the app */
 	bool active;
 };
 
@@ -81,10 +93,46 @@ static void reschedule_locked(int64_t now)
 	(void)k_work_reschedule(&retx_work, K_MSEC(MAX((int64_t)0, soonest - now)));
 }
 
-/* Hand the connected app a synthetic ROUTING error so a failed send surfaces as
- * a delivery failure, and emit a TX-failed event. Called without pend_lock. */
+/* Hand the connected app a synthetic ROUTING packet about our send @p id:
+ * @p reason NONE is a delivery report, anything else a failure. @p from is who
+ * it is presented as coming from. Called without pend_lock. */
+static void report_to_phone(uint32_t id, uint32_t from, uint8_t channel,
+			    meshtastic_Routing_Error reason)
+{
+#if defined(CONFIG_MESHTASTIC_PHONEAPI)
+	meshtastic_Routing routing = meshtastic_Routing_init_zero;
+	uint8_t buf[16];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+
+	routing.which_variant = meshtastic_Routing_error_reason_tag;
+	routing.error_reason = reason;
+	if (!pb_encode(&os, meshtastic_Routing_fields, &routing)) {
+		return;
+	}
+
+	meshtastic_phoneapi_on_packet(&(struct meshtastic_packet){
+		.from = from,
+		.to = mt.node_id,
+		.portnum = MESHTASTIC_PORT_ROUTING,
+		.request_id = id,
+		.payload = buf,
+		.payload_len = os.bytes_written,
+		.channel_index = channel,
+	}, NULL);
+#else
+	ARG_UNUSED(id);
+	ARG_UNUSED(from);
+	ARG_UNUSED(channel);
+	ARG_UNUSED(reason);
+#endif
+}
+
+/* A send ran out of retries: surface it to the app as a delivery failure and
+ * emit a TX-failed event. Called without pend_lock. */
 static void notify_failure(uint32_t id, uint32_t to)
 {
+	bool broadcast = (to == MESHTASTIC_NODE_BROADCAST);
+
 	meshtastic_sched_stat_reliable_fail();
 	LOG_WRN("reliable: id=0x%08x to 0x%08x exhausted retries", id, to);
 
@@ -92,8 +140,11 @@ static void notify_failure(uint32_t id, uint32_t to)
 	 * despite retransmits: strike its route health (three strikes decay the
 	 * route to flood so the next send rediscovers a working path — M4,
 	 * upstream RouteHealth). Note this fires only on retransmit exhaustion,
-	 * not on a NAK — a NAK means the peer received it, so its route is fine. */
-	meshtastic_nodedb_note_route_failure(to);
+	 * not on a NAK — a NAK means the peer received it, so its route is fine.
+	 * A broadcast has no route: nobody relaying it says nothing about one. */
+	if (!broadcast) {
+		meshtastic_nodedb_note_route_failure(to);
+	}
 
 	meshtastic_emit_event(MESHTASTIC_EVENT_TX_FAILED, -ETIMEDOUT,
 			      &(struct meshtastic_packet){
@@ -102,28 +153,10 @@ static void notify_failure(uint32_t id, uint32_t to)
 				      .id = id,
 			      });
 
-#if defined(CONFIG_MESHTASTIC_PHONEAPI)
-	meshtastic_Routing routing = meshtastic_Routing_init_zero;
-	uint8_t buf[16];
-	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
-
-	routing.which_variant = meshtastic_Routing_error_reason_tag;
-	routing.error_reason = meshtastic_Routing_Error_MAX_RETRANSMIT;
-	if (!pb_encode(&os, meshtastic_Routing_fields, &routing)) {
-		return;
-	}
-
-	/* Presented as if the unreachable destination reported the failure. */
-	meshtastic_phoneapi_on_packet(&(struct meshtastic_packet){
-		.from = to,
-		.to = mt.node_id,
-		.portnum = MESHTASTIC_PORT_ROUTING,
-		.request_id = id,
-		.payload = buf,
-		.payload_len = os.bytes_written,
-		.channel_index = meshtastic_channels_primary_index(),
-	}, NULL);
-#endif
+	/* Presented as if the unreachable destination reported the failure; a
+	 * broadcast has none, so it comes from us, as upstream's does. */
+	report_to_phone(id, broadcast ? mt.node_id : to, meshtastic_channels_primary_index(),
+			meshtastic_Routing_Error_MAX_RETRANSMIT);
 }
 
 /* Find the active slot tracking @p id, or -1. Caller holds pend_lock. */
@@ -180,8 +213,10 @@ void meshtastic_reliable_reset(void)
  * otherwise derive an airtime-adaptive interval that mirrors upstream
  * RadioInterface::getRetransmissionMsec, so the wait scales with the modem
  * preset instead of firing before an ACK can physically return on a slow one. */
-static uint32_t retx_interval_ms(size_t wire_len, uint32_t override_ms)
+static uint32_t retx_interval_ms(size_t wire_len, uint32_t override_ms, uint8_t attach)
 {
+	uint8_t sf = mt.modem.spread_factor;
+	uint32_t bw = mt.modem.bandwidth_hz;
 	uint32_t airtime = 0U;
 	uint8_t util = 0U;
 	uint32_t slot;
@@ -203,15 +238,27 @@ static uint32_t retx_interval_ms(size_t wire_len, uint32_t override_ms)
 	 * the slot term below; the packet-airtime and utilisation terms are 0. */
 #endif
 
-	slot = meshtastic_contention_effective_slot_ms(mt.modem.spread_factor,
-						       mt.modem.bandwidth_hz, false);
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+	/* Through a head, the relay we are waiting to overhear is timed on the
+	 * head's preset: wait in ITS slots. (The airtime term stays our radio's;
+	 * the slot term is the one that dominates.) */
+	if (attach != 0U) {
+		(void)meshtastic_attachment_modem(attach, &sf, &bw);
+	}
+#else
+	ARG_UNUSED(attach);
+#endif
+
+	slot = meshtastic_contention_effective_slot_ms(sf, bw, false);
 	return meshtastic_contention_retransmit_ms(airtime, slot, util);
 }
 
 void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint8_t *wire,
-			       uint32_t wire_len, const meshtastic_MeshPacket *mesh)
+			       uint32_t wire_len, const meshtastic_MeshPacket *mesh,
+			       uint8_t attach)
 {
 	struct meshtastic_sched_config c;
+	uint8_t retries;
 	bool want_ack;
 	uint32_t from;
 	uint32_t to;
@@ -234,10 +281,11 @@ void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint
 	portnum = mesh ? (uint32_t)mesh->decoded.portnum : local->portnum;
 	id = mesh ? mesh->id : local->id;
 
-	/* Only our-origin, want_ack, unicast application packets. ROUTING control
-	 * packets (e.g. the ACKs we send) are not themselves retransmitted. */
-	if (!want_ack || from != mt.node_id || to == MESHTASTIC_NODE_BROADCAST ||
-	    to == mt.node_id || portnum == MESHTASTIC_PORT_ROUTING) {
+	/* Only our-origin, want_ack application packets. ROUTING control packets
+	 * (e.g. the ACKs we send) are not themselves retransmitted. A broadcast
+	 * is tracked too: hearing it relayed is its only delivery report. */
+	if (!want_ack || from != mt.node_id || to == mt.node_id ||
+	    portnum == MESHTASTIC_PORT_ROUTING) {
 		return;
 	}
 
@@ -245,6 +293,8 @@ void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint
 	if (c.reliable_retries == 0U) {
 		return; /* feature disabled at runtime */
 	}
+	retries = (to == MESHTASTIC_NODE_BROADCAST) ? MIN(c.reliable_retries, BROADCAST_RETRIES)
+						    : c.reliable_retries;
 
 	now = k_uptime_get();
 
@@ -283,11 +333,16 @@ void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint
 	pend[slot].id = id;
 	pend[slot].to = to;
 	pend[slot].tier = meshtastic_sched_tier_for(portnum);
-	pend[slot].retries_left = c.reliable_retries;
-	pend[slot].next_due = now + (int64_t)retx_interval_ms(wire_len, c.reliable_timeout_ms);
+	pend[slot].retries_left = retries;
+	pend[slot].attach = attach;
+	pend[slot].channel = (local != NULL) ? local->channel_index
+					     : meshtastic_channels_primary_index();
+	pend[slot].next_due =
+		now + (int64_t)retx_interval_ms(wire_len, c.reliable_timeout_ms, attach);
 	pend[slot].active = true;
 
-	LOG_DBG("reliable: track id=0x%08x to 0x%08x retries=%u", id, to, c.reliable_retries);
+	LOG_DBG("reliable: track id=0x%08x to 0x%08x retries=%u attach=%u", id, to, retries,
+		(unsigned int)attach);
 
 	reschedule_locked(now);
 	k_mutex_unlock(&pend_lock);
@@ -355,11 +410,16 @@ void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing,
 
 void meshtastic_reliable_on_implicit_ack(uint32_t id)
 {
+	uint8_t channel = 0U;
 	bool resolved;
+	int i;
 
 	k_mutex_lock(&pend_lock, K_FOREVER);
-	resolved = resolve_locked(id);
+	i = find_locked(id);
+	resolved = (i >= 0);
 	if (resolved) {
+		channel = pend[i].channel;
+		pend[i].active = false;
 		reschedule_locked(k_uptime_get());
 	}
 	k_mutex_unlock(&pend_lock);
@@ -367,6 +427,10 @@ void meshtastic_reliable_on_implicit_ack(uint32_t id)
 	if (resolved) {
 		meshtastic_sched_stat_reliable_ack();
 		LOG_DBG("reliable: id=0x%08x implicit ack (heard rebroadcast)", id);
+		/* Tell the app, once: an ACK from ourselves is how upstream marks
+		 * "the mesh took it". A later echo of the same packet finds nothing
+		 * pending and reports nothing. */
+		report_to_phone(id, mt.node_id, channel, meshtastic_Routing_Error_NONE);
 	}
 }
 
@@ -399,10 +463,19 @@ static void retx_work_fn(struct k_work *work)
 		}
 
 		pend[i].retries_left--;
-		pend[i].next_due = now + (int64_t)retx_interval_ms(pend[i].wire_len, c.reliable_timeout_ms);
+		pend[i].next_due = now + (int64_t)retx_interval_ms(pend[i].wire_len,
+								   c.reliable_timeout_ms,
+								   pend[i].attach);
 		LOG_DBG("reliable: retransmit id=0x%08x (%u left)", pend[i].id,
 			pend[i].retries_left);
-		(void)meshtastic_radio_send_wire_prio(pend[i].wire, pend[i].wire_len, pend[i].tier);
+		if (pend[i].attach != 0U) {
+			(void)meshtastic_radio_send_wire_after_on(pend[i].wire, pend[i].wire_len,
+								  pend[i].tier, 0U,
+								  pend[i].attach);
+		} else {
+			(void)meshtastic_radio_send_wire_prio(pend[i].wire, pend[i].wire_len,
+							      pend[i].tier);
+		}
 	}
 	reschedule_locked(now);
 	k_mutex_unlock(&pend_lock);

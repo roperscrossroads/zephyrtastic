@@ -552,6 +552,89 @@ ZTEST(attachment, test_a_send_on_a_preset_channel_leaves_through_that_presets_he
 	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "restore");
 }
 
+/* A want_ack send that left through a head is retransmitted through THAT head,
+ * never on our own radio (where it would carry another preset's hash), and its
+ * implicit ACK is the relay that head hears. This is what a phone's text on a
+ * preset channel is: a want_ack broadcast. */
+ZTEST(attachment, test_a_reliable_send_through_a_head_is_retransmitted_through_it)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_msg msg;
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
+	const uint8_t there = meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF);
+	struct meshtastic_packet text = {
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.id = 0x2B10U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"ack mf",
+		.payload_len = 6U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_ack = true,
+		.channel_index = 1U,
+	};
+	uint32_t before;
+
+	meshtastic_reliable_reset();
+	zassert_ok(meshtastic_sched_set("reliable.timeout", "400"));
+
+	ch.index = 1;
+	ch.role = meshtastic_Channel_Role_SECONDARY;
+	ch.has_settings = true;
+	ch.settings.psk.size = 1U;
+	ch.settings.psk.bytes[0] = 1U;
+	strcpy(ch.settings.name, "MediumFast");
+	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "");
+
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2B00U, "admit mf", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -90, 5, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	k_msleep(300);
+	drain_radio();
+
+	before = sent.count;
+	zassert_ok(meshtastic_send_packet(&text, K_NO_WAIT), "sent on the MediumFast channel");
+	for (int i = 0; i < 30 && sent.count == before; i++) {
+		k_msleep(10);
+	}
+	zassert_equal(sent.count, before + 1U, "the original, one TX_FRAME");
+	zassert_equal(meshtastic_reliable_pending(), 1U, "tracked, though it left by a head");
+
+	/* No relay heard: the retransmit is a second TX_FRAME to the same head. */
+	for (int i = 0; i < 80 && sent.count == before + 1U; i++) {
+		k_msleep(10);
+	}
+	zassert_equal(sent.count, before + 2U, "the retransmit, through the head");
+	zassert_equal(sent.node, HEAD1_NODE, "the same head");
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_FRAME);
+	zassert_equal(((const struct meshtastic_wire_header *)msg.u.tx.wire)->id, 0x2B10U,
+		      "the same packet");
+	zassert_equal(((const struct meshtastic_wire_header *)msg.u.tx.wire)->channel, there,
+		      "still under MediumFast's hash");
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(100)), 0, "never on our radio");
+
+	/* The head hears a neighbour relay it: resolved, no further retransmit. */
+	memcpy(wire, msg.u.tx.wire, msg.u.tx.wire_len);
+	((struct meshtastic_wire_header *)wire)->relay_node = 0x77U;
+	set_hop_limit(wire, 2U);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -60, 10, wire, msg.u.tx.wire_len), "via head");
+	k_msleep(200);
+	zassert_equal(meshtastic_reliable_pending(), 0U, "the relay the head heard is the ACK");
+	before = sent.count;
+	k_msleep(600);
+	zassert_equal(sent.count, before, "and nothing more is sent");
+
+	meshtastic_reliable_reset(); /* the before hook restores the timeout */
+	ch.role = meshtastic_Channel_Role_DISABLED;
+	ch.settings.name[0] = '\0';
+	ch.settings.psk.size = 0U;
+	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "restore");
+}
+
 /* B15 (review F3, SCOPE C1): a head is admitted only over a link the bearer
  * vouches for, or from the operator's allow-list. Anything else gets nothing --
  * not a slot, not a delivery, not an RF frame. */
