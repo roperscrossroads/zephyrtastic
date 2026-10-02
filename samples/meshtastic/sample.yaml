@@ -204,7 +204,7 @@ tests:
     sysbuild: true
     extra_args:
       - SHIELD=wio_sx1262_xiao
-      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sig-required.conf;overlay-ble-peer.conf;overlay-led-status.conf"
+      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sig-required.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
   sample.meshtastic.fleet.c1.terse_signed:
     # Class 1 with terse asserts AND cluster + packet signing: the image agents-ooma.38 will
     # prove on hardware. It only fits because ASSERT_VERBOSE=n frees ~39 KB of flash.
@@ -214,7 +214,7 @@ tests:
     sysbuild: true
     extra_args:
       - SHIELD=wio_sx1262_xiao
-      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sig-required.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf"
+      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sig-required.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-quiet-first-boot.conf"
     extra_configs:
       - CONFIG_ASSERT_VERBOSE=n
   sample.meshtastic.fleet.c12:
