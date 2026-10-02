@@ -114,7 +114,11 @@ static K_THREAD_STACK_DEFINE(ble_work_stack, CONFIG_MESHTASTIC_BLE_WORK_STACK_SI
  * four; it is taken before ble.api.lock, never after (the phoneapi calls
  * ble_invalidate_delivery() with its own lock already released). */
 static K_MUTEX_DEFINE(fromradio_lock);
-static struct meshtastic_phoneapi_frame fromradio_staged;
+/* Also the phone API's in-flight slot (meshtastic_phoneapi_set_current()): it is written
+ * only inside meshtastic_phoneapi_current_frame(), which only stage_fromradio() calls, under
+ * fromradio_lock. In PSRAM where there is any, like ble_queue: a read copies it to
+ * fromradio_buf before anything is sent. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR struct meshtastic_phoneapi_frame fromradio_staged;
 static uint8_t fromradio_buf[MESHTASTIC_API_FRAME_MAX];
 static uint16_t fromradio_len;
 static bool fromradio_ready;
@@ -1241,6 +1245,8 @@ int meshtastic_ble_init(void)
 	meshtastic_phoneapi_init(&ble.api, "ble", ble_queue, ARRAY_SIZE(ble_queue), ble_data_ready,
 				 ble_disconnect, ble_invalidate_delivery, NULL, &ble_to_scratch,
 				 &ble_from_scratch);
+	/* The staging buffer IS the in-flight slot: stage_fromradio() is its only reader. */
+	meshtastic_phoneapi_set_current(&ble.api, &fromradio_staged);
 	meshtastic_phoneapi_register(&ble.api);
 
 	k_work_queue_start(&ble.work_q, ble_work_stack, CONFIG_MESHTASTIC_BLE_WORK_STACK_SIZE,

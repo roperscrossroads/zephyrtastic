@@ -5992,8 +5992,11 @@ ZTEST(protocol_stack, test_a_disconnect_loses_at_most_the_in_flight_frame)
 	uint32_t ids[8] = {0};
 	uint8_t n = 0U, before = 0U;
 
+	static struct meshtastic_phoneapi_frame in_flight;
+
 	meshtastic_phoneapi_init(&api, "backlog3", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL,
 				 &to_scratch, &from_scratch);
+	meshtastic_phoneapi_set_current(&api, &in_flight);
 
 	meshtastic_FromRadio a = backlog_text(1);
 	meshtastic_FromRadio b = backlog_text(2);

@@ -280,17 +280,30 @@ void meshtastic_phoneapi_push_frame_front(struct meshtastic_phoneapi *api,
 	k_mutex_unlock(&api->lock);
 }
 
+void meshtastic_phoneapi_set_current(struct meshtastic_phoneapi *api,
+				     struct meshtastic_phoneapi_frame *storage)
+{
+	k_mutex_lock(&api->lock, K_FOREVER);
+	api->current = storage;
+	api->current_valid = false;
+	k_mutex_unlock(&api->lock);
+}
+
 bool meshtastic_phoneapi_current_frame(struct meshtastic_phoneapi *api,
 				       struct meshtastic_phoneapi_frame *frame)
 {
 	k_mutex_lock(&api->lock, K_FOREVER);
+	if (api->current == NULL) {
+		k_mutex_unlock(&api->lock);
+		return false;
+	}
 	/* Same order as pop_frame: config stream first, then the queue. */
 	if (!api->current_valid && config_active(api) &&
-	    meshtastic_phoneapi_next_config_frame(api, &api->current) == 0) {
+	    meshtastic_phoneapi_next_config_frame(api, api->current) == 0) {
 		api->current_valid = true;
 	}
 	if (!api->current_valid && !config_active(api) && api->count > 0U &&
-	    queue_take_servable(api, &api->current)) {
+	    queue_take_servable(api, api->current)) {
 		api->current_valid = true;
 	}
 
@@ -299,7 +312,9 @@ bool meshtastic_phoneapi_current_frame(struct meshtastic_phoneapi *api,
 		return false;
 	}
 
-	*frame = api->current;
+	if (frame != api->current) {
+		*frame = *api->current;
+	}
 	k_mutex_unlock(&api->lock);
 	return true;
 }

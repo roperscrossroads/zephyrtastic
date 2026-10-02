@@ -96,7 +96,11 @@ struct meshtastic_phoneapi {
 	const char *name;
 	struct k_mutex lock;
 	struct meshtastic_phoneapi_frame *queue;
-	struct meshtastic_phoneapi_frame current;
+	/* The frame being delivered, for a transport whose client may read one frame more
+	 * than once (BLE). The transport's own storage, set with
+	 * meshtastic_phoneapi_set_current(), like `queue`: 516 bytes a transport that pops
+	 * frames does not pay for, and that can sit in PSRAM. NULL = pop only. */
+	struct meshtastic_phoneapi_frame *current;
 	uint8_t queue_size;
 	uint8_t head;
 	uint8_t tail;
@@ -161,6 +165,12 @@ void meshtastic_phoneapi_init(struct meshtastic_phoneapi *api, const char *name,
 			      meshtastic_phoneapi_disconnect_cb_t disconnect,
 			      meshtastic_phoneapi_invalidate_cb_t invalidate_delivery, void *user_data,
 			      meshtastic_ToRadio *to_scratch, meshtastic_FromRadio *from_scratch);
+/**
+ * @brief Give the transport an in-flight frame slot, which
+ *        meshtastic_phoneapi_current_frame() needs. Call once, after init.
+ */
+void meshtastic_phoneapi_set_current(struct meshtastic_phoneapi *api,
+				     struct meshtastic_phoneapi_frame *storage);
 void meshtastic_phoneapi_release_current_frame(struct meshtastic_phoneapi *api);
 void meshtastic_phoneapi_register(struct meshtastic_phoneapi *api);
 /**
@@ -187,6 +197,11 @@ bool meshtastic_phoneapi_pop_frame(struct meshtastic_phoneapi *api,
 				   struct meshtastic_phoneapi_frame *frame);
 void meshtastic_phoneapi_push_frame_front(struct meshtastic_phoneapi *api,
 					  const struct meshtastic_phoneapi_frame *frame);
+/**
+ * @brief The frame being delivered: the same one on every call until it is
+ *        completed or released. @p frame may be the slot itself. False if
+ *        nothing is waiting, or the transport has no slot.
+ */
 bool meshtastic_phoneapi_current_frame(struct meshtastic_phoneapi *api,
 				       struct meshtastic_phoneapi_frame *frame);
 void meshtastic_phoneapi_current_frame_complete(struct meshtastic_phoneapi *api);
