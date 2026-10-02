@@ -191,8 +191,11 @@ static void seed_default_primary(uint8_t index)
 	ch->role = meshtastic_Channel_Role_PRIMARY;
 	ch->has_settings = true;
 	/* settings.name stays "" (init_zero) -> get_name() yields the preset display name */
-	memcpy(ch->settings.psk.bytes, meshtastic_default_psk, sizeof(meshtastic_default_psk));
-	ch->settings.psk.size = sizeof(meshtastic_default_psk);
+	/* The well-known key in its one-byte form, as the reference seeds it: the
+	 * same key on the air as the 16 bytes this used to store, but the form the
+	 * client apps recognise as the default (no lock on the channel). */
+	ch->settings.psk.bytes[0] = 1U;
+	ch->settings.psk.size = 1U;
 	ch->settings.uplink_enabled = true;
 	ch->settings.downlink_enabled = true;
 	ch->settings.has_module_settings = true;
