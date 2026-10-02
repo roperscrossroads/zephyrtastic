@@ -1297,6 +1297,62 @@ ZTEST(meshtastic_shell, test_scanner_autostart_c_list_from_build)
 	zassert_equal(got[1], meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_TURBO);
 	zassert_equal(got[2], meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO);
 }
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include <zephyr/settings/settings.h>
+
+struct pin_read {
+	uint8_t raw[MESHTASTIC_SCANNER_MAX_PRESETS];
+	ssize_t len;
+};
+
+static int pin_read_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		       void *param)
+{
+	struct pin_read *r = param;
+
+	ARG_UNUSED(key);
+	r->len = read_cb(cb_arg, r->raw, MIN(len, sizeof(r->raw)));
+	return 0;
+}
+
+/* What a boot does to the scanner, without the reboot: the sweep is stopped, the list is
+ * back at the full set as after the scanner's own init, and the autostart runs. */
+static int scanner_boots_again(meshtastic_Config_LoRaConfig_ModemPreset *got, size_t cap)
+{
+	(void)meshtastic_scanner_stop();
+	zassert_ok(meshtastic_scanner_set_presets(NULL, 0U));
+	meshtastic_scanner_autostart();
+	return meshtastic_scanner_get_presets(got, cap);
+}
+
+/* Named to run after the three above: it leaves the build's list in place, as it found it. */
+ZTEST(meshtastic_shell, test_scanner_autostart_d_a_pinned_list_survives_a_boot)
+{
+	meshtastic_Config_LoRaConfig_ModemPreset got[MESHTASTIC_SCANNER_MAX_PRESETS];
+	struct pin_read r = {0};
+	const char *out = NULL;
+
+	zassert_ok(run_cmd("meshtastic scan presets MediumFast", &out), "%s", out);
+	zassert_not_null(strstr(out, "stored"), "%s", out);
+	zassert_ok(settings_load_subtree_direct("mtscan/presets", pin_read_cb, &r));
+	zassert_equal(r.len, 1, "one byte per preset");
+	zassert_equal(r.raw[0], (uint8_t)meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST);
+
+	zassert_equal(scanner_boots_again(got, ARRAY_SIZE(got)), 1,
+		      "the stored list, not the build's three");
+	zassert_equal(got[0], meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST);
+	zassert_true(meshtastic_scanner_sweeping(), "and the survey is running on it");
+
+	/* `all` forgets the pin: the record goes, and a boot is the build's again. */
+	zassert_ok(run_cmd("meshtastic scan presets all", &out), "%s", out);
+	memset(&r, 0, sizeof(r));
+	zassert_ok(settings_load_subtree_direct("mtscan/presets", pin_read_cb, &r));
+	zassert_equal(r.len, 0, "no record left");
+	zassert_equal(scanner_boots_again(got, ARRAY_SIZE(got)), 3, "the build's list");
+	zassert_equal(got[0], meshtastic_Config_LoRaConfig_ModemPreset_LONG_TURBO);
+}
+#endif /* CONFIG_MESHTASTIC_SETTINGS */
 #endif /* CONFIG_MESHTASTIC_SCANNER_AUTOSTART */
 
 #if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)

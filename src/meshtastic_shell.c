@@ -2023,8 +2023,9 @@ static int cmd_scan_presets(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	if (argc == 2U && strcmp(argv[1], "all") == 0) {
-		(void)meshtastic_scanner_set_presets(NULL, 0U);
-		shell_print(sh, "sweeping the full preset set (stats cleared)");
+		(void)meshtastic_scanner_pin_presets(NULL, 0U);
+		shell_print(sh, "sweeping the full preset set (stats cleared; nothing stored: "
+				"the next boot uses the build's list)");
 		return 0;
 	}
 
@@ -2040,7 +2041,7 @@ static int cmd_scan_presets(const struct shell *sh, size_t argc, char **argv)
 		}
 	}
 
-	if (meshtastic_scanner_set_presets(list, argc - 1U) < 0) {
+	if (meshtastic_scanner_pin_presets(list, argc - 1U) < 0) {
 		shell_error(sh, "set failed");
 		return -EINVAL;
 	}
@@ -2049,6 +2050,10 @@ static int cmd_scan_presets(const struct shell *sh, size_t argc, char **argv)
 	 * to a larger fraction of the time — say so, since that is the point. */
 	shell_print(sh, "sweeping %u presets (stats cleared; shorter cycle = higher capture "
 			"rate on each)", (unsigned int)(argc - 1U));
+	if (IS_ENABLED(CONFIG_MESHTASTIC_SETTINGS)) {
+		shell_print(sh, "stored: a reboot comes back to this list ('scan presets all' "
+				"forgets it)");
+	}
 	return 0;
 }
 

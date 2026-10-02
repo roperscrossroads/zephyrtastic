@@ -54,6 +54,22 @@ tests:
       - CONFIG_MESHTASTIC_SCANNER_AUTOSTART=y
       - CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESETS="longturbo, NotAPreset MediumTurbo,ShortTurbo"
 
+  # The list pinned at run time, on real NVS: `scan presets` stores it, and a boot uses
+  # it ahead of the build's list. The timing listener is pinned this way and lost its pin
+  # at every reboot.
+  meshtastic.shell.scanner_pinned.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SCANNER=y
+      - CONFIG_MESHTASTIC_SCANNER_RING_RECORDS=64
+      - CONFIG_MESHTASTIC_SCANNER_AUTOSTART=y
+      - CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESETS="longturbo, NotAPreset MediumTurbo,ShortTurbo"
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS_NVS=y
+
   # `meshtastic rf`. native_sim has no board FEM override, so this scenario is
   # also the only place the "[--] not on this hardware" branch compiles AND runs
   # — on the bench boards that row is always the controllable one.

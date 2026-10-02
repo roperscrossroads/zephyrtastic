@@ -9,6 +9,9 @@
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
 #include <zephyr/sys/util.h>
 
 #include <zephyr/drivers/lora.h>
@@ -563,6 +566,69 @@ int meshtastic_scanner_set_presets(const meshtastic_Config_LoRaConfig_ModemPrese
 	return 0;
 }
 
+/* ---- the pinned list (mtscan/presets): one byte per preset ------------------- */
+
+#define SCAN_PIN_KEY "mtscan/presets"
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+static bool scan_pinned; /* a stored list was loaded this boot */
+
+static int scan_settings_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	meshtastic_Config_LoRaConfig_ModemPreset list[MESHTASTIC_SCANNER_MAX_PRESETS];
+	uint8_t raw[MESHTASTIC_SCANNER_MAX_PRESETS];
+	bool same;
+
+	if (strcmp(key, "presets") != 0) {
+		return -ENOENT;
+	}
+	if (len == 0U || len > sizeof(raw) || read_cb(cb_arg, raw, len) != (ssize_t)len) {
+		return -EINVAL;
+	}
+	for (size_t i = 0U; i < len; i++) {
+		list[i] = (meshtastic_Config_LoRaConfig_ModemPreset)raw[i];
+	}
+	/* The record is read more than once a boot (ours, then the full load the BLE
+	 * bring-up does). Setting a list clears its statistics, so only a list that
+	 * differs is set. */
+	scan_lock();
+	same = scan_list_n == len && memcmp(scan_list, list, len * sizeof(list[0])) == 0;
+	scan_unlock();
+	if (!same && meshtastic_scanner_set_presets(list, len) != 0) {
+		LOG_WRN("scanner: stored preset list rejected");
+		return 0;
+	}
+	scan_pinned = true;
+	return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mt_scan, "mtscan", NULL, scan_settings_set, NULL, NULL);
+#endif
+
+int meshtastic_scanner_pin_presets(const meshtastic_Config_LoRaConfig_ModemPreset *list, size_t n)
+{
+	int ret = meshtastic_scanner_set_presets(list, n);
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	if (ret == 0 && (list == NULL || n == 0U)) {
+		(void)settings_delete(SCAN_PIN_KEY);
+		scan_pinned = false;
+	} else if (ret == 0) {
+		uint8_t raw[MESHTASTIC_SCANNER_MAX_PRESETS];
+
+		for (size_t i = 0U; i < n; i++) {
+			raw[i] = (uint8_t)list[i];
+		}
+		ret = settings_save_one(SCAN_PIN_KEY, raw, n);
+		if (ret != 0) {
+			LOG_WRN("scanner: preset list not saved (%d)", ret);
+		}
+		scan_pinned = (ret == 0);
+	}
+#endif
+	return ret;
+}
+
 int meshtastic_scanner_get_presets(meshtastic_Config_LoRaConfig_ModemPreset *out, size_t max)
 {
 	size_t n;
@@ -686,7 +752,18 @@ static void autostart_apply_list(const char *spec)
 
 void meshtastic_scanner_autostart(void)
 {
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	/* A list pinned at run time, before the build's: nothing else has loaded this
+	 * subtree yet (the full settings load comes with the BLE bring-up, later). */
+	(void)settings_load_subtree("mtscan");
+#endif
 #if defined(CONFIG_MESHTASTIC_SCANNER_AUTOSTART)
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	if (scan_pinned) {
+		LOG_INF("scanner: sweeping the stored preset list (%u)", (unsigned int)scan_list_n);
+	} else
+#endif
+	{
 #if CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESET >= 0
 	/* Park on the configured preset before starting, so a listener that has
 	 * just power-cycled resumes measuring the preset it was built for instead
@@ -703,6 +780,7 @@ void meshtastic_scanner_autostart(void)
 #else
 	autostart_apply_list(CONFIG_MESHTASTIC_SCANNER_AUTOSTART_PRESETS);
 #endif
+	}
 	if (meshtastic_scanner_start() == 0) {
 		LOG_INF("scanner: autostarted — this node is an instrument, not a participant");
 	} else {

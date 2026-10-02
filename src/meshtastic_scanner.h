@@ -99,6 +99,16 @@ struct meshtastic_scan_stats {
 int meshtastic_scanner_set_presets(const meshtastic_Config_LoRaConfig_ModemPreset *list, size_t n);
 
 /**
+ * @brief meshtastic_scanner_set_presets(), and keep the list across a reboot.
+ *
+ * The list is stored (settings record mtscan/presets) and applied again at boot, ahead of
+ * the build-time autostart list: a listener pinned to one preset at run time stays pinned.
+ * The full set (NULL or 0) deletes the record, which hands the choice back to the build.
+ * Without MESHTASTIC_SETTINGS this is meshtastic_scanner_set_presets().
+ */
+int meshtastic_scanner_pin_presets(const meshtastic_Config_LoRaConfig_ModemPreset *list, size_t n);
+
+/**
  * @brief The presets currently being swept.
  * @return number written to @p out, or negative errno.
  */
