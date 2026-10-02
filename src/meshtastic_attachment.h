@@ -103,6 +103,19 @@ bool meshtastic_attachment_modem(uint8_t id, uint8_t *spread_factor, uint32_t *b
  * to the local hash when the head's preset is unknown. */
 uint8_t meshtastic_attachment_tx_hash(uint8_t id, uint8_t index);
 
+/**
+ * @brief The radio a packet ORIGINATED on channel @p index leaves by.
+ *
+ * A slot named after a preset this brain covers through a head is that
+ * preset's channel (meshtastic_channels_named_for_preset): what is sent on it
+ * leaves through a head on that preset, the most recently heard one that can
+ * transmit. Every other channel is the brain's own radio, as before.
+ *
+ * @return 0 for our own radio, an attachment id, or -ENETUNREACH when the
+ *         channel names a preset no ready head is on: never the wrong radio.
+ */
+int meshtastic_attachment_for_channel(uint8_t index);
+
 /* The router noted that attachment @p id delivered a copy of a frame the local
  * radio had delivered @p ms earlier. */
 void meshtastic_attachment_note_latency(uint8_t id, uint32_t ms);

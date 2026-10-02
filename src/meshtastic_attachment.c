@@ -552,6 +552,42 @@ bool meshtastic_attachment_tx_ready(uint8_t id)
 	return ready;
 }
 
+int meshtastic_attachment_for_channel(uint8_t index)
+{
+	uint8_t preset = MESHTASTIC_PRESET_UNKNOWN;
+	int best = 0;
+	int64_t best_ms = INT64_MIN;
+
+	for (uint8_t p = 0U; p <= (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX; p++) {
+		if (meshtastic_channels_named_for_preset(index, p)) {
+			preset = p;
+			break;
+		}
+	}
+	if (preset == MESHTASTIC_PRESET_UNKNOWN) {
+		return 0; /* an ordinary channel: our own radio */
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	for (uint8_t id = 1U; id < ARRAY_SIZE(tab); id++) {
+		const struct meshtastic_attachment_info *a = &tab[id];
+
+		if (!used[id] || !a->link_up || a->preset != preset) {
+			continue;
+		}
+		if (a->have_status &&
+		    ((a->status.flags & MESHTASTIC_ATTACHMENT_ST_RX_ONLY) != 0U ||
+		     (a->status.flags & MESHTASTIC_ATTACHMENT_ST_TX_ENABLED) == 0U)) {
+			continue; /* an ear, or a head whose transmitter is off */
+		}
+		if (best == 0 || a->last_ms > best_ms) {
+			best = (int)id;
+			best_ms = a->last_ms;
+		}
+	}
+	k_mutex_unlock(&tab_lock);
+	return (best != 0) ? best : -ENETUNREACH;
+}
+
 uint8_t meshtastic_attachment_tx_hash(uint8_t id, uint8_t index)
 {
 	uint8_t preset = MESHTASTIC_PRESET_UNKNOWN;

@@ -1047,6 +1047,44 @@ static int send_packet_complete(const struct meshtastic_packet *local,
 	return 0;
 }
 
+#if defined(CONFIG_MESHTASTIC_DUTY_CYCLE) || defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+static void routing_nak_to_phone(const struct meshtastic_packet *blocked,
+				 meshtastic_Routing_Error reason);
+#endif
+
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+/* Which radio an ORIGINATED packet on @p send_index leaves by (agents-pcs2.11):
+ * a slot named after a preset a head is on sends through that head. With no
+ * ready head on that preset the send is refused -- and the phone is told
+ * (NO_INTERFACE, upstream's "no suitable interface for this packet") -- rather
+ * than keyed up on our own radio with another preset's channel hash, where
+ * nothing would decode it. @p id is the phone's packet id, 0 if not from one. */
+static int attach_for_send(uint8_t send_index, uint32_t id, uint8_t *attach)
+{
+	int a;
+
+	if (*attach != 0U) {
+		return 0; /* a reply: already bound to the radio it came in on */
+	}
+	a = meshtastic_attachment_for_channel(send_index);
+	if (a < 0) {
+		LOG_WRN("TX refused: channel %u is for a preset no ready head is on",
+			(unsigned int)send_index);
+		if (id != 0U) {
+			const struct meshtastic_packet blocked = {
+				.id = id,
+				.channel_index = send_index,
+			};
+
+			routing_nak_to_phone(&blocked, meshtastic_Routing_Error_NO_INTERFACE);
+		}
+		return a;
+	}
+	*attach = (uint8_t)a;
+	return 0;
+}
+#endif
+
 #if defined(CONFIG_MESHTASTIC_DUTY_CYCLE)
 /* Emit a ROUTING_APP NAK carrying DUTY_CYCLE_LIMIT straight to the phone.
  *
@@ -1057,13 +1095,21 @@ static int send_packet_complete(const struct meshtastic_packet *local,
  * hand it to the transports, never touch the air. */
 static void duty_nak_to_phone(const struct meshtastic_packet *blocked)
 {
+	routing_nak_to_phone(blocked, meshtastic_Routing_Error_DUTY_CYCLE_LIMIT);
+}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_DUTY_CYCLE) || defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+static void routing_nak_to_phone(const struct meshtastic_packet *blocked,
+				 meshtastic_Routing_Error reason)
+{
 	meshtastic_Routing routing = meshtastic_Routing_init_zero;
 	uint8_t buf[16];
 	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
 	struct meshtastic_packet nak = {0};
 
 	routing.which_variant = meshtastic_Routing_error_reason_tag;
-	routing.error_reason = meshtastic_Routing_Error_DUTY_CYCLE_LIMIT;
+	routing.error_reason = reason;
 
 	if (!pb_encode(&stream, meshtastic_Routing_fields, &routing)) {
 		return;
@@ -1188,6 +1234,7 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 	uint32_t pkt_len = 0U;
 	uint8_t channel_index;
 	uint8_t send_index;
+	uint8_t attach;
 	int ret;
 
 	if (!mt.initialized) {
@@ -1210,6 +1257,13 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 				: packet->channel_index;
 	send_index = meshtastic_channels_resolve_send_index(packet->to, channel_index,
 							    packet->channel);
+	attach = packet->tx_attach;
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+	ret = attach_for_send(send_index, 0U, &attach);
+	if (ret < 0) {
+		return ret;
+	}
+#endif
 
 	/* C3 Phase 6c: the wire is built mesh-native. Convert the struct to the outgoing
 	 * MeshPacket in mt_ws scratch (off the right-sized app-thread send stacks) and build
@@ -1220,7 +1274,7 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 		mt_ws.tx_mesh.channel = send_index;
 		mt_ws.tx_zero_hop = packet->zero_hop;
 		mt_ws.tx_no_pkc = packet->no_pkc;
-		mt_ws.tx_attach = packet->tx_attach;
+		mt_ws.tx_attach = attach;
 		ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
 		mt_ws.tx_zero_hop = false;
 		mt_ws.tx_no_pkc = false;
@@ -1231,7 +1285,7 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 		return ret;
 	}
 
-	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait, packet->tx_attach);
+	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait, attach);
 }
 
 int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t wait)
@@ -1244,6 +1298,7 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 	uint32_t to_norm;
 	uint8_t channel_index;
 	uint8_t send_index;
+	uint8_t attach = 0U;
 	int ret;
 
 	if (!mt.initialized || mesh == NULL) {
@@ -1260,6 +1315,12 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 				? (uint8_t)mesh->channel
 				: meshtastic_channels_primary_index();
 	send_index = meshtastic_channels_resolve_send_index(to_norm, channel_index, 0U);
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+	ret = attach_for_send(send_index, mesh->id, &attach);
+	if (ret < 0) {
+		return ret;
+	}
+#endif
 
 	k_mutex_lock(&mt_ws.lock, K_FOREVER);
 	meshtastic_mesh_packet_copy(&mt_ws.tx_mesh, mesh);
@@ -1268,13 +1329,15 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 	mt_ws.tx_mesh.channel = send_index;
 	mt_ws.tx_zero_hop = false;
 	mt_ws.tx_no_pkc = false;
+	mt_ws.tx_attach = attach;
 	ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
+	mt_ws.tx_attach = 0U;
 	k_mutex_unlock(&mt_ws.lock);
 	if (ret < 0) {
 		return ret;
 	}
 
-	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait, 0U);
+	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait, attach);
 }
 
 int meshtastic_send_data(uint32_t dest, uint32_t portnum, const uint8_t *payload,

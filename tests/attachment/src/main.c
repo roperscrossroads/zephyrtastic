@@ -468,6 +468,90 @@ ZTEST(attachment, test_a_slot_named_after_the_heard_preset_gets_that_presets_tra
 	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "restore");
 }
 
+/* agents-pcs2.11, the send half: what is ORIGINATED on a slot named after a
+ * head's preset leaves through a head on that preset, stamped with that
+ * preset's hash -- typing in the "MediumFast" chat speaks on MediumFast. With no
+ * ready head on that preset the send is refused, never keyed up on our own
+ * radio under another preset's hash. An ordinary channel is our own radio. */
+ZTEST(attachment, test_a_send_on_a_preset_channel_leaves_through_that_presets_head)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_msg msg;
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
+	const uint8_t there = meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF);
+	struct meshtastic_packet text = {
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"on mf",
+		.payload_len = 5U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.channel_index = 1U,
+	};
+	uint32_t before;
+
+	ch.index = 1;
+	ch.role = meshtastic_Channel_Role_SECONDARY;
+	ch.has_settings = true;
+	ch.settings.psk.size = 1U;
+	ch.settings.psk.bytes[0] = 1U;
+	strcpy(ch.settings.name, "MediumFast");
+	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "");
+
+	/* No head at all: refused, nothing leaves anywhere. */
+	zassert_equal(meshtastic_attachment_for_channel(1U), -ENETUNREACH);
+	zassert_equal(meshtastic_attachment_for_channel(0U), 0, "an ordinary channel: our radio");
+	before = sent.count;
+	zassert_equal(meshtastic_send_packet(&text, K_NO_WAIT), -ENETUNREACH,
+		      "no head on MediumFast: refused");
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "not on our radio");
+	zassert_equal(sent.count, before, "and no envelope");
+
+	/* A head on ShortTurbo does not count: wrong preset. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2A00U, "admit st", wire, &len);
+	zassert_ok(head_hears(HEAD2_NODE, PRESET_ST, -90, 5, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	k_msleep(300);
+	drain_radio();
+	zassert_equal(meshtastic_attachment_for_channel(1U), -ENETUNREACH,
+		      "a head on another preset is not MediumFast's");
+
+	/* A head on MediumFast: the send goes through it. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2A01U, "admit mf", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -90, 5, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+	k_msleep(300); /* let the relay of the admit frame be handed over first */
+	drain_radio();
+	zassert_true(meshtastic_attachment_for_channel(1U) > 0, "MediumFast has a head now");
+
+	before = sent.count;
+	zassert_ok(meshtastic_send_packet(&text, K_NO_WAIT), "sent on the MediumFast channel");
+	for (int i = 0; i < 100 && sent.count == before; i++) {
+		k_msleep(10);
+	}
+	zassert_equal(sent.count, before + 1U, "one TX_FRAME");
+	zassert_equal(sent.node, HEAD1_NODE, "to the MediumFast head, not the ShortTurbo one");
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_FRAME);
+	zassert_equal(msg.u.tx.preset, (uint8_t)PRESET_MF);
+	zassert_equal(((const struct meshtastic_wire_header *)msg.u.tx.wire)->channel, there,
+		      "stamped with MediumFast's public hash");
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "nothing on our radio");
+
+	/* The primary is still our own radio. */
+	text.channel_index = 0U;
+	zassert_ok(meshtastic_send_packet(&text, K_NO_WAIT), "");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "the primary leaves on our radio");
+
+	ch.role = meshtastic_Channel_Role_DISABLED;
+	ch.settings.name[0] = '\0';
+	ch.settings.psk.size = 0U;
+	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "restore");
+}
+
 /* B15 (review F3, SCOPE C1): a head is admitted only over a link the bearer
  * vouches for, or from the operator's allow-list. Anything else gets nothing --
  * not a slot, not a delivery, not an RF frame. */
