@@ -1059,7 +1059,7 @@ static void routing_nak_to_phone(const struct meshtastic_packet *blocked,
  * (NO_INTERFACE, upstream's "no suitable interface for this packet") -- rather
  * than keyed up on our own radio with another preset's channel hash, where
  * nothing would decode it. @p id is the phone's packet id, 0 if not from one. */
-static int attach_for_send(uint8_t send_index, uint32_t id, uint8_t *attach)
+static int attach_for_send(uint8_t send_index, uint32_t to, uint32_t id, uint8_t *attach)
 {
 	int a;
 
@@ -1082,7 +1082,30 @@ static int attach_for_send(uint8_t send_index, uint32_t id, uint8_t *attach)
 	}
 	if (a > 0) {
 		*attach = (uint8_t)a; /* a preset's own channel: that preset's head */
+		return 0;
 	}
+#if defined(CONFIG_MESHTASTIC_NODEDB)
+	/* A unicast goes to the peer on the radio that last heard it
+	 * (agents-pcs2.13): one transmission on the preset it is on, not one on
+	 * every preset we cover. Unknown since boot, or no head ready on that
+	 * preset any more: the caller's default stands. */
+	if (to != MESHTASTIC_NODE_BROADCAST && to != 0U && to != mt.node_id) {
+		struct meshtastic_nodedb_node peer;
+
+		if (meshtastic_nodedb_get(to, &peer) == 0 &&
+		    peer.heard_preset != MESHTASTIC_PRESET_UNKNOWN) {
+			if (peer.heard_preset == (uint8_t)mt.modem_preset) {
+				*attach = 0U;
+				return 1; /* our own radio, and settled */
+			}
+			a = (int)meshtastic_attachment_for_preset(peer.heard_preset);
+			if (a > 0) {
+				*attach = (uint8_t)a;
+				return 1;
+			}
+		}
+	}
+#endif
 	return 0;
 }
 #endif
@@ -1279,12 +1302,16 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 	send_index = meshtastic_channels_resolve_send_index(packet->to, channel_index,
 							    packet->channel);
 	attach = packet->tx_attach;
+	if (attach == MESHTASTIC_ATTACH_OWN) {
+		attach = 0U; /* a reply to something our own radio heard: stays there */
+	} else {
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-	ret = attach_for_send(send_index, 0U, &attach);
-	if (ret < 0) {
-		return ret;
-	}
+		ret = attach_for_send(send_index, packet->to, 0U, &attach);
+		if (ret < 0) {
+			return ret;
+		}
 #endif
+	}
 
 	/* C3 Phase 6c: the wire is built mesh-native. Convert the struct to the outgoing
 	 * MeshPacket in mt_ws scratch (off the right-sized app-thread send stacks) and build
@@ -1337,17 +1364,18 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 				: meshtastic_channels_primary_index();
 	send_index = meshtastic_channels_resolve_send_index(to_norm, channel_index, 0U);
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-	ret = attach_for_send(send_index, mesh->id, &attach);
+	ret = attach_for_send(send_index, to_norm, mesh->id, &attach);
 	if (ret < 0) {
 		return ret;
 	}
 	/* What the user says from the app (not an MQTT relay, whose from is not
 	 * ours) goes out on every radio when no single preset owns it: a direct
-	 * message, since the peer may be on any of them, and anything on a
+	 * message to a peer not heard since boot, which may be on any of them
+	 * (one heard since went to its radio above, ret 1), and anything on a
 	 * channel with a name of its own, which is one chat across all presets --
 	 * as it already is on receive. A preset's own channel went to that
 	 * preset's head above; the primary is our own radio's. */
-	if (attach == 0U && (mesh->from == 0U || mesh->from == mt.node_id) &&
+	if (ret == 0 && attach == 0U && (mesh->from == 0U || mesh->from == mt.node_id) &&
 	    (to_norm != MESHTASTIC_NODE_BROADCAST ||
 	     meshtastic_channels_custom_named(send_index))) {
 		attach = MESHTASTIC_ATTACH_ALL;

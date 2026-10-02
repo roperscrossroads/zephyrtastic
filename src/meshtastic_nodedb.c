@@ -125,6 +125,13 @@ struct nodedb_entry {
 	 * independently-evicted satellite map. */
 	bool has_position;
 	meshtastic_PositionLite position;
+	/* The preset this node was last heard on, plus one; 0 = not heard this
+	 * boot (agents-pcs2.13). A node with several radios hears a peer on one
+	 * of them, and that is the radio to answer it on. RAM only: it is learned
+	 * again from the first frame after a boot, and the stored record stays the
+	 * reference's. The preset, not the attachment id: a head's id changes when
+	 * it re-attaches, and two heads on one preset are interchangeable. */
+	uint8_t heard_preset1;
 };
 
 static K_MUTEX_DEFINE(nodedb_lock);
@@ -2026,6 +2033,12 @@ static void apply_basic_packet(struct nodedb_entry *entry, const struct meshtast
 		entry->node.hops_away = hops_away;
 	}
 
+	/* Which preset it was heard on (not an MQTT downlink, which is no radio). */
+	if (packet != NULL && packet->rx_heard_on != 0U &&
+	    !(mesh ? mesh->via_mqtt : packet->via_mqtt)) {
+		entry->heard_preset1 = packet->rx_heard_on;
+	}
+
 	nodedb_dirty = true; /* last_heard (and any new node) changed the sort order */
 }
 
@@ -2123,6 +2136,8 @@ static void fill_snapshot(const struct nodedb_entry *entry, struct meshtastic_no
 					: entry->last_heard_epoch;
 	out->snr = node->snr;
 	out->channel = node->channel;
+	out->heard_preset = (entry->heard_preset1 != 0U) ? (uint8_t)(entry->heard_preset1 - 1U)
+							 : 0xFFU;
 	out->next_hop = node->next_hop;
 	out->via_mqtt = IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_VIA_MQTT_BIT);
 	out->has_hops_away = node->has_hops_away;

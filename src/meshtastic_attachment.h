@@ -117,6 +117,14 @@ uint8_t meshtastic_attachment_tx_hash(uint8_t id, uint8_t index);
 int meshtastic_attachment_for_channel(uint8_t index);
 
 /**
+ * @brief A head that can transmit on @p preset: the most recently heard one.
+ *
+ * @return its attachment id, or 0 when there is none (or @p preset is ours:
+ *         that is our own radio).
+ */
+uint8_t meshtastic_attachment_for_preset(uint8_t preset);
+
+/**
  * @brief Send @p wire through one ready head on each preset other than ours.
  *
  * The other half of MESHTASTIC_ATTACH_ALL (the caller sends on our own radio):

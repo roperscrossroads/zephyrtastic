@@ -338,7 +338,7 @@ static void admin_emit_reply(meshtastic_AdminMessage *resp)
 	pkt.to = admin_cur.from;
 	pkt.id = meshtastic_allocate_packet_id();
 	pkt.request_id = admin_cur.id;
-	pkt.tx_attach = admin_cur.rx_attach; /* back out the radio the request came in on */
+	pkt.tx_attach = MESHTASTIC_REPLY_ATTACH(admin_cur.rx_attach); /* back out the radio the request came in on */
 	pkt.payload = buf;
 	pkt.payload_len = stream.bytes_written;
 
@@ -395,7 +395,7 @@ static void admin_ack_write(meshtastic_Routing_Error err)
 	pkt.to = admin_cur.from;
 	pkt.id = meshtastic_allocate_packet_id();
 	pkt.request_id = admin_cur.id;
-	pkt.tx_attach = admin_cur.rx_attach; /* back out the radio the request came in on */
+	pkt.tx_attach = MESHTASTIC_REPLY_ATTACH(admin_cur.rx_attach); /* back out the radio the request came in on */
 	pkt.channel_index = 0U;
 	pkt.payload = buf;
 	pkt.payload_len = stream.bytes_written;

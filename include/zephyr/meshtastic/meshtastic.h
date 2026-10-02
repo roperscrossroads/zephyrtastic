@@ -176,6 +176,13 @@ enum meshtastic_event_type {
 
 /** tx_attach value: every radio this node has (its own, and one head per other preset). */
 #define MESHTASTIC_ATTACH_ALL 0xFFU
+/** tx_attach value: this board's own radio, and nothing else may choose otherwise. 0 also
+ * means the own radio, but as a default the send path may replace (a unicast goes to the
+ * radio its peer was last heard on). */
+#define MESHTASTIC_ATTACH_OWN 0xFEU
+/** The tx_attach of a reply to something heard on @p rx_attach: that same radio. */
+#define MESHTASTIC_REPLY_ATTACH(rx_attach) \
+	(((rx_attach) == 0U) ? MESHTASTIC_ATTACH_OWN : (uint8_t)(rx_attach))
 
 /**
  * @brief Decoded Meshtastic packet — the public API boundary adapter.
@@ -231,6 +238,13 @@ struct meshtastic_packet {
 	 * topology (next hops, neighbours) is true for THAT radio only.
 	 */
 	uint8_t rx_attach;
+	/**
+	 * The modem preset this frame was heard on, plus one
+	 * (1 + meshtastic_Config_LoRaConfig_ModemPreset); 0 when it did not come
+	 * off a radio or the bearer cannot say. On a node with radio heads this
+	 * is what tells one radio's traffic from another's.
+	 */
+	uint8_t rx_heard_on;
 	/**
 	 * The attachment this frame leaves by: 0 = this board's own radio, else a
 	 * radio head's id. A reply sets it from the request's rx_attach so it goes

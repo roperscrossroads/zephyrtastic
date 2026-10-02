@@ -151,7 +151,7 @@ static int routing_send_reply(uint32_t to, uint32_t request_id, uint8_t ch_index
 		.want_ack = want_ack,
 		.channel_index = ch_index,
 		/* Back out the radio the request came in on (P3 slice 2). */
-		.tx_attach = attach,
+		.tx_attach = MESHTASTIC_REPLY_ATTACH(attach),
 		/* A reply to a PKC-received packet goes PKC (wire hash 0), not on
 		 * channel index 0. The reference builds its ACK on index 0 and gets away
 		 * with it because two stock nodes on one preset share an unnamed primary;

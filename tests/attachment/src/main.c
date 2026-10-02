@@ -589,6 +589,7 @@ ZTEST(attachment, test_beacons_and_the_users_own_channels_go_out_on_every_radio)
 	meshtastic_Channel fam = meshtastic_Channel_init_zero;
 	meshtastic_MeshPacket text = meshtastic_MeshPacket_init_zero;
 	struct meshtastic_attachment_msg msg;
+	struct meshtastic_nodedb_node peer;
 	struct lora_sim_frame f;
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t len;
@@ -611,6 +612,7 @@ ZTEST(attachment, test_beacons_and_the_users_own_channels_go_out_on_every_radio)
 	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -90, 5, wire, len));
 	k_msleep(50); /* so that "most recently heard" is not a tie */
 	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2D01U, "b", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there; /* decodable there */
 	zassert_ok(head_hears(HEAD2_NODE, PRESET_MF, -90, 5, wire, len));
 	k_msleep(400);
 	drain_radio();
@@ -656,14 +658,43 @@ ZTEST(attachment, test_beacons_and_the_users_own_channels_go_out_on_every_radio)
 	k_msleep(300);
 	zassert_equal(sent.count, before, "not through a head");
 
-	/* A direct message: every radio, the peer may be on any preset. */
+	/* A direct message to a peer not heard since boot: every radio, it may
+	 * be on any preset. */
 	text.id = 0x2D12U;
-	text.to = FAR_NODE_ID;
+	text.to = 0x0D0D0D01U;
 	before = sent.count;
 	zassert_ok(meshtastic_send_mesh_pb(&text));
 	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "on our own radio");
 	take_tx_frame(before, &msg);
 	zassert_equal(((const struct meshtastic_wire_header *)msg.u.tx.wire)->id, 0x2D12U);
+
+	/* To a peer last heard through the MediumFast head: that head, and not
+	 * our own radio (agents-pcs2.13). */
+	zassert_ok(meshtastic_nodedb_get(FAR_NODE_ID, &peer));
+	zassert_equal(peer.heard_preset, (uint8_t)PRESET_MF, "heard on MediumFast");
+	text.id = 0x2D13U;
+	text.to = FAR_NODE_ID;
+	before = sent.count;
+	zassert_ok(meshtastic_send_mesh_pb(&text));
+	take_tx_frame(before, &msg);
+	zassert_equal(((const struct meshtastic_wire_header *)msg.u.tx.wire)->id, 0x2D13U);
+	zassert_equal(msg.u.tx.preset, (uint8_t)PRESET_MF);
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0, "not on our radio");
+
+	/* The same peer is then heard on our own radio: our radio, no head. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2D02U, "c", wire, &len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -70, 8));
+	k_msleep(400);
+	drain_radio();
+	zassert_ok(meshtastic_nodedb_get(FAR_NODE_ID, &peer));
+	zassert_equal(peer.heard_preset, (uint8_t)PRESET_ST, "now heard on our own preset");
+	text.id = 0x2D14U;
+	before = sent.count;
+	zassert_ok(meshtastic_send_mesh_pb(&text));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "on our own radio");
+	zassert_equal(((const struct meshtastic_wire_header *)f.data)->id, 0x2D14U);
+	k_msleep(300);
+	zassert_equal(sent.count, before, "and through no head");
 	meshtastic_reliable_reset();
 }
 

@@ -1665,6 +1665,14 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 	}
 	shell_print(sh, "snr: %d.%u", scaled_whole(snr, 10), scaled_fraction(snr, 10));
 	shell_print(sh, "channel: %u", node.channel);
+	if (node.heard_preset != 0xFFU) {
+		shell_print(sh, "heard on: %s",
+			    meshtastic_preset_display_name(
+				    (meshtastic_Config_LoRaConfig_ModemPreset)node.heard_preset,
+				    true));
+	} else {
+		shell_print(sh, "heard on: (not since boot)");
+	}
 	shell_print(sh, "next hop: 0x%02x", node.next_hop);
 	shell_print(sh, "via mqtt: %s", node.via_mqtt ? "yes" : "no");
 	if (node.has_hops_away) {

@@ -215,7 +215,7 @@ int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t attach)
 
 	/* K_NO_WAIT: callers run on the RX thread, where a blocking send would
 	 * stall inbound processing until the TX queue drains. */
-	packet.tx_attach = attach;
+	packet.tx_attach = MESHTASTIC_REPLY_ATTACH(attach);
 	return meshtastic_send_packet(&packet, K_NO_WAIT);
 }
 
@@ -324,7 +324,7 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 			if (packet->channel_index < MESHTASTIC_MAX_CHANNELS) {
 				nodeinfo_packet.channel_index = packet->channel_index;
 			}
-			nodeinfo_packet.tx_attach = packet->rx_attach;
+			nodeinfo_packet.tx_attach = MESHTASTIC_REPLY_ATTACH(packet->rx_attach);
 			(void)meshtastic_send_packet(&nodeinfo_packet, K_NO_WAIT);
 		}
 	}

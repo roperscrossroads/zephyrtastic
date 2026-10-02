@@ -99,7 +99,7 @@ void meshtastic_dispatch_modules(const struct meshtastic_packet *packet,
 
 	LOG_INF("Module '%s' sending want_response reply", handler->name);
 	/* Back out the radio the request came in on (P3 slice 2). */
-	reply.tx_attach = packet->rx_attach;
+	reply.tx_attach = MESHTASTIC_REPLY_ATTACH(packet->rx_attach);
 	ret = meshtastic_send_packet(&reply, K_NO_WAIT);
 	if (ret < 0) {
 		LOG_WRN("Reply send failed (%d)", ret);

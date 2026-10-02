@@ -862,6 +862,9 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 						   payload, sizeof(payload), &decoded, &fail_reason,
 						   &rx_mesh);
 	packet.rx_attach = meta->attach;
+	packet.rx_heard_on = (rf && meta->preset != MESHTASTIC_PRESET_UNKNOWN)
+				     ? (uint8_t)(meta->preset + 1U)
+				     : 0U;
 	if (ret < 0) {
 		LOG_DBG("RX header parse failed (%d)", ret);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
@@ -1118,6 +1121,7 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		/* The MeshPacket has no notion of which of our radios heard it;
 		 * the flat struct does. Carry it across (SCOPE E1/E2). */
 		materialized.rx_attach = (packet != NULL) ? packet->rx_attach : 0U;
+		materialized.rx_heard_on = (packet != NULL) ? packet->rx_heard_on : 0U;
 		pkt = &materialized;
 	}
 
