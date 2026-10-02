@@ -267,8 +267,16 @@ int meshtastic_channels_init_from_config(const struct meshtastic_config *cfg)
 	if (cfg->channel_name != NULL) {
 		strncpy(ch->settings.name, cfg->channel_name, sizeof(ch->settings.name) - 1U);
 	}
-	memcpy(ch->settings.psk.bytes, cfg->psk, cfg->psk_len);
-	ch->settings.psk.size = (pb_size_t)cfg->psk_len;
+	/* An app that passes the well-known key passes its 16 bytes (meshtastic_init() takes
+	 * 16 or 32). Stored like that it is the same key on the air, but not the form the
+	 * client apps recognise as the default, and the channel shows a lock: the seed's
+	 * one-byte form stays. Every image built from the sample app comes through here, so
+	 * seeding the one-byte form in the defaults alone never reached a real node. */
+	if (cfg->psk_len != sizeof(meshtastic_default_psk) ||
+	    memcmp(cfg->psk, meshtastic_default_psk, sizeof(meshtastic_default_psk)) != 0) {
+		memcpy(ch->settings.psk.bytes, cfg->psk, cfg->psk_len);
+		ch->settings.psk.size = (pb_size_t)cfg->psk_len;
+	}
 	channel_fixup(0);
 
 	mt.ch_hash = meshtastic_channels_primary_hash();

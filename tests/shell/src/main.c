@@ -213,9 +213,21 @@ ZTEST(meshtastic_shell, test_reads_always_available)
  * printed and is what an operator normally needs. */
 ZTEST(meshtastic_shell, test_psk_hex_follows_kconfig)
 {
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
 	const char *out;
 
-	zassert_ok(run_cmd("meshtastic channel show 0", &out), "channel show failed");
+	/* A slot with a real key: the primary holds the well-known key in its one-byte
+	 * form, which has no bytes worth hiding and is never printed as hex. */
+	ch.index = 1;
+	ch.role = meshtastic_Channel_Role_SECONDARY;
+	ch.has_settings = true;
+	strcpy(ch.settings.name, "keyed");
+	ch.settings.psk.size = 16U;
+	memset(ch.settings.psk.bytes, 0xA5, 16U);
+	zassert_ok(meshtastic_channels_set_slot(1U, &ch));
+	zassert_ok(run_cmd("meshtastic channel show 1", &out), "channel show failed");
+	ch.role = meshtastic_Channel_Role_DISABLED;
+	zassert_ok(meshtastic_channels_set_slot(1U, &ch));
 
 	if (IS_ENABLED(CONFIG_MESHTASTIC_SHELL_PSK_HEX)) {
 		zassert_not_null(strstr(out, "psk hex:"),
@@ -1453,6 +1465,11 @@ ZTEST(meshtastic_shell, test_state_is_one_framed_line_with_the_node_s_facts)
 	zassert_not_null(strstr(json, "\"lora\":{\"preset\":"), "%s", json);
 	zassert_not_null(strstr(json, "\"dev\":{\"role\":"), "%s", json);
 	zassert_not_null(strstr(json, "\"ch\":[{\"i\":0,\"r\":1,"), "the primary: %s", json);
+	/* This node was started as the sample app starts one: meshtastic_init() given the
+	 * well-known key as its 16 bytes. Its primary must still hold the one-byte form, the
+	 * one the client apps show without a lock. */
+	zassert_not_null(strstr(json, "\"h\":8,\"k\":\"s1\""), "the default key's short form: %s",
+			 json);
 	zassert_is_null(strchr(json, '\n'), "one line");
 }
 
