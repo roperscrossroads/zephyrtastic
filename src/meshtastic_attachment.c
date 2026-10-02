@@ -19,6 +19,8 @@
 #include "meshtastic_contention.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_outbound.h"
+#include "meshtastic_packet.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_region_presets.h"
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
@@ -674,6 +676,67 @@ int meshtastic_attachment_for_channel(uint8_t index)
 	}
 	k_mutex_unlock(&tab_lock);
 	return (best != 0) ? best : -ENETUNREACH;
+}
+
+static uint8_t fan_buf[MESHTASTIC_PKT_MAX];
+static K_MUTEX_DEFINE(fan_lock);
+
+unsigned int meshtastic_attachment_fan_out(const uint8_t *wire, uint32_t len, uint8_t tier,
+					   uint8_t index)
+{
+	uint8_t ids[ARRAY_SIZE(tab)];
+	unsigned int n = 0U;
+	unsigned int sent = 0U;
+
+	if (wire == NULL || len < sizeof(struct meshtastic_wire_header) || len > sizeof(fan_buf)) {
+		return 0U;
+	}
+
+	/* One head per preset: the most recently heard that can transmit. */
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	for (uint8_t id = 1U; id < ARRAY_SIZE(tab); id++) {
+		const struct meshtastic_attachment_info *a = &tab[id];
+		bool placed = false;
+
+		if (!used[id] || !a->link_up || a->preset == MESHTASTIC_PRESET_UNKNOWN ||
+		    a->preset == (uint8_t)mt.modem_preset) {
+			continue; /* our own preset is our own radio's */
+		}
+		if (a->have_status &&
+		    ((a->status.flags & MESHTASTIC_ATTACHMENT_ST_RX_ONLY) != 0U ||
+		     (a->status.flags & MESHTASTIC_ATTACHMENT_ST_TX_ENABLED) == 0U)) {
+			continue;
+		}
+		for (unsigned int k = 0U; k < n; k++) {
+			if (tab[ids[k]].preset == a->preset) {
+				if (a->last_ms > tab[ids[k]].last_ms) {
+					ids[k] = id;
+				}
+				placed = true;
+				break;
+			}
+		}
+		if (!placed) {
+			ids[n++] = id;
+		}
+	}
+	k_mutex_unlock(&tab_lock);
+
+	k_mutex_lock(&fan_lock, K_FOREVER);
+	for (unsigned int k = 0U; k < n; k++) {
+		struct meshtastic_wire_header *hdr = (struct meshtastic_wire_header *)fan_buf;
+
+		memcpy(fan_buf, wire, len);
+		if (index < MESHTASTIC_MAX_CHANNELS &&
+		    hdr->channel == meshtastic_channels_get_hash(index)) {
+			hdr->channel = meshtastic_attachment_tx_hash(ids[k], index);
+		}
+		if (meshtastic_radio_send_wire_after_on(fan_buf, len, tier, 0U, ids[k]) >= 0) {
+			sent++;
+		}
+	}
+	k_mutex_unlock(&fan_lock);
+	return sent;
 }
 
 uint8_t meshtastic_attachment_tx_hash(uint8_t id, uint8_t index)

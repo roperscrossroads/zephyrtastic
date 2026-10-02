@@ -174,6 +174,9 @@ enum meshtastic_event_type {
 	MESHTASTIC_EVENT_METRICS_ERROR,
 };
 
+/** tx_attach value: every radio this node has (its own, and one head per other preset). */
+#define MESHTASTIC_ATTACH_ALL 0xFFU
+
 /**
  * @brief Decoded Meshtastic packet — the public API boundary adapter.
  *
@@ -234,6 +237,10 @@ struct meshtastic_packet {
 	 * back out the radio -- and on the preset -- the request came in on
 	 * (ATTACHMENT-P3-PLAN slice 2). A head that is down or receive-only makes
 	 * the send fail (-EHOSTUNREACH): a reply on another preset is noise.
+	 *
+	 * MESHTASTIC_ATTACH_ALL: every radio -- this board's own, and one head on
+	 * each other preset the node covers. What a node says to everyone (its
+	 * NodeInfo and position beacons) is said on every preset it is on.
 	 */
 	uint8_t tx_attach;
 	/** On-air channel hash from the wire header. */

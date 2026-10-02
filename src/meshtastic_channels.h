@@ -183,6 +183,16 @@ bool meshtastic_channels_decrypt_for_hash_on(uint8_t index, uint8_t wire_hash, u
 bool meshtastic_channels_named_for_preset(uint8_t index, uint8_t preset);
 
 /**
+ * @brief Is slot @p index a channel with a name of its own?
+ *
+ * True for an enabled slot whose stored name is neither empty nor any preset's
+ * display name ("family", not "MediumFast"). Such a channel is the same channel
+ * on every preset -- its hash does not depend on one -- so on a node with
+ * several radios it is one chat across all of them.
+ */
+bool meshtastic_channels_custom_named(uint8_t index);
+
+/**
  * @brief Human-readable channel name for a slot.
  *
  * Empty or unset names map to @ref MESHTASTIC_CHANNEL_LONGFAST for slot 0 semantics. The returned

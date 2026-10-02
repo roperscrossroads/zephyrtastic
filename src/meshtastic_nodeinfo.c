@@ -141,6 +141,10 @@ int meshtastic_send_node_info_ex(uint32_t dest, bool want_response, uint32_t res
 	if (ret < 0) {
 		return ret;
 	}
+	if (dest == MESHTASTIC_NODE_BROADCAST) {
+		/* Who we are, said to everyone: on every preset we are on. */
+		packet.tx_attach = MESHTASTIC_ATTACH_ALL;
+	}
 
 	return meshtastic_send_packet(&packet, K_FOREVER);
 }

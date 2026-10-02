@@ -242,7 +242,7 @@ static uint32_t retx_interval_ms(size_t wire_len, uint32_t override_ms, uint8_t 
 	/* Through a head, the relay we are waiting to overhear is timed on the
 	 * head's preset: wait in ITS slots. (The airtime term stays our radio's;
 	 * the slot term is the one that dominates.) */
-	if (attach != 0U) {
+	if (attach != 0U && attach != MESHTASTIC_ATTACH_ALL) {
 		(void)meshtastic_attachment_modem(attach, &sf, &bw);
 	}
 #else
@@ -468,7 +468,15 @@ static void retx_work_fn(struct k_work *work)
 								   pend[i].attach);
 		LOG_DBG("reliable: retransmit id=0x%08x (%u left)", pend[i].id,
 			pend[i].retries_left);
-		if (pend[i].attach != 0U) {
+		if (pend[i].attach == MESHTASTIC_ATTACH_ALL) {
+			/* It went out on every radio: so does the retransmit. */
+			(void)meshtastic_radio_send_wire_prio(pend[i].wire, pend[i].wire_len,
+							      pend[i].tier);
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+			(void)meshtastic_attachment_fan_out(pend[i].wire, pend[i].wire_len,
+							    pend[i].tier, pend[i].channel);
+#endif
+		} else if (pend[i].attach != 0U) {
 			(void)meshtastic_radio_send_wire_after_on(pend[i].wire, pend[i].wire_len,
 								  pend[i].tier, 0U,
 								  pend[i].attach);

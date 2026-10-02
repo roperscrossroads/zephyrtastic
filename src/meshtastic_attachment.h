@@ -116,6 +116,21 @@ uint8_t meshtastic_attachment_tx_hash(uint8_t id, uint8_t index);
  */
 int meshtastic_attachment_for_channel(uint8_t index);
 
+/**
+ * @brief Send @p wire through one ready head on each preset other than ours.
+ *
+ * The other half of MESHTASTIC_ATTACH_ALL (the caller sends on our own radio):
+ * the same packet, same id, on every other preset the node covers -- one head
+ * per preset, the most recently heard. A frame stamped with slot @p index's
+ * hash is re-stamped with that slot's hash under each head's preset (a default
+ * channel hashes by preset; a channel with its own name does not change, and
+ * neither does a PKC frame's 0).
+ *
+ * @return how many heads it was handed to.
+ */
+unsigned int meshtastic_attachment_fan_out(const uint8_t *wire, uint32_t len, uint8_t tier,
+					   uint8_t index);
+
 /* The router noted that attachment @p id delivered a copy of a frame the local
  * radio had delivered @p ms earlier. */
 void meshtastic_attachment_note_latency(uint8_t id, uint32_t ms);

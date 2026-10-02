@@ -495,6 +495,10 @@ static int position_send(uint32_t dest, k_timeout_t wait)
 	if (ret < 0) {
 		return ret;
 	}
+	if (dest == MESHTASTIC_NODE_BROADCAST) {
+		/* The beacon: on every preset we are on. */
+		packet.tx_attach = MESHTASTIC_ATTACH_ALL;
+	}
 
 	return meshtastic_send_packet(&packet, wait);
 }

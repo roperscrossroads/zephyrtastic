@@ -28,6 +28,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_neighborinfo.h"
 #include <zephyr/meshtastic/nodedb.h>
+#include <zephyr/meshtastic/nodeinfo.h>
 #include "meshtastic_packet.h"
 #include "meshtastic_contention.h"
 #include "meshtastic_preset.h"
@@ -560,6 +561,110 @@ ZTEST(attachment, test_a_send_on_a_preset_channel_leaves_through_that_presets_he
 	ch.settings.name[0] = '\0';
 	ch.settings.psk.size = 0U;
 	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "restore");
+}
+
+/* Wait for the next TX_FRAME envelope after @p before, and decode it. */
+static void take_tx_frame(uint32_t before, struct meshtastic_attachment_msg *msg)
+{
+	for (int i = 0; i < 100 && sent.count == before; i++) {
+		k_msleep(10);
+	}
+	zassert_equal(sent.count, before + 1U, "one TX_FRAME (%u)", sent.count - before);
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, msg));
+	zassert_equal(msg->type, MESHTASTIC_ATTACHMENT_TX_FRAME);
+}
+
+/* What the node says to everyone goes out on every radio it has: its own, and
+ * ONE head per other preset. Its NodeInfo beacon, so that it is a member of
+ * each preset's mesh and not only a listener on it -- re-stamped with the
+ * default channel's hash under that preset. What the user says on a channel
+ * with a name of its own, which is one chat across presets (its hash does not
+ * change). A direct message, since the peer may be on any preset. But a
+ * broadcast on the primary stays on our own radio: that is OUR preset's chat,
+ * and the other presets have their own. */
+ZTEST(attachment, test_beacons_and_the_users_own_channels_go_out_on_every_radio)
+{
+	const uint8_t there = meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF);
+	const uint8_t here = meshtastic_channels_get_hash(0U);
+	meshtastic_Channel fam = meshtastic_Channel_init_zero;
+	meshtastic_MeshPacket text = meshtastic_MeshPacket_init_zero;
+	struct meshtastic_attachment_msg msg;
+	struct lora_sim_frame f;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+	uint32_t before;
+
+	zassert_not_equal(there, here, "the two presets' default channels differ");
+
+	fam.index = 3;
+	fam.role = meshtastic_Channel_Role_SECONDARY;
+	fam.has_settings = true;
+	fam.settings.psk.size = 16U;
+	memset(fam.settings.psk.bytes, 0x33, 16U);
+	strcpy(fam.settings.name, "family");
+	zassert_ok(meshtastic_channels_set_slot(3U, &fam), "");
+	zassert_true(meshtastic_channels_custom_named(3U));
+	zassert_false(meshtastic_channels_custom_named(0U), "the default channel is not");
+
+	/* Two heads on MediumFast, one on our own preset. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2D00U, "a", wire, &len);
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -90, 5, wire, len));
+	k_msleep(50); /* so that "most recently heard" is not a tie */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x2D01U, "b", wire, &len);
+	zassert_ok(head_hears(HEAD2_NODE, PRESET_MF, -90, 5, wire, len));
+	k_msleep(400);
+	drain_radio();
+	zassert_false(meshtastic_channels_custom_named(1U), "the auto-created MediumFast is not");
+
+	/* The NodeInfo beacon: our radio, and ONE MediumFast head, re-stamped. */
+	before = sent.count;
+	zassert_ok(meshtastic_send_node_info(MESHTASTIC_NODE_BROADCAST));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "on our own radio");
+	zassert_equal(((const struct meshtastic_wire_header *)f.data)->channel, here);
+	take_tx_frame(before, &msg);
+	zassert_equal(sent.node, HEAD2_NODE, "the most recently heard MediumFast head");
+	zassert_equal(msg.u.tx.preset, (uint8_t)PRESET_MF);
+	zassert_equal(((const struct meshtastic_wire_header *)msg.u.tx.wire)->channel, there,
+		      "under MediumFast's default-channel hash");
+	zassert_equal(((const struct meshtastic_wire_header *)msg.u.tx.wire)->id,
+		      ((const struct meshtastic_wire_header *)f.data)->id, "the same packet");
+	k_msleep(200);
+	zassert_equal(sent.count, before + 1U, "one head per preset, not both");
+
+	/* The user's text on "family": both radios, the hash unchanged. */
+	text.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	text.to = MESHTASTIC_NODE_BROADCAST;
+	text.id = 0x2D10U;
+	text.channel = 3U;
+	text.hop_limit = 3U;
+	text.decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+	text.decoded.payload.size = 3U;
+	memcpy(text.decoded.payload.bytes, "fam", 3U);
+	before = sent.count;
+	zassert_ok(meshtastic_send_mesh_pb(&text));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "on our own radio");
+	take_tx_frame(before, &msg);
+	zassert_equal(((const struct meshtastic_wire_header *)msg.u.tx.wire)->channel,
+		      meshtastic_channels_get_hash(3U), "a named channel hashes the same everywhere");
+
+	/* The user's text on the primary: our own preset's chat, our radio only. */
+	text.id = 0x2D11U;
+	text.channel = 0U;
+	before = sent.count;
+	zassert_ok(meshtastic_send_mesh_pb(&text));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "on our own radio");
+	k_msleep(300);
+	zassert_equal(sent.count, before, "not through a head");
+
+	/* A direct message: every radio, the peer may be on any preset. */
+	text.id = 0x2D12U;
+	text.to = FAR_NODE_ID;
+	before = sent.count;
+	zassert_ok(meshtastic_send_mesh_pb(&text));
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(3)), "on our own radio");
+	take_tx_frame(before, &msg);
+	zassert_equal(((const struct meshtastic_wire_header *)msg.u.tx.wire)->id, 0x2D12U);
+	meshtastic_reliable_reset();
 }
 
 /* How many enabled slots are named after @p preset, and the first one. */

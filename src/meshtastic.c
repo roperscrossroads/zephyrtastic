@@ -1063,7 +1063,7 @@ static int attach_for_send(uint8_t send_index, uint32_t id, uint8_t *attach)
 {
 	int a;
 
-	if (*attach != 0U) {
+	if (*attach != 0U && *attach != MESHTASTIC_ATTACH_ALL) {
 		return 0; /* a reply: already bound to the radio it came in on */
 	}
 	a = meshtastic_attachment_for_channel(send_index);
@@ -1080,7 +1080,9 @@ static int attach_for_send(uint8_t send_index, uint32_t id, uint8_t *attach)
 		}
 		return a;
 	}
-	*attach = (uint8_t)a;
+	if (a > 0) {
+		*attach = (uint8_t)a; /* a preset's own channel: that preset's head */
+	}
 	return 0;
 }
 #endif
@@ -1137,7 +1139,14 @@ static int send_wire_tail(const struct meshtastic_packet *local,
 			  k_timeout_t wait, uint8_t attach)
 {
 	uint8_t tier = meshtastic_sched_tier_for(local->portnum);
+	const bool all = (attach == MESHTASTIC_ATTACH_ALL);
 	int ret;
+
+	if (all) {
+		/* Every radio: ours through everything below, then the heads. On a
+		 * node without heads this is an ordinary send. */
+		attach = 0U;
+	}
 
 	if (attach != 0U) {
 		/* Through a radio head (ATTACHMENT-P3-PLAN slice 2): the head keys
@@ -1224,7 +1233,14 @@ static int send_wire_tail(const struct meshtastic_packet *local,
 	if (ret >= 0) {
 		/* Track for retransmission if it is a want_ack packet we originate
 		 * (the hook self-filters everything else). */
-		meshtastic_reliable_on_tx(local, wire, pkt_len, mesh, 0U);
+		meshtastic_reliable_on_tx(local, wire, pkt_len, mesh,
+					  all ? MESHTASTIC_ATTACH_ALL : 0U);
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+		if (all) {
+			(void)meshtastic_attachment_fan_out(wire, pkt_len, tier,
+							    local->channel_index);
+		}
+#endif
 	}
 
 	return send_packet_complete(local, mesh, wire, pkt_len, ret, K_TIMEOUT_EQ(wait, K_FOREVER));
@@ -1279,7 +1295,7 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 		mt_ws.tx_mesh.channel = send_index;
 		mt_ws.tx_zero_hop = packet->zero_hop;
 		mt_ws.tx_no_pkc = packet->no_pkc;
-		mt_ws.tx_attach = attach;
+		mt_ws.tx_attach = (attach == MESHTASTIC_ATTACH_ALL) ? 0U : attach;
 		ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
 		mt_ws.tx_zero_hop = false;
 		mt_ws.tx_no_pkc = false;
@@ -1325,6 +1341,17 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 	if (ret < 0) {
 		return ret;
 	}
+	/* What the user says from the app (not an MQTT relay, whose from is not
+	 * ours) goes out on every radio when no single preset owns it: a direct
+	 * message, since the peer may be on any of them, and anything on a
+	 * channel with a name of its own, which is one chat across all presets --
+	 * as it already is on receive. A preset's own channel went to that
+	 * preset's head above; the primary is our own radio's. */
+	if (attach == 0U && (mesh->from == 0U || mesh->from == mt.node_id) &&
+	    (to_norm != MESHTASTIC_NODE_BROADCAST ||
+	     meshtastic_channels_custom_named(send_index))) {
+		attach = MESHTASTIC_ATTACH_ALL;
+	}
 #endif
 
 	k_mutex_lock(&mt_ws.lock, K_FOREVER);
@@ -1334,7 +1361,7 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 	mt_ws.tx_mesh.channel = send_index;
 	mt_ws.tx_zero_hop = false;
 	mt_ws.tx_no_pkc = false;
-	mt_ws.tx_attach = attach;
+	mt_ws.tx_attach = (attach == MESHTASTIC_ATTACH_ALL) ? 0U : attach;
 	ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
 	mt_ws.tx_attach = 0U;
 	k_mutex_unlock(&mt_ws.lock);
