@@ -65,6 +65,7 @@
 #include "meshtastic_hlc.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_shell_state.h"
 #if defined(CONFIG_MESHTASTIC_POSITION)
 #include "meshtastic_position.h"
 #endif
@@ -485,6 +486,13 @@ static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 		    CONFIG_MESHTASTIC_FLEET_CLASS == 0 ? " (unset: no courier will offer this node an image)"
 						       : "");
 	return 0;
+}
+
+static int cmd_state(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	return meshtastic_shell_state(sh);
 }
 
 static const char *clock_quality_name(enum meshtastic_clock_quality q)
@@ -7534,6 +7542,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
 	SHELL_CMD(version, NULL, SHELL_HELP("Show build id / firmware version.", NULL),
 		  cmd_version),
+	SHELL_CMD(state, NULL,
+		  SHELL_HELP("This node's state as one machine-readable line, for tools: "
+			     "~S{json}*crc16.", NULL),
+		  cmd_state),
 	SHELL_CMD(time, NULL,
 		  SHELL_HELP("Show or set the wall clock.", "[set <unix-epoch-seconds>]"),
 		  cmd_time),

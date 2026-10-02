@@ -4,6 +4,8 @@
 menuconfig MESHTASTIC_SHELL
 	bool "Meshtastic shell commands"
 	depends on SHELL
+	# `meshtastic state` frames its line with a CRC-16 and fingerprints keys with a CRC-32.
+	select CRC
 	help
 	  Add a "meshtastic" shell command group for status, text send,
 	  app-port send, and optional gnss/metrics/environment send

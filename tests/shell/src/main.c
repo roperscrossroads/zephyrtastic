@@ -25,6 +25,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_dummy.h>
+#include <zephyr/sys/crc.h>
 #include <zephyr/ztest.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
@@ -1352,3 +1353,120 @@ ZTEST(meshtastic_shell, test_ear_commands)
 	zassert_equal(meshtastic_relay_ear_get_peer(), 0U);
 }
 #endif /* CONFIG_MESHTASTIC_RELAY_EAR */
+
+/* ---- `meshtastic state`: the machine-readable line ------------------------- */
+
+/* Run `meshtastic state` and return its JSON text in @p json (NUL-terminated), having
+ * checked the frame: one `~S{...}*hhhh` line whose CRC-16 matches the text. */
+static void state_json(char *json, size_t cap)
+{
+	const char *out = NULL;
+	const char *start;
+	const char *star;
+	unsigned long want;
+	size_t len;
+
+	zassert_ok(run_cmd("meshtastic state", &out), "state failed");
+	start = strstr(out, "~S{");
+	zassert_not_null(start, "no sentinel: %s", out);
+	start += 2;
+	star = strrchr(start, '*');
+	zassert_not_null(star, "no checksum: %s", out);
+	len = (size_t)(star - start);
+	zassert_true(len < cap, "state line is %u bytes", (unsigned int)len);
+	zassert_equal(start[len - 1U], '}', "the JSON must end the framed text");
+	want = strtoul(star + 1, NULL, 16);
+	zassert_equal(crc16_itu_t(0U, (const uint8_t *)start, len), (uint16_t)want,
+		      "CRC over the JSON text must match the one printed");
+	memcpy(json, start, len);
+	json[len] = '\0';
+}
+
+ZTEST(meshtastic_shell, test_state_is_one_framed_line_with_the_node_s_facts)
+{
+	char json[1024];
+	char want[48];
+
+	state_json(json, sizeof(json));
+	zassert_not_null(strstr(json, "{\"v\":1,\"build\":\""), "%s", json);
+	snprintk(want, sizeof(want), "\"class\":%u,", (unsigned int)CONFIG_MESHTASTIC_FLEET_CLASS);
+	zassert_not_null(strstr(json, want), "%s", json);
+	snprintk(want, sizeof(want), "\"id\":\"0x%08x\"", meshtastic_get_node_id());
+	zassert_not_null(strstr(json, want), "%s", json);
+	zassert_not_null(strstr(json, "\"board\":\"" CONFIG_BOARD "\""), "%s", json);
+	zassert_not_null(strstr(json, "\"lora\":{\"preset\":"), "%s", json);
+	zassert_not_null(strstr(json, "\"dev\":{\"role\":"), "%s", json);
+	zassert_not_null(strstr(json, "\"ch\":[{\"i\":0,\"r\":1,"), "the primary: %s", json);
+	zassert_is_null(strchr(json, '\n'), "one line");
+}
+
+#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+ZTEST(meshtastic_shell, test_state_follows_what_is_set_and_never_prints_a_key)
+{
+	char json[1024];
+	meshtastic_Config before;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &before));
+	set_managed(false);
+
+	/* The default key in its one-byte form is named as such. */
+	zassert_ok(run_cmd("meshtastic channel set 1 name side role secondary psk default", NULL));
+	state_json(json, sizeof(json));
+	zassert_not_null(strstr(json, "{\"i\":1,\"r\":2,\"n\":\"side\","), "%s", json);
+	zassert_not_null(strstr(json, "\"k\":\"s1\""), "%s", json);
+
+	/* A real key is a fingerprint: the same for the same key, different for another,
+	 * and the key's bytes are nowhere in the line. */
+	zassert_ok(run_cmd("meshtastic channel set 1 psk hex "
+			   "00112233445566778899aabbccddeeff", NULL));
+	state_json(json, sizeof(json));
+	{
+		const char *k = strstr(json, "\"n\":\"side\"");
+		char fp1[16] = {0};
+		char fp2[16] = {0};
+
+		zassert_not_null(k);
+		k = strstr(k, "\"k\":\"c:");
+		zassert_not_null(k, "a fingerprint: %s", json);
+		memcpy(fp1, k + 5, 10);
+		zassert_is_null(strstr(json, "00112233"), "the key itself must not appear");
+		zassert_is_null(strstr(json, "ccddeeff"), "the key itself must not appear");
+
+		zassert_ok(run_cmd("meshtastic channel set 1 psk hex "
+				   "00112233445566778899aabbccddee00", NULL));
+		state_json(json, sizeof(json));
+		k = strstr(strstr(json, "\"n\":\"side\""), "\"k\":\"c:");
+		memcpy(fp2, k + 5, 10);
+		zassert_true(strcmp(fp1, fp2) != 0, "another key, another fingerprint");
+	}
+
+	/* Stored radio settings appear as stored. */
+	zassert_ok(run_cmd("meshtastic lora power 2", NULL));
+	zassert_ok(run_cmd("meshtastic lora tx off", NULL));
+	state_json(json, sizeof(json));
+	zassert_not_null(strstr(json, "\"pwr\":2,\"tx\":0}"), "%s", json);
+
+	/* A name with a quote and a backslash stays valid JSON. */
+	zassert_ok(run_cmd("meshtastic owner set \"a\\\"b\" ab", NULL));
+	state_json(json, sizeof(json));
+	zassert_not_null(strstr(json, "\"own\":{\"l\":\"a\\\"b\",\"s\":\"ab\"}"), "%s", json);
+
+	zassert_ok(run_cmd("meshtastic channel disable 1", NULL));
+	zassert_ok(run_cmd("meshtastic lora tx on", NULL));
+	state_json(json, sizeof(json));
+	zassert_is_null(strstr(json, "\"i\":1,"), "a disabled slot is not listed: %s", json);
+	zassert_ok(meshtastic_config_store_set_config(&before));
+}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_SCANNER)
+ZTEST(meshtastic_shell, test_state_reports_the_scanner)
+{
+	char json[1024];
+
+	state_json(json, sizeof(json));
+	zassert_not_null(strstr(json, "\"scanner\""), "the feature: %s", json);
+	zassert_not_null(strstr(json, "\"scan\":{\"shut\":"), "%s", json);
+	zassert_not_null(strstr(json, "\"presets\":["), "%s", json);
+}
+#endif
