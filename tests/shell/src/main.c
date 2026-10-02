@@ -1470,3 +1470,369 @@ ZTEST(meshtastic_shell, test_state_reports_the_scanner)
 	zassert_not_null(strstr(json, "\"presets\":["), "%s", json);
 }
 #endif
+
+/* ---- `meshtastic api`: the phone API as text ------------------------------- */
+
+#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
+
+#include <pb_decode.h>
+#include <pb_encode.h>
+#include <zephyr/sys/base64.h>
+
+#include "meshtastic/admin.pb.h"
+#include "meshtastic_phoneapi.h"
+
+/* One answer, parsed: the status line and the frames in front of it. */
+struct api_reply {
+	char status;      /* '.', '+', ':' or '!' */
+	unsigned int n;   /* the number behind it ('!': 0) */
+	char why[8];      /* '!': the word behind it */
+	unsigned int frames;
+};
+
+#define API_FRAMES_MAX 8U
+static meshtastic_FromRadio api_frames[API_FRAMES_MAX];
+static uint32_t api_next_id = 0x0A710000U;
+
+/* Run one command and parse what it printed. Every frame line must be whole: sentinel,
+ * base64, a CRC-16 over the base64 text, and a FromRadio inside. */
+static void api_cmd(const char *cmd, struct api_reply *r)
+{
+	static uint8_t raw[MESHTASTIC_API_FRAME_MAX];
+	const char *out = NULL;
+	const char *p;
+
+	*r = (struct api_reply){0};
+	(void)run_cmd(cmd, &out);
+	p = strstr(out, "~P");
+	zassert_not_null(p, "no answer to `%.40s`: %s", cmd, out);
+
+	while (p != NULL) {
+		const char *eol = strchr(p, '\n');
+		char kind = p[2];
+
+		zassert_not_null(eol, "an unterminated line: %s", p);
+		if (kind == '.' || kind == '+' || kind == ':') {
+			r->status = kind;
+			r->n = (unsigned int)strtoul(p + 3, NULL, 10);
+		} else if (kind == '!') {
+			size_t len = MIN((size_t)(eol - (p + 3)), sizeof(r->why) - 1U);
+
+			r->status = kind;
+			memcpy(r->why, p + 3, len);
+			while (len > 0U && (r->why[len - 1U] == '\r' || r->why[len - 1U] == '\n')) {
+				r->why[--len] = '\0';
+			}
+		} else {
+			const char *star = memchr(p, '*', (size_t)(eol - p));
+			pb_istream_t is;
+			size_t n = 0U;
+
+			zassert_equal(r->status, '\0', "a frame after the status line: %s", out);
+			zassert_not_null(star, "a frame without a checksum: %s", p);
+			zassert_equal(crc16_itu_t(0U, (const uint8_t *)p + 2, (size_t)(star - p) - 2U),
+				      (uint16_t)strtoul(star + 1, NULL, 16),
+				      "CRC over the base64 text must match");
+			zassert_ok(base64_decode(raw, sizeof(raw), &n, (const uint8_t *)p + 2,
+						 (size_t)(star - p) - 2U),
+				   "base64");
+			zassert_true(r->frames < API_FRAMES_MAX, "more frames than the burst");
+			is = pb_istream_from_buffer(raw, n);
+			api_frames[r->frames] = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
+			zassert_true(pb_decode(&is, meshtastic_FromRadio_fields,
+					       &api_frames[r->frames]),
+				     "a frame must be a FromRadio");
+			r->frames++;
+		}
+		p = strstr(eol, "~P");
+	}
+	zassert_not_equal(r->status, '\0', "no status line: %s", out);
+	if (r->status == '.' || r->status == '+') {
+		zassert_equal(r->n, r->frames, "the status line counts the frames");
+	}
+}
+
+/* Send a ToRadio in parts of at most @p part bytes (a multiple of 3). */
+static void api_send(const meshtastic_ToRadio *to, size_t part, struct api_reply *r)
+{
+	static uint8_t buf[MESHTASTIC_API_FRAME_MAX];
+	static char cmd[64 + MESHTASTIC_API_FRAME_MAX * 4U / 3U];
+	char b64[MESHTASTIC_API_FRAME_MAX * 4U / 3U + 8U];
+	pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+	size_t off = 0U;
+	size_t n;
+
+	zassert_true(pb_encode(&os, meshtastic_ToRadio_fields, to), "ToRadio encode");
+	while (os.bytes_written - off > part) {
+		zassert_ok(base64_encode((uint8_t *)b64, sizeof(b64), &n, &buf[off], part));
+		snprintk(cmd, sizeof(cmd), "meshtastic api + %s", b64);
+		api_cmd(cmd, r);
+		off += part;
+		zassert_equal(r->status, ':', "a part is acknowledged");
+		zassert_equal(r->n, off, "with the bytes held so far");
+	}
+	zassert_ok(base64_encode((uint8_t *)b64, sizeof(b64), &n, &buf[off],
+				 os.bytes_written - off));
+	snprintk(cmd, sizeof(cmd), "meshtastic api %s %04x", b64,
+		 crc16_itu_t(0U, buf, os.bytes_written));
+	api_cmd(cmd, r);
+}
+
+static void api_send_admin(const meshtastic_AdminMessage *a, size_t part, struct api_reply *r)
+{
+	static meshtastic_ToRadio to;
+	pb_ostream_t os;
+
+	to = (meshtastic_ToRadio)meshtastic_ToRadio_init_zero;
+	to.which_payload_variant = meshtastic_ToRadio_packet_tag;
+	to.packet.to = meshtastic_get_node_id();
+	to.packet.id = api_next_id++;
+	to.packet.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	to.packet.decoded.portnum = meshtastic_PortNum_ADMIN_APP;
+	os = pb_ostream_from_buffer(to.packet.decoded.payload.bytes,
+				    sizeof(to.packet.decoded.payload.bytes));
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, a), "AdminMessage encode");
+	to.packet.decoded.payload.size = (pb_size_t)os.bytes_written;
+	api_send(&to, part, r);
+}
+
+/* Serve until nothing is waiting, so a test starts from an empty transport. */
+static void api_drain(void)
+{
+	struct api_reply r;
+
+	do {
+		api_cmd("meshtastic api", &r);
+	} while (r.status == '+' || r.frames > 0U);
+}
+
+static void api_end_session(void)
+{
+	static meshtastic_ToRadio to;
+	struct api_reply r;
+
+	to = (meshtastic_ToRadio)meshtastic_ToRadio_init_zero;
+	to.which_payload_variant = meshtastic_ToRadio_disconnect_tag;
+	to.disconnect = true;
+	api_send(&to, 150U, &r);
+	api_drain();
+}
+
+ZTEST(meshtastic_shell, test_api_serves_the_config_stream_in_bursts)
+{
+	static meshtastic_ToRadio to;
+	struct api_reply r;
+	unsigned int total = 0U;
+	unsigned int bursts = 0U;
+	bool my_info = false;
+	bool complete = false;
+
+	api_drain();
+	to = (meshtastic_ToRadio)meshtastic_ToRadio_init_zero;
+	to.which_payload_variant = meshtastic_ToRadio_want_config_id_tag;
+	to.want_config_id = 42U;
+	api_send(&to, 150U, &r);
+
+	/* The request's own answer already carries the first frames. */
+	zassert_true(r.frames > 0U, "a send serves frames in the same answer");
+	zassert_equal(api_frames[0].which_payload_variant, meshtastic_FromRadio_my_info_tag,
+		      "the stream opens with MyNodeInfo");
+	zassert_equal(api_frames[0].my_info.my_node_num, meshtastic_get_node_id());
+	my_info = true;
+
+	while (true) {
+		zassert_true(r.frames <= CONFIG_MESHTASTIC_SHELL_PHONEAPI_BURST,
+			     "never more than the burst in one answer");
+		total += r.frames;
+		for (unsigned int i = 0U; i < r.frames; i++) {
+			zassert_false(complete, "nothing of the stream after its end");
+			if (api_frames[i].which_payload_variant ==
+			    meshtastic_FromRadio_config_complete_id_tag) {
+				zassert_equal(api_frames[i].config_complete_id, 42U);
+				complete = true;
+			}
+		}
+		if (complete) {
+			break;
+		}
+		zassert_equal(r.status, '+', "more is waiting while the stream runs");
+		zassert_true(++bursts < 200U, "the stream must end");
+		api_cmd("meshtastic api", &r);
+	}
+	zassert_true(my_info && complete);
+	zassert_true(total > CONFIG_MESHTASTIC_SHELL_PHONEAPI_BURST,
+		     "the stream is longer than one burst (%u frames)", total);
+
+	api_drain();
+	api_cmd("meshtastic api", &r);
+	zassert_equal(r.status, '.', "drained");
+	zassert_equal(r.frames, 0U);
+	api_end_session();
+}
+
+ZTEST(meshtastic_shell, test_api_request_and_reply_are_one_command)
+{
+	static meshtastic_ToRadio to;
+	struct api_reply r;
+	bool seen = false;
+
+	api_drain();
+	to = (meshtastic_ToRadio)meshtastic_ToRadio_init_zero;
+	to.which_payload_variant = meshtastic_ToRadio_heartbeat_tag;
+	api_send(&to, 150U, &r);
+	for (unsigned int i = 0U; i < r.frames; i++) {
+		seen |= api_frames[i].which_payload_variant == meshtastic_FromRadio_queueStatus_tag;
+	}
+	zassert_true(seen, "a heartbeat's QueueStatus comes back in the same answer");
+}
+
+ZTEST(meshtastic_shell, test_api_admin_write_in_parts_reaches_the_store)
+{
+	static meshtastic_AdminMessage a;
+	struct api_reply r;
+	char before[40];
+
+	api_drain();
+	set_managed(false);
+	strncpy(before, meshtastic_config_store_long_name(), sizeof(before) - 1U);
+	before[sizeof(before) - 1U] = '\0';
+
+	a = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	a.which_payload_variant = meshtastic_AdminMessage_set_owner_tag;
+	strcpy(a.payload_variant.set_owner.long_name, "over the wire, in three parts");
+	strcpy(a.payload_variant.set_owner.short_name, "wire");
+	/* 15 bytes a part: the packet is some 50 bytes, so this is several commands. */
+	api_send_admin(&a, 15U, &r);
+	zassert_true(r.status == '.' || r.status == '+', "accepted: !%s", r.why);
+	zassert_str_equal(meshtastic_config_store_long_name(), "over the wire, in three parts");
+	zassert_str_equal(meshtastic_config_store_short_name(), "wire");
+
+	strcpy(a.payload_variant.set_owner.long_name, before);
+	strcpy(a.payload_variant.set_owner.short_name, "back");
+	api_send_admin(&a, 150U, &r);
+	zassert_str_equal(meshtastic_config_store_long_name(), before);
+	api_drain();
+}
+
+/* The transport is the phone API, so the phone API's gate holds: a managed node refuses
+ * local admin here as it does over Bluetooth. */
+ZTEST(meshtastic_shell, test_api_managed_node_refuses_admin_writes)
+{
+	static meshtastic_AdminMessage a;
+	struct api_reply r;
+	char before[40];
+
+	api_drain();
+	strncpy(before, meshtastic_config_store_long_name(), sizeof(before) - 1U);
+	before[sizeof(before) - 1U] = '\0';
+	set_managed(true);
+
+	a = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	a.which_payload_variant = meshtastic_AdminMessage_set_owner_tag;
+	strcpy(a.payload_variant.set_owner.long_name, "must not land");
+	strcpy(a.payload_variant.set_owner.short_name, "no");
+	api_send_admin(&a, 150U, &r);
+	zassert_str_equal(meshtastic_config_store_long_name(), before,
+			  "a managed node must not take a local admin write");
+	set_managed(false);
+	api_drain();
+}
+
+ZTEST(meshtastic_shell, test_api_refuses_what_it_cannot_trust)
+{
+	static meshtastic_ToRadio to;
+	static char cmd[900];
+	struct api_reply r;
+
+	api_drain();
+
+	api_cmd("meshtastic api no-base64 0000", &r);
+	zassert_equal(r.status, '!');
+	zassert_str_equal(r.why, "b64");
+
+	/* A good frame with the wrong checksum is not handled: no QueueStatus follows. */
+	api_cmd("meshtastic api OgA= ffff", &r); /* heartbeat {} */
+	zassert_equal(r.status, '!');
+	zassert_str_equal(r.why, "crc");
+	api_cmd("meshtastic api", &r);
+	zassert_equal(r.frames, 0U, "a refused frame did nothing");
+
+	api_cmd("meshtastic api OgA= zz", &r);
+	zassert_str_equal(r.why, "crc", "a checksum that is not hex");
+
+	api_cmd("meshtastic api a b c", &r);
+	zassert_str_equal(r.why, "args");
+	api_cmd("meshtastic api OgA=", &r);
+	zassert_str_equal(r.why, "args", "a frame without its checksum");
+
+	/* More than a ToRadio can be: 150-byte parts until the buffer refuses one. */
+	strcpy(cmd, "meshtastic api + ");
+	memset(cmd + strlen("meshtastic api + "), 'A', 200U);
+	cmd[strlen("meshtastic api + ") + 200U] = '\0';
+	for (unsigned int i = 0U; i < 3U; i++) {
+		api_cmd(cmd, &r);
+		zassert_equal(r.status, ':', "part %u fits", i);
+	}
+	api_cmd(cmd, &r);
+	zassert_str_equal(r.why, "len", "the fourth 150 bytes do not fit in 512");
+
+	/* A refusal drops what was held: the next frame stands alone. */
+	to = (meshtastic_ToRadio)meshtastic_ToRadio_init_zero;
+	to.which_payload_variant = meshtastic_ToRadio_heartbeat_tag;
+	api_send(&to, 150U, &r);
+	zassert_equal(r.status, '.', "!%s", r.why);
+	zassert_equal(r.frames, 1U, "one QueueStatus for one heartbeat");
+
+	/* So does a poll in between. */
+	api_cmd("meshtastic api + AAAA", &r);
+	zassert_equal(r.status, ':');
+	zassert_equal(r.n, 3U);
+	api_cmd("meshtastic api", &r);
+	api_cmd("meshtastic api + AAAA", &r);
+	zassert_equal(r.n, 3U, "serving frames dropped the part that was held");
+	api_cmd("meshtastic api", &r);
+}
+
+ZTEST(meshtastic_shell, test_api_disconnect_ends_the_config_stream)
+{
+	static meshtastic_ToRadio to;
+	struct api_reply r;
+
+	api_drain();
+	to = (meshtastic_ToRadio)meshtastic_ToRadio_init_zero;
+	to.which_payload_variant = meshtastic_ToRadio_want_config_id_tag;
+	to.want_config_id = 7U;
+	api_send(&to, 150U, &r);
+	zassert_equal(r.status, '+', "mid-stream");
+
+	to = (meshtastic_ToRadio)meshtastic_ToRadio_init_zero;
+	to.which_payload_variant = meshtastic_ToRadio_disconnect_tag;
+	to.disconnect = true;
+	api_send(&to, 150U, &r);
+	do {
+		for (unsigned int i = 0U; i < r.frames; i++) {
+			zassert_not_equal(api_frames[i].which_payload_variant,
+					  meshtastic_FromRadio_config_complete_id_tag,
+					  "the stream a client left must not run on");
+			zassert_not_equal(api_frames[i].which_payload_variant,
+					  meshtastic_FromRadio_config_tag);
+		}
+		api_cmd("meshtastic api", &r);
+	} while (r.status == '+' || r.frames > 0U);
+}
+
+#else /* !CONFIG_MESHTASTIC_SHELL_PHONEAPI */
+
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+/* A build with the shell's writes compiled out must not grow them back through the phone
+ * API: the command is not there at all. */
+ZTEST(meshtastic_shell, test_api_is_absent_without_config_write)
+{
+	const char *out = NULL;
+
+	zassert_not_equal(run_cmd("meshtastic api", &out), 0, "the command must not exist");
+	zassert_is_null(strstr(out, "~P"), "%s", out);
+}
+#endif
+
+#endif /* CONFIG_MESHTASTIC_SHELL_PHONEAPI */

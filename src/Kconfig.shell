@@ -60,6 +60,49 @@ config MESHTASTIC_SHELL_CONFIG_WRITE
 	  SecurityConfig.is_managed: a managed node refuses them exactly as it
 	  refuses local admin over the PhoneAPI.
 
+config MESHTASTIC_SHELL_PHONEAPI
+	bool "The phone API over the shell (meshtastic api)"
+	depends on MESHTASTIC_PHONEAPI
+	depends on MESHTASTIC_SHELL_CONFIG_WRITE
+	default y
+	select BASE64
+	help
+	  Add "meshtastic api": ToRadio frames in as base64 arguments, FromRadio
+	  frames out as "~P<base64>*<crc16>" lines. A client library that speaks
+	  the phone API can then read and configure the node over the console it
+	  shares with the shell and the log, where the binary serial framing
+	  cannot go.
+
+	  It is one more phone API transport: is_managed and lockdown apply to it
+	  as they do to Bluetooth. Like the shell's own writes it is reachable by
+	  anyone with console access, which is why it depends on
+	  MESHTASTIC_SHELL_CONFIG_WRITE.
+
+	  Costs the transport's frame queue and scratch in RAM (PSRAM where the
+	  board has it).
+
+if MESHTASTIC_SHELL_PHONEAPI
+
+config MESHTASTIC_SHELL_PHONEAPI_QUEUE_SIZE
+	int "FromRadio queue depth for the shell transport"
+	default 4
+	range 2 64
+	help
+	  Frames kept for the client between two polls, about 516 bytes each.
+	  The config stream is not queued, so this only has to hold what arrives
+	  by itself: replies, queue status, mesh traffic. A full queue drops the
+	  cheapest frame first.
+
+config MESHTASTIC_SHELL_PHONEAPI_BURST
+	int "Frames served per command"
+	default 16
+	range 1 255
+	help
+	  The most frames one "meshtastic api" prints before it answers "~P+"
+	  and returns the console to the shell and the log.
+
+endif # MESHTASTIC_SHELL_PHONEAPI
+
 config MESHTASTIC_SHELL_PSK_HEX
 	bool "Print raw channel PSK bytes in the shell"
 	default n

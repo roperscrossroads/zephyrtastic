@@ -33,7 +33,8 @@
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-#define MESHTASTIC_PHONEAPI_MAX_TRANSPORTS 2
+/* Two of BLE, serial and TCP, and the shell's `meshtastic api` beside them. */
+#define MESHTASTIC_PHONEAPI_MAX_TRANSPORTS (2 + IS_ENABLED(CONFIG_MESHTASTIC_SHELL_PHONEAPI))
 
 static struct {
 	struct meshtastic_phoneapi *transports[MESHTASTIC_PHONEAPI_MAX_TRANSPORTS];

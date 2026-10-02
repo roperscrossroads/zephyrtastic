@@ -66,6 +66,9 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_shell_state.h"
+#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
+#include "meshtastic_shell_api.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_POSITION)
 #include "meshtastic_position.h"
 #endif
@@ -149,6 +152,10 @@ enum shell_work_op {
 	SHELL_WORK_LOCKDOWN_UNLOCK,
 	SHELL_WORK_LOCKDOWN_DISABLE,
 #endif
+#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
+	/* One step of `meshtastic api`; what to do is in meshtastic_shell_api.c. */
+	SHELL_WORK_API,
+#endif
 };
 
 struct shell_work_item {
@@ -214,6 +221,15 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 
 	while (true) {
 		k_msgq_get(&shell_work_msgq, &item, K_FOREVER);
+
+#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
+		if (item.op == SHELL_WORK_API) {
+			/* Prints nothing here: the shell thread is waiting for this step
+			 * and does the printing. */
+			meshtastic_shell_api_work();
+			continue;
+		}
+#endif
 
 		switch (item.op) {
 		case SHELL_WORK_SEND_TEXT:
@@ -494,6 +510,15 @@ static int cmd_state(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 	return meshtastic_shell_state(sh);
 }
+
+#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
+int meshtastic_shell_api_submit(void)
+{
+	struct shell_work_item item = {.op = SHELL_WORK_API};
+
+	return k_msgq_put(&shell_work_msgq, &item, K_NO_WAIT);
+}
+#endif
 
 static const char *clock_quality_name(enum meshtastic_clock_quality q)
 {
@@ -7546,6 +7571,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  SHELL_HELP("This node's state as one machine-readable line, for tools: "
 			     "~S{json}*crc16.", NULL),
 		  cmd_state),
+#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
+	SHELL_CMD(api, NULL,
+		  SHELL_HELP("The phone API as text, for tools: ToRadio in, ~P<FromRadio> lines out.",
+			     "[[+] <base64> [<crc16>]]"),
+		  meshtastic_shell_api_cmd),
+#endif
 	SHELL_CMD(time, NULL,
 		  SHELL_HELP("Show or set the wall clock.", "[set <unix-epoch-seconds>]"),
 		  cmd_time),
@@ -7796,6 +7827,9 @@ SHELL_CMD_REGISTER(meshtastic, &meshtastic_cmds,
 
 static int meshtastic_shell_init(void)
 {
+#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
+	meshtastic_shell_api_init();
+#endif
 	k_thread_create(&shell_work_thread, shell_work_stack,
 			K_THREAD_STACK_SIZEOF(shell_work_stack), shell_work_thread_fn, NULL, NULL,
 			NULL, CONFIG_MESHTASTIC_SHELL_WORK_PRIORITY, 0, K_NO_WAIT);
