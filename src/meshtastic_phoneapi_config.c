@@ -520,10 +520,7 @@ int meshtastic_phoneapi_next_config_frame(struct meshtastic_phoneapi *api,
 			from->id = meshtastic_next_fromradio_id();
 			from->which_payload_variant = meshtastic_FromRadio_queueStatus_tag;
 			from->queueStatus.res = 0;
-			from->queueStatus.free = (api->count >= api->queue_size)
-							? 0U
-							: (api->queue_size - api->count);
-			from->queueStatus.maxlen = api->queue_size;
+			meshtastic_phoneapi_fill_tx_queue(&from->queueStatus);
 			from->queueStatus.mesh_packet_id = 0U;
 			return emit_frame(api, from, MESHTASTIC_PHONEAPI_CONFIG_COMPLETE, 0U,
 					  frame);

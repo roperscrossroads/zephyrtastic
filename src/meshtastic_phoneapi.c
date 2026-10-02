@@ -17,6 +17,7 @@
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
+#include "meshtastic_outbound.h"
 #include "meshtastic_sched.h"
 #if IS_ENABLED(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
@@ -560,18 +561,30 @@ int meshtastic_phoneapi_enqueue_client_notification(const meshtastic_ClientNotif
 }
 
 
+/* QueueStatus.free and .maxlen are the RADIO's transmit queue, as in the reference
+ * (Router::getQueueStatus()): how many more packets the node will take from the client. A
+ * client library holds its sends back while free is 0. It used to be this transport's
+ * FromRadio queue, which is full whenever nobody has been reading: a client connecting to
+ * a node with a backlog was told there was no room and never sent a packet. */
+void meshtastic_phoneapi_fill_tx_queue(meshtastic_QueueStatus *qs)
+{
+	uint8_t depth = meshtastic_sched_get()->tx_depth;
+	uint8_t pending = meshtastic_outbound_pending();
+
+	qs->maxlen = depth;
+	qs->free = (pending >= depth) ? 0U : (uint32_t)(depth - pending);
+}
+
 void meshtastic_phoneapi_enqueue_queue_status(struct meshtastic_phoneapi *api, int res,
 					      uint32_t mesh_packet_id)
 {
 	meshtastic_FromRadio *from = api->from_scratch;
-	uint32_t pending = meshtastic_phoneapi_pending_count(api);
 
 	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
 	from->id = meshtastic_next_fromradio_id();
 	from->which_payload_variant = meshtastic_FromRadio_queueStatus_tag;
 	from->queueStatus.res = (int8_t)CLAMP(res, INT8_MIN, INT8_MAX);
-	from->queueStatus.free = (pending >= api->queue_size) ? 0U : (api->queue_size - pending);
-	from->queueStatus.maxlen = api->queue_size;
+	meshtastic_phoneapi_fill_tx_queue(&from->queueStatus);
 	from->queueStatus.mesh_packet_id = mesh_packet_id;
 
 	(void)meshtastic_phoneapi_enqueue_fromradio(api, from);

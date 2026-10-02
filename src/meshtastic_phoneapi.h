@@ -236,6 +236,8 @@ void meshtastic_phoneapi_enqueue_phone_config(struct meshtastic_phoneapi *api, u
 int meshtastic_phoneapi_set_channel(uint8_t index, const meshtastic_Channel *channel);
 void meshtastic_phoneapi_enqueue_queue_status(struct meshtastic_phoneapi *api, int res,
 					      uint32_t mesh_packet_id);
+/** Fill a QueueStatus's free and maxlen from the radio's transmit queue. */
+void meshtastic_phoneapi_fill_tx_queue(meshtastic_QueueStatus *qs);
 void meshtastic_phoneapi_handle_toradio(struct meshtastic_phoneapi *api, const uint8_t *buf,
 					size_t len);
 #if defined(CONFIG_MESHTASTIC_PHONELOG)

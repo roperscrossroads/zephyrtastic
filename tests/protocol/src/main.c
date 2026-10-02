@@ -5982,6 +5982,60 @@ ZTEST(protocol_stack, test_a_disconnect_keeps_the_backlog_for_the_next_connectio
 /* Upstream parity on the loss bound: PhoneAPI::close() loses at most the one
  * packet already dequeued. The frame in flight when the link died is gone (it
  * may be half-read, or a stale config frame); everything still queued is not. */
+/* QueueStatus is about the radio's transmit queue, as upstream reports it. It used to be
+ * this transport's own FromRadio queue: a client that connected to a node with a full
+ * backlog was told free=0 in the config stream, and the stock Python library then held
+ * every packet back for good. Found on the bench, through `meshtastic api`. */
+ZTEST(protocol_stack, test_queue_status_reports_the_radio_queue_not_the_phone_backlog)
+{
+	static struct meshtastic_phoneapi_frame q[8];
+	static meshtastic_ToRadio to_scratch;
+	static meshtastic_FromRadio from_scratch;
+	struct meshtastic_phoneapi api;
+	struct meshtastic_phoneapi_frame f;
+	uint8_t depth = meshtastic_sched_get()->tx_depth;
+	unsigned int statuses = 0U;
+	int guard = 0;
+
+	meshtastic_phoneapi_init(&api, "qstat", q, ARRAY_SIZE(q), NULL, NULL, NULL, NULL,
+				 &to_scratch, &from_scratch);
+	/* A backlog that fills the phone queue to the last slot. */
+	for (uint32_t i = 1U; i <= ARRAY_SIZE(q); i++) {
+		meshtastic_FromRadio t = backlog_text(i);
+
+		zassert_ok(meshtastic_phoneapi_enqueue_fromradio(&api, &t));
+	}
+	zassert_equal(meshtastic_outbound_pending(), 0U, "the radio owes nothing here");
+
+	/* The one in the config stream, then one asked for after it. */
+	meshtastic_phoneapi_enqueue_phone_config(&api, 0xC0FFEE04U);
+	while (meshtastic_phoneapi_pop_frame(&api, &f)) {
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t s = pb_istream_from_buffer(f.data, f.len);
+
+		zassert_true(++guard < 512, "stream did not terminate");
+		zassert_true(pb_decode(&s, meshtastic_FromRadio_fields, &from), "decode");
+		if (from.which_payload_variant == meshtastic_FromRadio_queueStatus_tag) {
+			zassert_equal(from.queueStatus.maxlen, depth, "the radio queue's depth");
+			zassert_equal(from.queueStatus.free, depth, "all of it free");
+			statuses++;
+		}
+	}
+	zassert_equal(statuses, 1U, "the config stream carries one QueueStatus");
+
+	meshtastic_phoneapi_enqueue_queue_status(&api, 0, 0x1234U);
+	zassert_true(meshtastic_phoneapi_pop_frame(&api, &f));
+	{
+		meshtastic_FromRadio from = meshtastic_FromRadio_init_zero;
+		pb_istream_t s = pb_istream_from_buffer(f.data, f.len);
+
+		zassert_true(pb_decode(&s, meshtastic_FromRadio_fields, &from), "decode");
+		zassert_equal(from.which_payload_variant, meshtastic_FromRadio_queueStatus_tag);
+		zassert_equal(from.queueStatus.free, depth);
+		zassert_equal(from.queueStatus.mesh_packet_id, 0x1234U);
+	}
+}
+
 ZTEST(protocol_stack, test_a_disconnect_loses_at_most_the_in_flight_frame)
 {
 	static struct meshtastic_phoneapi_frame q[8];
