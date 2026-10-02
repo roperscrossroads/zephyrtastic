@@ -397,6 +397,25 @@ uint8_t meshtastic_channels_hash_for_preset(uint8_t index, uint8_t preset)
 	return h;
 }
 
+bool meshtastic_channels_named_for_preset(uint8_t index, uint8_t preset)
+{
+	const meshtastic_Channel *ch;
+
+	if (index >= MESHTASTIC_MAX_CHANNELS ||
+	    preset > (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX ||
+	    preset == (uint8_t)mt.modem_preset) {
+		return false;
+	}
+	ch = &channel_slots[index];
+	if (ch->role == meshtastic_Channel_Role_DISABLED || !ch->has_settings ||
+	    ch->settings.name[0] == '\0') {
+		return false;
+	}
+	return strcmp(ch->settings.name,
+		      meshtastic_preset_display_name(
+			      (meshtastic_Config_LoRaConfig_ModemPreset)preset, true)) == 0;
+}
+
 bool meshtastic_channels_decrypt_for_hash_on(uint8_t index, uint8_t wire_hash, uint8_t preset)
 {
 	if (index >= MESHTASTIC_MAX_CHANNELS) {

@@ -171,6 +171,18 @@ uint8_t meshtastic_channels_hash_for_preset(uint8_t index, uint8_t preset);
 bool meshtastic_channels_decrypt_for_hash_on(uint8_t index, uint8_t wire_hash, uint8_t preset);
 
 /**
+ * @brief Is slot @p index the operator's channel FOR @p preset?
+ *
+ * True for an enabled slot named after @p preset's display name ("MediumFast"),
+ * when @p preset is a real preset and not the one this node's own radio is on.
+ * A brain that hears through radio heads may carry one such slot per head
+ * preset: traffic heard on that preset is then filed under it (its own chat in
+ * the phone app), not under the primary re-hashed for the preset. Opt-in:
+ * without such a slot nothing changes (agents-pcs2.11).
+ */
+bool meshtastic_channels_named_for_preset(uint8_t index, uint8_t preset);
+
+/**
  * @brief Human-readable channel name for a slot.
  *
  * Empty or unset names map to @ref MESHTASTIC_CHANNEL_LONGFAST for slot 0 semantics. The returned

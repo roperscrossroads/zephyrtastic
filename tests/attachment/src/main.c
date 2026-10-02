@@ -404,6 +404,70 @@ ZTEST(attachment, test_frame_from_another_preset_decodes_on_the_brain)
 	zassert_equal(a.rx_frames, 2U, "both envelopes counted, one decoded");
 }
 
+/* agents-pcs2.11: a slot named after a head's preset is that preset's channel.
+ * A brain covering MediumFast through a head shows ONE public chat by default:
+ * its primary, re-hashed for MediumFast, matches first. With a slot named
+ * "MediumFast" (default key) the same frame is filed under THAT slot, so the
+ * phone app shows the preset as its own chat. Opt-in: without the slot, and on
+ * our own radio, nothing changes. */
+ZTEST(attachment, test_a_slot_named_after_the_heard_preset_gets_that_presets_traffic)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint8_t payload[64];
+	uint32_t len;
+	struct meshtastic_packet pkt;
+	bool decoded;
+	meshtastic_Channel ch = meshtastic_Channel_init_zero;
+	const uint8_t there = meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF);
+
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1F01U, "mf", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+
+	/* Without the slot: the primary, as before. */
+	zassert_false(meshtastic_channels_named_for_preset(0U, (uint8_t)PRESET_MF));
+	decoded = false;
+	zassert_ok(meshtastic_try_decode_wire_packet_on(wire, (int)len, -90, 5, (uint8_t)PRESET_MF,
+							&pkt, payload, sizeof(payload), &decoded,
+							NULL, NULL));
+	zassert_true(decoded);
+	zassert_equal(pkt.channel_index, 0U, "no preset slot: filed under the primary");
+
+	/* The operator adds a channel named after the head's preset, default key. */
+	ch.index = 1;
+	ch.role = meshtastic_Channel_Role_SECONDARY;
+	ch.has_settings = true;
+	ch.settings.psk.size = 1U;
+	ch.settings.psk.bytes[0] = 1U;
+	strcpy(ch.settings.name, "MediumFast");
+	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "");
+	zassert_equal(meshtastic_channels_get_hash(1U), there,
+		      "a slot named MediumFast with the default key IS MediumFast's public hash");
+	zassert_true(meshtastic_channels_named_for_preset(1U, (uint8_t)PRESET_MF));
+	zassert_false(meshtastic_channels_named_for_preset(1U, (uint8_t)PRESET_ST),
+		      "not the channel for our own preset");
+
+	decoded = false;
+	zassert_ok(meshtastic_try_decode_wire_packet_on(wire, (int)len, -90, 5, (uint8_t)PRESET_MF,
+							&pkt, payload, sizeof(payload), &decoded,
+							NULL, NULL));
+	zassert_true(decoded);
+	zassert_equal(pkt.channel_index, 1U, "heard on MediumFast: filed under the MediumFast slot");
+
+	/* Our own radio's default-channel traffic still belongs to the primary. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x1F02U, "st", wire, &len);
+	decoded = false;
+	zassert_ok(meshtastic_try_decode_wire_packet_on(wire, (int)len, -90, 5, (uint8_t)PRESET_ST,
+							&pkt, payload, sizeof(payload), &decoded,
+							NULL, NULL));
+	zassert_true(decoded);
+	zassert_equal(pkt.channel_index, 0U, "our own preset's traffic stays on the primary");
+
+	ch.role = meshtastic_Channel_Role_DISABLED;
+	ch.settings.name[0] = '\0';
+	ch.settings.psk.size = 0U;
+	zassert_ok(meshtastic_channels_set_slot(1U, &ch), "restore");
+}
+
 /* B15 (review F3, SCOPE C1): a head is admitted only over a link the bearer
  * vouches for, or from the operator's allow-list. Anything else gets nothing --
  * not a slot, not a delivery, not an RF frame. */

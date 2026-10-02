@@ -398,27 +398,38 @@ static int try_decrypt_wire_hash(uint8_t wire_hash, uint8_t rx_preset, uint32_t 
 {
 	struct meshtastic_channel_key key;
 
-	for (uint8_t ch = 0; ch < MESHTASTIC_MAX_CHANNELS; ch++) {
-		const meshtastic_Channel *slot = meshtastic_channels_get(ch);
-		int ret;
+	/* Two passes. First the slots named after the preset the frame was heard
+	 * on through a head: the operator's channel FOR that preset, so its
+	 * traffic gets its own chat instead of being folded into the primary
+	 * (which, re-hashed for that preset, would match first and always won:
+	 * bench, 2026-10-01). Then everything else, as before. With no such slot
+	 * the first pass matches nothing and the order is unchanged. */
+	for (int pass = 0; pass < 2; pass++) {
+		for (uint8_t ch = 0; ch < MESHTASTIC_MAX_CHANNELS; ch++) {
+			const meshtastic_Channel *slot = meshtastic_channels_get(ch);
+			int ret;
 
-		if (slot == NULL || slot->role == meshtastic_Channel_Role_DISABLED) {
-			continue;
-		}
+			if (slot == NULL || slot->role == meshtastic_Channel_Role_DISABLED) {
+				continue;
+			}
+			if (meshtastic_channels_named_for_preset(ch, rx_preset) != (pass == 0)) {
+				continue;
+			}
 
-		if (!meshtastic_channels_decrypt_for_hash_on(ch, wire_hash, rx_preset)) {
-			continue;
-		}
+			if (!meshtastic_channels_decrypt_for_hash_on(ch, wire_hash, rx_preset)) {
+				continue;
+			}
 
-		ret = meshtastic_channels_get_key(ch, &key);
-		if (ret < 0) {
-			continue;
-		}
+			ret = meshtastic_channels_get_key(ch, &key);
+			if (ret < 0) {
+				continue;
+			}
 
-		ret = decrypt_mesh_encrypted_key(from, id, enc, enc_len, &key, data);
-		if (ret == 0) {
-			*channel_index_out = ch;
-			return 0;
+			ret = decrypt_mesh_encrypted_key(from, id, enc, enc_len, &key, data);
+			if (ret == 0) {
+				*channel_index_out = ch;
+				return 0;
+			}
 		}
 	}
 
