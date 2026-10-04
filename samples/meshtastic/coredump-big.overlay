@@ -22,6 +22,10 @@
  * coredump in place would shove the depot up and leave `partition@4d0000`
  * describing something at 0x540000, which devicetree warns about and which is
  * exactly the kind of quiet inconsistency a flash map should not carry.
+ *
+ * It ends where zephcore-fs begins (0xfc0000): the shared map reserves the last
+ * 256 KB for zephcore (heltec_partitions_16M.dtsi). Until 2026-10-04 this dump
+ * area sat at 0xf80000-0x1000000, over it.
  */
 
 &flash0 {
@@ -29,15 +33,15 @@
 		/* Replaced below at the tail of flash, 512 KB instead of 64 KB. */
 		/delete-node/ partition@4c0000;
 
-		coredump_partition: partition@f80000 {
+		coredump_partition: partition@f40000 {
 			compatible = "zephyr,mapped-partition";
 			label = "coredump";
-			reg = <0xf80000 DT_SIZE_K(512)>;
+			reg = <0xf40000 DT_SIZE_K(512)>;
 		};
 	};
 };
 
 /* Start unchanged at 0x4d0000; only the tail is given up. */
 &depot_partition {
-	reg = <0x4d0000 DT_SIZE_K(10944)>;
+	reg = <0x4d0000 DT_SIZE_K(10688)>;
 };

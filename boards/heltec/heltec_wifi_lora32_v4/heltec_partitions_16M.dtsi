@@ -26,8 +26,15 @@
  *   0x420000  storage    512 KB   NVS settings (was 192 KB)
  *   0x4a0000  scratch    128 KB   kept for swap-using-scratch builds
  *   0x4c0000  coredump    64 KB   (was 4 KB; a full dump needs more)
- *   0x4d0000  depot   11456 KB   LittleFS, mounted at /depot (see fstab)
+ *   0x4d0000  depot   11200 KB   LittleFS, mounted at /depot (see fstab; was 11456 KB)
+ *   0xfc0000  zephcore-fs 256 KB  RESERVED for zephcore: never mounted or written here
  *   0x1000000 end
+ *
+ * One map for two firmware families (operator, 2026-10-04): zephyrtastic and zephcore share
+ * this layout, one MCUboot and one signing key, and each keeps its settings in its own area
+ * (zephyrtastic: storage + mt-bulk; zephcore: zephcore-fs, map key ZEPHCORE_FS), so a board
+ * switched from one to the other and back keeps both identities. Nothing below the depot
+ * moved; the depot gave up its last 256 KB. coredump-big.overlay keeps clear of it too.
  */
 
 &flash0 {
@@ -101,7 +108,16 @@
 			 * it is what the flash-map generator numbers, not just XIP slots. */
 			compatible = "zephyr,mapped-partition";
 			label = "depot";
-			reg = <0x4d0000 DT_SIZE_K(11456)>;
+			reg = <0x4d0000 DT_SIZE_K(11200)>;
+		};
+
+		/* zephcore's LittleFS (its identity, prefs, contacts, channels) on a board
+		 * that also runs, or ran, zephcore. Described so the flash map (and the
+		 * bench's backups) name it; this firmware never mounts or writes it. */
+		zephcore_fs_partition: partition@fc0000 {
+			compatible = "zephyr,mapped-partition";
+			label = "zephcore-fs";
+			reg = <0xfc0000 DT_SIZE_K(256)>;
 		};
 	};
 };
