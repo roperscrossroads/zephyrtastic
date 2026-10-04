@@ -80,6 +80,7 @@ static void before(void *f)
 {
 	ARG_UNUSED(f);
 	meshtastic_led_status_locate(0);
+	zassert_ok(meshtastic_led_status_set_color(MESHTASTIC_LED_COLOR_DEFAULT));
 	zassert_ok(meshtastic_led_status_set_mode(MESHTASTIC_LED_IDLE));
 	k_msleep(10);
 }
@@ -176,6 +177,60 @@ ZTEST(led_status, test_an_unknown_mode_is_refused)
 	zassert_equal(meshtastic_led_status_get_mode(), MESHTASTIC_LED_IDLE);
 }
 
+/* A colour by name, and the names the bench uses; anything else is refused. */
+ZTEST(led_status, test_a_color_is_named_and_an_unknown_one_refused)
+{
+	enum meshtastic_led_color c;
+
+	zassert_ok(meshtastic_led_color_parse("cyan", &c));
+	zassert_equal(c, MESHTASTIC_LED_COLOR_CYAN);
+	zassert_ok(meshtastic_led_color_parse("default", &c));
+	zassert_equal(c, MESHTASTIC_LED_COLOR_DEFAULT);
+	zassert_equal(meshtastic_led_color_parse("white", &c), -EINVAL, "white is locate's");
+	zassert_equal(meshtastic_led_status_set_color((enum meshtastic_led_color)9), -EINVAL);
+	zassert_equal(meshtastic_led_status_get_color(), MESHTASTIC_LED_COLOR_DEFAULT);
+	zassert_str_equal(meshtastic_led_color_name(MESHTASTIC_LED_COLOR_MAGENTA), "magenta");
+}
+
+#if HAS_COLOR
+/* In use, the board shows what it is for: cyan is green and blue, steady, red dark. */
+ZTEST(led_status, test_in_use_shows_the_color_steady)
+{
+	zassert_ok(meshtastic_led_status_set_color(MESHTASTIC_LED_COLOR_CYAN));
+	zassert_ok(meshtastic_led_status_set_mode(MESHTASTIC_LED_IN_USE));
+	k_msleep(20);
+	struct watch g = watch(&green, 1500);
+
+	zassert_equal(g.lit_ms, g.ms, "green not steady in cyan");
+	zassert_true(lit(&blue), "blue not lit in cyan");
+	zassert_false(lit(&red), "red lit in cyan");
+}
+
+/* Idle blinks the colour slowly: yellow is red and green, together. */
+ZTEST(led_status, test_idle_blinks_the_color)
+{
+	zassert_ok(meshtastic_led_status_set_color(MESHTASTIC_LED_COLOR_YELLOW));
+	struct watch r = watch(&red, 4100);
+
+	zassert_true(r.on_edges >= 2U && r.on_edges <= 3U, "edges %u: not a slow blink", r.on_edges);
+	zassert_true(r.lit_ms < r.ms / 4U);
+	zassert_false(lit(&blue), "blue lit in yellow");
+}
+
+/* With a colour set, locate is white (all three, fast): no purpose has it. */
+ZTEST(led_status, test_locate_is_white_when_a_color_is_set)
+{
+	zassert_ok(meshtastic_led_status_set_color(MESHTASTIC_LED_COLOR_GREEN));
+	zassert_ok(meshtastic_led_status_set_mode(MESHTASTIC_LED_IN_USE));
+	meshtastic_led_status_locate(2);
+	k_msleep(5);
+	struct watch r = watch(&red, 900);
+
+	zassert_true(r.on_edges >= 4U, "red edges %u in 0.9 s: not a fast white blink", r.on_edges);
+	zassert_true(watch(&blue, 600).on_edges >= 2U, "blue not blinking with red");
+}
+#endif /* HAS_COLOR */
+
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 static int read_mode_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
 			void *param)
@@ -204,5 +259,21 @@ ZTEST(led_status, test_the_mode_survives_a_reboot)
 	zassert_ok(settings_save_one("mtled/mode", &off, 1));
 	zassert_ok(settings_load_subtree("mtled"));
 	zassert_equal(meshtastic_led_status_get_mode(), MESHTASTIC_LED_OFF, "not restored");
+}
+
+/* The colour is written to mtled/color and found there at boot, beside the mode. */
+ZTEST(led_status, test_the_color_survives_a_reboot)
+{
+	uint8_t stored = 0xFF;
+
+	zassert_ok(meshtastic_led_status_set_color(MESHTASTIC_LED_COLOR_MAGENTA));
+	zassert_ok(settings_load_subtree_direct("mtled/color", read_mode_cb, &stored));
+	zassert_equal(stored, (uint8_t)MESHTASTIC_LED_COLOR_MAGENTA, "not saved");
+
+	const uint8_t blue_c = (uint8_t)MESHTASTIC_LED_COLOR_BLUE;
+
+	zassert_ok(settings_save_one("mtled/color", &blue_c, 1));
+	zassert_ok(settings_load_subtree("mtled"));
+	zassert_equal(meshtastic_led_status_get_color(), MESHTASTIC_LED_COLOR_BLUE, "not restored");
 }
 #endif

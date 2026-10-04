@@ -40,6 +40,7 @@ static const struct gpio_dt_spec led_blue = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpi
 
 static struct k_work_delayable led_work;
 static enum meshtastic_led_mode led_mode = MESHTASTIC_LED_IDLE;
+static enum meshtastic_led_color led_color = MESHTASTIC_LED_COLOR_DEFAULT;
 static int64_t locate_until; /* k_uptime; 0 when not locating */
 static bool phase;
 
@@ -61,6 +62,27 @@ static void drive(bool red, bool green, bool blue)
 #endif
 }
 
+static const char *const color_names[] = {
+	[MESHTASTIC_LED_COLOR_DEFAULT] = "default", [MESHTASTIC_LED_COLOR_RED] = "red",
+	[MESHTASTIC_LED_COLOR_GREEN] = "green",     [MESHTASTIC_LED_COLOR_BLUE] = "blue",
+	[MESHTASTIC_LED_COLOR_YELLOW] = "yellow",   [MESHTASTIC_LED_COLOR_CYAN] = "cyan",
+	[MESHTASTIC_LED_COLOR_MAGENTA] = "magenta",
+};
+
+/* The colour lit, or dark. */
+static void show(enum meshtastic_led_color c, bool on)
+{
+	static const uint8_t rgb[] = {
+		[MESHTASTIC_LED_COLOR_DEFAULT] = 0, [MESHTASTIC_LED_COLOR_RED] = 4,
+		[MESHTASTIC_LED_COLOR_GREEN] = 2,   [MESHTASTIC_LED_COLOR_BLUE] = 1,
+		[MESHTASTIC_LED_COLOR_YELLOW] = 6,  [MESHTASTIC_LED_COLOR_CYAN] = 3,
+		[MESHTASTIC_LED_COLOR_MAGENTA] = 5,
+	};
+	const uint8_t v = on ? rgb[c] : 0U;
+
+	drive((v & 4U) != 0U, (v & 2U) != 0U, (v & 1U) != 0U);
+}
+
 static void led_work_fn(struct k_work *work)
 {
 	const int64_t now = k_uptime_get();
@@ -70,13 +92,21 @@ static void led_work_fn(struct k_work *work)
 
 	if (locate_until != 0 && now < locate_until) {
 		phase = !phase;
-		drive(false, false, phase);
+		if (led_color == MESHTASTIC_LED_COLOR_DEFAULT) {
+			drive(false, false, phase);
+		} else {
+			drive(phase, phase, phase); /* white: no purpose has it */
+		}
 		next = LOCATE_MS;
 	} else {
 		locate_until = 0;
 		switch (led_mode) {
 		case MESHTASTIC_LED_IN_USE:
-			drive(false, true, false);
+			if (led_color == MESHTASTIC_LED_COLOR_DEFAULT) {
+				drive(false, true, false);
+			} else {
+				show(led_color, true);
+			}
 			next = STEADY_MS;
 			break;
 		case MESHTASTIC_LED_OFF:
@@ -86,7 +116,11 @@ static void led_work_fn(struct k_work *work)
 		case MESHTASTIC_LED_IDLE:
 		default:
 			phase = !phase;
-			drive(phase, false, false);
+			if (led_color == MESHTASTIC_LED_COLOR_DEFAULT) {
+				drive(phase, false, false);
+			} else {
+				show(led_color, phase);
+			}
 			next = phase ? IDLE_ON_MS : IDLE_OFF_MS;
 			break;
 		}
@@ -113,39 +147,41 @@ bool meshtastic_led_status_has_color(void)
 	return LED_HAS_COLOR;
 }
 
-/* ---- persistence: the mode survives a reboot (mtled/mode) ------------------- */
+/* ---- persistence: the mode and colour survive a reboot (mtled/mode, mtled/color) -- */
 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 static int led_settings_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	uint8_t m;
+	const bool is_mode = strcmp(key, "mode") == 0;
 
-	if (strcmp(key, "mode") != 0) {
+	if (!is_mode && strcmp(key, "color") != 0) {
 		return -ENOENT;
 	}
 	if (len != sizeof(m) || read_cb(cb_arg, &m, len) != (ssize_t)len) {
 		return -EINVAL;
 	}
-	if (m <= (uint8_t)MESHTASTIC_LED_OFF) {
+	if (is_mode && m <= (uint8_t)MESHTASTIC_LED_OFF) {
 		led_mode = (enum meshtastic_led_mode)m;
+	} else if (!is_mode && m <= (uint8_t)MESHTASTIC_LED_COLOR_MAGENTA) {
+		led_color = (enum meshtastic_led_color)m;
 	}
 	return 0;
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(mt_led, "mtled", NULL, led_settings_set, NULL, NULL);
 
-static void led_save(enum meshtastic_led_mode mode)
+static void led_save(const char *key, uint8_t v)
 {
-	const uint8_t m = (uint8_t)mode;
-
-	if (settings_save_one("mtled/mode", &m, sizeof(m)) != 0) {
+	if (settings_save_one(key, &v, sizeof(v)) != 0) {
 		LOG_WRN("led: settings save failed");
 	}
 }
 #else
-static void led_save(enum meshtastic_led_mode mode)
+static void led_save(const char *key, uint8_t v)
 {
-	ARG_UNUSED(mode);
+	ARG_UNUSED(key);
+	ARG_UNUSED(v);
 }
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
 
@@ -157,9 +193,42 @@ int meshtastic_led_status_set_mode(enum meshtastic_led_mode mode)
 	led_mode = mode;
 	locate_until = 0;
 	phase = false;
-	led_save(mode);
+	led_save("mtled/mode", (uint8_t)mode);
 	(void)k_work_reschedule(&led_work, K_NO_WAIT);
 	return 0;
+}
+
+int meshtastic_led_status_set_color(enum meshtastic_led_color color)
+{
+	if (color > MESHTASTIC_LED_COLOR_MAGENTA) {
+		return -EINVAL;
+	}
+	led_color = color;
+	phase = false;
+	led_save("mtled/color", (uint8_t)color);
+	(void)k_work_reschedule(&led_work, K_NO_WAIT);
+	return 0;
+}
+
+enum meshtastic_led_color meshtastic_led_status_get_color(void)
+{
+	return led_color;
+}
+
+const char *meshtastic_led_color_name(enum meshtastic_led_color color)
+{
+	return (color <= MESHTASTIC_LED_COLOR_MAGENTA) ? color_names[color] : "?";
+}
+
+int meshtastic_led_color_parse(const char *name, enum meshtastic_led_color *out)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(color_names); i++) {
+		if (strcmp(name, color_names[i]) == 0) {
+			*out = (enum meshtastic_led_color)i;
+			return 0;
+		}
+	}
+	return -EINVAL;
 }
 
 enum meshtastic_led_mode meshtastic_led_status_get_mode(void)

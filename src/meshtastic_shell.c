@@ -3851,10 +3851,16 @@ static int cmd_led_show(const struct shell *sh, size_t argc, char **argv)
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
-	shell_print(sh, "mode: %s  (%s)", meshtastic_led_mode_name(meshtastic_led_status_get_mode()),
-		    meshtastic_led_status_has_color() ? "RGB: idle red, in-use green, locate blue"
-						      : "one LED: idle slow blink, in-use off, "
-							"locate fast blink");
+	enum meshtastic_led_color c = meshtastic_led_status_get_color();
+
+	shell_print(sh, "mode: %s  color: %s  (%s)",
+		    meshtastic_led_mode_name(meshtastic_led_status_get_mode()),
+		    meshtastic_led_color_name(c),
+		    !meshtastic_led_status_has_color()
+			    ? "one LED: idle slow blink, in-use off, locate fast blink"
+		    : c == MESHTASTIC_LED_COLOR_DEFAULT
+			    ? "RGB: idle red, in-use green, locate blue"
+			    : "RGB: idle blinks the color, in-use steady, locate white");
 	if (left != 0U) {
 		shell_print(sh, "locating: %u s left", left);
 	}
@@ -3881,6 +3887,20 @@ static int cmd_led_mode(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_led_color(const struct shell *sh, size_t argc, char **argv)
+{
+	enum meshtastic_led_color c;
+
+	ARG_UNUSED(argc);
+	if (meshtastic_led_color_parse(argv[1], &c) != 0) {
+		shell_error(sh, "color: default, red, green, blue, yellow, cyan or magenta");
+		return -EINVAL;
+	}
+	(void)meshtastic_led_status_set_color(c);
+	shell_print(sh, "color: %s (saved)", meshtastic_led_color_name(c));
+	return 0;
+}
+
 static int cmd_led_locate(const struct shell *sh, size_t argc, char **argv)
 {
 	uint32_t s = (argc > 1) ? (uint32_t)strtoul(argv[1], NULL, 10)
@@ -3901,6 +3921,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_led_mode, 2, 0),
 	SHELL_CMD_ARG(locate, NULL, SHELL_HELP("Blink \"here I am\"; 0 stops.", "[seconds]"),
 		      cmd_led_locate, 1, 1),
+	SHELL_CMD_ARG(color, NULL,
+		      SHELL_HELP("Set and save what the board is for, as a color (RGB boards).",
+				 "<default|red|green|blue|yellow|cyan|magenta>"),
+		      cmd_led_color, 2, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_LED_STATUS */
 
@@ -7822,7 +7846,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #endif
 #if defined(CONFIG_MESHTASTIC_LED_STATUS)
 	SHELL_CMD(led, &meshtastic_led_cmds,
-		  SHELL_HELP("Bench LED: show, mode, locate.", NULL), cmd_led_show),
+		  SHELL_HELP("Bench LED: show, mode, color, locate.", NULL), cmd_led_show),
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY)
 	SHELL_CMD(relay, &meshtastic_relay_cmds,

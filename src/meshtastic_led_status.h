@@ -26,6 +26,21 @@ enum meshtastic_led_mode {
 
 /* Starts the pattern in the saved mode (idle if none). Returns 0, or a
  * negative errno if led0 is declared but not ready. */
+/* What a board is FOR, as a colour on an RGB LED (the XIAO's): set by the bench from the
+ * board's place in its layout. DEFAULT keeps the original colours (idle red, in-use green,
+ * locate blue). With a colour set, idle blinks it slowly, in-use shows it steady, and locate
+ * blinks WHITE fast: white is no purpose's colour, so a located board cannot be mistaken
+ * for one. A one-LED board ignores the colour; its patterns say the same. */
+enum meshtastic_led_color {
+	MESHTASTIC_LED_COLOR_DEFAULT = 0,
+	MESHTASTIC_LED_COLOR_RED = 1,
+	MESHTASTIC_LED_COLOR_GREEN = 2,
+	MESHTASTIC_LED_COLOR_BLUE = 3,
+	MESHTASTIC_LED_COLOR_YELLOW = 4,
+	MESHTASTIC_LED_COLOR_CYAN = 5,
+	MESHTASTIC_LED_COLOR_MAGENTA = 6,
+};
+
 int meshtastic_led_status_init(void);
 
 /* Set and persist the mode (ends a locate). -EINVAL for an unknown mode. */
@@ -41,5 +56,12 @@ uint32_t meshtastic_led_status_locate_left(void);
 bool meshtastic_led_status_has_color(void);
 
 const char *meshtastic_led_mode_name(enum meshtastic_led_mode mode);
+
+/* The colour (saved as mtled/color); -EINVAL for one this enum does not have. */
+int meshtastic_led_status_set_color(enum meshtastic_led_color color);
+enum meshtastic_led_color meshtastic_led_status_get_color(void);
+const char *meshtastic_led_color_name(enum meshtastic_led_color color);
+/* A colour by its name ("default", "red", ... "magenta"); -EINVAL for any other. */
+int meshtastic_led_color_parse(const char *name, enum meshtastic_led_color *out);
 
 #endif /* MESHTASTIC_LED_STATUS_H_ */
