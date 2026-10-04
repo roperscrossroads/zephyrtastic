@@ -252,7 +252,7 @@ tests:
     sysbuild: true
     extra_args:
       - SHIELD=wio_sx1262_xiao
-      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-scanner.conf;overlay-listener.conf;overlay-xiao-listener.conf"
+      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-scanner.conf;overlay-listener.conf;overlay-xiao-listener.conf;overlay-led-status.conf"
   sample.meshtastic.fleet.gateway:
     # The WiFi gateway (net, no BT) with plaintext MQTT, as measured in FEATURE-COSTS §6.1:
     # what the justfile builds for PROFILE=v4-unified MQTT=1 (overlay-mqtt.conf last).
