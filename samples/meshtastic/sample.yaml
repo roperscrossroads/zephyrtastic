@@ -279,11 +279,13 @@ tests:
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nobt.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf"
   sample.meshtastic.fleet.e290_ble:
-    # The Heltec Vision Master E290 (ESP32-S3R8, bare SX1262, e-ink, no GNSS) as a LoRa+BLE node.
-    # Its board file states flash and PSRAM itself and enables the octal PSRAM; this builds the
-    # screen UI over the e-ink driver, which no other fleet image carries.
+    # The Heltec Vision Master E290 (ESP32-S3R8, bare SX1262, e-ink, no GNSS) as a plain LoRa+BLE
+    # node: the bring-up image (bench class 14). Its board file states flash and PSRAM itself and
+    # enables the octal PSRAM; this builds the screen UI over the e-ink driver, which no other
+    # fleet image carries. Key-derived node id, RF reporting, the status LED, and a receive-only
+    # first boot, as every bench Heltec. Mirrors the class recipe in the bench catalog.
     tags: [meshtastic, fleet, ble]
     platform_allow: [heltec_vision_master_e290/esp32s3/procpu]
     integration_platforms: [heltec_vision_master_e290/esp32s3/procpu]
     extra_args:
-      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-pm-off.conf;overlay-nomqtt.conf"
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-rf.conf;overlay-node-id-from-key.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
