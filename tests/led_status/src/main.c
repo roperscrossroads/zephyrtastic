@@ -192,6 +192,35 @@ ZTEST(led_status, test_a_color_is_named_and_an_unknown_one_refused)
 	zassert_str_equal(meshtastic_led_color_name(MESHTASTIC_LED_COLOR_MAGENTA), "magenta");
 }
 
+#if !HAS_COLOR
+/* A one-LED board ignores a stored colour: in use stays dark whatever the colour (magenta
+ * once lit it: drive() ORs red and blue onto the one LED), idle still blinks slowly (green
+ * once kept it dark), and locate still blinks fast. */
+ZTEST(led_status, test_a_one_led_board_keeps_its_patterns_whatever_the_color)
+{
+	static const enum meshtastic_led_color all[] = {
+		MESHTASTIC_LED_COLOR_RED, MESHTASTIC_LED_COLOR_GREEN, MESHTASTIC_LED_COLOR_BLUE,
+		MESHTASTIC_LED_COLOR_YELLOW, MESHTASTIC_LED_COLOR_CYAN, MESHTASTIC_LED_COLOR_MAGENTA,
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(all); i++) {
+		zassert_ok(meshtastic_led_status_set_color(all[i]));
+		zassert_ok(meshtastic_led_status_set_mode(MESHTASTIC_LED_IN_USE));
+		k_msleep(20);
+		zassert_equal(watch(&red, 1200).lit_ms, 0U, "in use lit the one LED in %s",
+			      meshtastic_led_color_name(all[i]));
+	}
+	zassert_ok(meshtastic_led_status_set_color(MESHTASTIC_LED_COLOR_GREEN));
+	zassert_ok(meshtastic_led_status_set_mode(MESHTASTIC_LED_IDLE));
+	struct watch w = watch(&red, 4100);
+
+	zassert_true(w.on_edges >= 2U && w.on_edges <= 3U, "idle in green: %u edges", w.on_edges);
+	meshtastic_led_status_locate(2);
+	k_msleep(5);
+	zassert_true(watch(&red, 900).on_edges >= 4U, "locate in green: not a fast blink");
+}
+#endif /* !HAS_COLOR */
+
 #if HAS_COLOR
 /* In use, the board shows what it is for: cyan is green and blue, steady, red dark. */
 ZTEST(led_status, test_in_use_shows_the_color_steady)

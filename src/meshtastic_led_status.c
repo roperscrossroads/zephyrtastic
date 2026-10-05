@@ -86,13 +86,17 @@ static void show(enum meshtastic_led_color c, bool on)
 static void led_work_fn(struct k_work *work)
 {
 	const int64_t now = k_uptime_get();
+	/* The colour is shown only where there are colours: a one-LED board keeps its
+	 * patterns whatever colour is stored (drive() ORs red and blue onto its LED, so a
+	 * magenta "in use" would light it, and a green "idle" would never blink). */
+	const bool tint = LED_HAS_COLOR && led_color != MESHTASTIC_LED_COLOR_DEFAULT;
 	uint32_t next;
 
 	ARG_UNUSED(work);
 
 	if (locate_until != 0 && now < locate_until) {
 		phase = !phase;
-		if (led_color == MESHTASTIC_LED_COLOR_DEFAULT) {
+		if (!tint) {
 			drive(false, false, phase);
 		} else {
 			drive(phase, phase, phase); /* white: no purpose has it */
@@ -102,7 +106,7 @@ static void led_work_fn(struct k_work *work)
 		locate_until = 0;
 		switch (led_mode) {
 		case MESHTASTIC_LED_IN_USE:
-			if (led_color == MESHTASTIC_LED_COLOR_DEFAULT) {
+			if (!tint) {
 				drive(false, true, false);
 			} else {
 				show(led_color, true);
@@ -116,7 +120,7 @@ static void led_work_fn(struct k_work *work)
 		case MESHTASTIC_LED_IDLE:
 		default:
 			phase = !phase;
-			if (led_color == MESHTASTIC_LED_COLOR_DEFAULT) {
+			if (!tint) {
 				drive(phase, false, false);
 			} else {
 				show(led_color, phase);
