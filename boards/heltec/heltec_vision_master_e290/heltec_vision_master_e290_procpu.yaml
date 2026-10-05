@@ -1,0 +1,19 @@
+# Twister platform metadata. Without this file twister does not recognize the board at
+# all ("unrecognized platform"), so no sample.yaml scenario on it could ever run.
+identifier: heltec_vision_master_e290/esp32s3/procpu
+name: Heltec Vision Master E290 (HT-VME290) PROCPU
+type: mcu
+arch: xtensa
+toolchain:
+  - zephyr
+supported:
+  - gpio
+  - uart
+  - i2c
+  - spi
+  - watchdog
+  - entropy
+  - lora
+  - nvs
+  - display
+vendor: heltec

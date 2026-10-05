@@ -12,6 +12,84 @@ config POWER_DOMAIN
 config POWER_DOMAIN_GPIO
 	default y
 
+# --- PSRAM: 8 MB OCTAL (ESP32-S3R8) ---------------------------------------
+# These MUST live with the board, not in an application overlay: the PSRAM part
+# is a property of the module, and an overlay shared with the 2 MB-quad V4 will
+# get one of the two boards wrong. (It did: overlay-v4-unified.conf used to pin
+# CONFIG_SPIRAM_MODE_QUAD=y unconditionally, which the R8 silently inherited —
+# an octal part driven in quad mode. ESP_SPIRAM_SIZE is safe by construction, it
+# is derived from the psram0 DT node, but the *mode* had no such guard.)
+#
+# The 8 MB octal PSRAM is soldered onto the module -- it is the defining feature of
+# the 2 MB-quad V4, not an application option. Force it on for the app image so
+# no build (unified, net, ble, or a bare `west build -b <board> samples/meshtastic`) can
+# silently omit it. `ESP_SPIRAM` has base `default n`; MCUboot must never touch PSRAM
+# (it carries its own `default n if MCUBOOT`), hence the `!MCUBOOT` guard here. If octal
+# @ 80 MHz is unstable on first hardware, drop SPIRAM_SPEED below to 40M -- never disable.
+config ESP_SPIRAM
+	default y if !MCUBOOT
+
+# Only defaults are set here, so an application can still override any of them.
+if ESP_SPIRAM
+
+choice SPIRAM_MODE
+	default SPIRAM_MODE_OCT
+endchoice
+
+# ESPPSRAM64 = 8 MB. The SPIRAM_TYPE choice already `depends on
+# (ESP_SPIRAM_SIZE = 8388608)` for this entry, i.e. it is cross-checked against
+# the psram0 DT size — stated explicitly here so the intent is visible.
+choice SPIRAM_TYPE
+	default SPIRAM_TYPE_ESPPSRAM64
+endchoice
+
+# 80 MHz is the rated/standard operating point for a WROOM-1 N16R8 octal part, but
+# first hardware bring-up (rzr3, 2026-08-03) was UNSTABLE at 80M: the boot log showed
+#   E: restore cache fail  ->  flash_esp32: Flash write error -5  ->  NVS/settings init -5
+# i.e. flash writes fault. On an octal-PSRAM S3 a flash write suspends+restores the MMU
+# cache, and the freshly-tuned 80 MHz octal PSRAM timing does not survive that cycle, so
+# NVS/settings/WiFi-credentials all fail to persist. Dropping to 40M (as the note below
+# always warned) gives the cache-restore enough timing margin. Revisit 80M only with a
+# dedicated flash/PSRAM MSPI-timing investigation.  (Was: default SPIRAM_SPEED_80M.)
+choice SPIRAM_SPEED
+	default SPIRAM_SPEED_40M
+endchoice
+
+# Shared-multi-heap external pool (linker: _ext_ram_heap_start.._ext_ram_heap_end).
+# The Zephyr default is 1 MB, sized for a 2 MB part; on 8 MB that leaves ~6.9 MB
+# of the module doing nothing. 4 MB still leaves ~4 MB of address space for
+# .ext_ram.bss growth, and the linker ASSERT ("External SPIRAM overflowed")
+# catches an overrun at build time rather than at runtime.
+#
+# This costs nothing in flash or boot image: .ext_ram.data is NOLOAD, so the
+# reservation is address space inside the part, not bytes in zephyr.bin.
+config ESP_SPIRAM_HEAP_SIZE
+	default 4194304
+
+# WiFi's adapter heap goes to PSRAM whenever PSRAM is on (2026-09-26, agents-zo3o.7).
+# It was CONFIG_ESP_WIFI_HEAP_SPIRAM=y in overlay-v4-unified.conf, whose comment says
+# the option depends on ESP_SPIRAM. It does not: on the V3 (no PSRAM) the WiFi adapter
+# then linked against shared_multi_heap_*() with no SHARED_MULTI_HEAP, and failed. Why
+# PSRAM at all: the display's framebuffer allocation races WiFi for the kernel heap
+# (the "scrambled screen", see the profile's display block).
+choice ESP_WIFI_HEAP
+	default ESP_WIFI_HEAP_SPIRAM
+endchoice
+
+# The NodeDB sizes (2026-09-27, agents-2dk3; moved here from overlay-v4-unified.conf the
+# same day). Both tables are MESHTASTIC_EXT_RAM_BSS_ATTR, so with PSRAM they cost no
+# internal RAM: 250 hot (34 KB) and 2000 warm keys (88 KB) are upstream's PSRAM-S3
+# figures. Set in the profile they also reached the V3, which has no PSRAM, and put
+# 122 KB in its dram0 (overflowed by 72 KB). A listener overlay still sets its own.
+config MESHTASTIC_NODEDB_MAX_NODES
+	default 250
+
+config MESHTASTIC_NODEDB_WARM_KEYS
+	default 2000
+
+endif # ESP_SPIRAM
+
+
 # Monochrome e-ink: if the app uses LVGL, drive it 1-bpp with the mono
 # inversion the SSD1680 panels want. Inert when LVGL is off.
 if LVGL
@@ -27,5 +105,54 @@ choice LV_COLOR_DEPTH
 endchoice
 
 endif # LVGL
+
+# --- Diagnostics (2026-09-03) ----------------------------------------------
+# Zephyr facilities that cost a little flash and nothing on the happy path, and
+# turn a silent reboot into a named one. Defaults only, so an overlay can still
+# switch any of them off. Added after the class-B hang (tooling repo
+# RF-PARITY-PLAN.md 8.16, bead agents-xhli.24): six hardware-watchdog resets
+# with consoles attached and NOTHING printed, because a double exception on
+# this core runs no handler at all.
+#
+# All `!MCUBOOT`: sysbuild configures the bootloader with this same file, and
+# the bootloader must stay exactly what is on every board (the fleet flashes
+# the app slot only). It also cannot link the backtrace helper (no Xtensa HAL
+# in its image) or place .rtc_noinit (its own linker script) -- found the
+# first time this block was built, 2026-09-03.
+
+# The double-exception record and per-level interrupt counters (carried patch
+# 0017). Read by `meshtastic resets` and the boot-time log.
+config XTENSA_FAULT_BREADCRUMBS
+	default y if !MCUBOOT
+
+# Entry treats a nesting count below 1 as "not nested" and switches stacks;
+# exit never goes below 0; both counted (carried patch 0017). The consequence
+# of an unbalanced count -- every interrupt on the interrupted thread's stack,
+# then a silent death -- is what the class-B record of 2026-09-03 showed
+# (nested == -1 in idle). This stops the consequence and reports the event.
+config XTENSA_ISR_NESTING_GUARD
+	default y if !MCUBOOT
+
+# A backtrace on every fatal. Upstream gates the option on the original ESP32
+# series; carried patch 0016 opens it to the whole Espressif family -- the
+# implementation is chip-generic (windowed-ABI frame walk + esp_ptr checks).
+# Upstream's own `default y` would otherwise reach MCUboot once 0016 makes the
+# option available, hence the explicit `n if MCUBOOT` here.
+config XTENSA_ENABLE_BACKTRACE
+	default n if MCUBOOT
+	default y
+
+# Kernel struct offsets for debugger / coredump thread plugins.
+config DEBUG_THREAD_INFO
+	default y if !MCUBOOT
+
+# Spinlock double-lock and wrong-unlock checks. Only live with ASSERT=y, which
+# the app sets; upstream defaults it off on this SoC purely on flash size.
+config SPIN_VALIDATE
+	default y if !MCUBOOT
+
+# HCI error codes as strings in the Bluetooth logs.
+config BT_HCI_ERR_TO_STR
+	default y if !MCUBOOT
 
 endif # BOARD_HELTEC_VISION_MASTER_E290_ESP32S3_PROCPU

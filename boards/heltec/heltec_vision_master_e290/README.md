@@ -3,7 +3,9 @@
 Zephyr board for the Heltec **Vision Master E290** — a 2.9" black/white E-Ink dev
 board with ESP32-S3, SX1262 LoRa, Wi-Fi and BLE, Meshtastic-compatible.
 
-> **Bring-up scaffold.** Pins are transcribed from the Meshtastic reference
+> **Builds, not yet run.** The meshtastic sample builds for this board in both the net and the
+> LoRa+BLE variants (fleet scenario `sample.meshtastic.fleet.e290_ble`), with the octal PSRAM
+> enabled and the e-ink screen UI linked. Nothing has run on hardware. Pins are transcribed from the Meshtastic reference
 > variant and the Heltec factory test (which agree), but **no E290 hardware has
 > been on the bench**. Every `VERIFY(hardware)` in the `.dts` is a real
 > unknown — especially the flash size, the e-ink orientation/offset, and the
@@ -15,8 +17,8 @@ It is a structural cross of the existing Heltec boards:
 
 | Aspect | E290 | Closest sibling |
 |---|---|---|
-| SoC | ESP32-S3**R8** (8 MB octal PSRAM) | V4-R8 |
-| Flash | **8 MB** (per Meshtastic's board config) | V3 |
+| SoC | ESP32-S3**R8** (8 MB octal PSRAM, enabled by this board's Kconfig.defconfig, as the V4-R8) | V4-R8 |
+| Flash | **8 MB** (per Meshtastic's board config; unconfirmed, read `esptool flash-id`) | V3 |
 | Radio | **bare SX1262, no FEM**, 21 dBm | V3 |
 | Display | 2.9" SSD1680 e-ink, 296×128, on **SPI3** | (none — new) |
 | GNSS | **none** (standard rev) | V3 |
@@ -70,3 +72,10 @@ the application, not the board defconfig.
 4. **Button 2 (GPIO21)** pull configuration.
 5. The **SSD1680** compatible is the closest in-tree match to the DEPG0290BNS800;
    confirm full/partial refresh behave on the real panel (waveform is from OTP).
+
+## Display refresh policy
+
+The screen UI's defaults are an OLED's (redraw every second, blank after 30 s). The sample's board conf
+sets a 10 s redraw and no blanking, because every redraw of an e-ink panel is a refresh. The Zephyr
+`ssd16xx` driver has no X RAM offset, so if the real panel shows the 8-pixel shift (item 2 below) the
+driver needs a small carried patch; do not guess it before the panel has been seen.
