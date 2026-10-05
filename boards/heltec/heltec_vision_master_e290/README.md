@@ -18,7 +18,7 @@ It is a structural cross of the existing Heltec boards:
 | Aspect | E290 | Closest sibling |
 |---|---|---|
 | SoC | ESP32-S3**R8** (8 MB octal PSRAM, enabled by this board's Kconfig.defconfig, as the V4-R8) | V4-R8 |
-| Flash | **8 MB** (per Meshtastic's board config; unconfirmed, read `esptool flash-id`) | V3 |
+| Flash | **16 MB** (measured: Winbond W25Q128; stock Meshtastic only uses 8 MB) | V4-R8 |
 | Radio | **bare SX1262, no FEM**, 21 dBm | V3 |
 | Display | 2.9" SSD1680 e-ink, 296×128, on **SPI3** | (none — new) |
 | GNSS | **none** (standard rev) | V3 |
@@ -62,14 +62,13 @@ the application, not the board defconfig.
 
 ## Open items (`VERIFY(hardware)`)
 
-1. **Flash size** — Meshtastic says 8 MB (`_n8r8` + 8M partitions). If the module
-   is 16 MB, switch to `_n16r8` + the 16M partition table.
+1. ~~Flash size~~ — **16 MB**, measured and on the schematic; the board uses the shared 16 MB map.
 2. **E-Ink orientation** (`rotation`) and the **1-byte X RAM offset** the
    Meshtastic driver applies (`DEPG0290BNS800: bufferOffsetX=1`) — an 8-px shift
    is the symptom if it's needed and missing.
 3. **Battery multiplier** — variant.h uses 4.9×1.03, the factory test 4.01;
    measure against a known voltage.
-4. **Button 2 (GPIO21)** pull configuration.
+4. ~~Button 2 (GPIO21) pull~~ — external 10k pull-up to 3V3 on the schematic (R21).
 5. The **SSD1680** compatible is the closest in-tree match to the DEPG0290BNS800;
    confirm full/partial refresh behave on the real panel (waveform is from OTP).
 

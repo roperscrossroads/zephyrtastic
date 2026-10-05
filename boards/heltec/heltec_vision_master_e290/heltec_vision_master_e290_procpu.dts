@@ -13,11 +13,8 @@
  * (firmware/variants/esp32s3/heltec_vision_master_e290/) and the Heltec factory
  * test; the two agree pin-for-pin.
  *
- * FLASH SIZE: the Meshtastic build treats this board as 8 MB flash (its board
- * JSON: flash_size 8MB, partitions default_8MB) — hence esp32s3_wroom_n8r8 +
- * the 8M partition table. VERIFY(hardware) against the actual module before
- * trusting the flash layout; if the unit is 16 MB, switch to _n16r8 + the 16M
- * partitions (as the V4-R8 board does).
+ * FLASH SIZE: 16 MB (measured; see the flash0 node below). Meshtastic's own build
+ * treats the board as 8 MB, which is wrong for the hardware.
  *
  * The display + several pins are VERIFY(hardware) — this is a bring-up
  * scaffold; e-ink orientation/offset can only be confirmed on a real panel.
@@ -30,18 +27,21 @@
 #include "heltec_vision_master_e290-pinctrl.dtsi"
 #include <zephyr/dt-bindings/lora/sx126x.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
-#include <espressif/partitions_0x0_amp_8M.dtsi>
+#include "../heltec_wifi_lora32_v4/heltec_partitions_16M.dtsi"
 
 /*
  * The module's two facts, stated by the board rather than inherited from a
  * per-module dtsi (upstream Zephyr 8094e61, 2026-08-23, deleted
  * espressif/esp32s3/esp32s3_wroom_n8r8.dtsi and its siblings, as it did for
  * the V4 boards). PSRAM mode and speed live in Kconfig.defconfig.
- * VERIFY(hardware): flash size; read it with `esptool flash-id` before flashing.
+ * Flash is 16 MB, measured 2026-10-05 (`esptool flash-id`: Winbond ef/4018) and given by the
+ * schematic's W25Q128 and the datasheet (Rev 0.3.1 "fixed flash size"). Stock Meshtastic uses
+ * only the first 8 MB, which is where this file's earlier 8 MB came from. The board therefore
+ * takes the shared 16 MB Heltec map (heltec_partitions_16M.dtsi), like the V4s.
  */
 &flash0 {
-	reg = <0x0 DT_SIZE_M(8)>;
-	ranges = <0x0 0x0 DT_SIZE_M(8)>;
+	reg = <0x0 DT_SIZE_M(16)>;
+	ranges = <0x0 0x0 DT_SIZE_M(16)>;
 };
 
 &psram0 {
@@ -83,7 +83,7 @@
 		};
 
 		/* Second built-in button (InkHUD "next tile" on Meshtastic).
-		 * VERIFY(hardware): whether GPIO21 has an external pull-up. */
+		 * GPIO21 has an external 10k pull-up to 3V3 (schematic V0.3.1, R21). */
 		button1: button_1 {
 			gpios = <&gpio0 21 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "AUX Key";
