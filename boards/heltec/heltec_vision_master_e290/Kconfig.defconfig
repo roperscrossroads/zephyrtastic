@@ -2,10 +2,10 @@
 
 if BOARD_HELTEC_VISION_MASTER_E290_ESP32S3_PROCPU
 
-# Vext (e-ink power) and ADC_CTRL (battery divider) are GPIO power-domains,
-# same model as the V3/V4. Enable the machinery so the panel's power-domains
-# phandle actually gates GPIO18 and the divider gate GPIO46 at init — this is
-# what powers the display at boot without an application write.
+# Vext (e-ink power) is a GPIO power-domain. Enable the machinery so the panel's
+# power-domains phandle actually gates GPIO18 at init — this is what powers the
+# display at boot without an application write. (The battery divider's gate,
+# ADC_CTRL, is the divider's own power-gpios, not a power domain.)
 config POWER_DOMAIN
 	default y
 

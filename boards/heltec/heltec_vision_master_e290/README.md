@@ -46,7 +46,7 @@ panel. The **T190** is the colour-TFT sibling.
 | 12 | LoRa RESET          | | | |
 
 **Vext is active-HIGH here** — the opposite of the V3/V4 (active-low). It powers
-the e-ink panel and the QuickLink sensor rail, and is driven on at boot by the
+the e-ink panel only (the QuickLink connector is on the always-on 3V3), and is driven on at boot by the
 GPIO power-domain (`CONFIG_POWER_DOMAIN[_GPIO]`, forced on).
 
 ## Build
