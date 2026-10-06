@@ -1,10 +1,47 @@
 # Copyright (c) 2026 The Zephyr Project Contributors
 # SPDX-License-Identifier: GPL-3.0
 
+config MESHTASTIC_DISPLAY_SHIM
+	bool "A frame reaches the panel only when it differs from the one on the glass"
+	depends on DISPLAY
+	select CRC
+	default y if MESHTASTIC_DISPLAY
+	help
+	  A display device between the Character Framebuffer and the panel
+	  (src/meshtastic_display_shim.c): it hashes each frame CFB writes and
+	  forwards it only when it differs from the last one written, or when the
+	  glass may no longer hold that frame. A bistable e-ink panel keeps its
+	  image with no refresh, and its controller is rated for about a million
+	  refreshes, so an unchanged frame should never cost one.
+
+if MESHTASTIC_DISPLAY_SHIM
+
+config MESHTASTIC_DISPLAY_MIN_REFRESH_MS
+	int "Minimum interval between panel refreshes (ms, 0 = none)"
+	default 0
+	range 0 600000
+	help
+	  A changed frame that arrives sooner than this after the last refresh is
+	  held back; the next render carries it once the interval has passed. For a
+	  bistable e-ink panel, whose controller is rated for about a million
+	  refreshes and which flashes visibly on each, a floor of tens of seconds;
+	  0 for an OLED.
+
+config MESHTASTIC_DISPLAY_SHIM_INIT_PRIORITY
+	int "Display shim init priority"
+	default 90
+	range 0 99
+	help
+	  POST_KERNEL priority of the device between CFB and the panel: after the
+	  panel's own driver (DISPLAY_INIT_PRIORITY, 85 by default).
+
+endif # MESHTASTIC_DISPLAY_SHIM
+
 menuconfig MESHTASTIC_DISPLAY
 	bool "On-device screen UI (CFB)"
 	select DISPLAY
 	select CHARACTER_FRAMEBUFFER
+	select MESHTASTIC_DISPLAY_SHIM
 	help
 	  Render a small on-device status UI on the board's monochrome display
 	  using Zephyr's Character Framebuffer (CFB). It reads node/state data
@@ -41,11 +78,13 @@ config MESHTASTIC_DISPLAY_BUTTON
 config MESHTASTIC_DISPLAY_REFRESH_MS
 	int "Screen refresh interval (ms)"
 	default 1000
-	range 100 10000
+	range 100 60000
 	help
-	  How often the current page is redrawn. Live counters (TX/RX, RSSI,
+	  How often the current page is rendered. Live counters (TX/RX, RSSI,
 	  uptime) update at this cadence. Button presses are handled immediately,
-	  independent of this interval.
+	  independent of this interval. A rendered frame reaches the panel only
+	  when it differs from the one on the glass (the display shim), so this is
+	  how often a CHANGE can show, not how often the panel refreshes.
 
 config MESHTASTIC_DISPLAY_LONGPRESS_MS
 	int "Long-press threshold (ms)"

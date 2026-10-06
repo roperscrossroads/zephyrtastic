@@ -1,0 +1,12 @@
+/* The panel the shim forwards to: Zephyr's dummy display (every write accepted, nothing shown). */
+/ {
+	chosen {
+		zephyr,display = &dummy_dc;
+	};
+
+	dummy_dc: dummy_dc {
+		compatible = "zephyr,dummy-dc";
+		height = <64>;
+		width = <128>;
+	};
+};

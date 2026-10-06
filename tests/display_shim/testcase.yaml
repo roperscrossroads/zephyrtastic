@@ -1,0 +1,15 @@
+common:
+  tags:
+    - meshtastic
+    - display
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.display_shim.native_sim: {}
+  # A floor between refreshes: a changed frame inside it is held, and carried by a later one.
+  meshtastic.display_shim.floor.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_DISPLAY_MIN_REFRESH_MS=2000

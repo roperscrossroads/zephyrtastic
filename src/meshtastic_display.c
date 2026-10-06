@@ -34,6 +34,7 @@
 
 #include <zephyr/meshtastic/nodedb.h>
 #if defined(CONFIG_MESHTASTIC_BATTERY)
+#include "meshtastic_display_shim.h"
 #include "meshtastic_battery.h"
 #endif
 #include "meshtastic_core.h" /* public getters + internal name/freq/chan/hop getters */
@@ -71,7 +72,9 @@ int meshtastic_display_init(void)
 
 #else
 
-static const struct device *const disp = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+/* The UI draws on the shim, which forwards a frame to the panel only when it differs from the
+ * one on the glass (meshtastic_display_shim.c). */
+static const struct device *disp;
 
 static uint8_t font_idx;
 static uint8_t font_w, font_h;
@@ -812,8 +815,9 @@ int meshtastic_display_init(void)
 {
 	int ret, fi;
 
+	disp = meshtastic_display_shim_device();
 	if (!device_is_ready(disp)) {
-		LOG_ERR("display %s not ready; UI off", disp->name);
+		LOG_ERR("display %s not ready; UI off", meshtastic_display_shim_panel()->name);
 		return 0; /* non-fatal: the mesh stack runs headless */
 	}
 
@@ -849,7 +853,8 @@ int meshtastic_display_init(void)
 	cfb_framebuffer_clear(disp, true);
 	(void)display_blanking_off(disp);
 
-	LOG_INF("display UI up: %s %ux%u, font %ux%u -> %ux%u chars, %s", disp->name,
+	LOG_INF("display UI up: %s %ux%u, font %ux%u -> %ux%u chars, %s",
+		meshtastic_display_shim_panel()->name,
 		disp_w, disp_h, font_w, font_h, cols, rows,
 		HAS_BUTTON ? "button nav" : "auto-cycle");
 
