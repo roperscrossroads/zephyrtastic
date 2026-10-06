@@ -144,6 +144,12 @@ static void st_features(struct st *s)
 #if defined(CONFIG_MESHTASTIC_PHONEAPI)
 		"phoneapi",
 #endif
+		/* A bring-up build (overlay-lora-debug.conf): the bench's recipe adds it as a
+		 * feature, and an image must report what its recipe added, or the bench
+		 * cannot tell it from the plain class (identity: class + build + features). */
+#if defined(CONFIG_LORA_LOG_LEVEL_DBG)
+		"lora-debug",
+#endif
 		NULL,
 	};
 
