@@ -25,6 +25,17 @@
 #define MESHTASTIC_PKI_NONCE_LEN 13
 
 /**
+ * @brief The identity scalar from its ingredients: SHA-256 over the DRBG's 32 bytes, the
+ *        16-byte hardware id, the uptime ticks and the cycle counter (both little-endian)
+ *        and a versioned domain string. Exposed for the test that pins the construction.
+ *
+ * @return 0, or -EIO when the hash is unavailable.
+ */
+int meshtastic_pki_identity_from(const uint8_t rnd[MESHTASTIC_PKI_KEY_LEN],
+				 const uint8_t hwid[16], uint64_t ticks, uint32_t cycles,
+				 uint8_t priv[MESHTASTIC_PKI_KEY_LEN]);
+
+/**
  * Load our X25519 keypair from the SecurityConfig, or generate + persist one if
  * absent. Call once at boot AFTER settings are loaded. Non-fatal on failure
  * (the node still works with PSK channels); returns 0 when a key is ready.

@@ -19,6 +19,7 @@
 
 #include <psa/crypto.h>
 
+#include <zephyr/meshtastic/hwid.h>
 #include <zephyr/meshtastic/nodedb.h>
 
 #include "meshtastic_config_store.h"
@@ -42,32 +43,97 @@ static bool g_have_key;
 
 /* ---- key management ---------------------------------------------------- */
 
+/* The domain string of the identity derivation; changing it changes every key a fresh
+ * node would mint, so it is versioned. */
+#define PKI_IDENTITY_DOMAIN "meshtastic-zephyr x25519 identity v1"
+
+int meshtastic_pki_identity_from(const uint8_t rnd[MESHTASTIC_PKI_KEY_LEN],
+				 const uint8_t hwid[MESHTASTIC_HWID_LEN], uint64_t ticks,
+				 uint32_t cycles, uint8_t priv[MESHTASTIC_PKI_KEY_LEN])
+{
+	/* Hashed as one message, fields in this order, integers little-endian. */
+	uint8_t in[MESHTASTIC_PKI_KEY_LEN + MESHTASTIC_HWID_LEN + 8 + 4 +
+		   sizeof(PKI_IDENTITY_DOMAIN) - 1U];
+	uint8_t *p = in;
+	size_t olen;
+	psa_status_t st;
+
+	memcpy(p, rnd, MESHTASTIC_PKI_KEY_LEN);
+	p += MESHTASTIC_PKI_KEY_LEN;
+	memcpy(p, hwid, MESHTASTIC_HWID_LEN);
+	p += MESHTASTIC_HWID_LEN;
+	sys_put_le64(ticks, p);
+	p += 8;
+	sys_put_le32(cycles, p);
+	p += 4;
+	memcpy(p, PKI_IDENTITY_DOMAIN, sizeof(PKI_IDENTITY_DOMAIN) - 1U);
+
+	st = psa_hash_compute(PSA_ALG_SHA_256, in, sizeof(in), priv, MESHTASTIC_PKI_KEY_LEN, &olen);
+	memset(in, 0, sizeof(in));
+	if (st != PSA_SUCCESS || olen != MESHTASTIC_PKI_KEY_LEN) {
+		return -EIO;
+	}
+	return 0;
+}
+
+/* The identity scalar is not the DRBG's output as it comes. The reference stirs the
+ * device's silicon id into its RNG before minting a key (CryptoEngine: CryptRNG.stir of
+ * MyNodeInfo.device_id) because a run of boards once minted identical keys from a poor RNG;
+ * here the same end is reached at the point of use: the scalar is SHA-256 over the DRBG's
+ * 32 bytes, the hardware id, and the moment (uptime ticks, the cycle counter).
+ *
+ * What that buys: a hash of uniformly random input is uniformly random, so a good DRBG
+ * loses nothing; and should the DRBG be deterministic from reset (the ESP32-S3 question,
+ * agents-0lzm.10: its WDEV register is a PRNG until a radio is on, which is why
+ * meshtastic_init() warms the BT controller up first), two identically flashed boards
+ * still mint different keys, because their silicon ids differ. What it does not buy: the
+ * hardware id is public (the phone API sends it, esptool prints it), so a predictable DRBG
+ * would still give a predictable key. Uniqueness, not entropy. The entropy comes from the
+ * radio warm-up and the hardware RNG; this is the second line.
+ *
+ * X25519 takes any 32 bytes as a scalar (clamped on use, RFC 7748), so the hash is the
+ * private key as it is; the PSA import below is the same path every crypto op already takes
+ * with the persisted scalar. */
 static int pki_generate(uint8_t priv[PKI_KEY_LEN], uint8_t pub[PKI_KEY_LEN])
 {
 	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
 	psa_key_id_t kid = PSA_KEY_ID_NULL;
+	uint8_t rnd[PKI_KEY_LEN];
+	uint8_t hwid[MESHTASTIC_HWID_LEN] = {0};
 	size_t olen;
 	psa_status_t st;
+	int ret;
+
+	st = psa_generate_random(rnd, sizeof(rnd));
+	if (st != PSA_SUCCESS) {
+		LOG_ERR("psa_generate_random failed (%d)", (int)st);
+		return -EIO;
+	}
+	if (meshtastic_hwid_get(hwid) != MESHTASTIC_HWID_LEN) {
+		LOG_WRN("no hardware id: the identity is the DRBG's alone");
+	}
+	ret = meshtastic_pki_identity_from(rnd, hwid, k_uptime_ticks(), k_cycle_get_32(), priv);
+	memset(rnd, 0, sizeof(rnd));
+	if (ret != 0) {
+		LOG_ERR("identity derivation failed (%d)", ret);
+		return ret;
+	}
 
 	psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
 	psa_set_key_bits(&attr, 255);
 	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_DERIVE | PSA_KEY_USAGE_EXPORT);
 	psa_set_key_algorithm(&attr, PSA_ALG_ECDH);
 
-	st = psa_generate_key(&attr, &kid);
+	st = psa_import_key(&attr, priv, PKI_KEY_LEN, &kid);
 	if (st != PSA_SUCCESS) {
-		LOG_ERR("psa_generate_key failed (%d)", (int)st);
+		LOG_ERR("psa_import_key failed (%d)", (int)st);
 		return -EIO;
 	}
-
-	st = psa_export_key(kid, priv, PKI_KEY_LEN, &olen);
-	if (st == PSA_SUCCESS && olen == PKI_KEY_LEN) {
-		st = psa_export_public_key(kid, pub, PKI_KEY_LEN, &olen);
-	}
+	st = psa_export_public_key(kid, pub, PKI_KEY_LEN, &olen);
 	(void)psa_destroy_key(kid);
 
 	if (st != PSA_SUCCESS || olen != PKI_KEY_LEN) {
-		LOG_ERR("pki key export failed (%d)", (int)st);
+		LOG_ERR("pki public key export failed (%d)", (int)st);
 		return -EIO;
 	}
 	return 0;

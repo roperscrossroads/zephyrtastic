@@ -622,6 +622,56 @@ ZTEST(admin_pki, test_dm_without_peer_key_refused)
 		     "a DM to a keyless peer must be refused, not channel-encrypted");
 }
 
+/* The identity scalar's construction, pinned: SHA-256 over the DRBG's 32 bytes, the
+ * 16-byte hardware id, the uptime ticks and the cycle counter (little-endian) and the
+ * versioned domain string, in that order. The vector was computed independently (Python
+ * hashlib). Why the construction exists is at pki_generate(): two identically flashed
+ * boards with a deterministic DRBG still mint different keys, because their silicon ids
+ * differ; a good DRBG loses nothing to the hash. */
+ZTEST(admin_pki, test_identity_scalar_is_sha256_of_rng_hwid_and_moment)
+{
+	uint8_t rnd[32], hwid[16], priv[32], again[32];
+	static const uint8_t want[32] = {
+		0x91, 0x57, 0xa8, 0x85, 0xe8, 0x75, 0xbc, 0xaf, 0xe9, 0x51, 0xd0, 0xca, 0xf8, 0xf5,
+		0xfd, 0x39, 0xb2, 0x17, 0x83, 0xd5, 0xff, 0xc3, 0x84, 0x2f, 0xed, 0x43, 0x6e, 0xf3,
+		0xd3, 0x93, 0x31, 0xed};
+
+	for (int i = 0; i < 32; i++) {
+		rnd[i] = (uint8_t)i;
+	}
+	for (int i = 0; i < 16; i++) {
+		hwid[i] = (uint8_t)(0xa0 + i);
+	}
+	zassert_equal(meshtastic_pki_identity_from(rnd, hwid, 0x0102030405060708ULL, 0xdeadbeefU,
+						   priv), 0, "");
+	zassert_mem_equal(priv, want, sizeof(want), "the construction changed: every fresh node "
+			  "would mint other keys; bump the domain string's version if intended");
+
+	/* The same DRBG output on another board (another silicon id) is another key. */
+	hwid[0] ^= 0x01;
+	zassert_equal(meshtastic_pki_identity_from(rnd, hwid, 0x0102030405060708ULL, 0xdeadbeefU,
+						   again), 0, "");
+	zassert_true(memcmp(priv, again, sizeof(priv)) != 0, "the hardware id must reach the key");
+
+	/* And a scalar so made is a valid X25519 private key: it imports and yields a public key
+	 * (clamping is the curve's, on use). */
+	{
+		psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+		psa_key_id_t kid = PSA_KEY_ID_NULL;
+		uint8_t pub[32];
+		size_t olen = 0;
+
+		psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
+		psa_set_key_bits(&attr, 255);
+		psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_DERIVE | PSA_KEY_USAGE_EXPORT);
+		psa_set_key_algorithm(&attr, PSA_ALG_ECDH);
+		zassert_equal(psa_import_key(&attr, priv, sizeof(priv), &kid), PSA_SUCCESS, "");
+		zassert_equal(psa_export_public_key(kid, pub, sizeof(pub), &olen), PSA_SUCCESS, "");
+		zassert_equal(olen, 32U, "");
+		(void)psa_destroy_key(kid);
+	}
+}
+
 /* DM-2 regression: a persisted SecurityConfig whose public_key has desynced from
  * its private_key (a partial NVS write, or an admin set_config that touched one
  * field) is SELF-HEALED on pki_init — the advertised/stored pub is re-derived from
