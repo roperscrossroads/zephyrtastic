@@ -289,3 +289,16 @@ tests:
     integration_platforms: [heltec_vision_master_e290/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
+  sample.meshtastic.fleet.t114_ble:
+    # The Heltec Mesh Node T114 v2 (nRF52840, bare SX1262, ST7789 TFT, L76K GNSS) as a plain
+    # LoRa+BLE node: the bring-up image. The second nRF52840 target, on the UPSTREAM Zephyr board
+    # (this tree adds only boards/heltec_t114_v2_nrf52840_uf2.{conf,overlay}); the legacy single
+    # image the resident Adafruit UF2 bootloader boots at 0x26000, no MCUboot yet. BLE, PKC, the
+    # shell and the DFU trigger are board baseline, as on the XIAO; the TFT and the GNSS are not in
+    # this image (the conf says why). Key-derived node id, RF reporting, the status LED and a
+    # receive-only first boot, as every bench node. Mirrors the class recipe in the bench catalog.
+    tags: [meshtastic, fleet, ble]
+    platform_allow: [heltec_t114_v2/nrf52840/uf2]
+    integration_platforms: [heltec_t114_v2/nrf52840/uf2]
+    extra_args:
+      - "EXTRA_CONF_FILE=overlay-rf.conf;overlay-node-id-from-key.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
