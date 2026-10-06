@@ -160,15 +160,20 @@
 			mipi-max-frequency = <6000000>;
 			reg = <0>;
 			/*
-			 * Native panel geometry is 128(W) x 296(H) portrait. The board is
-			 * used landscape (296x128); rotation is applied here.
-			 * VERIFY(hardware): orientation and the 1-byte X RAM offset the
-			 * Meshtastic driver applies (DEPG0290BNS800: bufferOffsetX=1) — an
-			 * 8-px horizontal shift is the symptom if it is needed and missing.
+			 * In the ssd16xx driver's model `width` runs along the GATE lines
+			 * (the long axis; 296 is an SSD1680's maximum) and `height` along the
+			 * SOURCE lines (176 max) -- the reel_board's 250x122 panel is declared
+			 * width 250, height 122. The DEPG0290BNS800 is 296 gates by 128 sources,
+			 * so it is 296 x 128 here, landscape, and needs no rotation (the first
+			 * declaration, 128 x 296 rotated 90, was refused at init: "Display size
+			 * out of range", found on the first boot on hardware, 2026-10-06).
+			 * VERIFY(hardware): 180 if the image is upside down; and the 1-byte X
+			 * RAM offset the Meshtastic driver applies (bufferOffsetX=1) -- an 8-px
+			 * horizontal shift is the symptom if it is needed and missing.
 			 */
-			width = <128>;
-			height = <296>;
-			rotation = <90>;
+			width = <296>;
+			height = <128>;
+			rotation = <0>;
 			busy-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;	/* PIN_EINK_BUSY = GPIO6, active-high */
 			power-domains = <&vext_ctrl>;
 
