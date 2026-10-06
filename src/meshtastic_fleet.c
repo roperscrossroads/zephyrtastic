@@ -3,9 +3,11 @@
  * Firmware intent on the cluster document — see meshtastic_fleet.h.
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/meshtastic/intents.h>
 #include <zephyr/logging/log.h>
 
 #include <pb_decode.h>
@@ -772,6 +774,34 @@ static int courier_arm_settings_set(const char *key, size_t len, settings_read_c
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(mt_fleet, "mtfleet", NULL, courier_arm_settings_set, NULL, NULL);
+
+/* The role intent: the courier loop's arm. */
+static bool courier_intent_is_set(char *detail, size_t len)
+{
+	bool armed;
+
+	k_mutex_lock(&courier_lock, K_FOREVER);
+	armed = courier.armed;
+	k_mutex_unlock(&courier_lock);
+	if (armed) {
+		snprintf(detail, len, "armed");
+	}
+	return armed;
+}
+
+static int courier_intent_clear(void)
+{
+	int ret;
+
+	k_mutex_lock(&courier_lock, K_FOREVER);
+	courier.armed = false;
+	k_mutex_unlock(&courier_lock);
+	ret = settings_delete("mtfleet/arm");
+	return (ret == -ENOENT) ? 0 : ret;
+}
+
+MESHTASTIC_INTENT_DEFINE(courier, "courier", "mtfleet/arm", courier_intent_is_set,
+			 courier_intent_clear);
 
 /* Milliseconds left on a restored arm's health window; 0 when it may push. */
 static int64_t courier_holdoff_left_ms(void)

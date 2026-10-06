@@ -87,6 +87,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_fatal.c
     meshtastic_hlc.c
     meshtastic_hwid.c
+    meshtastic_intents.c
     meshtastic_modules.c
     meshtastic_packet.c
     meshtastic_preset.c
@@ -237,6 +238,6 @@ if(CONFIG_MESHTASTIC)
   )
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_NODE_ID_FROM_KEY meshtastic_node_identity.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_DISPLAY meshtastic_display.c cfb_font_0609.c)
-
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_DISPLAY_SHIM meshtastic_display_shim.c)
+
 endif()

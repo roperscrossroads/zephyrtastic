@@ -28,6 +28,7 @@
 #include <zephyr/sys/crc.h>
 #include <zephyr/ztest.h>
 
+#include <zephyr/meshtastic/intents.h>
 #include <zephyr/meshtastic/meshtastic.h>
 
 #include <zephyr/meshtastic/nodeinfo.h>
@@ -1363,6 +1364,35 @@ ZTEST(meshtastic_shell, test_scanner_autostart_d_a_pinned_list_survives_a_boot)
 	zassert_equal(r.len, 0, "no record left");
 	zassert_equal(scanner_boots_again(got, ARRAY_SIZE(got)), 3, "the build's list");
 	zassert_equal(got[0], meshtastic_Config_LoRaConfig_ModemPreset_LONG_TURBO);
+}
+
+/* The role intents (include/zephyr/meshtastic/intents.h): a pinned list is one, `meshtastic
+ * intents` lists it, and clearing forgets the record and the pin. The shell's `clear` reboots
+ * (native_sim cannot come back from that), so the module's own clear is what is driven here;
+ * the shell's listing is checked before and after. */
+ZTEST(meshtastic_shell, test_scanner_autostart_e_a_pinned_list_is_an_intent_and_clearing_forgets_it)
+{
+	meshtastic_Config_LoRaConfig_ModemPreset got[MESHTASTIC_SCANNER_MAX_PRESETS];
+	struct pin_read r = {0};
+	const char *out = NULL;
+
+	zassert_ok(run_cmd("meshtastic intents", &out), "%s", out);
+	zassert_not_null(strstr(out, "scan     none"), "nothing pinned yet: %s", out);
+	zassert_not_null(strstr(out, "intents: 0 set"), "%s", out);
+
+	zassert_ok(run_cmd("meshtastic scan presets MediumFast", &out), "%s", out);
+	zassert_ok(run_cmd("meshtastic intents", &out), "%s", out);
+	zassert_not_null(strstr(out, "scan     set   1 preset(s) pinned"), "%s", out);
+	zassert_not_null(strstr(out, "intents: 1 set"), "%s", out);
+	zassert_equal(meshtastic_intents_set(), 1U, "");
+
+	zassert_equal(meshtastic_intents_clear(), 1, "one intent cleared");
+	zassert_ok(settings_load_subtree_direct("mtscan/presets", pin_read_cb, &r));
+	zassert_equal(r.len, 0, "the record is gone");
+	zassert_equal(meshtastic_intents_set(), 0U, "");
+	zassert_equal(scanner_boots_again(got, ARRAY_SIZE(got)), 3, "a boot is the build's list");
+	zassert_ok(run_cmd("meshtastic intents clear", &out), "%s", out);
+	zassert_not_null(strstr(out, "nothing to clear"), "%s", out);
 }
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
 #endif /* CONFIG_MESHTASTIC_SCANNER_AUTOSTART */

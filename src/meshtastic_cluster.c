@@ -96,6 +96,7 @@
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/meshtastic/intents.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
@@ -965,6 +966,29 @@ static int cluster_settings_set(const char *key, size_t len, settings_read_cb re
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(mtclus, "mtclus", NULL, cluster_settings_set, NULL, NULL);
+
+/* The role intent: the cluster document this node holds (entries and the persisted scope).
+ * The module itself goes idle without a channel named "cluster"; the document is what a
+ * plain node should not carry on to its next role. */
+static bool cluster_intent_is_set(char *detail, size_t len)
+{
+	uint16_t n = meshtastic_cluster_entry_count();
+
+	if (n != 0U) {
+		snprintf(detail, len, "%u entr%s", (unsigned int)n, n == 1U ? "y" : "ies");
+	}
+	return n != 0U;
+}
+
+static int cluster_intent_clear(void)
+{
+	int dropped = meshtastic_cluster_reset();
+
+	return dropped < 0 ? dropped : 0;
+}
+
+MESHTASTIC_INTENT_DEFINE(cluster, "cluster", "mtclus/*", cluster_intent_is_set,
+			 cluster_intent_clear);
 
 #else /* !CONFIG_MESHTASTIC_SETTINGS */
 

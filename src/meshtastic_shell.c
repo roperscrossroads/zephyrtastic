@@ -11,6 +11,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/meshtastic/bootlog.h>
 #include <zephyr/meshtastic/reboot_trace.h>
+#include <zephyr/meshtastic/intents.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/meshtastic/diagnostics.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
@@ -7648,11 +7650,72 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_admin_cmds,
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_ADMIN */
 
+/* ---- intents: the roles this node remembers ------------------------------------ */
+
+static void intents_print_one(const struct meshtastic_intent *it, bool set, const char *detail,
+			      void *arg)
+{
+	const struct shell *sh = arg;
+
+	if (set) {
+		shell_print(sh, "%-8s set   %s  (%s)", it->name, detail, it->keys);
+	} else {
+		shell_print(sh, "%-8s none  (%s)", it->name, it->keys);
+	}
+}
+
+static void intents_reboot_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_SHELL, "intents clear");
+	sys_reboot(SYS_REBOOT_COLD);
+}
+static K_WORK_DELAYABLE_DEFINE(intents_reboot_work, intents_reboot_fn);
+
+static int cmd_intents(const struct shell *sh, size_t argc, char **argv)
+{
+	size_t n;
+
+	if (argc >= 2 && strcmp(argv[1], "clear") == 0) {
+		int cleared = meshtastic_intents_clear();
+
+		if (cleared < 0) {
+			shell_error(sh, "intents: clear failed (%d); nothing more was touched", cleared);
+			return cleared;
+		}
+		if (cleared == 0) {
+			shell_print(sh, "intents: nothing to clear");
+			return 0;
+		}
+		/* The modules stood down in RAM as far as each could; a reboot makes it whole,
+		 * the way a config write already reboots the node. Delayed so this answer gets
+		 * out first. */
+		shell_print(sh, "intents: %d cleared; rebooting", cleared);
+		k_work_schedule(&intents_reboot_work, K_MSEC(300));
+		return 0;
+	}
+	if (argc >= 2) {
+		shell_error(sh, "usage: meshtastic intents [clear]");
+		return -EINVAL;
+	}
+	meshtastic_intents_each(intents_print_one, (void *)sh);
+	n = meshtastic_intents_set();
+	shell_print(sh, "intents: %u set", (unsigned int)n);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
 	SHELL_CMD(version, NULL, SHELL_HELP("Show build id / firmware version.", NULL),
 		  cmd_version),
+	SHELL_CMD_ARG(intents, NULL,
+		      SHELL_HELP("The roles this node remembers across reboots (peer target, brain, "
+				 "heads, ear, courier arm, relay, pinned presets, cluster document); "
+				 "`clear` forgets them all and reboots. Identity, radio, channels and "
+				 "owner are untouched.",
+				 "[clear]"),
+		      cmd_intents, 1, 1),
 	SHELL_CMD(state, NULL,
 		  SHELL_HELP("This node's state as one machine-readable line, for tools: "
 			     "~S{json}*crc16.", NULL),

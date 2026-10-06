@@ -22,6 +22,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/bluetooth/bluetooth.h>
@@ -31,6 +32,7 @@
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/kernel.h>
+#include <zephyr/meshtastic/intents.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
@@ -1423,6 +1425,37 @@ static int peer_intent_settings_set(const char *key, size_t len, settings_read_c
  * and depended on BT's own commit having run first (bt_is_ready()). */
 SETTINGS_STATIC_HANDLER_DEFINE(mt_blepeer, "blepeer", NULL, peer_intent_settings_set, NULL,
 			       NULL);
+
+/* The role intent (include/zephyr/meshtastic/intents.h): the outbound peer the central
+ * dials, and the scan that finds it. */
+static bool peer_intent_is_set(char *detail, size_t len)
+{
+	bool set;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	set = central.scan_on || central.target_node != 0U || central.last_node != 0U;
+	if (set) {
+		snprintf(detail, len, "target 0x%08x last 0x%08x%s", central.target_node,
+			 central.last_node, central.scan_on ? " scan on" : "");
+	}
+	k_mutex_unlock(&peer_lock);
+	return set;
+}
+
+static int peer_intent_clear(void)
+{
+	int ret;
+
+	k_mutex_lock(&peer_lock, K_FOREVER);
+	central.scan_on = false;
+	central.target_node = 0U;
+	central.last_node = 0U;
+	k_mutex_unlock(&peer_lock);
+	ret = settings_delete("blepeer/central");
+	return (ret == -ENOENT) ? 0 : ret;
+}
+
+MESHTASTIC_INTENT_DEFINE(peer, "peer", "blepeer/central", peer_intent_is_set, peer_intent_clear);
 #else
 static void peer_intent_save(void)
 {

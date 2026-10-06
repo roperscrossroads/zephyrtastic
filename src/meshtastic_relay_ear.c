@@ -15,9 +15,11 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/meshtastic/intents.h>
 #include <zephyr/logging/log.h>
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 #include <zephyr/settings/settings.h>
@@ -256,6 +258,33 @@ static int ear_settings_set(const char *key, size_t len, settings_read_cb read_c
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(mt_ear, "mtear", NULL, ear_settings_set, NULL, NULL);
+
+/* The role intent: the receiving half this ear forwards to. */
+static bool ear_intent_is_set(char *detail, size_t len)
+{
+	uint32_t peer;
+
+	k_mutex_lock(&ear_lock, K_FOREVER);
+	peer = ear.peer;
+	k_mutex_unlock(&ear_lock);
+	if (peer != 0U) {
+		snprintf(detail, len, "peer 0x%08x", peer);
+	}
+	return peer != 0U;
+}
+
+static int ear_intent_clear(void)
+{
+	int ret;
+
+	k_mutex_lock(&ear_lock, K_FOREVER);
+	ear.peer = 0U;
+	k_mutex_unlock(&ear_lock);
+	ret = settings_delete("mtear/peer");
+	return (ret == -ENOENT) ? 0 : ret;
+}
+
+MESHTASTIC_INTENT_DEFINE(ear, "ear", "mtear/peer", ear_intent_is_set, ear_intent_clear);
 
 static void ear_forget(void)
 {

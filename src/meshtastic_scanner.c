@@ -4,10 +4,12 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
+#include <zephyr/meshtastic/intents.h>
 #include <zephyr/logging/log.h>
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 #include <zephyr/settings/settings.h>
@@ -603,6 +605,22 @@ static int scan_settings_set(const char *key, size_t len, settings_read_cb read_
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(mt_scan, "mtscan", NULL, scan_settings_set, NULL, NULL);
+
+/* The role intent: a pinned preset list. */
+static bool scan_intent_is_set(char *detail, size_t len)
+{
+	if (scan_pinned) {
+		snprintf(detail, len, "%u preset(s) pinned", (unsigned int)scan_list_n);
+	}
+	return scan_pinned;
+}
+
+static int scan_intent_clear(void)
+{
+	return meshtastic_scanner_pin_presets(NULL, 0);
+}
+
+MESHTASTIC_INTENT_DEFINE(scan, "scan", "mtscan/presets", scan_intent_is_set, scan_intent_clear);
 #endif
 
 int meshtastic_scanner_pin_presets(const meshtastic_Config_LoRaConfig_ModemPreset *list, size_t n)

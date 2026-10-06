@@ -8,12 +8,14 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
+#include <zephyr/meshtastic/intents.h>
 #include "meshtastic_core.h"
 #include "meshtastic_attachment.h"
 #include "meshtastic_contention.h"
@@ -120,6 +122,43 @@ static int attach_settings_set(const char *key, size_t len, settings_read_cb rea
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(mt_attach_brain, "mtattach", NULL, attach_settings_set, NULL, NULL);
+
+/* The role intent: the heads this brain wants, on which presets, and whom it admits. */
+static bool brain_intent_is_set(char *detail, size_t len)
+{
+	unsigned int heads = 0U, allowed = 0U;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	for (unsigned int i = 0U; i < ARRAY_SIZE(want); i++) {
+		heads += (want[i].node != 0U);
+	}
+	for (unsigned int i = 0U; i < ARRAY_SIZE(allow); i++) {
+		allowed += (allow[i] != 0U);
+	}
+	k_mutex_unlock(&tab_lock);
+	if (heads || allowed) {
+		snprintf(detail, len, "%u head(s) wanted, %u allowed", heads, allowed);
+	}
+	return heads || allowed;
+}
+
+static int brain_intent_clear(void)
+{
+	int ret, ret2;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	memset(want, 0, sizeof(want));
+	memset(allow, 0, sizeof(allow));
+	k_mutex_unlock(&tab_lock);
+	ret = settings_delete("mtattach/want");
+	ret2 = settings_delete("mtattach/allow");
+	ret = (ret == -ENOENT) ? 0 : ret;
+	ret2 = (ret2 == -ENOENT) ? 0 : ret2;
+	return ret != 0 ? ret : ret2;
+}
+
+MESHTASTIC_INTENT_DEFINE(brain, "brain", "mtattach/want mtattach/allow", brain_intent_is_set,
+			 brain_intent_clear);
 #else
 static void allow_save_locked(void)
 {

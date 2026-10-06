@@ -11,9 +11,11 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/meshtastic/intents.h>
 #include <zephyr/logging/log.h>
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 #include <zephyr/settings/settings.h>
@@ -860,6 +862,33 @@ static int head_settings_set(const char *key, size_t len, settings_read_cb read_
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(mt_attach, "mtattach", NULL, head_settings_set, NULL, NULL);
+
+/* The role intent: the brain this head reports to. */
+static bool head_intent_is_set(char *detail, size_t len)
+{
+	uint32_t brain;
+
+	k_mutex_lock(&head_lock, K_FOREVER);
+	brain = head.brain;
+	k_mutex_unlock(&head_lock);
+	if (brain != 0U) {
+		snprintf(detail, len, "brain 0x%08x", brain);
+	}
+	return brain != 0U;
+}
+
+static int head_intent_clear(void)
+{
+	int ret;
+
+	k_mutex_lock(&head_lock, K_FOREVER);
+	head.brain = 0U;
+	k_mutex_unlock(&head_lock);
+	ret = settings_delete("mtattach/brain");
+	return (ret == -ENOENT) ? 0 : ret;
+}
+
+MESHTASTIC_INTENT_DEFINE(head, "head", "mtattach/brain", head_intent_is_set, head_intent_clear);
 
 static void head_forget(void)
 {

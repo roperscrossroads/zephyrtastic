@@ -21,9 +21,11 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/meshtastic/intents.h>
 #include <zephyr/logging/log.h>
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 #include <zephyr/settings/settings.h>
@@ -555,6 +557,35 @@ static int relay_settings_set(const char *key, size_t len, settings_read_cb read
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(mt_relay, "mtrelay", NULL, relay_settings_set, NULL, NULL);
+
+/* The role intent: the relay's direction and its ignore list. */
+static bool relay_intent_is_set(char *detail, size_t len)
+{
+	bool set;
+
+	k_mutex_lock(&relay_lock, K_FOREVER);
+	set = relay.dir != MESHTASTIC_RELAY_OFF || relay.ignore_count != 0U;
+	if (set) {
+		snprintf(detail, len, "dir %u, %u ignored", (unsigned int)relay.dir,
+			 (unsigned int)relay.ignore_count);
+	}
+	k_mutex_unlock(&relay_lock);
+	return set;
+}
+
+static int relay_intent_clear(void)
+{
+	int ret;
+
+	k_mutex_lock(&relay_lock, K_FOREVER);
+	relay.dir = MESHTASTIC_RELAY_OFF;
+	relay.ignore_count = 0U;
+	k_mutex_unlock(&relay_lock);
+	ret = settings_delete("mtrelay/relay");
+	return (ret == -ENOENT) ? 0 : ret;
+}
+
+MESHTASTIC_INTENT_DEFINE(relay, "relay", "mtrelay/relay", relay_intent_is_set, relay_intent_clear);
 
 static void relay_forget(void)
 {
