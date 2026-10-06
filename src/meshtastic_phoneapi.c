@@ -22,6 +22,7 @@
 #if IS_ENABLED(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #endif
+#include <zephyr/meshtastic/hwid.h>
 #if IS_ENABLED(CONFIG_MESHTASTIC_NODEINFO)
 #include <zephyr/meshtastic/nodeinfo.h>
 #endif
@@ -593,8 +594,6 @@ void meshtastic_phoneapi_enqueue_queue_status(struct meshtastic_phoneapi *api, i
 void meshtastic_phoneapi_enqueue_my_info(struct meshtastic_phoneapi *api, uint32_t request_id)
 {
 	meshtastic_FromRadio *from = api->from_scratch;
-	uint8_t node_id[4];
-
 	ARG_UNUSED(request_id);
 
 	*from = (meshtastic_FromRadio)meshtastic_FromRadio_init_zero;
@@ -603,9 +602,9 @@ void meshtastic_phoneapi_enqueue_my_info(struct meshtastic_phoneapi *api, uint32
 	from->my_info.my_node_num = meshtastic_get_node_id();
 	from->my_info.min_app_version = 0U;
 	from->my_info.nodedb_count = 1U;
-	from->my_info.device_id.size = sizeof(node_id);
-	sys_put_le32(meshtastic_get_node_id(), node_id);
-	memcpy(from->my_info.device_id.bytes, node_id, sizeof(node_id));
+	if (meshtastic_hwid_get(from->my_info.device_id.bytes) == MESHTASTIC_HWID_LEN) {
+		from->my_info.device_id.size = MESHTASTIC_HWID_LEN;
+	}
 	strncpy(from->my_info.pio_env, "zephyr", sizeof(from->my_info.pio_env) - 1U);
 
 	(void)meshtastic_phoneapi_enqueue_fromradio(api, from);

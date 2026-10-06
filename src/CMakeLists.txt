@@ -86,6 +86,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_config_store.c
     meshtastic_fatal.c
     meshtastic_hlc.c
+    meshtastic_hwid.c
     meshtastic_modules.c
     meshtastic_packet.c
     meshtastic_preset.c

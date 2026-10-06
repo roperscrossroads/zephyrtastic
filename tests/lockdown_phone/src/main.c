@@ -21,6 +21,7 @@
 #include <pb_decode.h>
 #include <pb_encode.h>
 
+#include <zephyr/meshtastic/hwid.h>
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
 
@@ -289,6 +290,7 @@ struct stream {
 	bool has_status;
 	meshtastic_LockdownStatus status;
 	pb_size_t device_id_len;
+	uint8_t device_id[16];
 	char firmware_version[32];
 	pb_size_t ch0_psk_len;
 	bool security_has_pubkey;
@@ -315,6 +317,8 @@ static void run_config(struct meshtastic_phoneapi *api, uint32_t nonce, struct s
 			switch (dec.which_payload_variant) {
 			case meshtastic_FromRadio_my_info_tag:
 				s->device_id_len = dec.my_info.device_id.size;
+				memcpy(s->device_id, dec.my_info.device_id.bytes,
+				       MIN(sizeof(s->device_id), dec.my_info.device_id.size));
 				break;
 			case meshtastic_FromRadio_metadata_tag:
 				strncpy(s->firmware_version, dec.metadata.firmware_version,
@@ -449,7 +453,15 @@ ZTEST(lockdown_phone, test_inactive_streams_everything_and_says_disabled)
 	zassert_true(meshtastic_phoneapi_authorized(&phone), "inactive: everyone is authorized");
 	run_config(&phone, 1234U, &s);
 	zassert_true(s.complete, "");
-	zassert_equal(s.device_id_len, 4U, "device_id present");
+	zassert_equal(s.device_id_len, 16U, "device_id present: the 16-byte hardware id");
+	{
+		/* The reference's bytes for this silicon (meshtastic_hwid.c), not the node
+		 * number: the app keys its database to it across re-keys and reflashes. */
+		uint8_t hwid[MESHTASTIC_HWID_LEN];
+
+		zassert_equal(meshtastic_hwid_get(hwid), MESHTASTIC_HWID_LEN, "");
+		zassert_mem_equal(s.device_id, hwid, sizeof(hwid), "device_id is the hardware id");
+	}
 	zassert_true(s.firmware_version[0] != '\0', "metadata present");
 	zassert_true(s.ch0_psk_len > 0U, "primary channel PSK present");
 	zassert_true(s.lora_tx_enabled, "the full LoRa section");
@@ -485,7 +497,7 @@ ZTEST(lockdown_phone, test_provision_over_the_phoneapi)
 	 * after the handshake -- it already knows. */
 	run_config(&phone, 77U, &s);
 	zassert_true(s.complete, "");
-	zassert_equal(s.device_id_len, 4U, "");
+	zassert_equal(s.device_id_len, 16U, "");
 	zassert_str_equal(s.mqtt_address, "broker.example", "");
 	zassert_str_equal(s.long_name, "sealed name", "");
 	zassert_false(s.has_status, "no status for an authorized connection");
@@ -534,7 +546,7 @@ ZTEST(lockdown_phone, test_new_connection_is_redacted_and_told_needs_auth)
 	}
 	run_config(&phone, 5U, &s);
 	zassert_equal(s.other_nodes, 1U, "the peer is streamed once authorized");
-	zassert_equal(s.device_id_len, 4U, "");
+	zassert_equal(s.device_id_len, 16U, "");
 }
 
 /* Nothing an unauthorized connection sends reaches the mesh or the admin
@@ -666,7 +678,7 @@ ZTEST(lockdown_phone, test_locked_boot_unlock_authorizes_after_the_reload)
 
 	run_config(&phone, 10U, &s);
 	zassert_str_equal(s.long_name, "sealed name", "the real records");
-	zassert_equal(s.device_id_len, 4U, "");
+	zassert_equal(s.device_id_len, 16U, "");
 }
 
 /* Lock Now: only from a connection that proved the passphrase, and it voids

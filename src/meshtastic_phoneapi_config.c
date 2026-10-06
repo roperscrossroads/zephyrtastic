@@ -15,6 +15,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
 
+#include <zephyr/meshtastic/hwid.h>
 #include <zephyr/meshtastic/nodedb.h>
 #if defined(CONFIG_MESHTASTIC_BOOTLOG)
 #include <zephyr/meshtastic/bootlog.h>
@@ -62,8 +63,6 @@ static bool authorized(const struct meshtastic_phoneapi *api)
 
 static void fill_my_info(meshtastic_FromRadio *from, bool auth)
 {
-	uint8_t node_id[4];
-
 	from->id = meshtastic_next_fromradio_id();
 	from->which_payload_variant = meshtastic_FromRadio_my_info_tag;
 	from->my_info.my_node_num = meshtastic_get_node_id();
@@ -74,9 +73,13 @@ static void fill_my_info(meshtastic_FromRadio *from, bool auth)
 		 * which-CVE-to-try material, neither needed to send a passphrase. */
 		return;
 	}
-	from->my_info.device_id.size = sizeof(node_id);
-	sys_put_le32(meshtastic_get_node_id(), node_id);
-	memcpy(from->my_info.device_id.bytes, node_id, sizeof(node_id));
+	/* The factory hardware id, as the reference sends (16 bytes of silicon; the app keys
+	 * its local database to it, across re-keys and reflashes). Empty when the hardware
+	 * has none, which the app treats as absent. */
+	BUILD_ASSERT(sizeof(from->my_info.device_id.bytes) >= MESHTASTIC_HWID_LEN);
+	if (meshtastic_hwid_get(from->my_info.device_id.bytes) == MESHTASTIC_HWID_LEN) {
+		from->my_info.device_id.size = MESHTASTIC_HWID_LEN;
+	}
 	strncpy(from->my_info.pio_env, "zephyr", sizeof(from->my_info.pio_env) - 1U);
 #if defined(CONFIG_MESHTASTIC_BOOTLOG)
 	/* agents-dnr4.28: the reference sends its persisted boot counter here, and
