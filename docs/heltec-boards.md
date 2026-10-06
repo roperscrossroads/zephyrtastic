@@ -129,3 +129,30 @@ measured; stock Meshtastic uses 8). Runs the meshtastic sample on hardware since
 board's own `README.md` (`boards/heltec/heltec_vision_master_e290/`) carries the pin map, the bring-up
 findings (panel geometry as the `ssd16xx` driver counts it, full refresh only, the display shim's
 refresh floor) and the open items.
+
+## Mesh Node T114 v2 (HT-n5262)
+
+Not an ESP32 at all: an **nRF52840** with a **bare SX1262** (no FEM; DIO2 drives the antenna switch,
+DIO3 a 1.8 V TCXO), a 1.14" ST7789 TFT (135×240, RGB565), an L76K GNSS behind a switched Vext rail,
+a green LED, a 2-LED WS2812 chain, a user button, a reset button, a battery divider on AIN2 and a 2 MB
+QSPI flash (MX25R1635F). Meshtastic hardware model **69**. The board definition is **upstream
+Zephyr's** (`zephyr/boards/heltec/heltec_t114_v2`); this tree adds no board directory, only the app's
+`samples/meshtastic/boards/heltec_t114_v2_nrf52840_uf2.{conf,overlay}` and two Kconfig.debug
+defaults. Target `heltec_t114_v2/nrf52840/uf2`: the `/uf2` variant lays flash out for the resident
+Adafruit bootloader with SoftDevice v6 (application at 0x26000, 792 KB; 32 KB storage at 0xec000),
+and `west build` emits a `zephyr.uf2` for its drive. Builds since 2026-10-06 (fleet scenario
+`sample.meshtastic.fleet.t114_ble`: 586 KB flash, 190 KB RAM); **not yet run on hardware**.
+
+What it inherits from the XIAO (the first nRF52840 target, `xiao_ble_nrf52840.conf`): no MCUboot in
+the plain image (the signing header would put SP=0/PC=0 at the bootloader's jump), BLE as the only
+phone transport with PKC baseline, the controller's connection-parameter lessons, the 4 KB system heap
+the fatal handler links against, the shell on USB CDC with `log` and `settings`, the DFU trigger with
+the 1200-baud touch, the boot guard on and the task watchdog off. What differs: the 32 kHz crystal is
+left as the clock source (upstream Meshtastic runs this board with LFXO; the XIAO's never starts), and
+there is a reset button.
+
+Not in the first image, each a later commit: the TFT (the screen UI is CFB over a mono panel; RGB565
+has no path), the GNSS (needs a board power hook for Vext P0.21 and the receiver's reset/wake pins,
+then `overlay-gnss.conf`), the QSPI flash (undeclared upstream; it is where the bulk NodeDB store and an
+MCUboot second slot would go), the battery module (`overlay-battery.conf`; the `vbatt` node is declared,
+its 100k/390k divider inferred from upstream's 4.916 multiplier and marked VERIFY), the WS2812 pair.
