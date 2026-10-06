@@ -33,8 +33,8 @@
 #include <zephyr/logging/log.h>
 
 #include <zephyr/meshtastic/nodedb.h>
-#if defined(CONFIG_MESHTASTIC_BATTERY)
 #include "meshtastic_display_shim.h"
+#if defined(CONFIG_MESHTASTIC_BATTERY)
 #include "meshtastic_battery.h"
 #endif
 #include "meshtastic_core.h" /* public getters + internal name/freq/chan/hop getters */
