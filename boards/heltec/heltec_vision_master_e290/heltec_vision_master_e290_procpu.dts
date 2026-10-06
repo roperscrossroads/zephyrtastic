@@ -144,8 +144,7 @@
 	 * E-Ink is on SPI3 through a MIPI-DBI shim (the Zephyr ssd16xx driver is a
 	 * MIPI-DBI device). The DEPG0290BNS800 panel is an SSD1680-class controller;
 	 * its full-refresh waveform comes from the controller's OTP, so no manual LUT
-	 * is needed (empty `full`/`partial` profiles — `partial` present so partial
-	 * refresh is enabled using the OTP defaults).
+	 * is needed (an empty `full` profile; no `partial`, see below).
 	 */
 	mipi_dbi_eink: mipi-dbi {
 		compatible = "zephyr,mipi-dbi-spi";
@@ -177,10 +176,15 @@
 			busy-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;	/* PIN_EINK_BUSY = GPIO6, active-high */
 			power-domains = <&vext_ctrl>;
 
+			/*
+			 * Full refresh only, for now. With a `partial { }` node every frame after
+			 * the first goes through the partial profile with the controller's OTP
+			 * waveform in display mode 2, and on this panel that left the screen blank
+			 * right after the first frame had shown (2026-10-06). A partial LUT that
+			 * works for the DEPG0290BNS800 is upstream Meshtastic's (its fast-refresh
+			 * driver for this panel); until it is carried here, every refresh is full.
+			 */
 			full {
-			};
-
-			partial {
 			};
 		};
 	};
