@@ -119,3 +119,13 @@ files (`8094e61`), so each board's `_procpu.dts` now sets `&flash0` and `&psram0
 top of the plain `esp32s3.dtsi`, and selects the plain `SOC_ESP32S3`. A wrong number there
 is the same class of silent mismatch as the mode was: `ESP_SPIRAM_SIZE` follows the node,
 whatever it says. The port was proven byte-identical apart from the build stamp.
+
+## Vision Master E290 (HT-VME290)
+
+A different board of the same family: ESP32-S3R8, a **bare SX1262** (no FEM, as the V3) and a 2.9"
+e-ink panel instead of the OLED. Zephyr target `heltec_vision_master_e290/esp32s3/procpu`, BOARD_TAG
+`heltec-vme290`, Meshtastic hardware model **68**, the shared 16 MB partition map (flash is 16 MB,
+measured; stock Meshtastic uses 8). Runs the meshtastic sample on hardware since 2026-10-06. The
+board's own `README.md` (`boards/heltec/heltec_vision_master_e290/`) carries the pin map, the bring-up
+findings (panel geometry as the `ssd16xx` driver counts it, full refresh only, the display shim's
+refresh floor) and the open items.
