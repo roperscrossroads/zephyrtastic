@@ -112,10 +112,11 @@ configdefault RESET_ON_FATAL_ERROR
 # partition, and the LOGGING backend spun ~9 s on a dead console until the
 # watchdog fired (sometimes landing in the UF2 bootloader). The --sysbuild
 # (MCUboot) XIAO image turns it back on in mcuboot-xiao/app.conf, where the
-# partition exists.
+# partition exists. The T114 is the same case: a legacy single image booted by the
+# Adafruit bootloader, with no coredump partition in its layout.
 # Cost: -1.2 KB dram0 on V4 (flash backend) | XIAO: partition on QSPI.
 configdefault DEBUG_COREDUMP
-	default n if BOARD_XIAO_BLE
+	default n if BOARD_XIAO_BLE || BOARD_HELTEC_T114_V2
 	default y
 
 # Xtensa: BREAK before the double-exception vector's `1: j 1b`. Means something
@@ -179,10 +180,11 @@ configdefault MESHTASTIC_HEALTH_REPORT
 # hardware WDT itself (`depends on !WATCHDOG`); MESHTASTIC_DFU_BOOT_GUARD_REQUIRED
 # plus a BUILD_ASSERT make turning this on there a build failure, not a silent
 # loss of the guard. Operator preference 2026-08-23: no task WDT during XIAO
-# bring-up.
+# bring-up. The T114 (same MCU, same bootloader family) takes the XIAO's split
+# unchanged: the boot guard is proven on this silicon, the task watchdog is not.
 # Cost: -0.7 KB dram0 on V4.
 configdefault MESHTASTIC_WATCHDOG
-	default n if BOARD_XIAO_BLE
+	default n if BOARD_XIAO_BLE || BOARD_HELTEC_T114_V2
 	default y
 
 # `meshtastic crashtest` (deliberate faults, to prove the coredump path). Class

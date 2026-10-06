@@ -1,0 +1,63 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Heltec Mesh Node T114 v2 — what the app needs on top of the upstream Zephyr board.
+ *
+ * The upstream board (zephyr/boards/heltec/heltec_t114_v2) already describes the
+ * SX1262 (spi3, DIO2 as the TX switch, 1.8 V TCXO), the ST7789 TFT, the L76K GNSS on
+ * uart1 as gnss-nmea-generic, the green LED (led0), the user button (sw0), the battery
+ * ADC channel, the WS2812 pair and the board's power-control GPIOs. This overlay only
+ * gives those nodes the names and the two app-side nodes this firmware looks for.
+ *
+ * Pin sources: the upstream board file, cross-checked against upstream Meshtastic's
+ * firmware/variants/nrf52840/heltec_mesh_node_t114/variant.h (the same pins, Arduino
+ * numbered: P0.x = x, P1.x = 32 + x).
+ */
+
+/* The radio driver takes the modem by node label (DT_NODELABEL(lora0), for DIO1 as the
+ * light-sleep wake source); the board calls its node `lora`. A second label, no change. */
+lora0: &lora {};
+
+/ {
+	aliases {
+		lora0 = &lora0;
+		/* The GNSS module (overlay-gnss.conf) finds the receiver by this alias. */
+		gnss = &gnss;
+	};
+
+	/*
+	 * Battery sense: a resistor divider on P0.04 (AIN2, upstream BATTERY_PIN 4), gated
+	 * by ADC_CTRL P0.06 driven HIGH while sampling (upstream ADC_CTRL_ENABLED HIGH).
+	 * Upstream's ADC_MULTIPLIER is 4.916; a 100k/390k divider is 4.9 and is what the
+	 * Heltec V3/V4 fit — the 0.3 % is a per-board calibration, not a different divider.
+	 * VERIFY(schematic): the resistor values are inferred from the multiplier, not read
+	 * off a drawing. The board's channel@2 already sets gain 1/6, the internal 0.6 V
+	 * reference and 12 bits, so the channel is 0-3.6 V at the pin.
+	 */
+	vbatt: vbatt {
+		compatible = "voltage-divider";
+		io-channels = <&adc 2>;
+		output-ohms = <100000>;
+		full-ohms = <(100000 + 390000)>;
+		power-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+	};
+
+	/*
+	 * The GNSS receiver's 1PPS output, P1.04 (upstream PIN_GPS_PPS 32 + 4). Inert until
+	 * the GNSS module is built in. The receiver itself is powered by Vext (P0.21,
+	 * active-HIGH, upstream VEXT_ENABLE / VEXT_ON_VALUE HIGH) with a reset on P1.06
+	 * (active-low) and a wake/standby line on P1.02 — the board file exposes all three as
+	 * plain GPIOs (vext-control, gnss-rst, gnss-wakeup aliases); nothing drives them until
+	 * a board power hook does, so the receiver is unpowered in this image.
+	 *
+	 * Named gnss-timepulse, not gnss-pps: the upstream board already has a root node
+	 * gnss_pps (the same pin as a bare GPIO), and the devicetree macros fold `-` and `_`
+	 * to one identifier, so a second gnss-pps redefines every DT_N_S_gnss_pps_* macro.
+	 * The firmware finds this node by its compatible, so the name is free.
+	 */
+	gnss_timepulse: gnss-timepulse {
+		compatible = "meshtastic,gnss-pps";
+		pps-gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+};
