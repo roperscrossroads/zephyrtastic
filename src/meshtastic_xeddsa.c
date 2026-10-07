@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/__assert.h>
 #include <zephyr/sys/byteorder.h>
 
 #include "meshtastic_xeddsa.h"
@@ -52,22 +53,45 @@ void meshtastic_xeddsa_curve_to_ed_pub(const uint8_t curve_pub[MESHTASTIC_XEDDSA
 }
 
 size_t meshtastic_xeddsa_build_signing_buffer(uint8_t *buf, size_t buf_size, uint32_t from_node,
-					      uint32_t packet_id, uint32_t portnum,
-					      const uint8_t *payload, size_t payload_len)
+					      uint32_t packet_id, uint32_t to_node,
+					      const meshtastic_Data *data)
 {
-	const size_t total = MESHTASTIC_XEDDSA_SIGBUF_HEADER_LEN + payload_len;
+	size_t total;
+	uint8_t *w = buf;
 
-	if (buf == NULL || total > buf_size || (payload == NULL && payload_len != 0U)) {
+	if (buf == NULL || data == NULL) {
 		return 0U;
 	}
-	/* Upstream memcpy()s the raw uint32s, so the layout is the host's byte order. Both
-	 * implementations are little-endian; upstream's own comment flags this as a hazard for
-	 * "oddball platforms", so spell it out rather than inherit a memcpy. */
-	sys_put_le32(from_node, buf);
-	sys_put_le32(packet_id, buf + 4);
-	sys_put_le32(portnum, buf + 8);
-	if (payload_len != 0U) {
-		memcpy(buf + MESHTASTIC_XEDDSA_SIGBUF_HEADER_LEN, payload, payload_len);
+	total = MESHTASTIC_XEDDSA_SIGBUF_HEADER_LEN + data->payload.size;
+	if (total > buf_size || data->payload.size > sizeof(data->payload.bytes)) {
+		return 0U;
+	}
+	/* The layout is the header comment's, byte for byte: upstream 2.8.1 writes every
+	 * integer little-endian explicitly ("the encoding is pinned by the protocol, not by
+	 * the host"), and so does this. */
+	*w++ = MESHTASTIC_XEDDSA_SIGNING_VERSION;
+	sys_put_le32(from_node, w);
+	w += 4;
+	sys_put_le32(packet_id, w);
+	w += 4;
+	sys_put_le32(to_node, w);
+	w += 4;
+	sys_put_le32((uint32_t)data->portnum, w);
+	w += 4;
+	sys_put_le32(data->request_id, w);
+	w += 4;
+	sys_put_le32(data->reply_id, w);
+	w += 4;
+	sys_put_le32(data->emoji, w);
+	w += 4;
+	/* An absent bitfield signs as zero; its presence is in the flags byte. */
+	sys_put_le32(data->has_bitfield ? (uint32_t)data->bitfield : 0U, w);
+	w += 4;
+	*w++ = (uint8_t)((data->want_response ? MESHTASTIC_XEDDSA_SIGNED_FLAG_WANT_RESPONSE : 0U) |
+			 (data->has_bitfield ? MESHTASTIC_XEDDSA_SIGNED_FLAG_HAS_BITFIELD : 0U));
+	__ASSERT_NO_MSG((size_t)(w - buf) == MESHTASTIC_XEDDSA_SIGBUF_HEADER_LEN);
+	if (data->payload.size != 0U) {
+		memcpy(w, data->payload.bytes, data->payload.size);
 	}
 	return total;
 }
@@ -330,14 +354,15 @@ bool meshtastic_xeddsa_check_rx_policy(const struct meshtastic_packet *pkt,
 		return false;
 	}
 
+	/* The envelope the signature covers is the decoded Data itself (mesh is non-NULL
+	 * here: the signature came out of it); from, id and to are the wire header's. */
 	siglen = meshtastic_xeddsa_build_signing_buffer(sigbuf, sizeof(sigbuf), pkt->from, pkt->id,
-							pkt->portnum, pkt->payload,
-							pkt->payload_len);
+							pkt->to, &mesh->decoded);
 	if (siglen == 0U) {
 		/* Longer than anything the reference can sign, so no signature over it can be
 		 * genuine. */
-		LOG_WRN("XEdDSA: unsignable payload (%zu bytes) from 0x%08x, drop",
-			pkt->payload_len, (unsigned int)pkt->from);
+		LOG_WRN("XEdDSA: unsignable payload (%u bytes) from 0x%08x, drop",
+			(unsigned int)mesh->decoded.payload.size, (unsigned int)pkt->from);
 		return false;
 	}
 

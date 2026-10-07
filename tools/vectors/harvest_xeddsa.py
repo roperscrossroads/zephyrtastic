@@ -15,7 +15,13 @@ variant (see firmware/variants/nrf52840/nrf52.ini). So this needs two sources:
 
 From the firmware tree, two regions are extracted verbatim -- both GPL-3, same licence as
 this port:
-    buildSigningBuffer  the exact bytes that get signed (from | id | portnum | payload)
+    buildSigningBuffer  the exact bytes that get signed -- since 2.8.1 (#11422) a 34-byte
+                        header (version | from | id | to | portnum | request_id | reply_id |
+                        emoji | bitfield | flags) then the payload; before it, 12 bytes
+                        (from | id | portnum). No negotiation between the two: a 2.8.1
+                        verifier drops a 2.8.0 signature under every policy.
+    putLE32             the integer encoding that header pins explicitly
+    signing constants   the version byte, header length and flag bits (CryptoEngine.h)
     curve_to_ed_pub     the X25519 -> Ed25519 map, for a second opinion on our own
 
 From the library, the signer itself is compiled and run. ⚠️ Its XEdDSA.cpp carries NO
@@ -33,6 +39,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -47,23 +54,73 @@ HEADER_OUT = REPO / "tests" / "vectors" / "meshtastic_xeddsa_vectors.h"
 
 # Verbatim regions from the firmware tree.
 TARGETS = [
+    ("put_le32", "src/mesh/CryptoEngine.cpp", "static void putLE32("),
     ("build_signing_buffer", "src/mesh/CryptoEngine.cpp", "static size_t buildSigningBuffer("),
     ("curve_to_ed_pub", "src/mesh/CryptoEngine.cpp", "void CryptoEngine::curve_to_ed_pub("),
 ]
+
+# The constants buildSigningBuffer refers to, taken line by line from the header (they are
+# not braced, so grab() cannot take them). Order is the order they appear in the probe.
+CONSTANT_NAMES = ["XEDDSA_SIGNING_VERSION", "XEDDSA_SIGNED_HEADER_LEN",
+                  "XEDDSA_SIGNED_FLAG_WANT_RESPONSE", "XEDDSA_SIGNED_FLAG_HAS_BITFIELD"]
+
+
+def grab_constants(upstream: Path) -> Region:
+    """The signing constants from src/mesh/CryptoEngine.h, verbatim, one line each."""
+    rel = "src/mesh/CryptoEngine.h"
+    lines = (upstream / rel).read_text(errors="replace").splitlines()
+    picked, first = [], None
+    for name in CONSTANT_NAMES:
+        for n, ln in enumerate(lines, 1):
+            if re.match(rf"\s*(#define|static constexpr \w+)\s+{name}\b", ln):
+                picked.append(ln)
+                first = first or n
+                break
+        else:
+            sys.exit(f"error: {rel} has no definition of {name}")
+    return Region(name="signing_constants", relpath=rel, anchor=CONSTANT_NAMES[0],
+                  text="\n".join(picked) + "\n", line=first)
 
 # Library translation units the probe compiles. XEdDSA.cpp is the unlicensed one.
 LIB_SOURCES = ["XEdDSA.cpp", "Ed25519.cpp", "Curve25519.cpp", "BigNumberUtil.cpp",
                "SHA512.cpp", "Crypto.cpp", "Hash.cpp"]
 
-# (label, 32-byte private key seed, fromNode, packetId, portnum, payload)
+BROADCAST = 0xFFFFFFFF
+DATA_PAYLOAD_LEN = 233  # meshtastic_Constants_DATA_PAYLOAD_LEN
+
+
+class Case:
+    """One signed packet: the MeshPacket header part (from, id, to) and the Data envelope."""
+
+    def __init__(self, label, seed, frm, pid, to, port, payload, *, request_id=0, reply_id=0,
+                 emoji=0, bitfield=None, want_response=False):
+        self.label, self.seed, self.frm, self.pid, self.to, self.port = label, seed, frm, pid, to, port
+        self.payload = payload
+        self.request_id, self.reply_id, self.emoji = request_id, reply_id, emoji
+        self.has_bitfield = bitfield is not None
+        self.bitfield = bitfield or 0
+        self.want_response = want_response
+
+
 # Chosen to cover: an ordinary broadcast, an empty payload (headers only), a payload at the
-# 256-byte signing-buffer ceiling minus the 12-byte header, and a key whose clamped form
-# differs in both clamped bytes.
+# Data schema's ceiling, a key whose clamped form differs in both clamped bytes, and -- the
+# fields #11422 added to the envelope -- a unicast reply with reply_id and emoji (a tapback),
+# want_response, and a bitfield that is present (OK_TO_MQTT set) against one that is absent,
+# which the flags byte must tell apart.
 CASES = [
-    ("position", 0x11, 0x075c78e8, 0x2a2b2c2d, 3, bytes(range(0, 24))),
-    ("nodeinfo", 0x42, 0x121f8bac, 0x00000001, 4, bytes(range(200, 256))),
-    ("empty_payload", 0x7f, 0x03c1adc6, 0xfffffffe, 67, b""),
-    ("max_payload", 0xa5, 0x051c2856, 0x12345678, 1, bytes((i * 7) & 0xFF for i in range(244))),
+    Case("position", 0x11, 0x075c78e8, 0x2a2b2c2d, BROADCAST, 3, bytes(range(0, 24))),
+    Case("nodeinfo", 0x42, 0x121f8bac, 0x00000001, BROADCAST, 4, bytes(range(200, 256)),
+         want_response=True, bitfield=0x03),
+    Case("empty_payload", 0x7f, 0x03c1adc6, 0xfffffffe, BROADCAST, 67, b""),
+    Case("max_payload", 0xa5, 0x051c2856, 0x12345678, BROADCAST, 1,
+         bytes((i * 7) & 0xFF for i in range(DATA_PAYLOAD_LEN))),
+    Case("tapback", 0x3c, 0x7cc1c864, 0x6a5b4c3d, 0x1f6b56cb, 1, "\U0001F44D".encode(),
+         reply_id=0x2a2b2c2d, emoji=1, bitfield=0x01),
+    # A signed unicast, as a licensed station sends. Addressed to tests/xeddsa_rx's own node
+    # id, so that suite can receive it as a DM to us without re-addressing it (which is now
+    # exactly what the signature refuses).
+    Case("licensed_request", 0x58, 0x96b698d4, 0x00000100, 0x5A5A0001, 6, b"\x01",
+         request_id=0x00000099, want_response=True),
 ]
 
 # The first-contact NodeInfo bootstrap needs a case that cannot be written down in advance:
@@ -100,6 +157,24 @@ RNGClass::RNGClass() {}
 RNGClass::~RNGClass() {}
 void RNGClass::rand(uint8_t *data, size_t len) { memset(data, 0, len); }
 
+/* The slice of nanopb's meshtastic_Data that buildSigningBuffer reads, with the generated
+ * field types (mesh.pb.h: bitfield is uint8_t, the rest uint32_t / bool). */
+typedef struct { uint16_t size; uint8_t bytes[233]; } meshtastic_Data_payload_t;
+typedef struct {
+    int portnum;
+    meshtastic_Data_payload_t payload;
+    bool want_response;
+    uint32_t dest, source, request_id, reply_id, emoji;
+    bool has_bitfield;
+    uint8_t bitfield;
+} meshtastic_Data;
+
+/* --- verbatim from upstream: the signing constants (CryptoEngine.h) --- */
+%(signing_constants)s
+
+/* --- verbatim from upstream: the integer encoding --- */
+%(put_le32)s
+
 /* --- verbatim from upstream: the bytes that get signed --- */
 %(build_signing_buffer)s
 
@@ -124,8 +199,16 @@ int main()
 
 CASE_TMPL = r"""    {
         uint8_t priv[32], xpub[32], edpriv[32], edpub[32], edpub_from_x[32], sig[64];
-        static const uint8_t payload[] = {%(payload)s};
-        uint8_t buf[256];
+        static const uint8_t payload[%(payload_n)s + 1] = {%(payload)s};
+        uint8_t buf[XEDDSA_SIGNED_HEADER_LEN + 233];
+        meshtastic_Data d;
+        memset(&d, 0, sizeof(d));
+        d.portnum = %(port)s;
+        d.payload.size = %(payload_n)s;
+        memcpy(d.payload.bytes, payload, %(payload_n)s);
+        d.request_id = %(request_id)sU; d.reply_id = %(reply_id)sU; d.emoji = %(emoji)sU;
+        d.has_bitfield = %(has_bitfield)s; d.bitfield = %(bitfield)s;
+        d.want_response = %(want_response)s;
         for (int i = 0; i < 32; i++) priv[i] = (uint8_t)(%(seed)s + i);
         /* X25519 clamping. Curve25519::eval masks the POINT, not the scalar, while
          * priv_curve_to_ed_keys clamps -- an unclamped seed yields a public key that does
@@ -135,19 +218,22 @@ CASE_TMPL = r"""    {
         uint8_t privcopy[32]; memcpy(privcopy, priv, 32);
         XEdDSA::priv_curve_to_ed_keys(privcopy, edpriv, edpub);
         curve_to_ed_pub(xpub, edpub_from_x);
-        size_t len = buildSigningBuffer(buf, sizeof(buf), %(from)sU, %(id)sU, %(port)sU,
-                                        payload, sizeof(payload));
+        size_t len = buildSigningBuffer(buf, sizeof(buf), %(from)sU, %(id)sU, %(to)sU, &d);
         for (int i = 0; i < 32; i++) sig[i] = (uint8_t)(0xA0 + i);   /* deterministic Z */
         XEdDSA::sign(sig, edpriv, edpub, buf, len);
         printf("    {");
         printf("\"label\": \"%(label)s\", ");
-        printf("\"from\": %%u, \"id\": %%u, \"port\": %%u, ",
-               (unsigned)%(from)sU, (unsigned)%(id)sU, (unsigned)%(port)sU);
+        printf("\"from\": %%u, \"id\": %%u, \"to\": %%u, \"port\": %%u, ",
+               (unsigned)%(from)sU, (unsigned)%(id)sU, (unsigned)%(to)sU, (unsigned)%(port)sU);
+        printf("\"request_id\": %%u, \"reply_id\": %%u, \"emoji\": %%u, ",
+               (unsigned)d.request_id, (unsigned)d.reply_id, (unsigned)d.emoji);
+        printf("\"has_bitfield\": %%d, \"bitfield\": %%u, \"want_response\": %%d, ",
+               (int)d.has_bitfield, (unsigned)d.bitfield, (int)d.want_response);
         emit_hex("x_priv", priv, 32);
         emit_hex("x_pub", xpub, 32);
         emit_hex("ed_pub", edpub, 32);
         emit_hex("ed_pub_from_x", edpub_from_x, 32);
-        emit_hex("payload", payload, sizeof(payload));
+        emit_hex("payload", payload, %(payload_n)s);
         emit_hex("signed_bytes", buf, len);
         emit_hex("sig", sig, 64);
         printf("\"self_verify\": %%d", (int)Ed25519::verify(sig, edpub, buf, len));
@@ -163,16 +249,26 @@ def build_probe(regions: dict[str, Region], cases_in=None) -> str:
     ctep = regions["curve_to_ed_pub"].text.replace("CryptoEngine::", "", 1)
     cases = "".join(
         CASE_TMPL % {
-            "label": label,
-            "seed": f"0x{seed:02x}",
-            "from": f"0x{frm:08x}",
-            "id": f"0x{pid:08x}",
-            "port": str(port),
-            "payload": ", ".join(f"0x{b:02x}" for b in payload) or "0",
+            "label": c.label,
+            "seed": f"0x{c.seed:02x}",
+            "from": f"0x{c.frm:08x}",
+            "id": f"0x{c.pid:08x}",
+            "to": f"0x{c.to:08x}",
+            "port": str(c.port),
+            "payload": ", ".join(f"0x{b:02x}" for b in c.payload) or "0",
+            "payload_n": str(len(c.payload)),
+            "request_id": f"0x{c.request_id:08x}",
+            "reply_id": f"0x{c.reply_id:08x}",
+            "emoji": str(c.emoji),
+            "has_bitfield": "true" if c.has_bitfield else "false",
+            "bitfield": str(c.bitfield),
+            "want_response": "true" if c.want_response else "false",
         }
-        for label, seed, frm, pid, port, payload in (cases_in if cases_in is not None else CASES)
+        for c in (cases_in if cases_in is not None else CASES)
     )
     return PROBE % {
+        "signing_constants": regions["signing_constants"].text,
+        "put_le32": regions["put_le32"].text,
         "build_signing_buffer": bsb,
         "curve_to_ed_pub": ctep,
         "cases": cases,
@@ -232,9 +328,9 @@ def emit_header(data: dict, regions: dict[str, Region], rev: str, lib_rev: str) 
     a(" *                  --upstream <firmware-tree> --crypto-lib <meshtastic/Crypto>")
     a(" *")
     a(" * Every signature below was produced by COMPILING AND RUNNING upstream's own")
-    a(" * signer against upstream's own signing-buffer layout. This port never signs, so")
-    a(" * these are the only data in the tree that can prove our VERIFY agrees with the")
-    a(" * thing it has to interoperate with -- a self-test cannot.")
+    a(" * signer against upstream's own signing-buffer layout, so they are the only data in")
+    a(" * the tree that can prove our VERIFY (and, with the same Z, our SIGN) agrees with")
+    a(" * the thing it has to interoperate with -- a self-test cannot.")
     a(" *")
     a(" * The deterministic Z mixed into every nonce below is 0xA0, 0xA1, ... 0xBF -- the")
     a(" * signing tests must pass exactly that to reproduce these signatures.")
@@ -249,14 +345,24 @@ def emit_header(data: dict, regions: dict[str, Region], rev: str, lib_rev: str) 
     a("#ifndef MESHTASTIC_XEDDSA_VECTORS_H_")
     a("#define MESHTASTIC_XEDDSA_VECTORS_H_")
     a("")
+    a("#include <stdbool.h>")
     a("#include <stdint.h>")
     a("#include <stddef.h>")
     a("")
     a("struct mt_xeddsa_vector {")
     a("\tconst char *label;")
+    a("\t/* MeshPacket header part */")
     a("\tuint32_t from;")
     a("\tuint32_t id;")
+    a("\tuint32_t to;")
+    a("\t/* Data envelope part (#11422: everything but dest/source is covered) */")
     a("\tuint32_t portnum;")
+    a("\tuint32_t request_id;")
+    a("\tuint32_t reply_id;")
+    a("\tuint32_t emoji;")
+    a("\tuint8_t bitfield;")
+    a("\tbool has_bitfield;")
+    a("\tbool want_response;")
     a("\t/* TEST KEY ONLY: derived from a fixed seed by the harvester, never a real node's")
     a("\t * key. Present so the signing tests can reproduce upstream's signature. */")
     a("\tuint8_t x_priv[32];")
@@ -281,13 +387,18 @@ def emit_header(data: dict, regions: dict[str, Region], rev: str, lib_rev: str) 
         assert c["self_verify"] == 1, f"{c['label']}: upstream cannot verify its own signature"
         a("\t{")
         a(f"\t\t.label = \"{c['label']}\",")
-        a(f"\t\t.from = 0x{c['from']:08x}U, .id = 0x{c['id']:08x}U, "
-          f".portnum = {c['port']}U,")
+        a(f"\t\t.from = 0x{c['from']:08x}U, .id = 0x{c['id']:08x}U, .to = 0x{c['to']:08x}U,")
+        a(f"\t\t.portnum = {c['port']}U, .request_id = 0x{c['request_id']:08x}U, "
+          f".reply_id = 0x{c['reply_id']:08x}U, .emoji = {c['emoji']}U,")
+        a(f"\t\t.bitfield = {c['bitfield']}U, "
+          f".has_bitfield = {'true' if c['has_bitfield'] else 'false'}, "
+          f".want_response = {'true' if c['want_response'] else 'false'},")
         a(f"\t\t.x_priv = {{{c_bytes(c['x_priv'])}}},")
         a(f"\t\t.x_pub = {{{c_bytes(c['x_pub'])}}},")
         a(f"\t\t.ed_pub = {{{c_bytes(c['ed_pub'])}}},")
         a(f"\t\t.payload = mt_xeddsa_payload_{c['label']},")
-        a(f"\t\t.payload_len = sizeof(mt_xeddsa_payload_{c['label']}),")
+        # Not sizeof(): an empty payload is emitted as a one-element placeholder array.
+        a(f"\t\t.payload_len = {len(bytes.fromhex(c['payload']))}U,")
         a(f"\t\t.signed_bytes = mt_xeddsa_signed_{c['label']},")
         a(f"\t\t.signed_len = sizeof(mt_xeddsa_signed_{c['label']}),")
         a(f"\t\t.sig = {{{c_bytes(c['sig'])}}},")
@@ -309,6 +420,7 @@ def main() -> int:
     args = ap.parse_args()
 
     regions = {n: grab(args.upstream, n, rel, anchor) for n, rel, anchor in TARGETS}
+    regions["signing_constants"] = grab_constants(args.upstream)
     for n, r in regions.items():
         print(f"  extracted {n:22s} {r.relpath}:{r.line}  {r.sha256[:16]}")
 
@@ -316,7 +428,8 @@ def main() -> int:
 
     # Pass 1: the fixed cases, plus a throwaway case that only exists to reveal the
     # bootstrap seed's public key.
-    probe_cases = list(CASES) + [("bootstrap_probe", BOOTSTRAP_SEED, 1, 1, BOOTSTRAP_PORT, b"")]
+    probe_cases = list(CASES) + [Case("bootstrap_probe", BOOTSTRAP_SEED, 1, 1, BROADCAST,
+                                      BOOTSTRAP_PORT, b"")]
     first = run_probe(build_probe(regions, probe_cases), args.crypto_lib)
     pub = bytes.fromhex(next(c for c in first["cases"] if c["label"] == "bootstrap_probe")["x_pub"])
 
@@ -324,7 +437,8 @@ def main() -> int:
     payload = user_payload(pub)
     node_id = crc32_ieee(pub)
     probe_cases = list(CASES) + [
-        ("nodeinfo_bootstrap", BOOTSTRAP_SEED, node_id, 0x5150C0DE, BOOTSTRAP_PORT, payload)
+        Case("nodeinfo_bootstrap", BOOTSTRAP_SEED, node_id, 0x5150C0DE, BROADCAST,
+             BOOTSTRAP_PORT, payload)
     ]
     data = run_probe(build_probe(regions, probe_cases), args.crypto_lib)
     boot = next(c for c in data["cases"] if c["label"] == "nodeinfo_bootstrap")

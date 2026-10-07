@@ -73,7 +73,7 @@ static void make(const struct mt_xeddsa_vector *v, struct meshtastic_packet *pkt
 {
 	*pkt = (struct meshtastic_packet){
 		.from = v->from,
-		.to = MESHTASTIC_NODE_BROADCAST,
+		.to = v->to,
 		.id = v->id,
 		.portnum = v->portnum,
 		.payload = v->payload,
@@ -81,13 +81,21 @@ static void make(const struct mt_xeddsa_vector *v, struct meshtastic_packet *pkt
 	};
 	*mesh = (meshtastic_MeshPacket)meshtastic_MeshPacket_init_zero;
 	mesh->from = v->from;
+	mesh->to = v->to;
 	mesh->id = v->id;
 	mesh->decoded.portnum = (meshtastic_PortNum)v->portnum;
 	/* Matches production (meshtastic_router.c materializes pkt FROM decoded_mesh, so both
 	 * always carry the same bytes): needed so a BALANCED size check on mesh->decoded sees
-	 * the real payload instead of an empty one (agents-ooma.32's tests below). */
+	 * the real payload instead of an empty one (agents-ooma.32's tests below), and since
+	 * #11422 because the whole envelope is what the signature covers. */
 	mesh->decoded.payload.size = (pb_size_t)v->payload_len;
 	memcpy(mesh->decoded.payload.bytes, v->payload, v->payload_len);
+	mesh->decoded.request_id = v->request_id;
+	mesh->decoded.reply_id = v->reply_id;
+	mesh->decoded.emoji = v->emoji;
+	mesh->decoded.has_bitfield = v->has_bitfield;
+	mesh->decoded.bitfield = v->bitfield;
+	mesh->decoded.want_response = v->want_response;
 	if (with_signature) {
 		mesh->decoded.xeddsa_signature.size = 64;
 		memcpy(mesh->decoded.xeddsa_signature.bytes, v->sig, 64);
@@ -178,6 +186,42 @@ ZTEST(xeddsa_rx, test_signature_replayed_onto_other_content_is_dropped)
 		      "a signature must not verify over a different packet id");
 }
 
+/* #11422: the envelope is covered, not only the payload. A genuine 2.8.1 tapback (a unicast
+ * reply with reply_id, emoji and a bitfield) verifies as upstream signed it; the same bytes
+ * with reply_id re-pointed, the reaction turned back into a reply, the bitfield's consent
+ * bit stripped, or the DM re-addressed as a broadcast are each a DROP -- the in-flight
+ * rewrites AES-CTR channels cannot otherwise detect. */
+ZTEST(xeddsa_rx, test_envelope_fields_are_covered_by_the_signature)
+{
+	const struct mt_xeddsa_vector *v = vec("tapback");
+	struct meshtastic_packet pkt;
+	meshtastic_MeshPacket mesh;
+
+	seed_key(v);
+	make(v, &pkt, &mesh, true);
+	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh), "genuine tapback dropped");
+	zassert_true(mesh.xeddsa_signed, "verified tapback must be marked signed");
+
+	make(v, &pkt, &mesh, true);
+	mesh.decoded.reply_id ^= 1U;
+	zassert_false(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh), "re-pointed reply accepted");
+
+	make(v, &pkt, &mesh, true);
+	mesh.decoded.emoji = 0U;
+	zassert_false(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh),
+		      "reaction turned into a reply accepted");
+
+	make(v, &pkt, &mesh, true);
+	mesh.decoded.has_bitfield = false;
+	mesh.decoded.bitfield = 0U;
+	zassert_false(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh), "stripped bitfield accepted");
+
+	make(v, &pkt, &mesh, true);
+	pkt.to = MESHTASTIC_NODE_BROADCAST;
+	mesh.to = MESHTASTIC_NODE_BROADCAST;
+	zassert_false(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh), "re-addressed DM accepted");
+}
+
 /* --- malformed ----------------------------------------------------------------------- */
 
 ZTEST(xeddsa_rx, test_partial_signature_is_dropped)
@@ -263,21 +307,20 @@ ZTEST(xeddsa_rx, test_balanced_accepts_unsigned_broadcast_that_would_not_have_fi
  * the RECEIVER's owner.is_licensed here, not the sender's. */
 ZTEST(xeddsa_rx, test_balanced_unicast_downgrade_drop_depends_on_our_own_license)
 {
-	const struct mt_xeddsa_vector *v = vec("position");
+	/* A signed unicast addressed to us, as upstream signed it: `to` is inside the signed
+	 * bytes since #11422, so a broadcast vector cannot be re-addressed for this. */
+	const struct mt_xeddsa_vector *v = vec("licensed_request");
 	struct meshtastic_packet pkt;
 	meshtastic_MeshPacket mesh;
 	meshtastic_User owner = meshtastic_User_init_zero;
 
+	zassert_equal(v->to, TEST_NODE_ID, "the vector must be addressed to this node");
 	seed_key(v);
 	make(v, &pkt, &mesh, true);
-	pkt.to = TEST_NODE_ID;
-	mesh.to = TEST_NODE_ID;
 	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh), "genuine signature dropped");
 
 	set_policy(meshtastic_Config_SecurityConfig_PacketSignaturePolicy_PACKET_SIGNATURE_POLICY_BALANCED);
 	make(v, &pkt, &mesh, false);
-	pkt.to = TEST_NODE_ID;
-	mesh.to = TEST_NODE_ID;
 	zassert_true(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh),
 		     "an unlicensed receiver does not apply the downgrade-drop to a unicast");
 
@@ -287,8 +330,6 @@ ZTEST(xeddsa_rx, test_balanced_unicast_downgrade_drop_depends_on_our_own_license
 	zassert_ok(meshtastic_config_store_set_owner(&owner), "could not set the owner");
 
 	make(v, &pkt, &mesh, false);
-	pkt.to = TEST_NODE_ID;
-	mesh.to = TEST_NODE_ID;
 	zassert_false(meshtastic_xeddsa_check_rx_policy(&pkt, &mesh),
 		      "a licensed receiver applies the downgrade-drop to a unicast too");
 
@@ -610,9 +651,7 @@ ZTEST(xeddsa_rx, test_our_broadcast_is_signed_and_verifies)
 	/* Verify it the way a peer would: over the key they hold for us. */
 	zassert_equal(meshtastic_pki_get_public_key(our_key), sizeof(our_key));
 	len = meshtastic_xeddsa_build_signing_buffer(buf, sizeof(buf), TEST_NODE_ID, mesh.id,
-						     (uint32_t)mesh.decoded.portnum,
-						     mesh.decoded.payload.bytes,
-						     mesh.decoded.payload.size);
+						     mesh.to, &mesh.decoded);
 	zassert_true(len > 0U, "signing buffer");
 	zassert_true(meshtastic_xeddsa_verify(our_key, buf, len,
 					      mesh.decoded.xeddsa_signature.bytes),

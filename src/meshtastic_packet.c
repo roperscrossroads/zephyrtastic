@@ -155,10 +155,10 @@ static void sign_our_packet(const meshtastic_MeshPacket *mesh, meshtastic_Data *
 		return;
 	}
 
+	/* The signature covers the Data envelope as it will be encoded -- which is `data`
+	 * itself, signature field aside -- under the wire header's from, id and to. */
 	if (meshtastic_pki_sign_packet(mesh->from == 0U ? mt.node_id : mesh->from, mesh->id,
-				       (uint32_t)data->portnum, data->payload.bytes,
-				       data->payload.size,
-				       data->xeddsa_signature.bytes) != 0) {
+				       mesh->to, data, data->xeddsa_signature.bytes) != 0) {
 		/* Unsigned beats unsent: every policy but STRICT accepts an unsigned packet. */
 		data->xeddsa_signature.size = 0U;
 		meshtastic_xeddsa_note_tx(false);
@@ -173,6 +173,7 @@ static int encode_packet_data(const meshtastic_MeshPacket *mesh, uint8_t *buf, s
 {
 	meshtastic_Data data;
 	pb_ostream_t stream;
+	bool from_us;
 
 	if (mesh == NULL || buf == NULL || encoded_len == NULL) {
 		return -EINVAL;
@@ -190,9 +191,9 @@ static int encode_packet_data(const meshtastic_MeshPacket *mesh, uint8_t *buf, s
 	 * longer merges a separate `base`. */
 	data = mesh->decoded;
 
-	/* This port does not sign (Data.xeddsa_signature is decoded by the schema but never
-	 * produced -- agents-ooma.5), so on traffic we originate the field must be ZEROED, not
-	 * merely left alone. The phone path carries its own decoded verbatim, so a client that
+	/* On traffic we originate, Data.xeddsa_signature must be ZEROED first, not merely left
+	 * alone (a signing build then fills it in sign_our_packet; a verify-only build never
+	 * does). The phone path carries its own decoded verbatim, so a client that
 	 * sets the field would have those bytes transmitted as ours, and a reference node that
 	 * holds our public key runs xeddsa_verify over them and DROPS the packet on failure --
 	 * under every policy, COMPATIBLE included. A length that is neither 0 nor 64 is dropped
@@ -207,27 +208,33 @@ static int encode_packet_data(const meshtastic_MeshPacket *mesh, uint8_t *buf, s
 	 * a verifying receiver drops as a downgrade. A `from` of 0 means us (see the wire-header
 	 * stamp below), and via_mqtt marks the foreign frames.
 	 */
-	if ((mesh->from == 0U || mesh->from == mt.node_id) && !mesh->via_mqtt) {
+	from_us = (mesh->from == 0U || mesh->from == mt.node_id);
+	if (from_us) {
+		/* Every packet we originate carries the bitfield, mirroring the reference
+		 * (Router.cpp: set under isFromUs). Bit 0 is our own MQTT consent, taken
+		 * from config.lora.config_ok_to_mqtt; bit 1 mirrors want_response. This stays
+		 * node-authoritative and is re-stamped here (never trusted from the phone): a
+		 * receiver cannot distinguish "declined" from "too old to say" if the field is
+		 * absent and must treat absence as declined, so we always emit it.
+		 *
+		 * Stamped BEFORE signing, as upstream (Router.cpp, under isFromUs), and only
+		 * on our own traffic: since #11422 the bitfield is inside the signed bytes, so
+		 * a stamp after the signature would invalidate it, and a re-stamp of a foreign
+		 * (MQTT-injected) frame would break its author's signature. */
+		data.has_bitfield = true;
+		data.bitfield = 0U;
+		if (mt.config_ok_to_mqtt) {
+			data.bitfield |= MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK;
+		}
+		if (data.want_response) {
+			data.bitfield |= MESHTASTIC_BITFIELD_WANT_RESPONSE_MASK;
+		}
+	}
+	if (from_us && !mesh->via_mqtt) {
 		data.xeddsa_signature.size = 0U;
 #if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN)
 		sign_our_packet(mesh, &data, buf_len);
 #endif
-	}
-
-	/* Every packet we originate carries the bitfield, mirroring the reference
-	 * (Router.cpp: set under isFromUs). Bit 0 is our own MQTT consent, taken
-	 * from config.lora.config_ok_to_mqtt; bit 1 mirrors want_response. This stays
-	 * node-authoritative and is re-stamped here (never trusted from the phone): a
-	 * receiver cannot distinguish "declined" from "too old to say" if the field is
-	 * absent and must treat absence as declined, so we always emit it.
-	 */
-	data.has_bitfield = true;
-	data.bitfield = 0U;
-	if (mt.config_ok_to_mqtt) {
-		data.bitfield |= MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK;
-	}
-	if (data.want_response) {
-		data.bitfield |= MESHTASTIC_BITFIELD_WANT_RESPONSE_MASK;
 	}
 
 	stream = pb_ostream_from_buffer(buf, buf_len);

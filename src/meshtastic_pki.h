@@ -17,6 +17,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "meshtastic/mesh.pb.h"
+
 /** X25519 public/private key length. */
 #define MESHTASTIC_PKI_KEY_LEN 32
 /** Bytes added on the wire by PKC: 8-byte CCM tag + 4-byte extra nonce. */
@@ -56,14 +58,15 @@ int meshtastic_pki_init(void);
  *
  * Lives here, rather than the caller fetching the key, so the X25519 private scalar never
  * leaves this module: this is the only operation outside it that needs the private half.
- * Builds the reference's signing buffer (from | id | portnum | payload) and hedges the
- * nonce with fresh randomness.
+ * Builds the reference's signing buffer (the Data envelope under a fixed header, see
+ * meshtastic_xeddsa.h) and hedges the nonce with fresh randomness. @p to_node is the wire
+ * header's, MESHTASTIC_NODE_BROADCAST for a broadcast.
  *
  * @return 0 on success, negative on failure -- in which case the packet goes out unsigned
  *         rather than wrong.
  */
-int meshtastic_pki_sign_packet(uint32_t from_node, uint32_t packet_id, uint32_t portnum,
-			       const uint8_t *payload, size_t payload_len, uint8_t sig[64]);
+int meshtastic_pki_sign_packet(uint32_t from_node, uint32_t packet_id, uint32_t to_node,
+			       const meshtastic_Data *data, uint8_t sig[64]);
 #endif
 
 #if defined(CONFIG_MESHTASTIC_XEDDSA_SIGN_CORE)

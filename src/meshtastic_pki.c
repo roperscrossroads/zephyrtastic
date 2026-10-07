@@ -552,17 +552,17 @@ int meshtastic_pki_sign_bytes(const uint8_t *msg, size_t len, uint8_t sig[64])
  * signing existed. The thread this now runs on is shared with cluster signing and was
  * proven on hardware there (agents-ooma.31) before this call site was switched over.
  */
-int meshtastic_pki_sign_packet(uint32_t from_node, uint32_t packet_id, uint32_t portnum,
-			       const uint8_t *payload, size_t payload_len, uint8_t sig[64])
+int meshtastic_pki_sign_packet(uint32_t from_node, uint32_t packet_id, uint32_t to_node,
+			       const meshtastic_Data *data, uint8_t sig[64])
 {
 	uint8_t buf[MESHTASTIC_XEDDSA_SIGBUF_MAX];
 	size_t len;
 
-	if (sig == NULL) {
+	if (sig == NULL || data == NULL) {
 		return -EACCES;
 	}
 	len = meshtastic_xeddsa_build_signing_buffer(buf, sizeof(buf), from_node, packet_id,
-						     portnum, payload, payload_len);
+						     to_node, data);
 	if (len == 0U) {
 		return -EMSGSIZE;
 	}

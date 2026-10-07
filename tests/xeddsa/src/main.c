@@ -66,34 +66,95 @@ ZTEST(xeddsa, test_derived_key_high_bit_is_always_clear)
 
 /* --- the signed bytes --------------------------------------------------------------- */
 
+/* The Data envelope a vector describes, as the encoder or decoder would hold it. */
+static void vector_data(const struct mt_xeddsa_vector *v, meshtastic_Data *d)
+{
+	memset(d, 0, sizeof(*d));
+	d->portnum = (meshtastic_PortNum)v->portnum;
+	d->payload.size = (pb_size_t)v->payload_len;
+	memcpy(d->payload.bytes, v->payload, v->payload_len);
+	d->request_id = v->request_id;
+	d->reply_id = v->reply_id;
+	d->emoji = v->emoji;
+	d->has_bitfield = v->has_bitfield;
+	d->bitfield = v->bitfield;
+	d->want_response = v->want_response;
+}
+
 /* Parity of the byte string, not of the crypto. A wrong header layout here is invisible to
- * every self-test and fatal on a real mesh. */
+ * every self-test and fatal on a real mesh -- exactly what 2.8.0 -> 2.8.1 was (#11422). */
 ZTEST(xeddsa, test_signing_buffer_matches_upstream)
 {
 	for (size_t i = 0; i < N_VECTORS; i++) {
 		const struct mt_xeddsa_vector *v = &mt_xeddsa_vectors[i];
 		uint8_t buf[MESHTASTIC_XEDDSA_SIGBUF_MAX];
+		meshtastic_Data d;
 		size_t len;
 
+		vector_data(v, &d);
 		len = meshtastic_xeddsa_build_signing_buffer(buf, sizeof(buf), v->from, v->id,
-							     v->portnum, v->payload,
-							     v->payload_len);
+							     v->to, &d);
 		zassert_equal(len, v->signed_len, "%s: signed length differs", v->label);
 		zassert_mem_equal(buf, v->signed_bytes, len, "%s: signed bytes differ", v->label);
 	}
 }
 
+/* Every envelope field is in the header at a fixed offset: changing any one of them changes
+ * the signed bytes, and an absent bitfield is distinguishable from a present zero. */
+ZTEST(xeddsa, test_signing_buffer_covers_every_envelope_field)
+{
+	const struct mt_xeddsa_vector *v = &mt_xeddsa_vectors[0];
+	uint8_t ref[MESHTASTIC_XEDDSA_SIGBUF_MAX], alt[MESHTASTIC_XEDDSA_SIGBUF_MAX];
+	meshtastic_Data d;
+	size_t len;
+
+	vector_data(v, &d);
+	len = meshtastic_xeddsa_build_signing_buffer(ref, sizeof(ref), v->from, v->id, v->to, &d);
+	zassert_true(len > 0U);
+	zassert_equal(ref[0], MESHTASTIC_XEDDSA_SIGNING_VERSION, "version byte");
+
+#define DIFFERS_WHEN(what, change)                                                           \
+	do {                                                                                 \
+		meshtastic_Data m = d;                                                       \
+		uint32_t from = v->from, id = v->id, to = v->to;                             \
+		change;                                                                      \
+		zassert_equal(meshtastic_xeddsa_build_signing_buffer(alt, sizeof(alt), from, \
+								     id, to, &m),            \
+			      len, what ": length");                                         \
+		zassert_true(memcmp(ref, alt, len) != 0, what " is not covered");            \
+	} while (0)
+
+	DIFFERS_WHEN("from", from ^= 1U);
+	DIFFERS_WHEN("id", id ^= 1U);
+	DIFFERS_WHEN("to", to ^= 1U);
+	DIFFERS_WHEN("portnum", m.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP);
+	DIFFERS_WHEN("request_id", m.request_id ^= 1U);
+	DIFFERS_WHEN("reply_id", m.reply_id ^= 1U);
+	DIFFERS_WHEN("emoji", m.emoji ^= 1U);
+	DIFFERS_WHEN("want_response", m.want_response = !m.want_response);
+	DIFFERS_WHEN("bitfield presence", m.has_bitfield = true; m.bitfield = 0U);
+	DIFFERS_WHEN("bitfield value", m.has_bitfield = true; m.bitfield = 1U);
+#undef DIFFERS_WHEN
+}
+
 ZTEST(xeddsa, test_signing_buffer_refuses_overflow)
 {
 	uint8_t buf[MESHTASTIC_XEDDSA_SIGBUF_MAX];
-	uint8_t payload[MESHTASTIC_XEDDSA_SIGBUF_MAX];
+	meshtastic_Data d;
 
-	memset(payload, 0xA5, sizeof(payload));
-	/* One byte more than the header leaves room for. */
-	zassert_equal(meshtastic_xeddsa_build_signing_buffer(
-			      buf, sizeof(buf), 1, 2, 3, payload,
-			      sizeof(buf) - MESHTASTIC_XEDDSA_SIGBUF_HEADER_LEN + 1U),
+	memset(&d, 0, sizeof(d));
+	d.payload.size = sizeof(d.payload.bytes);
+	memset(d.payload.bytes, 0xA5, sizeof(d.payload.bytes));
+	/* The largest Data payload fits exactly ... */
+	zassert_equal(meshtastic_xeddsa_build_signing_buffer(buf, sizeof(buf), 1, 2, 3, &d),
+		      sizeof(buf), "the largest payload must fit SIGBUF_MAX");
+	/* ... and one byte less of buffer refuses it rather than truncating. */
+	zassert_equal(meshtastic_xeddsa_build_signing_buffer(buf, sizeof(buf) - 1U, 1, 2, 3, &d),
 		      0U, "an oversized payload must be refused, not truncated");
+	/* A payload size beyond the schema is refused outright. */
+	d.payload.size = sizeof(d.payload.bytes) + 1U;
+	zassert_equal(meshtastic_xeddsa_build_signing_buffer(buf, sizeof(buf), 1, 2, 3, &d), 0U,
+		      "a payload size beyond the schema must be refused");
 }
 
 /* --- verify -------------------------------------------------------------------------- */

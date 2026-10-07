@@ -1,31 +1,43 @@
 {
-  "upstream": "firmware @ 47db0e302",
+  "upstream": "firmware @ 8e6a88d06",
   "crypto_lib": {
     "revision": "pinned archive",
     "files": {
-      "XEdDSA.cpp": "0b7b787f46d00a60054909891c08fff580cbbc10137e53c6d3fb680be5c323f7",
+      "XEdDSA.cpp": "a876fce2e12161ef7d1811febb119dc8d392d6a7e0c70d894efcac8cdd3a6efd",
       "Ed25519.cpp": "a5de86ae207e45fbad89e098f0f861bc53829760ee45bfa0389fdfb8b1aa2fb4",
       "Curve25519.cpp": "0f712b4bac4c573f112b4772c9f66dcc85df1c35de2949dd6267fa1903e7368e",
       "BigNumberUtil.cpp": "fb832ff438d9f6eeee86b3be0496e1875cbdc3ddc371f053f5193f53e0e68c0c",
       "SHA512.cpp": "e519c4be0713efd51fc880b718ec66df4fe42aaead20176ecce9c6f6d0da8691",
       "Crypto.cpp": "ee661a18648ccf5e04bb62b4a012e29f1ad214d08e7897fa73fd7c2c317d8ff7",
       "Hash.cpp": "e194af2180148e815f4852f1ba90ad98aa0cad469fb79b077846d2641c24aaae",
-      "XEdDSA.h": "78d92883534d66737f0bfaa058370331ff2cdbba5ab03ba911cf12d3a98c4339",
+      "XEdDSA.h": "8ac4a3786e14f6f0421b68834013561571b77611f03f4766b5b9374a0d5c982d",
       "Ed25519.h": "a8b25da7c5cd6f2caef9d3cd81079f0e6709c5b612c952a87d6cb1297e272098"
     }
   },
   "regions": {
+    "put_le32": {
+      "file": "src/mesh/CryptoEngine.cpp",
+      "line": 90,
+      "anchor": "static void putLE32(",
+      "sha256": "c382b281a88632ded793d41e7404b4cf9ace98427550f718c97b7f04e8d4ec82"
+    },
     "build_signing_buffer": {
       "file": "src/mesh/CryptoEngine.cpp",
-      "line": 95,
+      "line": 137,
       "anchor": "static size_t buildSigningBuffer(",
-      "sha256": "098504e24c6eaf5587ad8c97d55d097d47e9d09e3544034f2e0c761f1b5b0482"
+      "sha256": "1d25d66f7788ecd3b61b373b19ba8ebd57c1c342cbf00700a85c13f6205c70c8"
     },
     "curve_to_ed_pub": {
       "file": "src/mesh/CryptoEngine.cpp",
-      "line": 143,
+      "line": 207,
       "anchor": "void CryptoEngine::curve_to_ed_pub(",
       "sha256": "ac9f5e5266fa51b362f456bb9e33bf457d832b6f405dc11cd20ece066fe47eb8"
+    },
+    "signing_constants": {
+      "file": "src/mesh/CryptoEngine.h",
+      "line": 35,
+      "anchor": "XEDDSA_SIGNING_VERSION",
+      "sha256": "0cd74519a491797c5886e5e57e5c3325d72710537b9039100ab4bc156f5498f2"
     }
   }
 }
