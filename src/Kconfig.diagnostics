@@ -69,3 +69,12 @@ config MESHTASTIC_STACK_PROTECTION
 # and never reflashed by the fleet -- untouched.
 config XTENSA_INTERRUPT_NONPREEMPTABLE
 	default y if SOC_SERIES_ESP32S3
+
+config MESHTASTIC_LORA_DEBUG_BUILD
+	bool "This image is a LoRa bring-up build (reported as the lora-debug feature)"
+	help
+	  Set by samples/meshtastic/overlay-lora-debug.conf and by nothing else. It only names the
+	  recipe, so `meshtastic state` can tell the bring-up image from the plain class (identity
+	  is class + build + features). It is NOT derived from the driver's log level: the base
+	  prj.conf runs the LoRa driver at DEBUG, and only the Heltec overlay lowers it, so a plain
+	  XIAO image is at DEBUG too and must not claim the feature.
