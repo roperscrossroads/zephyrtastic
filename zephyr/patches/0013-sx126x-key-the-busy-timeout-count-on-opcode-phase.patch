@@ -1,5 +1,5 @@
 diff --git a/drivers/lora/native/sx126x/sx126x_hal_common.c b/drivers/lora/native/sx126x/sx126x_hal_common.c
-index 6773772..579bc61 100644
+index 36a3a26a7..d2892f05e 100644
 --- a/drivers/lora/native/sx126x/sx126x_hal_common.c
 +++ b/drivers/lora/native/sx126x/sx126x_hal_common.c
 @@ -44,41 +44,57 @@ static uint8_t sx126x_last_issued_opcode;
@@ -8,10 +8,10 @@ index 6773772..579bc61 100644
   * no longer erases the evidence of a per-command wedge. The reported streak is the worst
 - * opcode's count, which keeps the existing accessor (and `meshtastic rf`'s "SPI BUSY
 - * streak" row) meaning "how stuck is this radio".
-+ * count of any tracked wait, which keeps the existing accessor (and `meshtastic rf`'s
-+ * "SPI BUSY streak" row) meaning "how stuck is this radio".
++ * count of any tracked wait, which keeps the existing accessor (and any status report built
++ * on it) meaning "how stuck is this radio".
 + *
-+ * agents-3raz, second pass: keying on the opcode ALONE was still not enough, and failed
++ * Second pass: keying on the opcode ALONE was still not enough, and failed
 + * the same way one level down. sx126x_hal_write_cmd() waits on BUSY twice for the same
 + * opcode -- once BEFORE the SPI transfer and once after -- and the PRE wait cannot fail
 + * in the wedged state, because the chip is idle by definition until the command is
@@ -88,7 +88,7 @@ index 6773772..579bc61 100644
  		if (slot != NULL) {
 -			(*slot)++; /* agents-3raz: per-opcode, so an unrelated success
 -				    * elsewhere cannot erase a per-command wedge */
-+			(*slot)++; /* agents-3raz: per (opcode, phase), so neither an
++			(*slot)++; /* Per (opcode, phase), so neither an
 +				    * unrelated opcode nor this command's own pre-wait
 +				    * can erase the evidence of a per-command wedge */
  		}

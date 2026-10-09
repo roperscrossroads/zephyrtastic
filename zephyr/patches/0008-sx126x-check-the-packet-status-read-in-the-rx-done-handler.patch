@@ -1,8 +1,8 @@
 diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
-index 12e3ed5..957d4a1 100644
+index 8f80ba6f3..3c0ace0fe 100644
 --- a/drivers/lora/native/sx126x/sx126x.c
 +++ b/drivers/lora/native/sx126x/sx126x.c
-@@ -941,7 +941,23 @@ static void sx126x_handle_irq_rx_done(const struct device *dev, uint16_t irq_sta
+@@ -973,7 +973,23 @@ static void sx126x_handle_irq_rx_done(const struct device *dev, uint16_t irq_sta
  		goto out;
  	}
  
@@ -12,7 +12,7 @@ index 12e3ed5..957d4a1 100644
 +	 * not masquerade as a measurement either: `result` is zero-initialised, so
 +	 * discarding this return code reports RSSI 0 / SNR 0, and 0 is precisely
 +	 * the value the mesh stack reads as "not received over RF at all"
-+	 * (reference: RadioLibInterface.cpp treats rx_snr == 0 && rx_rssi == 0 as a
++	 * (some mesh stacks treat rx_snr == 0 && rx_rssi == 0 as a
 +	 * locally-generated packet). Log it, so an unavailable reading stays
 +	 * distinguishable from a signal that merely ran off the top of the scale:
 +	 * RssiPkt is an unsigned -dBm/2 byte, so a transmitter a short bench

@@ -1,5 +1,5 @@
 diff --git a/drivers/watchdog/wdt_esp32.c b/drivers/watchdog/wdt_esp32.c
-index bab133c73b..c13b6b82d8 100644
+index 3b456f2b3..da3d9a910 100644
 --- a/drivers/watchdog/wdt_esp32.c
 +++ b/drivers/watchdog/wdt_esp32.c
 @@ -22,6 +22,7 @@

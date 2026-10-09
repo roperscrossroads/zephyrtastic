@@ -5,6 +5,7 @@
 config BOARD_HELTEC_VISION_MASTER_E290
 	# ESP32-S3R8 WROOM: 8MB flash + 8MB OCTAL PSRAM.
 	# (Meshtastic treats this board as 8MB flash — see the board .dts note.)
-	select SOC_ESP32S3_WROOM_N8R8
+	# The plain SoC symbol (Zephyr 4.5 retired the per-module ones): sizes are in the board dts.
+	select SOC_ESP32S3
 	select SOC_ESP32S3_PROCPU if BOARD_HELTEC_VISION_MASTER_E290_ESP32S3_PROCPU
 	select SOC_ESP32S3_APPCPU if BOARD_HELTEC_VISION_MASTER_E290_ESP32S3_APPCPU

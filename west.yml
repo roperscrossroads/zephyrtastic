@@ -15,7 +15,7 @@ manifest:
       # patches and they would not apply. Bumping Zephyr is now a deliberate
       # act: change this SHA, run `west update && west patch apply`, and fix
       # whatever the patches no longer apply to.
-      revision: 6072d4880d2d8deeadb506929adca4dba44c8220
+      revision: 25c8f4a23988dd3b2cfb463613622738298c2d6c
       clone-depth: 1
       import:
         name-allowlist:

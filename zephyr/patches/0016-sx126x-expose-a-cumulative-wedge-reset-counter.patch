@@ -1,7 +1,8 @@
 diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+index 9ccfebd86..8f1d36a8d 100644
 --- a/drivers/lora/native/sx126x/sx126x.c
 +++ b/drivers/lora/native/sx126x/sx126x.c
-@@ -810,6 +810,12 @@
+@@ -840,6 +840,12 @@ static uint32_t sx126x_agc_reset_ok_count;
  static uint32_t sx126x_agc_reset_fail_count;
  static uint32_t sx126x_agc_reset_skipped_count;
  static uint32_t sx126x_agc_patch_fail_count;
@@ -14,7 +15,7 @@ diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx
  
  uint32_t sx126x_cad_clear_count_get(void)
  {
-@@ -851,6 +857,11 @@
+@@ -881,6 +887,11 @@ uint32_t sx126x_agc_patch_fail_count_get(void)
  	return sx126x_agc_patch_fail_count;
  }
  
@@ -26,7 +27,7 @@ diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx
  void sx126x_cad_agc_stats_reset(void)
  {
  	sx126x_cad_clear_count = 0U;
-@@ -861,6 +872,7 @@
+@@ -891,6 +902,7 @@ void sx126x_cad_agc_stats_reset(void)
  	sx126x_agc_reset_fail_count = 0U;
  	sx126x_agc_reset_skipped_count = 0U;
  	sx126x_agc_patch_fail_count = 0U;
@@ -34,7 +35,7 @@ diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx
  }
  
  /*
-@@ -1237,6 +1249,7 @@
+@@ -1273,6 +1285,7 @@ int sx126x_config_begin(const struct device *dev)
  			sx126x_hal_busy_timeout_streak());
  		(void)sx126x_chip_init(dev);
  		sx126x_hal_busy_timeout_streak_reset();

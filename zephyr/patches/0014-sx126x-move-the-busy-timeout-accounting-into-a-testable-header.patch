@@ -1,6 +1,6 @@
 diff --git a/drivers/lora/native/sx126x/sx126x_busy_track.h b/drivers/lora/native/sx126x/sx126x_busy_track.h
 new file mode 100644
-index 0000000..a50ebf0
+index 000000000..a50ebf09e
 --- /dev/null
 +++ b/drivers/lora/native/sx126x/sx126x_busy_track.h
 @@ -0,0 +1,128 @@
@@ -133,7 +133,7 @@ index 0000000..a50ebf0
 +
 +#endif /* ZEPHYR_DRIVERS_LORA_SX126X_BUSY_TRACK_H_ */
 diff --git a/drivers/lora/native/sx126x/sx126x_hal_common.c b/drivers/lora/native/sx126x/sx126x_hal_common.c
-index 6572ffd..ff7808f 100644
+index d2892f05e..a9ff6ab95 100644
 --- a/drivers/lora/native/sx126x/sx126x_hal_common.c
 +++ b/drivers/lora/native/sx126x/sx126x_hal_common.c
 @@ -5,6 +5,8 @@
@@ -145,7 +145,7 @@ index 6572ffd..ff7808f 100644
  #include <zephyr/kernel.h>
  #include <zephyr/device.h>
  #include <zephyr/drivers/spi.h>
-@@ -112,61 +114,16 @@ static void sx126x_oplog_dump(void)
+@@ -59,61 +61,16 @@ static uint8_t sx126x_last_issued_opcode;
   * The key is therefore (opcode, phase). Only a POST success on an opcode clears that
   * opcode's POST count. A slot is a WAIT, not a command -- hence the rename.
   */
@@ -210,24 +210,24 @@ index 6572ffd..ff7808f 100644
  }
  
  static int spi_transfer(const struct spi_dt_spec *spi,
-@@ -218,13 +175,9 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
+@@ -164,13 +121,9 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
  	if (!WAIT_FOR(!sx126x_hal_is_busy(dev),
  		      timeout_ms * 1000,
  		      k_msleep(1))) {
 -		uint32_t *slot = sx126x_busy_slot(opcode, post, true);
 -
 -		if (slot != NULL) {
--			(*slot)++; /* agents-3raz: per (opcode, phase), so neither an
+-			(*slot)++; /* Per (opcode, phase), so neither an
 -				    * unrelated opcode nor this command's own pre-wait
 -				    * can erase the evidence of a per-command wedge */
 -		}
-+		/* agents-3raz: per (opcode, phase), so neither an unrelated opcode nor
++		/* Per (opcode, phase), so neither an unrelated opcode nor
 +		 * this command's own pre-wait can erase a per-command wedge. */
 +		sx126x_busy_record_timeout(&sx126x_busy_fail, opcode, post);
  		/* On a PRE timeout, sx126x_last_issued_opcode is the op that left BUSY
  		 * high (the culprit); on a POST timeout it is this same command. */
  		sx126x_hal_busy_timeout_report(dev, opcode, timeout_ms, post,
-@@ -235,18 +188,12 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
+@@ -178,18 +131,12 @@ int sx126x_hal_wait_busy(const struct device *dev, uint32_t timeout_ms, uint8_t
  		return -ETIMEDOUT;
  	}
  
@@ -238,16 +238,17 @@ index 6572ffd..ff7808f 100644
 -		 * post-wait never returns succeeds every time, and clearing on it is what
 -		 * pinned the count at 1 while every transmit failed. */
 -		uint32_t *slot = sx126x_busy_slot(opcode, post, false);
+-
+-		if (slot != NULL) {
+-			*slot = 0U;
+-		}
+-	}
 +	/* Only THIS wait's count is cleared: the radio has just proven it can complete this
 +	 * command at this phase. Another opcode may still be wedged, and so may this opcode's
 +	 * other phase -- the pre-wait of a command whose post-wait never returns succeeds every
 +	 * time, and clearing on it is what pinned the count at 1 while every transmit failed. */
 +	sx126x_busy_record_success(&sx126x_busy_fail, opcode, post);
- 
--		if (slot != NULL) {
--			*slot = 0U;
--		}
--	}
++
  	return 0;
  }
  

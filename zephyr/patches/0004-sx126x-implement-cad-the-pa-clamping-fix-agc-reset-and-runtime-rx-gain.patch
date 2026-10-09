@@ -1,22 +1,24 @@
 diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
-index 3c9a14f..b7df2d7 100644
+index d2ff2f430..afa8d1475 100644
 --- a/drivers/lora/native/sx126x/sx126x.c
 +++ b/drivers/lora/native/sx126x/sx126x.c
-@@ -731,6 +731,68 @@ static int sx126x_ensure_ready(const struct device *dev)
+@@ -761,6 +761,70 @@ static int sx126x_ensure_ready(const struct device *dev)
  	return 0;
  }
  
 +/*
-+ * Periodic AGC reset (parity: upstream Meshtastic RadioLibInterface::resetAGC(),
-+ * called every AGC_RESET_INTERVAL_MS = 60s). Empirically necessary, not
-+ * theoretical: per upstream's own commit history, the SX126x's internal AGC
++ * Periodic AGC reset (MeshCore's radio layer does the same, on a configurable
++ * interval). Empirically necessary, not theoretical: the SX126x's internal AGC
 + * can get stuck and RX sensitivity silently degrades -- and does not recover
 + * on its own until reboot. A plain standby cycle does not reset it; only a
 + * warm-sleep power-cycle of the analog frontend does, which is exactly what
 + * sx126x_set_sleep()/sx126x_ensure_ready() already implement (SLEEP_WARM_START
 + * retains configuration, so this is cheap -- no full recalibration).
++ * MeshCore's own sequence is more thorough: it also runs Calibrate(all) and
++ * re-calibrates the image for the operating frequency. This one does not; whether
++ * it should is an open item (docs/ZEPHYR-PATCHES.md).
 + *
-+ * The caller (meshtastic_radio.c, on a periodic timer) is responsible for
++ * The caller (the application's radio layer, on a periodic timer) is responsible for
 + * pausing continuous async RX and re-arming it afterward, exactly as it
 + * already does around a TX -- this function only does the chip-level cycle,
 + * under data->lock like every other config-touching operation in this file.
@@ -71,7 +73,7 @@ index 3c9a14f..b7df2d7 100644
  static void sx126x_handle_irq_tx_done(const struct device *dev)
  {
  	struct sx126x_data *data = dev->data;
-@@ -986,8 +1048,10 @@ static int sx126x_lora_config(const struct device *dev,
+@@ -1055,8 +1119,10 @@ static int sx126x_lora_config(const struct device *dev, const struct lora_modem_
  		goto out;
  	}
  
@@ -84,7 +86,7 @@ index 3c9a14f..b7df2d7 100644
  	if (ret < 0) {
  		goto out;
  	}
-@@ -1003,6 +1067,161 @@ out:
+@@ -1073,6 +1139,160 @@ out:
  	return ret;
  }
  
@@ -135,9 +137,8 @@ index 3c9a14f..b7df2d7 100644
 + * driver's standard TX/RX/timeout/CRC-err DIO1 mask before returning either
 + * way, since SetCadParams' own IRQ configuration otherwise displaces it.
 + *
-+ * Returns 0 (clear), -EBUSY (activity detected -- the exact contract the
-+ * upper layers, up through meshtastic_radio.c's retry loop, already expect
-+ * from a busy channel), or a negative errno on a communication failure.
++ * Returns 0 (clear), -EBUSY (activity detected -- the contract
++ * lora_send() documents for a busy channel), or a negative errno on a communication failure.
 + */
 +static int sx126x_do_cad(const struct device *dev, const struct lora_modem_config *config)
 +{
@@ -246,7 +247,7 @@ index 3c9a14f..b7df2d7 100644
  static int sx126x_lora_send_async(const struct device *dev,
  				  uint8_t *data_buf, uint32_t data_len,
  				  struct k_poll_signal *async)
-@@ -1034,6 +1253,15 @@ static int sx126x_lora_send_async(const struct device *dev,
+@@ -1114,6 +1334,15 @@ static int sx126x_lora_send_async(const struct device *dev,
  		return ret;
  	}
  
@@ -262,7 +263,7 @@ index 3c9a14f..b7df2d7 100644
  	data->tx_async_signal = async;
  	k_msgq_purge(&data->tx_msgq);
  
-@@ -1605,6 +1833,7 @@ static int sx126x_pm_action(const struct device *dev,
+@@ -1691,6 +1920,7 @@ static int sx126x_pm_action(const struct device *dev,
  static int sx126x_init(const struct device *dev)
  {
  	struct sx126x_data *data = dev->data;
@@ -270,7 +271,7 @@ index 3c9a14f..b7df2d7 100644
  	int ret;
  
  	/* Initialize data structures */
-@@ -1617,6 +1846,7 @@ static int sx126x_init(const struct device *dev)
+@@ -1703,6 +1933,7 @@ static int sx126x_init(const struct device *dev)
  	data->dev = dev;
  	atomic_set(&data->state, SX126X_STATE_IDLE);
  	data->config_valid = false;
@@ -279,12 +280,12 @@ index 3c9a14f..b7df2d7 100644
  	/* Initialize HAL */
  	ret = sx126x_hal_init(dev);
 diff --git a/drivers/lora/native/sx126x/sx126x.h b/drivers/lora/native/sx126x/sx126x.h
-index 0122958c32..494cf9ebf1 100644
+index 07c50f004..c7eada65e 100644
 --- a/drivers/lora/native/sx126x/sx126x.h
 +++ b/drivers/lora/native/sx126x/sx126x.h
-@@ -43,6 +43,16 @@ struct sx126x_data {
- 	struct lora_modem_config config;
- 	bool config_valid;
+@@ -48,6 +48,16 @@ struct sx126x_data {
+ 	struct lora_modem_config_gfsk gfsk_config;
+ 	bool gfsk;
  
 +	/*
 +	 * RX gain boost mode. Seeded from hal_config->rx_boosted (the devicetree
@@ -299,51 +300,11 @@ index 0122958c32..494cf9ebf1 100644
  	/* TX completion via message queue */
  	struct k_msgq tx_msgq;
  	struct sx126x_tx_result tx_result;
-diff --git a/drivers/lora/native/sx126x/sx126x_regs.h b/drivers/lora/native/sx126x/sx126x_regs.h
-index 1e6146f751..d3e8e52535 100644
---- a/drivers/lora/native/sx126x/sx126x_regs.h
-+++ b/drivers/lora/native/sx126x/sx126x_regs.h
-@@ -76,6 +76,22 @@
- 
- #define SX126X_IRQ_ALL                      0x03FF
- 
-+/* SetCadParams (0x88) field values. Defaults (used when the caller requests
-+ * symbol_num=0 / detection_peak=0 / detection_minimum=0, i.e. "auto") match
-+ * RadioLib's own CAD defaults for the SX1262 -- the exact library upstream
-+ * Meshtastic uses -- which in turn cite Semtech DS.SX1261-2.W.APP rev 1.1
-+ * p.92. Confirmed against RadioLib source (SX126x_commands.cpp setCad(),
-+ * 2026-08-06): symbolNum defaults to 4 symbols, detPeak to spreadingFactor+13
-+ * (SF-dependent, not fixed), detMin to 10, exitMode always GOTO_STDBY. */
-+#define SX126X_CAD_ON_1_SYMB                0x00
-+#define SX126X_CAD_ON_2_SYMB                0x01
-+#define SX126X_CAD_ON_4_SYMB                0x02
-+#define SX126X_CAD_ON_8_SYMB                0x03
-+#define SX126X_CAD_ON_16_SYMB               0x04
-+#define SX126X_CAD_GOTO_STDBY               0x00
-+#define SX126X_CAD_GOTO_RX                  0x01
-+#define SX126X_CAD_PARAM_DET_MIN_DEFAULT    10U
-+
- /* Packet Types */
- #define SX126X_PACKET_TYPE_GFSK             0x00
- #define SX126X_PACKET_TYPE_LORA             0x01
-@@ -183,6 +199,12 @@
- /* TX Clamp Config (workaround for SX1262) */
- #define SX126X_REG_TX_CLAMP_CFG             0x08D8
- 
-+/* RX sensitivity patch bit, re-applied by the periodic AGC-reset warm-sleep
-+ * cycle (upstream Meshtastic resetAGC(), empirically necessary -- see
-+ * SX126x_hal.c's sx126x_reset_agc()). Bit 0 only; other bits preserved. */
-+#define SX126X_REG_RX_SENSITIVITY_PATCH     0x08B5
-+#define SX126X_RX_SENSITIVITY_PATCH_BIT     BIT(0)
-+
- /* Over Current Protection */
- #define SX126X_REG_OCP                      0x08E7
- 
 diff --git a/drivers/lora/native/sx126x/sx126x_hal.c b/drivers/lora/native/sx126x/sx126x_hal.c
-index ca61427..845251b 100644
+index ca6142749..a04192b6b 100644
 --- a/drivers/lora/native/sx126x/sx126x_hal.c
 +++ b/drivers/lora/native/sx126x/sx126x_hal.c
-@@ -195,6 +195,35 @@ static int sx126x_hal_set_pa_config(const struct device *dev, uint8_t pa_duty_cy
+@@ -195,6 +195,34 @@ static int sx126x_hal_set_pa_config(const struct device *dev, uint8_t pa_duty_cy
  	return sx126x_hal_write_cmd(dev, SX126X_CMD_SET_PA_CONFIG, buf, 4);
  }
  
@@ -352,8 +313,7 @@ index ca61427..845251b 100644
 + * sec. 15.2): the default TX_CLAMP_CFG value makes the PA's over-current
 + * clamp overly eager, silently capping actual output power below what was
 + * configured -- worse at higher power and with antenna mismatch, with no
-+ * error raised anywhere. RadioLib (the library upstream Meshtastic uses)
-+ * applies this unconditionally for every SX1262/SX1268 via fixPaClamping();
++ * error raised anywhere. RadioLib applies this unconditionally for every SX1262/SX1268 via fixPaClamping();
 + * the STM32WL HAL variant in this same driver tree already carries an
 + * equivalent read-modify-write (same 0x1E mask) but only for that variant --
 + * this is the SX1262 discrete-chip path (e.g. Heltec V4's SPI-connected
@@ -379,7 +339,7 @@ index ca61427..845251b 100644
  int sx126x_hal_configure_tx_params(const struct device *dev, int8_t power,
  				   uint32_t frequency, uint8_t ramp_time)
  {
-@@ -228,6 +257,12 @@ int sx126x_hal_configure_tx_params(const struct device *dev, int8_t power,
+@@ -228,6 +256,12 @@ int sx126x_hal_configure_tx_params(const struct device *dev, int8_t power,
  		if (ret < 0) {
  			return ret;
  		}
@@ -391,4 +351,43 @@ index ca61427..845251b 100644
 +
  		tx_power = CLAMP(power, SX1262_MIN_POWER, SX1262_MAX_POWER);
  	}
+ 
+diff --git a/drivers/lora/native/sx126x/sx126x_regs.h b/drivers/lora/native/sx126x/sx126x_regs.h
+index 9b342f473..198c16999 100644
+--- a/drivers/lora/native/sx126x/sx126x_regs.h
++++ b/drivers/lora/native/sx126x/sx126x_regs.h
+@@ -76,6 +76,21 @@
+ 
+ #define SX126X_IRQ_ALL                      0x03FF
+ 
++/* SetCadParams (0x88) field values. Defaults (used when the caller requests
++ * symbol_num=0 / detection_peak=0 / detection_minimum=0, i.e. "auto") match
++ * RadioLib's own CAD defaults for the SX1262, which in turn cite Semtech DS.SX1261-2.W.APP rev 1.1
++ * p.92. Confirmed against RadioLib source (SX126x_commands.cpp setCad(),
++ * 2026-08-06): symbolNum defaults to 4 symbols, detPeak to spreadingFactor+13
++ * (SF-dependent, not fixed), detMin to 10, exitMode always GOTO_STDBY. */
++#define SX126X_CAD_ON_1_SYMB                0x00
++#define SX126X_CAD_ON_2_SYMB                0x01
++#define SX126X_CAD_ON_4_SYMB                0x02
++#define SX126X_CAD_ON_8_SYMB                0x03
++#define SX126X_CAD_ON_16_SYMB               0x04
++#define SX126X_CAD_GOTO_STDBY               0x00
++#define SX126X_CAD_GOTO_RX                  0x01
++#define SX126X_CAD_PARAM_DET_MIN_DEFAULT    10U
++
+ /* Packet Types */
+ #define SX126X_PACKET_TYPE_GFSK             0x00
+ #define SX126X_PACKET_TYPE_LORA             0x01
+@@ -252,6 +267,12 @@
+ /* TX Clamp Config (workaround for SX1262) */
+ #define SX126X_REG_TX_CLAMP_CFG             0x08D8
+ 
++/* RX sensitivity patch bit, re-applied by the periodic AGC-reset warm-sleep
++ * cycle (MeshCore's AGC reset does the same; empirically necessary -- see
++ * sx126x_reset_agc()). Bit 0 only; other bits preserved. */
++#define SX126X_REG_RX_SENSITIVITY_PATCH     0x08B5
++#define SX126X_RX_SENSITIVITY_PATCH_BIT     BIT(0)
++
+ /* Over Current Protection */
+ #define SX126X_REG_OCP                      0x08E7
  

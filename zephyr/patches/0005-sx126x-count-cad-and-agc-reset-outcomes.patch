@@ -1,8 +1,8 @@
 diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
-index b7df2d7..d699cbb 100644
+index afa8d1475..db23587a2 100644
 --- a/drivers/lora/native/sx126x/sx126x.c
 +++ b/drivers/lora/native/sx126x/sx126x.c
-@@ -731,6 +731,77 @@ static int sx126x_ensure_ready(const struct device *dev)
+@@ -761,6 +761,77 @@ static int sx126x_ensure_ready(const struct device *dev)
  	return 0;
  }
  
@@ -13,8 +13,8 @@ index b7df2d7..d699cbb 100644
 + * these are soak-test visibility, not synchronization state, and every
 + * increment site already runs under data->lock. Exported via plain accessor
 + * + reset functions in the same style as
-+ * sx126x_hal_busy_timeout_streak()/_reset(), consumed by meshtastic_radio.c
-+ * and surfaced on `meshtastic sched stats`.
++ * sx126x_hal_busy_timeout_streak()/_reset(), consumed by the application's radio
++ * layer and surfaced in its statistics.
 + */
 +static uint32_t sx126x_cad_clear_count;
 +static uint32_t sx126x_cad_busy_count;
@@ -78,9 +78,9 @@ index b7df2d7..d699cbb 100644
 +}
 +
  /*
-  * Periodic AGC reset (parity: upstream Meshtastic RadioLibInterface::resetAGC(),
-  * called every AGC_RESET_INTERVAL_MS = 60s). Empirically necessary, not
-@@ -760,6 +831,7 @@ int sx126x_reset_agc(const struct device *dev)
+  * Periodic AGC reset (MeshCore's radio layer does the same, on a configurable
+  * interval). Empirically necessary, not theoretical: the SX126x's internal AGC
+@@ -792,6 +863,7 @@ int sx126x_reset_agc(const struct device *dev)
  
  	if (atomic_get(&data->state) == SX126X_STATE_TX) {
  		k_mutex_unlock(&data->lock);
@@ -88,7 +88,7 @@ index b7df2d7..d699cbb 100644
  		return -EBUSY;
  	}
  
-@@ -784,12 +856,20 @@ int sx126x_reset_agc(const struct device *dev)
+@@ -816,12 +888,20 @@ int sx126x_reset_agc(const struct device *dev)
  	}
  	if (ret < 0) {
  		LOG_WRN("AGC reset: RX sensitivity patch re-apply failed (%d)", ret);
@@ -109,7 +109,7 @@ index b7df2d7..d699cbb 100644
  	return ret;
  }
  
-@@ -1164,33 +1244,54 @@ static int sx126x_do_cad(const struct device *dev, const struct lora_modem_confi
+@@ -1235,33 +1315,54 @@ static int sx126x_do_cad(const struct device *dev, const struct lora_modem_confi
  	params[5] = 0U;
  	params[6] = 0U;
  
@@ -169,7 +169,7 @@ index b7df2d7..d699cbb 100644
  	deadline = k_uptime_get() + SX126X_CAD_TIMEOUT_MS;
  	while (gpio_pin_get_dt(&hal_config->dio1) == 0) {
  		if (k_uptime_get() >= deadline) {
-@@ -1215,11 +1316,27 @@ restore_mask:
+@@ -1286,11 +1387,27 @@ restore_mask:
  					  SX126X_IRQ_RX_TX_TIMEOUT | SX126X_IRQ_CRC_ERR,
  				  0, 0);
  

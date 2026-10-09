@@ -9,8 +9,8 @@ config BOARD_SENSECAP_INDICATOR_D1L
 	# CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y, CONFIG_SPIRAM_MODE_OCT=y) and against
 	# upstream Meshtastic's own platformio.ini for this variant. Not confirmed to be
 	# a literal Espressif WROOM-packaged SIP rather than a bare chip + discrete
-	# flash/PSRAM on a custom PCB -- SOC_ESP32S3_WROOM_N8R8 is used here purely for
-	# its 8 MB flash / 8 MB octal PSRAM Kconfig defaults, which match either way.
-	select SOC_ESP32S3_WROOM_N8R8
+	# flash/PSRAM on a custom PCB. The plain SoC symbol is used (Zephyr 4.5 retired the
+	# per-module ones); the 8 MB / 8 MB sizes are in the board dts.
+	select SOC_ESP32S3
 	select SOC_ESP32S3_PROCPU if BOARD_SENSECAP_INDICATOR_D1L_ESP32S3_PROCPU
 	select SOC_ESP32S3_APPCPU if BOARD_SENSECAP_INDICATOR_D1L_ESP32S3_APPCPU

@@ -1,8 +1,8 @@
 diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
-index d1d282a..62d875c 100644
+index 44b282c6b..9ccfebd86 100644
 --- a/drivers/lora/native/sx126x/sx126x.c
 +++ b/drivers/lora/native/sx126x/sx126x.c
-@@ -1660,8 +1660,36 @@ static int sx126x_lora_send(const struct device *dev,
+@@ -1734,8 +1734,36 @@ static int sx126x_lora_send(const struct device *dev,
  		return ret;
  	}
  

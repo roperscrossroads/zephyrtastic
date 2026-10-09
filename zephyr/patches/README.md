@@ -5,6 +5,15 @@ project pinned to `main` in `../west.yml`). `west update` restores each project
 to its manifest revision and **discards in-tree edits**, so anything we change in
 `zephyr/` must be captured here or it is lost on the next update.
 
+> **Zephyr 4.5 series (2026-10-09, branch `zephyr-4.5-bump`).** The series was renumbered when
+> the pin moved to `25c8f4a2`: 0001-0017 are the patches rebased onto 4.5 by zephcore (sx126x
+> driver, `wdt_esp32`, the BT controller ISR guard), 0018 GNSS buffer, 0019 Nordic QSPI, 0020
+> `stream_flash`, 0021 Xtensa fault breadcrumbs. Dropped: the `adc_esp32` GPIO patch (pending a
+> V4 hardware check), Xtensa backtrace and window spill (upstream builds them under
+> `XTENSA_ENABLE_BACKTRACE` now). The older per-patch notes below use the 4.4 numbers;
+> `patches.yml` carries the current descriptions, and the bump record is the tooling repo's
+> `docs/ZEPHYR-4.5-BUMP.md`.
+
 ## Workflow
 
 ```bash

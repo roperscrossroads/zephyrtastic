@@ -15,6 +15,7 @@
 &flash0 {
 	partitions {
 		mt_bulk_partition: partition@100000 {
+			compatible = "zephyr,mapped-partition";
 			label = "mt-bulk";
 			reg = <0x00100000 0x00040000>;
 		};

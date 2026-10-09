@@ -290,14 +290,6 @@ static int smpc_output(struct net_buf *nb)
 	return rc;
 }
 
-static uint16_t smpc_get_mtu(const struct net_buf *nb)
-{
-	ARG_UNUSED(nb);
-	/* The client sizes upload chunks from NETBUF_SIZE, not from this; it is
-	 * here for completeness of the transport contract. */
-	return CONFIG_MCUMGR_TRANSPORT_NETBUF_SIZE;
-}
-
 /* ------------------------------------------------------------------------ */
 /* Transport: RX (notifications from the target's SMP characteristic)        */
 
@@ -378,7 +370,7 @@ static uint8_t smpc_notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_par
 		 * (smp_process_request_packet), so strip it here too. Ownership of
 		 * the buffer stays with us; the callback only reads it. */
 		net_buf_pull(smpc.rx, sizeof(hdr));
-		rc = smp_client_single_response(smpc.rx, &hdr);
+		rc = smp_client_single_response(&smpc_transport, smpc.rx, &hdr);
 		if (rc != MGMT_ERR_EOK) {
 			smpc.rx_unmatched++;
 			LOG_WRN("SMPC rx: unmatched response seq %u group %u id %u", hdr.nh_seq,
@@ -737,7 +729,6 @@ static int smpc_client_init(void)
 	}
 
 	smpc_transport.functions.output = smpc_output;
-	smpc_transport.functions.get_mtu = smpc_get_mtu;
 	rc = smp_transport_init(&smpc_transport);
 	if (rc != 0) {
 		return rc;
@@ -1299,7 +1290,7 @@ static void smpc_job_fn(struct k_work *work)
 			goto out;
 		}
 		memcpy(hash, s1->hash, sizeof(hash));
-		rc = img_mgmt_client_state_write(&smpc_img, hash, false, &st);
+		rc = img_mgmt_client_state_write(&smpc_img, hash, sizeof(hash), false, &st);
 		if (rc != MGMT_ERR_EOK) {
 			LOG_ERR("SMPC update: mark-test failed (%s)", mgmt_err_str(rc));
 			goto out;
@@ -1410,7 +1401,7 @@ static void smpc_job_fn(struct k_work *work)
 	k_mutex_lock(&smpc.lock, K_FOREVER);
 	smpc.job_stage = "confirm";
 	k_mutex_unlock(&smpc.lock);
-	rc = img_mgmt_client_state_write(&smpc_img, NULL, true, &st);
+	rc = img_mgmt_client_state_write(&smpc_img, NULL, 0, true, &st);
 	if (rc != MGMT_ERR_EOK) {
 		LOG_ERR("SMPC update: confirm failed (%s)", mgmt_err_str(rc));
 		goto out;
@@ -1683,7 +1674,12 @@ static int cmd_connect(const struct shell *sh, size_t argc, char **argv)
 	const char *type = argc > 2 ? argv[2] : "random";
 	int rc;
 
-	rc = bt_addr_le_from_str(argv[1], type, &addr);
+	/* Zephyr 4.5 parses "P:XX:..." / "R:XX:..." only; the type word is ours. */
+	char full[3 + BT_ADDR_STR_LEN];
+
+	snprintf(full, sizeof(full), "%c:%s", (type[0] == 'p' || type[0] == 'P') ? 'P' : 'R',
+		 argv[1]);
+	rc = bt_addr_le_from_str(full, &addr);
 	if (rc != 0) {
 		shell_error(sh, "bad address (want XX:XX:XX:XX:XX:XX [public|random])");
 		return -EINVAL;
@@ -1876,7 +1872,7 @@ static int cmd_test(const struct shell *sh, size_t argc, char **argv)
 		return -ENOENT;
 	}
 	memcpy(hash, s1->hash, sizeof(hash));
-	rc = img_mgmt_client_state_write(&smpc_img, hash, false, &st);
+	rc = img_mgmt_client_state_write(&smpc_img, hash, sizeof(hash), false, &st);
 	if (rc != MGMT_ERR_EOK) {
 		shell_error(sh, "mark test: %s", mgmt_err_str(rc));
 		return -EIO;
@@ -1898,7 +1894,7 @@ static int cmd_confirm(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "not connected");
 		return -ENOTCONN;
 	}
-	rc = img_mgmt_client_state_write(&smpc_img, NULL, true, &st);
+	rc = img_mgmt_client_state_write(&smpc_img, NULL, 0, true, &st);
 	if (rc != MGMT_ERR_EOK) {
 		shell_error(sh, "confirm: %s", mgmt_err_str(rc));
 		return -EIO;

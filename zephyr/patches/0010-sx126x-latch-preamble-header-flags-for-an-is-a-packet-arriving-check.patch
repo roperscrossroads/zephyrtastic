@@ -1,8 +1,8 @@
 diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
-index ddb950b..d1d282a 100644
+index 0348d0cd3..44b282c6b 100644
 --- a/drivers/lora/native/sx126x/sx126x.c
 +++ b/drivers/lora/native/sx126x/sx126x.c
-@@ -28,6 +28,40 @@ LOG_MODULE_REGISTER(sx126x, CONFIG_LORA_LOG_LEVEL);
+@@ -35,6 +35,40 @@ LOG_MODULE_REGISTER(sx126x, CONFIG_LORA_LOG_LEVEL);
   */
  #define SX126X_BUSY_RECOVERY_THRESHOLD	4
  
@@ -19,10 +19,10 @@ index ddb950b..d1d282a 100644
 + * being demodulated right now". They are ENABLED in the IRQ mask so they latch
 + * in the status register, but deliberately NOT routed to DIO1 -- a preamble
 + * detection is not an event to act on, only a fact to consult. This is how
-+ * RadioLib configures the chip for Meshtastic (RADIOLIB_IRQ_RX_DEFAULT_FLAGS
-+ * plus PREAMBLE_DETECTED in the enable mask, RX_DONE alone on DIO1), and it is
-+ * the entire mechanism behind upstream's isActivelyReceiving(): read the
-+ * status register, look at these bits.
++ * RadioLib configures the chip (RADIOLIB_IRQ_RX_DEFAULT_FLAGS plus
++ * PREAMBLE_DETECTED in the enable mask, RX_DONE alone on DIO1), and it is the
++ * whole mechanism behind an "is a packet arriving" check: read the status
++ * register, look at these bits.
 + *
 + * Without them in the enable mask the bits never latch at all, so no amount of
 + * reading the status register can tell a caller a packet is arriving. That was
@@ -43,7 +43,7 @@ index ddb950b..d1d282a 100644
  static int bandwidth_to_reg(enum lora_signal_bandwidth bw, uint8_t *reg)
  {
  	switch (bw) {
-@@ -406,6 +440,8 @@ static int sx126x_set_rx_duty_cycle(const struct device *dev,
+@@ -417,6 +451,8 @@ static int sx126x_set_rx_duty_cycle(const struct device *dev,
  static int sx126x_set_rx(const struct device *dev, uint32_t timeout_ms)
  {
  	uint32_t timeout;
@@ -52,7 +52,7 @@ index ddb950b..d1d282a 100644
  
  	if (timeout_ms == 0) {
  		timeout = SX126X_RX_TIMEOUT_CONTINUOUS;
-@@ -413,7 +449,16 @@ static int sx126x_set_rx(const struct device *dev, uint32_t timeout_ms)
+@@ -424,7 +460,16 @@ static int sx126x_set_rx(const struct device *dev, uint32_t timeout_ms)
  		timeout = SX126X_MS_TO_TIMEOUT(timeout_ms);
  	}
  
@@ -70,7 +70,7 @@ index ddb950b..d1d282a 100644
  
  	sys_put_be24(timeout, buf);
  	return sx126x_hal_write_cmd(dev, SX126X_CMD_SET_RX, buf, 3);
-@@ -552,10 +597,9 @@ static int sx126x_chip_init(const struct device *dev)
+@@ -582,10 +627,9 @@ static int sx126x_chip_init(const struct device *dev)
  		return ret;
  	}
  
@@ -84,14 +84,14 @@ index ddb950b..d1d282a 100644
  	if (ret < 0) {
  		LOG_ERR("Set IRQ params failed: %d", ret);
  		return ret;
-@@ -890,6 +934,86 @@ out:
+@@ -922,6 +966,86 @@ out:
  	return ret;
  }
  
 +/*
-+ * Is a packet being demodulated right now? Parity: upstream Meshtastic's
-+ * SX126xInterface::isActivelyReceiving() reads the IRQ status register and
-+ * looks at HEADER_VALID | PREAMBLE_DETECTED. This is the chip half of that; the
++ * Is a packet being demodulated right now? The usual way to answer is to read
++ * the IRQ status register and look at HEADER_VALID | PREAMBLE_DETECTED. This is
++ * the chip half of that; the
 + * false-detection timing (a preamble that never became a header, a header that
 + * never became a packet) lives in the caller, because it needs the modem's
 + * preamble and packet times, which the driver does not compute.
@@ -171,7 +171,7 @@ index ddb950b..d1d282a 100644
  static void sx126x_handle_irq_tx_done(const struct device *dev)
  {
  	struct sx126x_data *data = dev->data;
-@@ -1284,11 +1408,13 @@ bool sx126x_rx_boosted_applied_get(const struct device *dev, bool *out)
+@@ -1356,11 +1480,12 @@ bool sx126x_rx_boosted_applied_get(const struct device *dev, bool *out)
   * this driver accepted in its config struct but never actually implemented.
   *
   * Parameters: symbol_num/detection_peak/detection_minimum of 0 mean "auto" --
@@ -182,14 +182,13 @@ index ddb950b..d1d282a 100644
 + * CAD_PARAM_DEFAULT): 4-symbol window, detPeak = spreadingFactor + 13
   * (SF-dependent), detMin = 10, always exits to STDBY_RC regardless of
 - * result. A caller may override any of the three explicitly.
-+ * result. A caller may override any of the three explicitly. Note that
-+ * upstream Meshtastic does NOT take the 4-symbol fallback: it passes
-+ * NUM_SYM_CAD = 2 explicitly (RadioInterface.h, per AN1200.48), which is
-+ * why meshtastic_radio.c asks for LORA_CAD_SYMB_2 rather than 0.
++ * result. A caller may override any of the three explicitly. A caller
++ * may prefer 2 symbols (see Semtech AN1200.48) and ask for LORA_CAD_SYMB_2
++ * explicitly rather than 0.
   *
   * Caller contract: must hold data->lock and have the chip in a state where
   * SetCadParams/SetCad are valid (sx126x_ensure_ready() has already run) --
-@@ -1408,15 +1534,10 @@ static int sx126x_do_cad(const struct device *dev, const struct lora_modem_confi
+@@ -1479,15 +1604,10 @@ static int sx126x_do_cad(const struct device *dev, const struct lora_modem_confi
  restore_mask:
  	sx126x_clear_irq_status(dev, SX126X_IRQ_ALL);
  

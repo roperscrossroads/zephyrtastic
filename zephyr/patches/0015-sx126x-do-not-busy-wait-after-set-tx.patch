@@ -1,8 +1,8 @@
 diff --git a/drivers/lora/native/sx126x/sx126x_hal_common.c b/drivers/lora/native/sx126x/sx126x_hal_common.c
-index ff7808f..3536b02 100644
+index a9ff6ab95..c69da4ad1 100644
 --- a/drivers/lora/native/sx126x/sx126x_hal_common.c
 +++ b/drivers/lora/native/sx126x/sx126x_hal_common.c
-@@ -290,14 +290,41 @@ int sx126x_hal_write_cmd(const struct device *dev, uint8_t opcode,
+@@ -233,14 +233,41 @@ int sx126x_hal_write_cmd(const struct device *dev, uint8_t opcode,
  		return ret;
  	}
  
@@ -20,7 +20,7 @@ index ff7808f..3536b02 100644
 +	 * waiting for it to drop would always time out. It needs a settle delay
 +	 * instead, before the next NSS edge can wake it reliably.
 +	 *
-+	 * SET_TX (agents-3raz): after SetTx the radio is transmitting, and
++	 * SET_TX: after SetTx the radio is transmitting, and
 +	 * completion is signalled by DIO1/TX_DONE -- not by BUSY. Waiting on BUSY
 +	 * here overlaps the exact window in which TX_DONE arrives, and the TX-done
 +	 * work handler calls sx126x_set_sleep(). Once the chip is asleep BUSY is

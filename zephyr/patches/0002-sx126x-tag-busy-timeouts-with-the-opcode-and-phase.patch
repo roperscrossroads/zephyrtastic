@@ -1,5 +1,5 @@
 diff --git a/drivers/lora/native/sx126x/sx126x_hal.c b/drivers/lora/native/sx126x/sx126x_hal.c
-index 34f7089584..ca6142749f 100644
+index 34f708958..ca6142749 100644
 --- a/drivers/lora/native/sx126x/sx126x_hal.c
 +++ b/drivers/lora/native/sx126x/sx126x_hal.c
 @@ -54,8 +54,8 @@ int sx126x_hal_reset(const struct device *dev)
@@ -14,7 +14,7 @@ index 34f7089584..ca6142749f 100644
  		return ret;
  	}
 diff --git a/drivers/lora/native/sx126x/sx126x_hal.h b/drivers/lora/native/sx126x/sx126x_hal.h
-index e4b26ba60b..006041c2d6 100644
+index e4b26ba60..006041c2d 100644
 --- a/drivers/lora/native/sx126x/sx126x_hal.h
 +++ b/drivers/lora/native/sx126x/sx126x_hal.h
 @@ -48,7 +48,28 @@ int sx126x_hal_init(const struct device *dev);
@@ -48,7 +48,7 @@ index e4b26ba60b..006041c2d6 100644
  bool sx126x_hal_is_busy(const struct device *dev);
  
 diff --git a/drivers/lora/native/sx126x/sx126x_hal_common.c b/drivers/lora/native/sx126x/sx126x_hal_common.c
-index b2dfc0d75b..b6f5490092 100644
+index 19c715941..4301057f1 100644
 --- a/drivers/lora/native/sx126x/sx126x_hal_common.c
 +++ b/drivers/lora/native/sx126x/sx126x_hal_common.c
 @@ -16,6 +16,15 @@ LOG_MODULE_REGISTER(sx126x_hal_common, CONFIG_LORA_LOG_LEVEL);
@@ -56,7 +56,7 @@ index b2dfc0d75b..b6f5490092 100644
  #define SX126X_BUSY_DEFAULT_TIMEOUT 1000
  
 +/*
-+ * Diagnostics (agents-qnpp): opcode of the last command actually issued over SPI.
++ * Diagnostics: opcode of the last command actually issued over SPI.
 + * A PRE-wait BUSY timeout means the PRIOR op left BUSY high; logging this names it.
 + * Module-scope (single radio on the target); a torn read across the TX thread and
 + * the RX workqueue at worst mislabels one diagnostic line. Set at every command
