@@ -39,16 +39,16 @@ choice SPIRAM_TYPE
 	default SPIRAM_TYPE_ESPPSRAM64
 endchoice
 
-# 80 MHz is the rated/standard operating point for a WROOM-1 N16R8 octal part, but
-# first hardware bring-up (rzr3, 2026-08-03) was UNSTABLE at 80M: the boot log showed
+# 80 MHz is the rated/standard operating point for a WROOM-1 N16R8 octal part. First hardware
+# bring-up (rzr3, 2026-08-03) was UNSTABLE at 80M on the 4.4 tree: the boot log showed
 #   E: restore cache fail  ->  flash_esp32: Flash write error -5  ->  NVS/settings init -5
-# i.e. flash writes fault. On an octal-PSRAM S3 a flash write suspends+restores the MMU
-# cache, and the freshly-tuned 80 MHz octal PSRAM timing does not survive that cycle, so
-# NVS/settings/WiFi-credentials all fail to persist. Dropping to 40M (as the note below
-# always warned) gives the cache-restore enough timing margin. Revisit 80M only with a
-# dedicated flash/PSRAM MSPI-timing investigation.  (Was: default SPIRAM_SPEED_80M.)
+# because a flash write suspends and restores the MMU cache and the tuned 80 MHz octal PSRAM
+# timing did not survive that cycle, so NVS/settings failed to persist. It ran at 40M until the
+# Zephyr 4.5 bump, which brings upstream 0cd62bb7a ("refresh flash timing after PSRAM tuning",
+# the fix for exactly this) and hal_espressif a56f511b7 (PSRAM short-read buffer). 80M is the
+# trial on the 4.5 branch; if flash writes fail again, put 40M back.
 choice SPIRAM_SPEED
-	default SPIRAM_SPEED_40M
+	default SPIRAM_SPEED_80M
 endchoice
 
 # Shared-multi-heap external pool (linker: _ext_ram_heap_start.._ext_ram_heap_end).
