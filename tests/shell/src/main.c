@@ -502,6 +502,32 @@ ZTEST(meshtastic_shell, test_nodeinfo_interval_persists_and_reads_back)
 }
 
 /*
+ * `nodeinfo request` (agents-yhdm) runs the whole send path, which a XIAO's 2048-byte shell
+ * stack cannot carry: run inline it reset the board every time. It must go through the work
+ * queue like `nodeinfo send`: the command only says "queued", and the answer (or the
+ * cooldown's "suppressed" on a second ask) is printed by the work thread.
+ */
+ZTEST(meshtastic_shell, test_nodeinfo_request_is_deferred_and_throttled)
+{
+	const struct shell *sh = shell_backend_dummy_get_ptr();
+	const char *out;
+	size_t len = 0;
+
+	zassert_ok(run_cmd("meshtastic nodeinfo request 0x2f5444ac", &out), "request failed");
+	zassert_not_null(strstr(out, "queued"), "must be queued, not run on the shell thread: %s", out);
+
+	k_msleep(500);
+	out = shell_backend_dummy_get_output(sh, &len);
+	zassert_not_null(strstr(out, "requested"), "the work thread should report it: %s", out);
+
+	zassert_ok(run_cmd("meshtastic nodeinfo request 0x2f5444ac", &out), "second request failed");
+	zassert_not_null(strstr(out, "queued"), "second ask is queued too: %s", out);
+	k_msleep(500);
+	out = shell_backend_dummy_get_output(sh, &len);
+	zassert_not_null(strstr(out, "suppressed"), "the cooldown should answer: %s", out);
+}
+
+/*
  * `meshtastic position` (agents-t2hb.2): the two PositionConfig fields with a
  * consumer. interval must reach meshtastic_position_broadcast_secs() (what both
  * senders call) with 0 falling back to the compiled default; gps_mode must reach

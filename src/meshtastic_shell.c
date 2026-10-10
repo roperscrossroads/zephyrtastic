@@ -138,6 +138,10 @@ enum shell_work_op {
 	SHELL_WORK_SEND_METRICS,
 	SHELL_WORK_SEND_ENVIRONMENT,
 	SHELL_WORK_SEND_NODEINFO,
+	/* The send path again (protobuf encode, wire build, PKC encrypt): not on the shell
+	 * thread's 2048-byte XIAO stack. Bench 2026-10-09: `nodeinfo request` ran inline and
+	 * rebooted kit1 every time (agents-yhdm). */
+	SHELL_WORK_REQUEST_NODEINFO,
 #if defined(CONFIG_MESHTASTIC_KEYVERIFY)
 	/* Both run the send path (PSA RNG, protobuf encode, wire build with the
 	 * PKC encrypt) which the shell thread's own stack cannot carry: on the
@@ -260,6 +264,18 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 			break;
 		case SHELL_WORK_SEND_NODEINFO:
 			ret = meshtastic_send_node_info(item.dest);
+			break;
+		case SHELL_WORK_REQUEST_NODEINFO:
+			ret = meshtastic_nodeinfo_request(item.dest);
+			if (ret == -EAGAIN) {
+				shell_print(item.sh, "suppressed: already requested 0x%08x within "
+					    "the last %d s (CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC)",
+					    item.dest, CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC);
+				ret = 0;
+			} else if (ret == 0) {
+				shell_print(item.sh, "requested -- watch for a NodeInfo reply from "
+					    "0x%08x", item.dest);
+			}
 			break;
 #if defined(CONFIG_MESHTASTIC_KEYVERIFY)
 		case SHELL_WORK_KEYVERIFY_START:
@@ -3182,36 +3198,25 @@ static int cmd_nodeinfo_send(const struct shell *sh, size_t argc, char **argv)
 }
 
 /* Unlike `send`, this actually asks: want_response=true, so a compliant peer
- * replies with ITS NodeInfo. Calls meshtastic_nodeinfo_request() directly
- * (not through the deferred-work queue `send` uses) — it is already
- * non-blocking (K_NO_WAIT) and its own per-peer cooldown, so there is
- * nothing for a queue to protect here that the function does not already
- * handle itself. */
+ * replies with ITS NodeInfo. It goes through the same work queue `send` does: the
+ * request runs the whole send path, which the shell thread's stack cannot carry on
+ * a XIAO (CONFIG_SHELL_STACK_SIZE=2048; run inline it reset the board every time).
+ * The per-peer cooldown and the K_NO_WAIT send live in meshtastic_nodeinfo_request(). */
 static int cmd_nodeinfo_request(const struct shell *sh, size_t argc, char **argv)
 {
-	uint32_t dest;
+	struct shell_work_item item = {
+		.op = SHELL_WORK_REQUEST_NODEINFO,
+	};
 	int ret;
 
 	ARG_UNUSED(argc);
 
-	ret = parse_u32(sh, argv[1], &dest);
+	ret = parse_u32(sh, argv[1], &item.dest);
 	if (ret < 0) {
 		return ret;
 	}
 
-	ret = meshtastic_nodeinfo_request(dest);
-	if (ret == -EAGAIN) {
-		shell_print(sh, "suppressed: already requested 0x%08x within the last "
-				"%d s (CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC)",
-			    dest, CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC);
-		return 0;
-	}
-	if (ret < 0) {
-		shell_error(sh, "request failed: %d", ret);
-		return ret;
-	}
-	shell_print(sh, "requested — watch for a NodeInfo reply from 0x%08x", dest);
-	return 0;
+	return enqueue_shell_work(sh, &item);
 }
 
 /* Get/set device.node_info_broadcast_secs (agents-t2hb.1). Same shape as
