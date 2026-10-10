@@ -141,7 +141,9 @@ enum shell_work_op {
 	/* The send path again (protobuf encode, wire build, PKC encrypt): not on the shell
 	 * thread's 2048-byte XIAO stack. Bench 2026-10-09: `nodeinfo request` ran inline and
 	 * rebooted kit1 every time (agents-yhdm). */
+#if defined(CONFIG_MESHTASTIC_NODEINFO)
 	SHELL_WORK_REQUEST_NODEINFO,
+#endif
 	/* The other one-shot senders, same reason: `neighbors send` rebooted kit1 inline
 	 * (bench 2026-10-10, agents-yhdm). */
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
@@ -291,6 +293,7 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 		case SHELL_WORK_SEND_NODEINFO:
 			ret = meshtastic_send_node_info(item.dest);
 			break;
+#if defined(CONFIG_MESHTASTIC_NODEINFO)
 		case SHELL_WORK_REQUEST_NODEINFO:
 			ret = meshtastic_nodeinfo_request(item.dest);
 			if (ret == -EAGAIN) {
@@ -303,6 +306,7 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 					    "0x%08x", item.dest);
 			}
 			break;
+#endif
 #if defined(CONFIG_MESHTASTIC_ADMIN) && defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
 		case SHELL_WORK_ADMIN_REMOTE: {
 			uint32_t arg;
