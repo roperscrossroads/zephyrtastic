@@ -147,6 +147,11 @@ enum shell_work_op {
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 	SHELL_WORK_SEND_STATUS,
 #endif
+#if defined(CONFIG_MESHTASTIC_ADMIN) && defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
+	/* `admin remote`: payload[0] is an enum admin_remote_op, the rest its argument.
+	 * Run inline it reset kit1 from the shell thread's stack (bench 2026-10-10). */
+	SHELL_WORK_ADMIN_REMOTE,
+#endif
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 	SHELL_WORK_SEND_NEIGHBORINFO,
 #endif
@@ -176,6 +181,13 @@ enum shell_work_op {
 	/* One step of `meshtastic api`; what to do is in meshtastic_shell_api.c. */
 	SHELL_WORK_API,
 #endif
+};
+
+enum admin_remote_op {
+	ADMIN_REMOTE_GET_OWNER,
+	ADMIN_REMOTE_GET_CONFIG,
+	ADMIN_REMOTE_SET_TIME,
+	ADMIN_REMOTE_SET_OWNER,
 };
 
 struct shell_work_item {
@@ -291,6 +303,44 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 					    "0x%08x", item.dest);
 			}
 			break;
+#if defined(CONFIG_MESHTASTIC_ADMIN) && defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
+		case SHELL_WORK_ADMIN_REMOTE: {
+			uint32_t arg;
+
+			switch (item.payload[0]) {
+			case ADMIN_REMOTE_GET_OWNER:
+				ret = meshtastic_admin_client_get_owner(item.dest);
+				break;
+			case ADMIN_REMOTE_GET_CONFIG:
+				ret = meshtastic_admin_client_get_config(item.dest, item.payload[1]);
+				break;
+			case ADMIN_REMOTE_SET_TIME:
+				memcpy(&arg, &item.payload[1], sizeof(arg));
+				ret = meshtastic_admin_client_set_time(item.dest, arg);
+				break;
+			case ADMIN_REMOTE_SET_OWNER: {
+				const char *long_name = (const char *)&item.payload[2];
+				const char *short_name =
+					item.payload[1] != 0U ? long_name + strlen(long_name) + 1 : NULL;
+
+				ret = meshtastic_admin_client_set_owner(item.dest, long_name,
+									short_name);
+				break;
+			}
+			default:
+				ret = -EINVAL;
+				break;
+			}
+			if (ret == -EACCES) {
+				shell_error(item.sh, "request failed (%d) -- no public key / passkey",
+					    ret);
+			} else if (ret == 0) {
+				shell_print(item.sh,
+					    "request sent -- watch for `admin client:` log lines");
+			}
+			break;
+		}
+#endif
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 		case SHELL_WORK_SEND_STATUS:
 			ret = meshtastic_statusmessage_send();
@@ -6616,20 +6666,22 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
  * mutating op that follows. */
 static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 {
-	uint32_t node_num;
+	struct shell_work_item item = {.op = SHELL_WORK_ADMIN_REMOTE};
 	int ret;
 
 	if (argc < 3U) {
 		goto usage;
 	}
-	ret = parse_u32(sh, argv[1], &node_num);
+	ret = parse_u32(sh, argv[1], &item.dest);
 	if (ret < 0) {
 		return ret;
 	}
 
+	/* Everything below only parses and checks. The send itself runs on the work queue:
+	 * it is the whole send path, which the XIAO shell stack cannot carry. */
 	if (strcmp(argv[2], "get") == 0 && argc >= 4U) {
 		if (strcmp(argv[3], "owner") == 0) {
-			ret = meshtastic_admin_client_get_owner(node_num);
+			item.payload[0] = ADMIN_REMOTE_GET_OWNER;
 		} else if (strcmp(argv[3], "config") == 0 && argc >= 5U) {
 			uint32_t type;
 
@@ -6637,14 +6689,18 @@ static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 			if (ret < 0) {
 				return ret;
 			}
-			ret = meshtastic_admin_client_get_config(node_num, type);
+			item.payload[0] = ADMIN_REMOTE_GET_CONFIG;
+			item.payload[1] = (uint8_t)type;
+			if (type > UINT8_MAX) {
+				goto usage;
+			}
 		} else {
 			goto usage;
 		}
 	} else if (strcmp(argv[2], "set-time") == 0) {
 		/*
 		 * Relay a wall clock to a peer (agents-xhli.14). With no explicit
-		 * epoch, relay OUR OWN — which is the whole point: a node that has a
+		 * epoch, relay OUR OWN -- which is the whole point: a node that has a
 		 * time source hands one to a node that does not.
 		 *
 		 * Refusing when our own clock is unset is not a nicety. An unset
@@ -6669,33 +6725,39 @@ static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 			}
 		}
 
-		if (!meshtastic_admin_client_have_passkey(node_num)) {
-			shell_error(sh, "no fresh session passkey for 0x%08x — run "
+		if (!meshtastic_admin_client_have_passkey(item.dest)) {
+			shell_error(sh, "no fresh session passkey for 0x%08x -- run "
 				    "`meshtastic admin remote 0x%08x get owner` first",
-				    node_num, node_num);
+				    item.dest, item.dest);
 			return -EACCES;
 		}
-		ret = meshtastic_admin_client_set_time(node_num, epoch);
+		item.payload[0] = ADMIN_REMOTE_SET_TIME;
+		memcpy(&item.payload[1], &epoch, sizeof(epoch));
 	} else if (strcmp(argv[2], "set-owner") == 0 && argc >= 4U) {
-		if (!meshtastic_admin_client_have_passkey(node_num)) {
-			shell_error(sh, "no fresh session passkey for 0x%08x — run "
+		size_t long_len = strlen(argv[3]);
+		size_t short_len = argc >= 5U ? strlen(argv[4]) : 0U;
+
+		if (!meshtastic_admin_client_have_passkey(item.dest)) {
+			shell_error(sh, "no fresh session passkey for 0x%08x -- run "
 				    "`meshtastic admin remote 0x%08x get owner` first",
-				    node_num, node_num);
+				    item.dest, item.dest);
 			return -EACCES;
 		}
-		ret = meshtastic_admin_client_set_owner(node_num, argv[3],
-							argc >= 5U ? argv[4] : NULL);
+		if (2U + long_len + 1U + short_len + 1U > sizeof(item.payload)) {
+			shell_error(sh, "name too long");
+			return -EINVAL;
+		}
+		item.payload[0] = ADMIN_REMOTE_SET_OWNER;
+		item.payload[1] = argc >= 5U ? 1U : 0U;
+		memcpy(&item.payload[2], argv[3], long_len + 1U);
+		if (argc >= 5U) {
+			memcpy(&item.payload[2U + long_len + 1U], argv[4], short_len + 1U);
+		}
 	} else {
 		goto usage;
 	}
 
-	if (ret < 0) {
-		shell_error(sh, "request failed (%d)%s", ret,
-			    ret == -EACCES ? " — no public key / passkey" : "");
-		return ret;
-	}
-	shell_print(sh, "request sent — watch for `admin client:` log lines");
-	return 0;
+	return enqueue_shell_work(sh, &item);
 
 usage:
 	shell_error(sh, "usage: meshtastic admin remote <node> get owner\n"
