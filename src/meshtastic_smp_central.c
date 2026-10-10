@@ -88,6 +88,8 @@ LOG_MODULE_REGISTER(mt_smpc, CONFIG_MESHTASTIC_LOG_LEVEL);
 /* How long a target may be away for the swap+reboot leg of `smpc update`. */
 #define SMPC_UPDATE_REBOOT_WAIT_MS 150000
 #define SMPC_UPDATE_RECONNECT_GAP_MS 3000
+/* How long after our disconnect() the old link may take to be reported down. */
+#define SMPC_UPDATE_LINK_DOWN_WAIT_MS 15000
 
 /* Connection parameters this central asks for. The target (a peripheral that
  * carries BT_GAP_AUTO_UPDATE_CONN_PARAMS=n since the A.2 investigation) keeps
@@ -1329,6 +1331,18 @@ static void smpc_job_fn(struct k_work *work)
 
 		k_sleep(K_MSEC(SMPC_UPDATE_RECONNECT_GAP_MS));
 		(void)meshtastic_smpc_disconnect();
+		/* bt_conn_disconnect() does not clear `ready`: the disconnected callback does,
+		 * and for a peer that has already rebooted that is the supervision timeout,
+		 * seconds away. Without this wait the loop below saw a stale "ready", skipped
+		 * the reconnect, and verified over a dead link (bench 2026-10-10, 4.5 courier
+		 * to a XIAO: "post-swap state read failed (timeout)" 5 s after the link went). */
+		{
+			int64_t down_by = k_uptime_get() + SMPC_UPDATE_LINK_DOWN_WAIT_MS;
+
+			while (meshtastic_smpc_ready() && k_uptime_get() < down_by) {
+				k_sleep(K_MSEC(250));
+			}
+		}
 		rc = -ENOTCONN;
 		while (k_uptime_get() < deadline) {
 			k_sleep(K_MSEC(SMPC_UPDATE_RECONNECT_GAP_MS));
