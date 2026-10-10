@@ -142,6 +142,20 @@ enum shell_work_op {
 	 * thread's 2048-byte XIAO stack. Bench 2026-10-09: `nodeinfo request` ran inline and
 	 * rebooted kit1 every time (agents-yhdm). */
 	SHELL_WORK_REQUEST_NODEINFO,
+	/* The other one-shot senders, same reason: `neighbors send` rebooted kit1 inline
+	 * (bench 2026-10-10, agents-yhdm). */
+#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
+	SHELL_WORK_SEND_STATUS,
+#endif
+#if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
+	SHELL_WORK_SEND_NEIGHBORINFO,
+#endif
+#if defined(CONFIG_MESHTASTIC_MESHBEACON)
+	SHELL_WORK_SEND_BEACON,
+#endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+	SHELL_WORK_SEND_HEAD_STATUS,
+#endif
 #if defined(CONFIG_MESHTASTIC_KEYVERIFY)
 	/* Both run the send path (PSA RNG, protobuf encode, wire build with the
 	 * PKC encrypt) which the shell thread's own stack cannot carry: on the
@@ -277,6 +291,56 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 					    "0x%08x", item.dest);
 			}
 			break;
+#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
+		case SHELL_WORK_SEND_STATUS:
+			ret = meshtastic_statusmessage_send();
+			if (ret == -ENODATA) {
+				shell_error(item.sh, "no status set (meshtastic status set <text>)");
+			} else if (ret == 0) {
+				shell_print(item.sh, "status broadcast sent");
+			}
+			break;
+#endif
+#if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
+		case SHELL_WORK_SEND_NEIGHBORINFO:
+			ret = meshtastic_neighborinfo_send();
+			if (ret == -ENODATA) {
+				shell_error(item.sh,
+					    "no direct neighbors heard yet; nothing to send");
+			} else if (ret == 0) {
+				shell_print(item.sh, "neighbor info sent");
+			}
+			break;
+#endif
+#if defined(CONFIG_MESHTASTIC_MESHBEACON)
+		case SHELL_WORK_SEND_BEACON:
+			ret = meshtastic_meshbeacon_send();
+			switch (ret) {
+			case 0:
+				shell_print(item.sh, "beacon sent");
+				break;
+			case -ENODATA:
+				shell_error(item.sh, "nothing to beacon: no text and no offer configured");
+				break;
+			case -ENOENT:
+				shell_error(item.sh, "every target was skipped (see `meshtastic beacon`)");
+				break;
+			case -EPERM:
+				shell_error(item.sh, "a CLIENT_HIDDEN node never beacons");
+				break;
+			default:
+				break;
+			}
+			break;
+#endif
+#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+		case SHELL_WORK_SEND_HEAD_STATUS:
+			ret = meshtastic_attachment_head_status_send();
+			if (ret == 0) {
+				shell_print(item.sh, "status sent");
+			}
+			break;
+#endif
 #if defined(CONFIG_MESHTASTIC_KEYVERIFY)
 		case SHELL_WORK_KEYVERIFY_START:
 			ret = meshtastic_keyverify_start(item.dest);
@@ -3385,22 +3449,13 @@ static int cmd_status_clear(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_status_send(const struct shell *sh, size_t argc, char **argv)
 {
-	int ret;
+	struct shell_work_item item = {.op = SHELL_WORK_SEND_STATUS};
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	ret = meshtastic_statusmessage_send();
-	if (ret == -ENODATA) {
-		shell_error(sh, "no status set (meshtastic status set <text>)");
-		return ret;
-	}
-	if (ret < 0) {
-		shell_error(sh, "send failed: %d", ret);
-		return ret;
-	}
-	shell_print(sh, "status broadcast queued");
-	return 0;
+	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
+	return enqueue_shell_work(sh, &item);
 }
 
 static int cmd_status_peers(const struct shell *sh, size_t argc, char **argv)
@@ -3973,16 +4028,13 @@ static int cmd_attach_head_brain(const struct shell *sh, size_t argc, char **arg
 
 static int cmd_attach_head_status(const struct shell *sh, size_t argc, char **argv)
 {
-	int ret = meshtastic_attachment_head_status_send();
+	struct shell_work_item item = {.op = SHELL_WORK_SEND_HEAD_STATUS};
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
-	if (ret != 0) {
-		shell_error(sh, "status not sent (%d)", ret);
-		return ret;
-	}
-	shell_print(sh, "status sent");
-	return 0;
+
+	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
+	return enqueue_shell_work(sh, &item);
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
@@ -4123,22 +4175,13 @@ static int cmd_neighbors_lora(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_neighbors_send(const struct shell *sh, size_t argc, char **argv)
 {
-	int ret;
+	struct shell_work_item item = {.op = SHELL_WORK_SEND_NEIGHBORINFO};
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	ret = meshtastic_neighborinfo_send();
-	if (ret == -ENODATA) {
-		shell_error(sh, "no direct neighbors heard yet; nothing to send");
-		return ret;
-	}
-	if (ret < 0) {
-		shell_error(sh, "send failed: %d", ret);
-		return ret;
-	}
-	shell_print(sh, "neighbor info queued");
-	return 0;
+	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
+	return enqueue_shell_work(sh, &item);
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_neighbors_cmds,
@@ -4304,29 +4347,13 @@ static int cmd_beacon_interval(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_beacon_send(const struct shell *sh, size_t argc, char **argv)
 {
-	int ret;
+	struct shell_work_item item = {.op = SHELL_WORK_SEND_BEACON};
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	ret = meshtastic_meshbeacon_send();
-	switch (ret) {
-	case 0:
-		shell_print(sh, "beacon queued");
-		return 0;
-	case -ENODATA:
-		shell_error(sh, "nothing to beacon: no text and no offer configured");
-		return ret;
-	case -ENOENT:
-		shell_error(sh, "every target was skipped (see `meshtastic beacon`)");
-		return ret;
-	case -EPERM:
-		shell_error(sh, "a CLIENT_HIDDEN node never beacons");
-		return ret;
-	default:
-		shell_error(sh, "send failed: %d", ret);
-		return ret;
-	}
+	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
+	return enqueue_shell_work(sh, &item);
 }
 
 static int cmd_beacon_forget(const struct shell *sh, size_t argc, char **argv)
