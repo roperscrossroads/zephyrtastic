@@ -245,6 +245,56 @@ unreliable inhibitor. To observe residency, use the `overlay-pm-quiet.conf` rig 
 `meshtastic netpause <secs>` shell command (drive/read over serial while the network —
 and the sleeps it would perturb — is genuinely quiet).
 
+**It also stalls the USB hub it hangs off (bench, 2026-10-10).** The dead USB PHY is not a quiet
+absence to the host: the hub's transaction translator times out on the sleeping device
+(`usb 1-1.3.4: clear tt 1 (9191) error -110`) and every full-speed device behind that hub chain
+stopped answering for as long as the board slept, XIAO consoles included. A `CONFIG_PM` image with
+power saving on will also not enumerate after a replug (the PHY is off before the host's setup
+request), so the board needs ROM download mode to be reflashed. And a ROM-mode S3 is not reset by
+`esptool --after hard_reset` over USB-Serial-JTAG on this bench; `--after watchdog_reset` is.
+Run a PM build on a board with its own USB host (or on battery), never on a shared hub, and do
+not set `power on` on a bench node.
+
+### Measured on hardware, Zephyr 4.5 (V4, 2026-10-11)
+
+A V4 on a PM build (`overlay-pm-on.conf` on class 4), `is_power_saving` on, `min_wake_secs` 10,
+`wait_bluetooth_secs` 600 as a safety window after every boot, its console released so nothing polled
+its USB.
+
+- **The SoC light-sleeps and wakes on LoRa.** 45 of 45 remote-admin `get config` round trips (PKC,
+  one every ~12 s for 9 minutes, rzr4 -> rzr2) were answered, and the next console read showed
+  `governor inhibitors: 0x00`, `STANDBY lock: held by esp-idf radio controller`, and **1131
+  light-sleep entries**. The probe cadence sat inside the 10 s activity window, so this is mostly
+  awake time with many short sleeps, not a residency figure; no current was measured.
+- **BLE under light sleep is not established.** The sleeping node keeps advertising (about -64 dBm at
+  1 m) and 4 of 4 phone connects to it timed out; awake on the same PM image 1 of 3 succeeded. But
+  the same probe later gave 2 of 4 on the plain image and **0 of 4 on rzr4, which never ran a PM
+  build**, against 15 of 15 earlier in the day: the host's one Bluetooth adapter is shared and was
+  flaky, so these numbers say nothing about the firmware. Repeat it back to back with a plain-image
+  control, on a quiet adapter, before concluding anything about BLE and `CONFIG_PM`.
+- **USB does not come back.** After the first sleep the V4 stopped enumerating
+  (`Device not responding to setup address`), and kept not enumerating after power saving was turned
+  off over LoRa and the node was rebooted by remote admin; a power cycle is what restores it
+  (with power saving off in storage), or ROM download mode if the stored setting is still on.
+- **The cause of the dead USB is not established.** The HAL's `sleep_console_usj_pad_backup_and_disable()`
+  / `..._restore()` pair (`sleep_modes.c:667`) saves the pad state and puts it back, and Zephyr's
+  `serial_esp32_usb.c` enables the pad at init, so a plain "the pad is left off" reading does not hold.
+  What was observed: the console answered once, in the window right after a LoRa wake; after that
+  the node stayed unreachable over USB (`Write timeout` on a tty that was still present) through a
+  power-saving-off write and a software reboot, and came back only after a power cycle. That fits
+  state a CPU reset does not clear; which register is not known (the registers cannot be read over
+  the USB-JTAG that is down).
+- **Releasing the console reduces the hub stall, it does not remove it.** With no process holding
+  the tty open, the other consoles kept flowing through a 9-minute sleep run. But the hub that
+  rzr2 hangs off still logged `clear tt ... error -110` after each wake, and after a replug of rzr2
+  alone the hub itself wedged (`hub_ext_port_status failed (err = -110)` every 5 s, and sysfs reads
+  and `devreg guard` hung behind it) until the whole hub was unplugged. Treat a PM build on a
+  shared hub as something that can need that.
+- **Recovery without hands** needs the node to have been given a trusted remote-admin key before
+  it was put to sleep (`meshtastic admin trust <node>`): `set_config` power and `reboot` then go over
+  LoRa from a neighbour (the stock Python `Node.writeConfig('power')` through a tunnel does it).
+  `wait_bluetooth_secs` gives a console window after every boot to turn it off locally.
+
 ## Tests
 
 [`tests/power/`](../tests/power/) — a native_sim `ztest` suite (mirrors
