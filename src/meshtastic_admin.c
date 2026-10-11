@@ -131,6 +131,10 @@ static struct admin_ctx {
 /* begin_edit_settings ... commit_edit_settings transaction state (single local
  * session; the app opens/closes serially). */
 static bool admin_edit_open;
+/* ...and whether the LOCAL app opened it. Only a transaction the local app opened
+ * (while the node was not managed: a begin on a managed node is refused) lets the
+ * local app's further messages, its commit included, through the managed gate. */
+static bool admin_edit_local;
 
 /*
  * agents-dnr4.2: a client that opens an edit transaction and then goes silent
@@ -163,6 +167,7 @@ static void admin_edit_idle_work_fn(struct k_work *work)
 		meshtastic_settings_flush();
 #endif
 		admin_edit_open = false;
+		admin_edit_local = false;
 	}
 	k_mutex_unlock(&admin_lock);
 }
@@ -517,6 +522,28 @@ void meshtastic_admin_prepare_security_write(meshtastic_Config_SecurityConfig *i
 	}
 	security_clear_managed_without_admin_key(incoming);
 }
+
+/* A node whose stored config is managed with no admin key (written before the guard
+ * above, or restored from a backup) is a lock-out already: clear it at boot, as a
+ * write of the same config would have. */
+static int admin_managed_sanity_apply(void)
+{
+	meshtastic_Config cfg = meshtastic_Config_init_zero;
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg) != 0 ||
+	    cfg.which_payload_variant != meshtastic_Config_security_tag ||
+	    !cfg.payload_variant.security.is_managed) {
+		return 0;
+	}
+	security_clear_managed_without_admin_key(&cfg.payload_variant.security);
+	if (!cfg.payload_variant.security.is_managed) {
+		LOG_WRN("admin: stored config was managed with no admin key; managed mode cleared");
+		(void)meshtastic_config_store_set_config(&cfg);
+	}
+	return 0;
+}
+
+MESHTASTIC_SETTINGS_APPLY_DEFINE(admin_managed_sanity, admin_managed_sanity_apply);
 
 void meshtastic_admin_redact_module_config_for_mesh(meshtastic_ModuleConfig *module)
 {
@@ -1257,16 +1284,16 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	 * authorized remote admin can. Consume without applying; the app already
 	 * knows the node is managed from SecurityConfig and greys its settings out.
 	 * Config still reaches the app through the normal want_config stream. */
-	/* One exception: the commit of an edit transaction the local app opened while
-	 * the node was not managed. The transaction is the way managed mode gets
-	 * switched on (begin, set_config security is_managed, commit); set_config has
-	 * already made the node managed in RAM, so without this the commit would be
-	 * ignored here and the whole transaction -- the owner, the keys -- would never
-	 * be saved. A begin on a node that is already managed was refused above, so an
-	 * open transaction can only have been opened by the unmanaged node's app. */
-	if (!admin_cur.remote && meshtastic_admin_is_managed() &&
-	    !(admin_edit_open &&
-	      admin_req.which_payload_variant == meshtastic_AdminMessage_commit_edit_settings_tag)) {
+	/* One exception: the rest of an edit transaction the local app opened while the
+	 * node was not managed. Enabling managed mode IS such a transaction (begin,
+	 * set_config security is_managed, commit, with other sections before or after
+	 * the security one): set_config makes the node managed in RAM, and without this
+	 * every later message of the same transaction, the commit included, would be
+	 * ignored here -- the owner, the keys, a section sent after security -- and
+	 * nothing saved. A begin on a managed node is refused above, so a transaction
+	 * the local app opened was opened by the unmanaged node's app. A transaction a
+	 * REMOTE admin opened does not open the gate for local messages. */
+	if (!admin_cur.remote && meshtastic_admin_is_managed() && !admin_edit_local) {
 		LOG_INF("admin: ignoring local admin variant %u — node is_managed",
 			(unsigned int)admin_req.which_payload_variant);
 		k_mutex_unlock(&admin_lock);
@@ -1596,6 +1623,7 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	case meshtastic_AdminMessage_begin_edit_settings_tag:
 		meshtastic_config_store_set_save_suppressed(true);
 		admin_edit_open = true;
+		admin_edit_local = !admin_cur.remote;
 		k_work_reschedule(&admin_edit_idle_work, K_MSEC(CONFIG_MESHTASTIC_ADMIN_EDIT_IDLE_MS));
 		LOG_DBG("admin: begin edit transaction");
 		break;
@@ -1619,6 +1647,7 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 			meshtastic_settings_flush();
 #endif
 			admin_edit_open = false;
+			admin_edit_local = false;
 			LOG_DBG("admin: commit edit transaction");
 		} else {
 			LOG_WRN("admin: commit_edit_settings with no transaction open — ignored");
@@ -1681,6 +1710,7 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		 * nor the idle timeout can act on a transaction the reset already
 		 * superseded. */
 		admin_edit_open = false;
+		admin_edit_local = false;
 		(void)k_work_cancel_delayable(&admin_edit_idle_work);
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 		(void)meshtastic_settings_wipe(true); /* keep config/security */
@@ -1699,6 +1729,7 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		meshtastic_config_store_set_save_suppressed(true);
 		/* agents-dnr4.3: see factory_reset_config above. */
 		admin_edit_open = false;
+		admin_edit_local = false;
 		(void)k_work_cancel_delayable(&admin_edit_idle_work);
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 		(void)meshtastic_settings_wipe(false); /* wipe everything incl. identity */
@@ -2038,6 +2069,7 @@ void meshtastic_admin_reset(void)
 	 * races only (a concurrent commit clears the same state). */
 	if (admin_edit_open) {
 		admin_edit_open = false;
+		admin_edit_local = false;
 		meshtastic_config_store_set_save_suppressed(false);
 		(void)k_work_cancel_delayable(&admin_edit_idle_work);
 	}

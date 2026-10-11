@@ -1220,6 +1220,81 @@ ZTEST(admin_pki, test_edit_transaction_auto_commits_after_idle_timeout)
  * transport a stray message could arrive on, refuse to act on a commit that
  * doesn't correspond to a real open transaction.
  */
+/* The managed gate's transaction exception is for a transaction the LOCAL app opened. One
+ * a remote admin opened on an already-managed node must not let a local client's commit
+ * end it early. */
+ZTEST(admin_pki, test_a_remote_admins_transaction_is_not_committed_by_the_local_app)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	uint8_t peer_key_now[MESHTASTIC_PKI_KEY_LEN];
+	meshtastic_Config before = meshtastic_Config_init_zero;
+	meshtastic_Config managed = meshtastic_Config_init_zero;
+	meshtastic_MeshPacket pkt = meshtastic_MeshPacket_init_zero;
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	pb_ostream_t os = pb_ostream_from_buffer(pkt.decoded.payload.bytes,
+						 sizeof(pkt.decoded.payload.bytes));
+	size_t len;
+
+	zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_NODE_ID, peer_key_now), "peer key");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &before),
+		   "read security");
+	managed = before;
+	managed.payload_variant.security.is_managed = true;
+	managed.payload_variant.security.admin_key_count = 1U;
+	managed.payload_variant.security.admin_key[0].size = 32U;
+	memcpy(managed.payload_variant.security.admin_key[0].bytes, peer_key_now, 32U);
+	zassert_ok(meshtastic_config_store_set_config(&managed), "managed, PEER is its admin");
+	zassert_true(meshtastic_admin_is_managed(), "precondition: managed");
+
+	meshtastic_admin_session_reset();
+	meshtastic_admin_session_current(key);
+	len = encode_admin_edit_settings(false, key, sizeof(key), buf, sizeof(buf));
+	inject_pkc_admin(buf, len, 0x0C3D2000U);
+	k_sleep(K_MSEC(50));
+	zassert_true(meshtastic_config_store_save_suppressed(), "the remote admin's transaction is open");
+
+	/* The local app's commit: dropped by the gate, the transaction stays open. */
+	am.which_payload_variant = meshtastic_AdminMessage_commit_edit_settings_tag;
+	am.payload_variant.commit_edit_settings = true;
+	zassert_true(pb_encode(&os, meshtastic_AdminMessage_fields, &am), "encode");
+	pkt.from = TEST_NODE_ID;
+	pkt.id = 0x0AD00099U;
+	pkt.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	pkt.decoded.portnum = meshtastic_PortNum_ADMIN_APP;
+	pkt.decoded.payload.size = (pb_size_t)os.bytes_written;
+	(void)meshtastic_admin_handle_local(&pkt);
+	zassert_true(meshtastic_config_store_save_suppressed(),
+		     "a local commit must not end a transaction the remote admin opened");
+
+	meshtastic_admin_reset(); /* closes the remote admin's transaction and un-suppresses saves */
+	zassert_ok(meshtastic_config_store_set_config(&before), "restore security");
+	meshtastic_admin_session_reset();
+	meshtastic_settings_flush(); /* later tests expect nothing pending */
+}
+
+/* A node whose stored config is managed with no admin key (written before the guard, or
+ * restored from a backup) is cleared at boot, as a write of the same config would be. */
+ZTEST(admin_pki, test_stored_managed_without_an_admin_key_is_cleared_at_boot)
+{
+	meshtastic_Config before = meshtastic_Config_init_zero;
+	meshtastic_Config bad = meshtastic_Config_init_zero;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &before),
+		   "read security");
+	bad = before;
+	bad.payload_variant.security.is_managed = true;
+	bad.payload_variant.security.admin_key_count = 0U;
+	zassert_ok(meshtastic_config_store_set_config(&bad), "store the lock-out directly");
+	zassert_true(meshtastic_admin_is_managed(), "precondition");
+
+	(void)meshtastic_settings_apply_all();
+	zassert_false(meshtastic_admin_is_managed(), "cleared by the boot-time sanity check");
+
+	zassert_ok(meshtastic_config_store_set_config(&before), "restore security");
+	meshtastic_settings_flush();
+}
+
 ZTEST(admin_pki, test_stray_commit_edit_settings_is_a_noop)
 {
 	uint8_t buf[256];
@@ -3841,6 +3916,21 @@ ZTEST(admin_pki, test_commit_of_the_transaction_that_enabled_managed_mode_is_app
 	(void)send_local_admin_msg(&am);
 	zassert_true(meshtastic_admin_is_managed(), "the node is now managed");
 
+	/* A section sent AFTER the security one, in the same transaction, is applied too:
+	 * it was not silently dropped by the node having just become managed. */
+	am = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	am.which_payload_variant = meshtastic_AdminMessage_set_owner_tag;
+	strcpy(am.payload_variant.set_owner.long_name, "After Managed");
+	strcpy(am.payload_variant.set_owner.short_name, "AFTR");
+	(void)send_local_admin_msg(&am);
+	{
+		meshtastic_User rb;
+
+		meshtastic_fill_user(&rb);
+		zassert_str_equal(rb.long_name, "After Managed",
+				  "a write after is_managed in the same transaction is applied");
+	}
+
 	am = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
 	am.which_payload_variant = meshtastic_AdminMessage_commit_edit_settings_tag;
 	am.payload_variant.commit_edit_settings = true;
@@ -3852,6 +3942,7 @@ ZTEST(admin_pki, test_commit_of_the_transaction_that_enabled_managed_mode_is_app
 	zassert_ok(meshtastic_config_store_set_config(&before), "restore security");
 	zassert_equal(meshtastic_admin_is_managed(), before.payload_variant.security.is_managed,
 		      "restored");
+	meshtastic_settings_flush(); /* later tests expect nothing pending */
 }
 
 ZTEST(admin_pki, test_private_key_is_redacted_for_mesh_not_for_phone)
