@@ -453,6 +453,25 @@ void meshtastic_admin_redact_config_for_mesh(meshtastic_Config *config)
 	config->payload_variant.security.private_key.size = 0;
 }
 
+/* Managed mode with no admin key is a lock-out: local admin is refused for a
+ * managed node and no remote sender is authorized, so nothing but an erase could
+ * change it again. The reference clears is_managed and warns when none of the
+ * admin_key entries is a 32-byte key (AdminModule.cpp, the security case); so
+ * does this. */
+static void security_clear_managed_without_admin_key(meshtastic_Config_SecurityConfig *sec)
+{
+	if (!sec->is_managed) {
+		return;
+	}
+	for (pb_size_t i = 0; i < sec->admin_key_count && i < ARRAY_SIZE(sec->admin_key); i++) {
+		if (sec->admin_key[i].size == 32U) {
+			return;
+		}
+	}
+	sec->is_managed = false;
+	LOG_WRN("admin: is_managed needs at least one admin public key -- not enabling managed mode");
+}
+
 void meshtastic_admin_prepare_security_write(meshtastic_Config_SecurityConfig *incoming,
 					     const meshtastic_Config_SecurityConfig *current)
 {
@@ -467,6 +486,7 @@ void meshtastic_admin_prepare_security_write(meshtastic_Config_SecurityConfig *i
 		LOG_WRN("admin: security set omitted the private key; keeping the identity keypair");
 		incoming->private_key = current->private_key;
 		incoming->public_key = current->public_key;
+		security_clear_managed_without_admin_key(incoming);
 		return;
 	}
 
@@ -495,6 +515,7 @@ void meshtastic_admin_prepare_security_write(meshtastic_Config_SecurityConfig *i
 		rotated.public_key = incoming->public_key;
 		*incoming = rotated;
 	}
+	security_clear_managed_without_admin_key(incoming);
 }
 
 void meshtastic_admin_redact_module_config_for_mesh(meshtastic_ModuleConfig *module)
@@ -1236,7 +1257,16 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 	 * authorized remote admin can. Consume without applying; the app already
 	 * knows the node is managed from SecurityConfig and greys its settings out.
 	 * Config still reaches the app through the normal want_config stream. */
-	if (!admin_cur.remote && meshtastic_admin_is_managed()) {
+	/* One exception: the commit of an edit transaction the local app opened while
+	 * the node was not managed. The transaction is the way managed mode gets
+	 * switched on (begin, set_config security is_managed, commit); set_config has
+	 * already made the node managed in RAM, so without this the commit would be
+	 * ignored here and the whole transaction -- the owner, the keys -- would never
+	 * be saved. A begin on a node that is already managed was refused above, so an
+	 * open transaction can only have been opened by the unmanaged node's app. */
+	if (!admin_cur.remote && meshtastic_admin_is_managed() &&
+	    !(admin_edit_open &&
+	      admin_req.which_payload_variant == meshtastic_AdminMessage_commit_edit_settings_tag)) {
 		LOG_INF("admin: ignoring local admin variant %u — node is_managed",
 			(unsigned int)admin_req.which_payload_variant);
 		k_mutex_unlock(&admin_lock);

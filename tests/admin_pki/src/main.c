@@ -3767,9 +3767,91 @@ ZTEST(admin_pki, test_bare_keypair_rotation_keeps_the_other_security_fields)
 	in.private_key.size = 32U;
 	memset(in.private_key.bytes, 0xE5, 32U);
 	in.is_managed = true;
+	in.admin_key_count = 1U;
+	in.admin_key[0].size = 32U;
+	memset(in.admin_key[0].bytes, 0xF6, 32U);
 	meshtastic_admin_prepare_security_write(&in, &cur);
-	zassert_equal(in.admin_key_count, 0U, "a full write is not merged");
-	zassert_true(in.is_managed, "and keeps what it carried");
+	zassert_equal(in.admin_key_count, 1U, "a full write is not merged");
+	zassert_true(in.is_managed, "and keeps what it carried, managed with an admin key included");
+}
+
+/* Managed mode with no admin key locks the node out for good (local admin is refused,
+ * nobody remote is authorized): the reference clears is_managed and warns, so does
+ * this -- on a full write, a write that omits the private key, and a rotation. */
+ZTEST(admin_pki, test_managed_without_an_admin_key_is_cleared)
+{
+	meshtastic_Config_SecurityConfig cur = meshtastic_Config_SecurityConfig_init_zero;
+	meshtastic_Config_SecurityConfig in = meshtastic_Config_SecurityConfig_init_zero;
+
+	cur.private_key.size = 32U;
+	memset(cur.private_key.bytes, 0xA1, 32U);
+
+	/* Full write, new private key, managed, no admin key. */
+	in.private_key.size = 32U;
+	memset(in.private_key.bytes, 0xE5, 32U);
+	in.is_managed = true;
+	meshtastic_admin_prepare_security_write(&in, &cur);
+	zassert_false(in.is_managed, "managed with no admin key must not be stored");
+
+	/* Private key omitted (the identity is kept), managed, no admin key. */
+	in = (meshtastic_Config_SecurityConfig)meshtastic_Config_SecurityConfig_init_zero;
+	in.is_managed = true;
+	meshtastic_admin_prepare_security_write(&in, &cur);
+	zassert_false(in.is_managed, "the omitted-key path is held to the same rule");
+	zassert_equal(in.private_key.size, 32U, "and still keeps the identity key");
+
+	/* An entry that is not a 32-byte key does not count. */
+	in = (meshtastic_Config_SecurityConfig)meshtastic_Config_SecurityConfig_init_zero;
+	in.is_managed = true;
+	in.admin_key_count = 1U;
+	in.admin_key[0].size = 16U;
+	meshtastic_admin_prepare_security_write(&in, &cur);
+	zassert_false(in.is_managed, "a short key is not an admin key");
+}
+
+/* Enabling managed mode is a transaction: begin, set_config(security, is_managed), commit.
+ * set_config makes the node managed in RAM, and the managed gate then used to drop the
+ * local commit, leaving saves suppressed and the transaction never saved. The commit of
+ * a transaction the app opened on an unmanaged node must get through. */
+ZTEST(admin_pki, test_commit_of_the_transaction_that_enabled_managed_mode_is_applied)
+{
+	meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+	meshtastic_Config before = meshtastic_Config_init_zero;
+	meshtastic_Config restore = meshtastic_Config_init_zero;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &before),
+		   "read security");
+	restore = before;
+	restore.payload_variant.security.is_managed = false;
+	zassert_ok(meshtastic_config_store_set_config(&restore), "start unmanaged");
+	zassert_false(meshtastic_admin_is_managed(), "precondition: not managed");
+
+	am.which_payload_variant = meshtastic_AdminMessage_begin_edit_settings_tag;
+	am.payload_variant.begin_edit_settings = true;
+	(void)send_local_admin_msg(&am);
+	zassert_true(meshtastic_config_store_save_suppressed(), "the transaction is open");
+
+	am = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	am.which_payload_variant = meshtastic_AdminMessage_set_config_tag;
+	am.payload_variant.set_config.which_payload_variant = meshtastic_Config_security_tag;
+	am.payload_variant.set_config.payload_variant.security.is_managed = true;
+	am.payload_variant.set_config.payload_variant.security.admin_key_count = 1U;
+	am.payload_variant.set_config.payload_variant.security.admin_key[0].size = 32U;
+	memset(am.payload_variant.set_config.payload_variant.security.admin_key[0].bytes, 0x77, 32U);
+	(void)send_local_admin_msg(&am);
+	zassert_true(meshtastic_admin_is_managed(), "the node is now managed");
+
+	am = (meshtastic_AdminMessage)meshtastic_AdminMessage_init_zero;
+	am.which_payload_variant = meshtastic_AdminMessage_commit_edit_settings_tag;
+	am.payload_variant.commit_edit_settings = true;
+	(void)send_local_admin_msg(&am);
+	zassert_false(meshtastic_config_store_save_suppressed(),
+		      "the commit must be applied: saves are un-suppressed and flushed");
+
+	/* Leave the suite as it was. */
+	zassert_ok(meshtastic_config_store_set_config(&before), "restore security");
+	zassert_equal(meshtastic_admin_is_managed(), before.payload_variant.security.is_managed,
+		      "restored");
 }
 
 ZTEST(admin_pki, test_private_key_is_redacted_for_mesh_not_for_phone)
