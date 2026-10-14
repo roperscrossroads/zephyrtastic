@@ -28,6 +28,9 @@
 #include <zephyr/meshtastic/reboot_trace.h>
 
 #include <hal/nrf_power.h>
+
+#include "meshtastic_retained.h"
+
 #if defined(CONFIG_MESHTASTIC_DFU_BOOT_GUARD)
 #include <cmsis_core.h>
 #endif
@@ -148,16 +151,28 @@ static K_WORK_DELAYABLE_DEFINE(boot_guard_work, boot_guard_feed);
  * of this guard (keyed on the DOG bit) never fired and dead images just
  * boot-looped in the dark. The magic guards against power-on garbage. */
 #define BOOT_GUARD_MAGIC 0x42475244U /* "BGRD" */
+#define BOOT_GUARD_VERSION 1U
 #define BOOT_GUARD_MAX_ATTEMPTS 3U
-static __noinit uint32_t boot_guard_magic;
+/* Sealed (meshtastic_retained.h), not just a magic: after an update another image's bytes
+ * can sit where this one keeps the count (agents-8h29), and a count read from them could
+ * park a freshly updated node in its bootloader on its first boot. */
+static __noinit struct meshtastic_retained_seal boot_guard_seal;
 static __noinit uint32_t boot_guard_attempts;
+
+static void boot_guard_store(uint32_t attempts)
+{
+	meshtastic_retained_void(&boot_guard_seal);
+	boot_guard_attempts = attempts;
+	meshtastic_retained_seal(&boot_guard_seal, BOOT_GUARD_MAGIC, BOOT_GUARD_VERSION,
+				 &boot_guard_attempts, sizeof(boot_guard_attempts));
+}
 
 static void boot_guard_feed(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
 	/* Reaching the system workqueue IS the definition of a healthy boot. */
-	boot_guard_attempts = 0U;
+	boot_guard_store(0U);
 #if defined(CONFIG_MESHTASTIC_BOOTLOG)
 	meshtastic_bootlog_heartbeat((uint32_t)k_uptime_seconds());
 #endif
@@ -168,16 +183,19 @@ static void boot_guard_feed(struct k_work *work)
 
 static int boot_guard_arm(void)
 {
-	if (boot_guard_magic != BOOT_GUARD_MAGIC) {
-		boot_guard_magic = BOOT_GUARD_MAGIC;
-		boot_guard_attempts = 0U;
+	uint32_t attempts = 0U;
+
+	if (meshtastic_retained_valid(&boot_guard_seal, BOOT_GUARD_MAGIC, BOOT_GUARD_VERSION,
+				      &boot_guard_attempts, sizeof(boot_guard_attempts))) {
+		attempts = boot_guard_attempts;
 	}
 
-	boot_guard_attempts++;
-	if (boot_guard_attempts >= BOOT_GUARD_MAX_ATTEMPTS) {
+	attempts++;
+	boot_guard_store(attempts);
+	if (attempts >= BOOT_GUARD_MAX_ATTEMPTS) {
 		/* Same image died this many times in a row: stop trying and
 		 * park in the bootloader, ready for a reflash. */
-		boot_guard_attempts = 0U;
+		boot_guard_store(0U);
 		nrf_power_gpregret_set(NRF_POWER, 0U, DFU_MAGIC_SERIAL_ONLY_RESET);
 		NVIC_SystemReset();
 	}

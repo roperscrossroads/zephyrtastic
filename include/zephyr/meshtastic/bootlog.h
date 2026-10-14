@@ -140,6 +140,10 @@ void meshtastic_bootlog_test_durable_load(void);
 /** Run the durable half of the boot path (load, append, count, save) as a boot does. */
 void meshtastic_bootlog_test_durable_boot(void);
 
+/** Test hook: change the retained history's body behind its seal, as another image's
+ *  bytes would (agents-8h29). */
+void meshtastic_bootlog_test_retained_scribble(void);
+
 #if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
 /*
  * The faults nothing else can report: a double exception (the vector runs no

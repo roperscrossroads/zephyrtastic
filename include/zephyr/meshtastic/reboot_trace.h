@@ -119,6 +119,11 @@ void meshtastic_reboot_trace_capture(int type, uint32_t caller_pc, bool have_pc)
 /** @brief Forget the record, so the next boot does not re-report this one. */
 void meshtastic_reboot_trace_clear(void);
 
+#if defined(CONFIG_ZTEST)
+/** @brief Test hook: leave the bytes another image would, magic intact, body changed. */
+void meshtastic_reboot_trace_test_scribble(void);
+#endif
+
 /** @brief Human-readable reason name, never NULL. */
 const char *meshtastic_reboot_reason_str(uint8_t reason);
 

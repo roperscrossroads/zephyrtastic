@@ -230,3 +230,19 @@ static void *suite_setup(void)
 }
 
 ZTEST_SUITE(bootlog_durable, NULL, suite_setup, reset_ring, NULL, NULL);
+
+/* The retained-RAM ring, not the durable one: sealed since agents-8h29, so bytes another
+ * image left where this one keeps its history are not read as a history. This suite's last
+ * test on purpose, because the scribble leaves the ring unreadable for the rest of the run. */
+ZTEST(bootlog_durable, test_zz_another_images_retained_bytes_are_no_history)
+{
+	struct meshtastic_boot_record rec[2];
+
+	zassert_equal(meshtastic_bootlog_history(rec, ARRAY_SIZE(rec)), 1U, "this boot recorded");
+	meshtastic_bootlog_heartbeat(42U);
+	zassert_equal(meshtastic_bootlog_history(rec, ARRAY_SIZE(rec)), 1U,
+		      "a heartbeat reseals: still readable");
+	meshtastic_bootlog_test_retained_scribble();
+	zassert_equal(meshtastic_bootlog_history(rec, ARRAY_SIZE(rec)), 0U,
+		      "a body that fails its seal is no history");
+}

@@ -53,6 +53,8 @@
 #include <zephyr/meshtastic/bootlog.h>
 #include <zephyr/meshtastic/reboot_trace.h>
 
+#include "meshtastic_retained.h"
+
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 /* Same three-way choice logring makes, and for the same reason: the ESP32 has a
@@ -76,27 +78,62 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define BOOTLOG_MAGIC   0x424F4F54U /* "BOOT" */
 #define BOOTLOG_ENTRIES CONFIG_MESHTASTIC_BOOTLOG_ENTRIES
 
-static BOOTLOG_ATTR uint32_t bl_magic;
-static BOOTLOG_ATTR uint32_t bl_boot_num;
-static BOOTLOG_ATTR uint32_t bl_next; /* next write slot */
-static BOOTLOG_ATTR uint32_t bl_count; /* valid entries, saturating at ENTRIES */
-static BOOTLOG_ATTR struct meshtastic_boot_record bl_ring[BOOTLOG_ENTRIES];
-/* Updated while running; read by the NEXT boot, which is the whole point. */
-static BOOTLOG_ATTR uint16_t bl_uptime_s;
+#define BOOTLOG_VERSION 1U
+
+/* The history, sealed as one record (meshtastic_retained.h): magic, layout version, length
+ * and a CRC over the body. The magic alone was the test until agents-8h29, and after an image
+ * change it can sit where this image looks while the bytes around it are the other image's. */
+static BOOTLOG_ATTR struct {
+	struct meshtastic_retained_seal seal;
+	struct {
+		uint32_t boot_num;
+		uint32_t next;  /* next write slot */
+		uint32_t count; /* valid entries, saturating at ENTRIES */
+		/* Updated while running; read by the NEXT boot, which is the whole point. */
+		uint16_t uptime_s;
+		uint16_t reserved;
+		struct meshtastic_boot_record ring[BOOTLOG_ENTRIES];
+	} b;
+} bl;
+
+static bool bl_valid(void)
+{
+	return meshtastic_retained_valid(&bl.seal, BOOTLOG_MAGIC, BOOTLOG_VERSION, &bl.b,
+					 sizeof(bl.b));
+}
+
+static void bl_seal(void)
+{
+	meshtastic_retained_seal(&bl.seal, BOOTLOG_MAGIC, BOOTLOG_VERSION, &bl.b, sizeof(bl.b));
+}
 
 #if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
 /* The arch's two records describe the run in progress and are cleared each
  * boot; these copies live in the same retained region as the ring so the
  * double-exception record outlives the reboot after the one it explains, and
- * the interrupt counters always mean "the previous run". */
-static BOOTLOG_ATTR struct xtensa_dblexc_record bl_dblexc;
-static BOOTLOG_ATTR uint32_t bl_dblexc_boot;
-static BOOTLOG_ATTR struct xtensa_irq_stats bl_irq_prev;
-static BOOTLOG_ATTR uint16_t bl_irq_prev_uptime_s;
-static BOOTLOG_ATTR uint32_t bl_irq_prev_magic;
+ * the interrupt counters always mean "the previous run". Sealed apart from the
+ * ring: each half is present or not on its own. */
+#define BL_XT_MAGIC 0x58544243U /* "XTBC" */
+static BOOTLOG_ATTR struct {
+	struct meshtastic_retained_seal seal;
+	struct {
+		struct xtensa_dblexc_record dblexc;
+		uint32_t dblexc_boot;
+		struct xtensa_irq_stats irq_prev;
+		uint16_t irq_prev_uptime_s;
+		uint8_t has_dblexc;
+		uint8_t has_irq_prev;
 #if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
-static BOOTLOG_ATTR uint32_t bl_clamps_prev[2];
+		uint32_t clamps_prev[2];
 #endif
+	} b;
+} bl_xt;
+
+static bool bl_xt_valid(void)
+{
+	return bl_valid() && meshtastic_retained_valid(&bl_xt.seal, BL_XT_MAGIC, BOOTLOG_VERSION,
+						       &bl_xt.b, sizeof(bl_xt.b));
+}
 #endif
 
 /* This boot's record, copied out of retained RAM at init so later reads cannot
@@ -120,53 +157,52 @@ static int bootlog_init(void)
 	}
 #endif
 
-	warm = (bl_magic == BOOTLOG_MAGIC);
-	prev_uptime = warm ? bl_uptime_s : 0U;
+	warm = bl_valid();
+	prev_uptime = warm ? bl.b.uptime_s : 0U;
 
-	if (!warm || bl_next >= BOOTLOG_ENTRIES || bl_count > BOOTLOG_ENTRIES) {
-		/* Retained RAM lost, or its indices are garbage. Either way the
-		 * history cannot be trusted, so start a fresh one rather than print
-		 * whatever was in the memory. A counter that restarts at 1 IS the
-		 * report: something took the RAM rail down. */
-		bl_magic = BOOTLOG_MAGIC;
+	if (!warm || bl.b.next >= BOOTLOG_ENTRIES || bl.b.count > BOOTLOG_ENTRIES) {
+		/* Retained RAM lost, or its indices are garbage, or another image's
+		 * bytes are where this one keeps the history (an update can do that).
+		 * Either way the history cannot be trusted, so start a fresh one rather
+		 * than print whatever was in the memory. A counter that restarts at 1
+		 * IS the report: the RAM rail went down, or a new image runs. */
 #if defined(CONFIG_MESHTASTIC_REBOOT_TRACE)
 		/* Retained RAM did not survive, so any reboot record in it is not this
 		 * node's last reboot -- it is whatever the RAM happened to hold. Drop it
-		 * rather than let a stale record be reported as fresh; the magic alone is
+		 * rather than let a stale record be reported as fresh; its own seal is
 		 * only a 1-in-2^32 guard and this is the one moment we KNOW it is void. */
 		meshtastic_reboot_trace_clear();
 #endif
-		bl_boot_num = 0U;
-		bl_next = 0U;
-		bl_count = 0U;
-		memset(bl_ring, 0, sizeof(bl_ring));
+		memset(&bl.b, 0, sizeof(bl.b));
 		warm = false;
 		prev_uptime = 0U;
 	}
 
 #if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
-	/* Before the increment: bl_boot_num is the boot that just ended, which is
-	 * the one any record here belongs to. */
+	/* Before the increment: bl.b.boot_num is the boot that just ended, which is
+	 * the one any record here belongs to. A double exception recorded before an
+	 * earlier boot is kept while its seal holds. The arch's own records are
+	 * read only on a warm boot: on a cold one they are whatever RAM held. */
+	if (!warm || !meshtastic_retained_valid(&bl_xt.seal, BL_XT_MAGIC, BOOTLOG_VERSION,
+						&bl_xt.b, sizeof(bl_xt.b))) {
+		memset(&bl_xt.b, 0, sizeof(bl_xt.b));
+	}
 	if (warm) {
 		if (xtensa_dblexc_record.magic == XTENSA_DBLEXC_MAGIC) {
-			bl_dblexc = xtensa_dblexc_record;
-			bl_dblexc_boot = bl_boot_num;
+			bl_xt.b.dblexc = xtensa_dblexc_record;
+			bl_xt.b.dblexc_boot = bl.b.boot_num;
+			bl_xt.b.has_dblexc = 1U;
 		}
-		bl_irq_prev = xtensa_irq_stats;
-		bl_irq_prev_uptime_s = prev_uptime;
-		bl_irq_prev_magic = BOOTLOG_MAGIC;
+		bl_xt.b.irq_prev = xtensa_irq_stats;
+		bl_xt.b.irq_prev_uptime_s = prev_uptime;
+		bl_xt.b.has_irq_prev = 1U;
 #if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
-		bl_clamps_prev[0] = xtensa_nesting_clamps[0];
-		bl_clamps_prev[1] = xtensa_nesting_clamps[1];
-#endif
-	} else {
-		bl_dblexc.magic = 0U;
-		bl_irq_prev_magic = 0U;
-#if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
-		bl_clamps_prev[0] = 0U;
-		bl_clamps_prev[1] = 0U;
+		bl_xt.b.clamps_prev[0] = xtensa_nesting_clamps[0];
+		bl_xt.b.clamps_prev[1] = xtensa_nesting_clamps[1];
 #endif
 	}
+	meshtastic_retained_seal(&bl_xt.seal, BL_XT_MAGIC, BOOTLOG_VERSION, &bl_xt.b,
+				 sizeof(bl_xt.b));
 	memset(&xtensa_dblexc_record, 0, sizeof(xtensa_dblexc_record));
 	memset(&xtensa_irq_stats, 0, sizeof(xtensa_irq_stats));
 #if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
@@ -175,20 +211,21 @@ static int bootlog_init(void)
 #endif
 #endif
 
-	bl_boot_num++;
-	bl_uptime_s = 0U;
+	bl.b.boot_num++;
+	bl.b.uptime_s = 0U;
 
-	bl_this.boot_num = bl_boot_num;
+	bl_this.boot_num = bl.b.boot_num;
 	bl_this.cause = cause;
 	bl_this.flags = (uint16_t)((warm ? MESHTASTIC_BOOT_F_WARM : 0U) |
 				   (cause_ok ? MESHTASTIC_BOOT_F_CAUSE_OK : 0U));
 	bl_this.prev_uptime_s = prev_uptime;
 
-	bl_ring[bl_next] = bl_this;
-	bl_next = (bl_next + 1U) % BOOTLOG_ENTRIES;
-	if (bl_count < BOOTLOG_ENTRIES) {
-		bl_count++;
+	bl.b.ring[bl.b.next] = bl_this;
+	bl.b.next = (bl.b.next + 1U) % BOOTLOG_ENTRIES;
+	if (bl.b.count < BOOTLOG_ENTRIES) {
+		bl.b.count++;
 	}
+	bl_seal();
 
 	return 0;
 }
@@ -200,7 +237,13 @@ SYS_INIT(bootlog_init, PRE_KERNEL_1, 1);
 
 void meshtastic_bootlog_heartbeat(uint32_t uptime_s)
 {
-	bl_uptime_s = (uint16_t)MIN(uptime_s, (uint32_t)UINT16_MAX);
+	bl.b.uptime_s = (uint16_t)MIN(uptime_s, (uint32_t)UINT16_MAX);
+	bl_seal();
+}
+
+void meshtastic_bootlog_test_retained_scribble(void)
+{
+	bl.b.uptime_s ^= 0x5A5AU;
 }
 
 void meshtastic_bootlog_this_boot(struct meshtastic_boot_record *out)
@@ -214,17 +257,17 @@ size_t meshtastic_bootlog_history(struct meshtastic_boot_record *out, size_t max
 {
 	size_t n;
 
-	if (out == NULL || max == 0U || bl_magic != BOOTLOG_MAGIC) {
+	if (out == NULL || max == 0U || !bl_valid()) {
 		return 0U;
 	}
 
-	n = MIN((size_t)bl_count, max);
+	n = MIN((size_t)bl.b.count, max);
 	for (size_t i = 0; i < n; i++) {
-		/* Oldest first. bl_next points one past the newest, so walking back
+		/* Oldest first. bl.b.next points one past the newest, so walking back
 		 * n slots from it lands on the oldest entry we are returning. */
-		size_t idx = (bl_next + BOOTLOG_ENTRIES - n + i) % BOOTLOG_ENTRIES;
+		size_t idx = (bl.b.next + BOOTLOG_ENTRIES - n + i) % BOOTLOG_ENTRIES;
 
-		out[i] = bl_ring[idx];
+		out[i] = bl.b.ring[idx];
 	}
 	return n;
 }
@@ -589,7 +632,7 @@ uint32_t meshtastic_bootlog_reboot_count(void)
 {
 	/* No flash: the retained-RAM counter, which restarts on power loss. Still
 	 * strictly increases across every reset that keeps RAM. */
-	return bl_boot_num;
+	return bl.b.boot_num;
 }
 
 int meshtastic_bootlog_reset_count(void)
@@ -645,28 +688,28 @@ static void bootlog_log_line(void *ctx, const char *line)
 #if defined(CONFIG_XTENSA_FAULT_BREADCRUMBS)
 bool meshtastic_bootlog_dblexc(struct xtensa_dblexc_record *out, uint32_t *boot_num)
 {
-	if (bl_magic != BOOTLOG_MAGIC || bl_dblexc.magic != XTENSA_DBLEXC_MAGIC) {
+	if (!bl_xt_valid() || !bl_xt.b.has_dblexc) {
 		return false;
 	}
 	if (out != NULL) {
-		*out = bl_dblexc;
+		*out = bl_xt.b.dblexc;
 	}
 	if (boot_num != NULL) {
-		*boot_num = bl_dblexc_boot;
+		*boot_num = bl_xt.b.dblexc_boot;
 	}
 	return true;
 }
 
 bool meshtastic_bootlog_irq_stats_prev(struct xtensa_irq_stats *out, uint16_t *prev_uptime_s)
 {
-	if (bl_magic != BOOTLOG_MAGIC || bl_irq_prev_magic != BOOTLOG_MAGIC) {
+	if (!bl_xt_valid() || !bl_xt.b.has_irq_prev) {
 		return false;
 	}
 	if (out != NULL) {
-		*out = bl_irq_prev;
+		*out = bl_xt.b.irq_prev;
 	}
 	if (prev_uptime_s != NULL) {
-		*prev_uptime_s = bl_irq_prev_uptime_s;
+		*prev_uptime_s = bl_xt.b.irq_prev_uptime_s;
 	}
 	return true;
 }
@@ -815,11 +858,11 @@ void meshtastic_bootlog_fault_lines(meshtastic_bootlog_line_fn fn, void *ctx)
 			fn(ctx, line);
 		}
 #if defined(CONFIG_XTENSA_ISR_NESTING_GUARD)
-		if (bl_clamps_prev[0] != 0U || bl_clamps_prev[1] != 0U) {
+		if (bl_xt.b.clamps_prev[0] != 0U || bl_xt.b.clamps_prev[1] != 0U) {
 			(void)snprintk(line, sizeof(line),
 				       "  nesting guard: %u entries started from 0 (count was "
 				       "negative), %u exits floored at 0",
-				       bl_clamps_prev[0], bl_clamps_prev[1]);
+				       bl_xt.b.clamps_prev[0], bl_xt.b.clamps_prev[1]);
 			fn(ctx, line);
 		}
 #endif

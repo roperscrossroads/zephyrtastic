@@ -151,3 +151,26 @@ ZTEST(meshtastic_reboot_trace, test_detail_longer_than_the_field_is_truncated_sa
 		      "and read by a printf on the next boot");
 	zassert_true(strlen(rt.detail) < sizeof(rt.detail));
 }
+
+ZTEST(meshtastic_reboot_trace, test_another_images_bytes_are_not_read_as_a_record)
+{
+	struct meshtastic_reboot_trace rt;
+
+	/* After an image change the magic can sit where this image looks while the bytes
+	 * around it are the other image's (agents-8h29: "ran 8241 s", caller 0x65746174). */
+	meshtastic_reboot_trace_capture(SYS_REBOOT_WARM, 0x1234U, true);
+	meshtastic_reboot_trace_test_scribble();
+	zassert_false(meshtastic_reboot_trace_get(&rt), "a body that fails its seal is no record");
+}
+
+ZTEST(meshtastic_reboot_trace, test_another_images_note_is_not_taken_as_a_reason)
+{
+	struct meshtastic_reboot_trace rt;
+
+	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_ADMIN, "asked");
+	meshtastic_reboot_trace_test_scribble();
+	meshtastic_reboot_trace_capture(SYS_REBOOT_WARM, 0x1U, true);
+	zassert_true(meshtastic_reboot_trace_get(&rt));
+	zassert_equal(rt.reason, MESHTASTIC_REBOOT_UNKNOWN, "a damaged note says nothing");
+	zassert_str_equal(rt.detail, "");
+}

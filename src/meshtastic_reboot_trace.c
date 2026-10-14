@@ -10,6 +10,8 @@
 
 #include <zephyr/meshtastic/reboot_trace.h>
 
+#include "meshtastic_retained.h"
+
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
 /* The same three-way choice bootlog and logring make, for the same reason: the ESP32 has an
@@ -24,20 +26,28 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #define REBOOT_TRACE_ATTR __noinit
 #endif
 
-#define REBOOT_TRACE_MAGIC 0x5242544DU /* "RBTM" */
+#define REBOOT_TRACE_MAGIC   0x5242544DU /* "RBTM" */
+#define REBOOT_NOTE_MAGIC    0x4E4F5445U /* "NOTE" */
+#define REBOOT_TRACE_VERSION 1U
 
-/* Written last, read first: the magic is what tells the next boot the rest of this struct is
- * real and not whatever the RAM happened to hold. Same discipline as the watchdog crash info. */
-static REBOOT_TRACE_ATTR uint32_t rt_magic;
-static REBOOT_TRACE_ATTR struct meshtastic_reboot_trace rt_record;
+/* Each record is one struct, sealed (meshtastic_retained.h): the body is written first and the
+ * seal last, so the next boot believes a record only if this layout wrote it whole. The magic
+ * alone used to be the test, and after an image change it passed over the other image's bytes
+ * (agents-8h29). */
+static REBOOT_TRACE_ATTR struct {
+	struct meshtastic_retained_seal seal;
+	struct meshtastic_reboot_trace record;
+} rt;
 
 /* A note left by one of our own call sites, waiting for the reboot to pick it up. Kept apart
- * from rt_record so that a note left but never followed by a reboot cannot masquerade as one. */
-static REBOOT_TRACE_ATTR uint32_t rt_note_magic;
-static REBOOT_TRACE_ATTR uint8_t rt_note_reason;
-static REBOOT_TRACE_ATTR char rt_note_detail[24];
-
-#define REBOOT_NOTE_MAGIC 0x4E4F5445U /* "NOTE" */
+ * from the record so that a note left but never followed by a reboot cannot masquerade as one. */
+static REBOOT_TRACE_ATTR struct {
+	struct meshtastic_retained_seal seal;
+	struct {
+		uint8_t reason;
+		char detail[24];
+	} body;
+} rt_note;
 
 static const char *const reason_names[] = {
 	[MESHTASTIC_REBOOT_UNKNOWN] = "unknown",
@@ -67,29 +77,41 @@ const char *meshtastic_reboot_type_str(uint8_t sys_type)
 
 void meshtastic_reboot_trace_note(enum meshtastic_reboot_reason reason, const char *detail)
 {
-	rt_note_reason = (uint8_t)reason;
-	rt_note_detail[0] = '\0';
+	meshtastic_retained_void(&rt_note.seal);
+	memset(&rt_note.body, 0, sizeof(rt_note.body));
+	rt_note.body.reason = (uint8_t)reason;
 	if (detail != NULL) {
-		strncpy(rt_note_detail, detail, sizeof(rt_note_detail) - 1);
-		rt_note_detail[sizeof(rt_note_detail) - 1] = '\0';
+		strncpy(rt_note.body.detail, detail, sizeof(rt_note.body.detail) - 1);
 	}
-	rt_note_magic = REBOOT_NOTE_MAGIC; /* last */
+	meshtastic_retained_seal(&rt_note.seal, REBOOT_NOTE_MAGIC, REBOOT_TRACE_VERSION, &rt_note.body,
+				 sizeof(rt_note.body));
 }
 
 bool meshtastic_reboot_trace_get(struct meshtastic_reboot_trace *out)
 {
-	if (rt_magic != REBOOT_TRACE_MAGIC || out == NULL) {
+	if (out == NULL || !meshtastic_retained_valid(&rt.seal, REBOOT_TRACE_MAGIC,
+						      REBOOT_TRACE_VERSION, &rt.record,
+						      sizeof(rt.record))) {
 		return false;
 	}
-	*out = rt_record;
+	*out = rt.record;
 	return true;
 }
 
 void meshtastic_reboot_trace_clear(void)
 {
-	rt_magic = 0U;
-	memset(&rt_record, 0, sizeof(rt_record));
+	meshtastic_retained_void(&rt.seal);
+	memset(&rt.record, 0, sizeof(rt.record));
 }
+
+#if defined(CONFIG_ZTEST)
+void meshtastic_reboot_trace_test_scribble(void)
+{
+	/* What another image leaves: the magic where this one looks, other bytes around it. */
+	rt.record.uptime_s ^= 0x5A5A5A5AU;
+	rt_note.body.reason ^= 0x5AU;
+}
+#endif
 
 /*
  * The link-time wrapper. -Wl,--wrap=sys_reboot sends EVERY caller here first -- ours, the
@@ -112,32 +134,35 @@ void meshtastic_reboot_trace_capture(int type, uint32_t caller_pc, bool have_pc)
 {
 	const char *tname;
 
-	memset(&rt_record, 0, sizeof(rt_record));
-	rt_record.sys_type = (uint8_t)type;
-	rt_record.uptime_s = (uint32_t)(k_uptime_get() / 1000);
-	rt_record.caller_pc = caller_pc;
-	rt_record.have_pc = have_pc;
+	meshtastic_retained_void(&rt.seal);
+	memset(&rt.record, 0, sizeof(rt.record));
+	rt.record.sys_type = (uint8_t)type;
+	rt.record.uptime_s = (uint32_t)(k_uptime_get() / 1000);
+	rt.record.caller_pc = caller_pc;
+	rt.record.have_pc = have_pc;
 
 	/* k_thread_name_get() returns "" rather than NULL when names are on but unset. Not
 	 * safe to call from an ISR on every arch, so gate on context. */
 	if (!k_is_in_isr()) {
 		tname = k_thread_name_get(k_current_get());
 		if (tname != NULL) {
-			strncpy(rt_record.thread, tname, sizeof(rt_record.thread) - 1);
+			strncpy(rt.record.thread, tname, sizeof(rt.record.thread) - 1);
 		}
 	} else {
-		strncpy(rt_record.thread, "<isr>", sizeof(rt_record.thread) - 1);
+		strncpy(rt.record.thread, "<isr>", sizeof(rt.record.thread) - 1);
 	}
 
-	if (rt_note_magic == REBOOT_NOTE_MAGIC) {
-		rt_record.reason = rt_note_reason;
-		strncpy(rt_record.detail, rt_note_detail, sizeof(rt_record.detail) - 1);
-		rt_note_magic = 0U; /* consume: a note belongs to exactly one reboot */
+	if (meshtastic_retained_valid(&rt_note.seal, REBOOT_NOTE_MAGIC, REBOOT_TRACE_VERSION,
+				      &rt_note.body, sizeof(rt_note.body))) {
+		rt.record.reason = rt_note.body.reason;
+		strncpy(rt.record.detail, rt_note.body.detail, sizeof(rt.record.detail) - 1);
+		meshtastic_retained_void(&rt_note.seal); /* consume: a note belongs to one reboot */
 	} else {
-		rt_record.reason = MESHTASTIC_REBOOT_UNKNOWN;
+		rt.record.reason = MESHTASTIC_REBOOT_UNKNOWN;
 	}
 
-	rt_magic = REBOOT_TRACE_MAGIC; /* written last, deliberately */
+	meshtastic_retained_seal(&rt.seal, REBOOT_TRACE_MAGIC, REBOOT_TRACE_VERSION, &rt.record,
+				 sizeof(rt.record)); /* last, deliberately */
 }
 
 FUNC_NORETURN void __wrap_sys_reboot(int type)

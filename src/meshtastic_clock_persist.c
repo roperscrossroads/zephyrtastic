@@ -15,6 +15,7 @@
 
 #include "meshtastic_clock.h"
 #include "meshtastic_clock_persist.h"
+#include "meshtastic_retained.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -34,15 +35,26 @@ LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 #endif
 
 #define PERSIST_MAGIC   0x4D435031U /* "MCP1" */
-#define PERSIST_VERSION 1U
+#define PERSIST_VERSION 2U /* 2: sealed (agents-8h29) */
 
+/* Sealed (meshtastic_retained.h): magic, version, length and a checksum over the body. The
+ * magic and version alone pass over another image's bytes after an update, and a wrong epoch
+ * restored here is a confident wrong time on the air. */
 static PERSIST_ATTR struct {
-	uint32_t magic;
-	uint16_t version;
-	uint16_t quality; /* what the clock was worth when saved; reporting only */
-	int64_t epoch_ms;
-	uint32_t counter_ticks;
+	struct meshtastic_retained_seal seal;
+	struct {
+		int64_t epoch_ms;
+		uint32_t counter_ticks;
+		uint16_t quality; /* what the clock was worth when saved; reporting only */
+		uint16_t reserved;
+	} b;
 } saved;
+
+static bool saved_valid(void)
+{
+	return meshtastic_retained_valid(&saved.seal, PERSIST_MAGIC, PERSIST_VERSION, &saved.b,
+					 sizeof(saved.b));
+}
 
 static const struct device *const counter_dev =
 	DEVICE_DT_GET(DT_CHOSEN(meshtastic_persist_counter));
@@ -71,19 +83,18 @@ static void persist_save(struct k_work *work)
 	}
 
 	/*
-	 * Magic cleared first, set last. A reset landing in the middle of this
+	 * Seal voided first, set last. A reset landing in the middle of this
 	 * then leaves a record that fails its own check, rather than one that
 	 * passes with half its fields from the previous save — which would restore
 	 * a confident wrong time, the failure this whole module must not produce.
 	 */
-	saved.magic = 0U;
-	barrier_dmem_fence_full();
-	saved.version = PERSIST_VERSION;
-	saved.quality = (uint16_t)meshtastic_clock_get_quality();
-	saved.epoch_ms = now_ms;
-	saved.counter_ticks = ticks;
-	barrier_dmem_fence_full();
-	saved.magic = PERSIST_MAGIC;
+	meshtastic_retained_void(&saved.seal);
+	saved.b.quality = (uint16_t)meshtastic_clock_get_quality();
+	saved.b.reserved = 0U;
+	saved.b.epoch_ms = now_ms;
+	saved.b.counter_ticks = ticks;
+	meshtastic_retained_seal(&saved.seal, PERSIST_MAGIC, PERSIST_VERSION, &saved.b,
+				 sizeof(saved.b));
 
 reschedule:
 	k_work_schedule(&save_work, K_SECONDS(CONFIG_MESHTASTIC_CLOCK_PERSIST_INTERVAL_S));
@@ -148,12 +159,12 @@ static enum meshtastic_clock_persist_result persist_apply(uint64_t downtime_ms)
 	 * at GPS it would block everything except GPS indefinitely — so a node
 	 * would come back from a reset holding a stale time it refused to correct.
 	 */
-	meshtastic_clock_set_epoch_ms(saved.epoch_ms + (int64_t)downtime_ms,
+	meshtastic_clock_set_epoch_ms(saved.b.epoch_ms + (int64_t)downtime_ms,
 				      MESHTASTIC_CLOCK_QUALITY_DEVICE,
 				      MESHTASTIC_CLOCK_PRECISION_SUBSECOND);
 	last_downtime_ms = (uint32_t)downtime_ms;
 	LOG_INF("clock: restored across a %u ms reset (saved at quality %u)",
-		(unsigned int)downtime_ms, (unsigned int)saved.quality);
+		(unsigned int)downtime_ms, (unsigned int)saved.b.quality);
 	return MESHTASTIC_CLOCK_PERSIST_RESTORED;
 }
 
@@ -162,10 +173,11 @@ enum meshtastic_clock_persist_result
 meshtastic_clock_persist_test_restore(int64_t epoch_ms, enum meshtastic_clock_quality saved_q,
 				      uint32_t gap_ms)
 {
-	saved.magic = PERSIST_MAGIC;
-	saved.version = PERSIST_VERSION;
-	saved.epoch_ms = epoch_ms;
-	saved.quality = (uint16_t)saved_q;
+	memset(&saved.b, 0, sizeof(saved.b));
+	saved.b.epoch_ms = epoch_ms;
+	saved.b.quality = (uint16_t)saved_q;
+	meshtastic_retained_seal(&saved.seal, PERSIST_MAGIC, PERSIST_VERSION, &saved.b,
+				 sizeof(saved.b));
 	last_result = persist_apply(gap_ms);
 	return last_result;
 }
@@ -191,7 +203,7 @@ static int persist_restore(void)
 		goto start_saving;
 	}
 
-	if (saved.magic != PERSIST_MAGIC || saved.version != PERSIST_VERSION) {
+	if (!saved_valid()) {
 		last_result = MESHTASTIC_CLOCK_PERSIST_NO_RECORD;
 		goto start_saving;
 	}
@@ -208,7 +220,7 @@ static int persist_restore(void)
 	}
 
 	/* Unsigned subtraction: correct across one wrap of the counter's width. */
-	delta = now_ticks - saved.counter_ticks;
+	delta = now_ticks - saved.b.counter_ticks;
 	downtime_ms = ((uint64_t)delta * MSEC_PER_SEC) / freq;
 	last_result = persist_apply(downtime_ms);
 

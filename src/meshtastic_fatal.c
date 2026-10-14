@@ -30,6 +30,8 @@
 
 #include <zephyr/meshtastic/diagnostics.h>
 
+#include "meshtastic_retained.h"
+
 #if defined(CONFIG_MESHTASTIC_DFU_ON_FATAL)
 #include "meshtastic_dfu_trigger.h"
 #endif
@@ -92,24 +94,34 @@ static void fatal_collect_heap_stats(struct meshtastic_fatal_crash_info *info)
 
 #define FATAL_CRASH_MAGIC 0x46415441U /* "FATA" */
 
-static FATAL_CRASH_RTC_ATTR uint32_t rtc_fatal_magic;
+#define FATAL_CRASH_VERSION 1U
+
+/* Sealed (meshtastic_retained.h): a magic alone also passes over another image's bytes
+ * after an update (agents-8h29). */
+static FATAL_CRASH_RTC_ATTR struct meshtastic_retained_seal rtc_fatal_seal;
 static FATAL_CRASH_RTC_ATTR struct meshtastic_fatal_crash_info rtc_fatal_info;
+
+static bool fatal_record_valid(void)
+{
+	return meshtastic_retained_valid(&rtc_fatal_seal, FATAL_CRASH_MAGIC, FATAL_CRASH_VERSION,
+					 &rtc_fatal_info, sizeof(rtc_fatal_info));
+}
 
 bool meshtastic_fatal_take_last_crash(struct meshtastic_fatal_crash_info *out)
 {
-	if (rtc_fatal_magic != FATAL_CRASH_MAGIC) {
+	if (!fatal_record_valid()) {
 		return false;
 	}
 
 	*out = rtc_fatal_info;
-	rtc_fatal_magic = 0U; /* one-shot: don't re-report on a later, unrelated boot */
+	meshtastic_retained_void(&rtc_fatal_seal); /* one-shot: not re-reported on a later boot */
 
 	return true;
 }
 
 bool meshtastic_fatal_peek_last_crash(struct meshtastic_fatal_crash_info *out)
 {
-	if (rtc_fatal_magic != FATAL_CRASH_MAGIC) {
+	if (!fatal_record_valid()) {
 		return false;
 	}
 
@@ -131,6 +143,7 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 	/* Plain memory stores -- no driver, no log subsystem -- same reasoning
 	 * as watchdog_pre_reset_cb(), and doubly so here: this can run from a
 	 * genuine CPU exception context, not just a device-driver ISR. */
+	meshtastic_retained_void(&rtc_fatal_seal); /* invalid while it changes */
 	rtc_fatal_info.reason = reason;
 
 	fatal_collect_heap_stats(&rtc_fatal_info);
@@ -140,9 +153,9 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 		sizeof(rtc_fatal_info.thread_name) - 1);
 	rtc_fatal_info.thread_name[sizeof(rtc_fatal_info.thread_name) - 1] = '\0';
 
-	/* Written last, deliberately -- same reasoning as
-	 * meshtastic_watchdog.c's rtc_crash_magic. */
-	rtc_fatal_magic = FATAL_CRASH_MAGIC;
+	/* Sealed last, deliberately -- same reasoning as meshtastic_watchdog.c's crash seal. */
+	meshtastic_retained_seal(&rtc_fatal_seal, FATAL_CRASH_MAGIC, FATAL_CRASH_VERSION,
+				 &rtc_fatal_info, sizeof(rtc_fatal_info));
 
 	LOG_PANIC();
 

@@ -40,6 +40,7 @@
 #endif
 
 #include "meshtastic_core.h" /* meshtastic_radio_cad_/agc_ counter getters */
+#include "meshtastic_retained.h"
 #include "meshtastic_watchdog.h"
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -145,19 +146,37 @@ static struct k_work_delayable heartbeat_work;
  * -- protects against the hardware reset landing mid-write. */
 #define WATCHDOG_CRASH_MAGIC 0x43524153U /* "CRAS" */
 
-static MESHTASTIC_WDT_RTC_ATTR uint32_t rtc_crash_magic;
+#define WATCHDOG_CRASH_VERSION 1U
+
+/* Sealed (meshtastic_retained.h), not just a magic: after an update the magic can sit where
+ * this image looks while the bytes around it are the other image's (agents-8h29). */
+static MESHTASTIC_WDT_RTC_ATTR struct meshtastic_retained_seal rtc_crash_seal;
 static MESHTASTIC_WDT_RTC_ATTR struct meshtastic_watchdog_crash_info rtc_crash_info;
 
 /* Separate breadcrumb + magic for the hardware-ISR path (see
  * hw_wdt_stage0_callback() below) -- deliberately its own RTC-persistent
- * slot, not reused from rtc_crash_info/rtc_crash_magic above, so a boot can
+ * slot, not reused from rtc_crash_info/rtc_crash_seal above, so a boot can
  * tell unambiguously which path actually caught the hang: this one firing
  * with the software one absent means the scheduler itself was unresponsive,
  * not just one application channel. */
 #define HW_WATCHDOG_CRASH_MAGIC 0x48435241U /* "HCRA" */
 
-static MESHTASTIC_WDT_RTC_ATTR uint32_t rtc_hw_crash_magic;
+static MESHTASTIC_WDT_RTC_ATTR struct meshtastic_retained_seal rtc_hw_crash_seal;
 static MESHTASTIC_WDT_RTC_ATTR struct meshtastic_hw_watchdog_crash_info rtc_hw_crash_info;
+
+static bool crash_valid(void)
+{
+	return meshtastic_retained_valid(&rtc_crash_seal, WATCHDOG_CRASH_MAGIC,
+					 WATCHDOG_CRASH_VERSION, &rtc_crash_info,
+					 sizeof(rtc_crash_info));
+}
+
+static bool hw_crash_valid(void)
+{
+	return meshtastic_retained_valid(&rtc_hw_crash_seal, HW_WATCHDOG_CRASH_MAGIC,
+					 WATCHDOG_CRASH_VERSION, &rtc_hw_crash_info,
+					 sizeof(rtc_hw_crash_info));
+}
 
 /* Boot-time latch of the above, taken in meshtastic_watchdog_init() before the
  * hardware callback is installed -- see hw_crash_latch() for why the RTC slot
@@ -209,6 +228,7 @@ static void channel_timeout_cb(int channel_id, void *user_data)
 
 	ARG_UNUSED(channel_id);
 
+	meshtastic_retained_void(&rtc_crash_seal); /* invalid while it changes */
 	strncpy(rtc_crash_info.channel, channel_name, sizeof(rtc_crash_info.channel) - 1);
 	rtc_crash_info.channel[sizeof(rtc_crash_info.channel) - 1] = '\0';
 
@@ -228,8 +248,9 @@ static void channel_timeout_cb(int channel_id, void *user_data)
 		sizeof(rtc_crash_info.thread_name) - 1);
 	rtc_crash_info.thread_name[sizeof(rtc_crash_info.thread_name) - 1] = '\0';
 
-	/* Written last, deliberately -- see the file comment on rtc_crash_magic. */
-	rtc_crash_magic = WATCHDOG_CRASH_MAGIC;
+	/* Sealed last, deliberately -- see the file comment on the crash breadcrumb. */
+	meshtastic_retained_seal(&rtc_crash_seal, WATCHDOG_CRASH_MAGIC, WATCHDOG_CRASH_VERSION,
+				 &rtc_crash_info, sizeof(rtc_crash_info));
 
 	/* Name the channel that starved, not just the fact of a watchdog reboot: the
 	 * channel is the whole diagnosis. */
@@ -278,6 +299,7 @@ static void MESHTASTIC_WDT_IRAM_ATTR hw_wdt_stage0_callback(const struct device 
 	ARG_UNUSED(dev);
 	ARG_UNUSED(channel_id);
 
+	meshtastic_retained_void(&rtc_hw_crash_seal); /* invalid while it changes */
 	rtc_hw_crash_info.uptime_ms = k_uptime_get_32();
 
 	tname = k_thread_name_get(k_current_get());
@@ -285,9 +307,12 @@ static void MESHTASTIC_WDT_IRAM_ATTR hw_wdt_stage0_callback(const struct device 
 		sizeof(rtc_hw_crash_info.thread_name) - 1);
 	rtc_hw_crash_info.thread_name[sizeof(rtc_hw_crash_info.thread_name) - 1] = '\0';
 
-	/* Written last, deliberately -- see the file comment on rtc_crash_magic
-	 * (same reasoning applies to this separate breadcrumb). */
-	rtc_hw_crash_magic = HW_WATCHDOG_CRASH_MAGIC;
+	/* Sealed last, deliberately -- see the file comment on the crash breadcrumb (same
+	 * reasoning applies to this separate one). The seal is forced inline: this runs from
+	 * IRAM and must not call into flash. */
+	meshtastic_retained_seal(&rtc_hw_crash_seal, HW_WATCHDOG_CRASH_MAGIC,
+				 WATCHDOG_CRASH_VERSION, &rtc_hw_crash_info,
+				 sizeof(rtc_hw_crash_info));
 }
 
 /* Feeds the "sysworkq" channel -- proof that the system workqueue thread
@@ -411,10 +436,10 @@ static void heartbeat_work_fn(struct k_work *work)
 	 * actually runs out. Racy by a hair (the ISR could fire between the read
 	 * and the clear, losing one event); acceptable for a counter whose
 	 * purpose is "is this happening at all". */
-	if (rtc_hw_crash_magic == HW_WATCHDOG_CRASH_MAGIC) {
+	if (hw_crash_valid()) {
 		uint32_t at_ms = rtc_hw_crash_info.uptime_ms;
 
-		rtc_hw_crash_magic = 0U;
+		meshtastic_retained_void(&rtc_hw_crash_seal);
 		STATS_INC(mt_wdt, hw_stage0_recovered);
 		LOG_WRN("HW watchdog stage 0 fired at uptime=%u ms but the board recovered "
 			"(task_wdt background feed was late; no reset)",
@@ -449,19 +474,19 @@ void meshtastic_watchdog_checkin(void)
 
 bool meshtastic_watchdog_take_last_crash(struct meshtastic_watchdog_crash_info *out)
 {
-	if (rtc_crash_magic != WATCHDOG_CRASH_MAGIC) {
+	if (!crash_valid()) {
 		return false;
 	}
 
 	*out = rtc_crash_info;
-	rtc_crash_magic = 0U; /* one-shot: don't re-report on a later, unrelated boot */
+	meshtastic_retained_void(&rtc_crash_seal); /* one-shot: not re-reported on a later boot */
 
 	return true;
 }
 
 bool meshtastic_watchdog_peek_last_crash(struct meshtastic_watchdog_crash_info *out)
 {
-	if (rtc_crash_magic != WATCHDOG_CRASH_MAGIC) {
+	if (!crash_valid()) {
 		return false;
 	}
 
@@ -492,12 +517,12 @@ bool meshtastic_watchdog_peek_last_crash(struct meshtastic_watchdog_crash_info *
  * the report path no matter what the timings do. */
 static void hw_crash_latch(void)
 {
-	if (rtc_hw_crash_magic == HW_WATCHDOG_CRASH_MAGIC) {
+	if (hw_crash_valid()) {
 		hw_crash_latched_info = rtc_hw_crash_info;
 		hw_crash_latched_valid = true;
 	}
 
-	rtc_hw_crash_magic = 0U;
+	meshtastic_retained_void(&rtc_hw_crash_seal);
 }
 
 bool meshtastic_hw_watchdog_take_last_crash(struct meshtastic_hw_watchdog_crash_info *out)
