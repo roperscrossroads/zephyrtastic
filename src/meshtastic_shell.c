@@ -132,6 +132,24 @@
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
+/* One writer per console. The serial shell prints the logs itself (its log backend) and
+ * holds its output lock while a command prints; log_backend_uart writes the same UART with
+ * uart_poll_out() from the log thread, outside that lock. Both on one UART print every log
+ * line twice and put a log line's bytes inside a command's output: a `meshtastic api`
+ * frame split that way reached the phone-API tunnel as a damaged line (agents-62n9). The
+ * plain backend picks zephyr,log-uart when chosen, else zephyr,console. */
+#if defined(CONFIG_LOG_BACKEND_UART) && defined(CONFIG_SHELL_BACKEND_SERIAL) &&                    \
+	DT_HAS_CHOSEN(zephyr_shell_uart)
+#if DT_HAS_CHOSEN(zephyr_log_uart)
+#define MT_LOG_UART_NODE DT_CHOSEN(zephyr_log_uart)
+#else
+#define MT_LOG_UART_NODE DT_CHOSEN(zephyr_console)
+#endif
+BUILD_ASSERT(!DT_SAME_NODE(MT_LOG_UART_NODE, DT_CHOSEN(zephyr_shell_uart)),
+	     "CONFIG_LOG_BACKEND_UART on the serial shell's UART: the shell's own log backend "
+	     "already prints the logs there; drop CONFIG_LOG_BACKEND_UART");
+#endif
+
 enum shell_work_op {
 	SHELL_WORK_SEND_TEXT,
 	SHELL_WORK_SEND_POSITION,
