@@ -165,6 +165,7 @@ static void warm_absorb_locked(const struct nodedb_entry *entry);
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
 static void mtrec_schedule_save(void);
+static void mtrec_schedule_identity_save(void);
 static void mtrec_note_evicted(void);
 #if defined(NODEDB_BULK)
 static bool nrec_active(void);
@@ -291,6 +292,15 @@ static void apply_user(struct nodedb_entry *entry, const meshtastic_User *user)
 	}
 #endif
 
+	/* What the record stores about this node, before the update: any change is
+	 * saved (upstream NodeDB::updateUser's `changed`, less the channel, which
+	 * the record does not keep). */
+	bool changed = strncmp(node->long_name, user->long_name, sizeof(node->long_name)) != 0 ||
+		       strncmp(node->short_name, user->short_name, sizeof(node->short_name)) != 0 ||
+		       node->hw_model != (uint8_t)user->hw_model ||
+		       node->role != (uint8_t)user->role;
+	uint32_t bitfield_before = node->bitfield;
+
 	copy_string(node->long_name, sizeof(node->long_name), user->long_name);
 	copy_string(node->short_name, sizeof(node->short_name), user->short_name);
 	node->hw_model = (uint8_t)user->hw_model;
@@ -307,6 +317,7 @@ static void apply_user(struct nodedb_entry *entry, const meshtastic_User *user)
 		if (key_len > 0U) {
 			memcpy(node->public_key.bytes, user->public_key.bytes, key_len);
 		}
+		changed = changed || key_changed;
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_KEYS)
 		/* Mirror a peer's key into the warm tier + NVS, only when it first
 		 * appears or changes, so a known peer re-broadcasting its NodeInfo
@@ -330,13 +341,16 @@ static void apply_user(struct nodedb_entry *entry, const meshtastic_User *user)
 		  user->has_is_unmessagable && user->is_unmessagable);
 
 #if defined(CONFIG_MESHTASTIC_NODEDB_PERSIST_RECORDS)
-	/* A curated (favorite/ignored) node's identity changed — re-persist its
-	 * record. Volatile fields are excluded from the record, so this rewrites
-	 * NVS only on a genuine identity change, not on every heard packet. */
-	if (IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_FAVORITE_BIT) ||
-	    IS_BIT_SET(node->bitfield, NODEINFO_BITFIELD_IS_IGNORED_BIT)) {
-		mtrec_schedule_save();
+	/* Any node's stored identity changed: save it, so a rename survives a reboot
+	 * that comes before the next snapshot (agents-mlx2). This used to save only
+	 * favourite and ignored nodes, and a peer renamed 30 s before a reboot came
+	 * back under its old name. A NodeInfo that changes nothing writes nothing. */
+	if (changed || node->bitfield != bitfield_before) {
+		mtrec_schedule_identity_save();
 	}
+#else
+	ARG_UNUSED(changed);
+	ARG_UNUSED(bitfield_before);
 #endif
 }
 
@@ -1258,8 +1272,10 @@ SETTINGS_STATIC_HANDLER_DEFINE(mtnode, MTNODE_SUBTREE, NULL, nodekeys_set, NULL,
  * Volatile per-hearing fields (snr / channel / next_hop / hops / via-mqtt) are
  * NOT persisted — they are re-learned from the next packet. last_heard IS
  * persisted, but as a durable wall-clock epoch (see mtrec_encode), not the
- * volatile uptime, so a node's recency survives a reboot. Identity changes and
- * favorite/ignore toggles persist promptly; last_heard is refreshed by a
+ * volatile uptime, so a node's recency survives a reboot. Favorite/ignore toggles
+ * persist promptly, any node's identity change (name, hw model, role, key, flags)
+ * no sooner than MESHTASTIC_NODEDB_IDENTITY_SAVE_FLOOR_SEC after the last save,
+ * as the reference's updateUser throttles it; last_heard is refreshed by a
  * periodic snapshot (MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC) that only rewrites
  * records whose epoch actually changed. Guarded by nodedb_lock like the rest of
  * the store.
@@ -1477,11 +1493,17 @@ static void mtrec_do_persist(void)
 	}
 }
 
+/* Uptime of the last save by the save work, for the identity-save floor. */
+static int64_t mtrec_saved_at_ms;
+static bool mtrec_saved_once;
+
 static void mtrec_save_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
 	mtrec_do_persist();
+	mtrec_saved_at_ms = k_uptime_get();
+	mtrec_saved_once = true;
 }
 
 static K_WORK_DELAYABLE_DEFINE(mtrec_save_work, mtrec_save_work_handler);
@@ -1490,6 +1512,24 @@ static void mtrec_schedule_save(void)
 {
 	(void)k_work_reschedule(&mtrec_save_work,
 				K_MSEC(CONFIG_MESHTASTIC_SETTINGS_SAVE_DELAY_MS));
+}
+
+/* A peer's identity changed. Save after the usual coalescing delay, or when the
+ * floor since the last save ends, whichever is later. k_work_schedule leaves a
+ * save already pending where it is, so a stream of renames cannot push the save
+ * out for ever (a reschedule would), and a change inside the floor is saved
+ * when it ends rather than dropped as the reference's throttle drops it. */
+static void mtrec_schedule_identity_save(void)
+{
+	int64_t delay_ms = CONFIG_MESHTASTIC_SETTINGS_SAVE_DELAY_MS;
+
+	if (mtrec_saved_once) {
+		int64_t since = k_uptime_get() - mtrec_saved_at_ms;
+		int64_t floor_ms = (int64_t)CONFIG_MESHTASTIC_NODEDB_IDENTITY_SAVE_FLOOR_SEC * 1000;
+
+		delay_ms = MAX(delay_ms, floor_ms - since);
+	}
+	(void)k_work_schedule(&mtrec_save_work, K_MSEC(delay_ms));
 }
 
 #if CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC > 0

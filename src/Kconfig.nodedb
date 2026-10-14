@@ -95,4 +95,18 @@ config MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC
 	  periodic snapshots; records then persist only on identity change or
 	  favorite/ignore toggle (last-heard recency will not survive a reboot).
 
+config MESHTASTIC_NODEDB_IDENTITY_SAVE_FLOOR_SEC
+	int "Least time between two saves for a peer's identity change (seconds)"
+	depends on MESHTASTIC_NODEDB_PERSIST_RECORDS
+	default 60
+	range 1 3600
+	help
+	  A peer's NodeInfo that changes what is stored about it (long or
+	  short name, hardware model, role, public key, licensed or
+	  unmessagable flag) saves the node list, but not sooner than this
+	  after the previous save, so a mesh full of renames cannot wear the
+	  flash. The reference saves at most once a minute for the same
+	  reason (NodeDB::updateUser); unlike it, a change inside the floor
+	  is saved when the floor ends, not dropped.
+
 endif # MESHTASTIC_NODEDB

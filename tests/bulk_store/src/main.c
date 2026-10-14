@@ -512,3 +512,66 @@ ZTEST(bulk_store, test_l_legacy_settings_keys_are_imported_once_then_deleted)
 	stage_boot();
 	zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_K, key), "now served from the bulk pages");
 }
+
+/* ---- a peer's rename reaches the flash without a snapshot (agents-mlx2) ---------- */
+
+#if defined(CONFIG_MESHTASTIC_NODEDB_IDENTITY_SAVE_FLOOR_SEC)
+#define PEER_R   0x0A0A00D1U
+#define FLOOR_MS (CONFIG_MESHTASTIC_NODEDB_IDENTITY_SAVE_FLOOR_SEC * 1000)
+
+static void expect_name(uint32_t num, const char *want, const char *why)
+{
+	struct meshtastic_nodedb_node node;
+
+	zassert_ok(meshtastic_nodedb_get(num, &node), "%s: node present", why);
+	zassert_equal(strcmp(node.long_name, want), 0, "%s: '%s', want '%s'", why, node.long_name,
+		      want);
+}
+
+ZTEST(bulk_store, test_m_a_peer_rename_survives_a_reboot_before_any_snapshot)
+{
+	struct meshtastic_bulk_info saved, held;
+
+	if (CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC != 0) {
+		ztest_test_skip(); /* a snapshot would save it anyway: proves nothing */
+	}
+
+	/* A plain peer (not favourite, not ignored), heard and saved. */
+	stage_boot();
+	k_msleep(FLOOR_MS + 200); /* past the floor of the boot's own save */
+	seed_peer(PEER_R, "alpha");
+	k_msleep(500);
+	stage_boot();
+	expect_name(PEER_R, "alpha", "a new peer saved on its own");
+
+	/* Renamed, then a reboot before any snapshot: the kit2 case, where rzr2 and
+	 * rzr4 came back under their old names. */
+	k_msleep(FLOOR_MS + 200);
+	seed_peer(PEER_R, "renamed");
+	k_msleep(500);
+	stage_boot();
+	expect_name(PEER_R, "renamed", "a rename saved on its own");
+
+	/* The floor: a second rename right after a save waits for the floor's end,
+	 * and is then saved, not dropped. */
+	k_msleep(FLOOR_MS + 200);
+	seed_peer(PEER_R, "first");
+	k_msleep(500);
+	meshtastic_bulk_info_get(&saved);
+	seed_peer(PEER_R, "second");
+	k_msleep(500);
+	meshtastic_bulk_info_get(&held);
+	zassert_equal(held.free_bytes, saved.free_bytes, "inside the floor: nothing written yet");
+	k_msleep(FLOOR_MS);
+	stage_boot();
+	expect_name(PEER_R, "second", "saved when the floor ended");
+
+	/* The same NodeInfo again changes nothing and writes nothing. */
+	k_msleep(FLOOR_MS + 200);
+	meshtastic_bulk_info_get(&saved);
+	seed_peer(PEER_R, "second");
+	k_msleep(FLOOR_MS + 500);
+	meshtastic_bulk_info_get(&held);
+	zassert_equal(held.free_bytes, saved.free_bytes, "an unchanged NodeInfo costs no flash");
+}
+#endif /* CONFIG_MESHTASTIC_NODEDB_IDENTITY_SAVE_FLOOR_SEC */

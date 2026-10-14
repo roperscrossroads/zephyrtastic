@@ -14,6 +14,12 @@ tests:
     extra_configs:
       # Snapshots every 2 s so the tests see a save without waiting 5 minutes.
       - CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC=2
+  # No snapshot at all: a peer's rename must reach the flash on its own, within
+  # the identity-save floor (agents-mlx2). test_m runs only here.
+  meshtastic.bulk_store.identity_save.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_NODEDB_PERSIST_INTERVAL_SEC=0
+      - CONFIG_MESHTASTIC_NODEDB_IDENTITY_SAVE_FLOOR_SEC=2
   # Keys in bulk with node records OFF (PERSIST_RECORDS and PERSIST_KEYS are
   # independent): the unlock reload must still restore the warm pages. Build-only,
   # because the node-record tests above need records on.
