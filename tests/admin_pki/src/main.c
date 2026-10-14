@@ -175,7 +175,18 @@ static const struct device *const lora_dev = DEVICE_GET(mock_lora);
 
 /* ---- Test fixture --------------------------------------------------------- */
 
-static uint8_t peer_pubkey[MESHTASTIC_PKI_KEY_LEN];
+/* PEER's identity: one fixed public key for the whole suite, RFC 7748's "Bob" (as
+ * in mesh_sim). The NodeDB pins the first key it learns for a node and the simulated
+ * flash keeps it across runs, so a key made at random per run, or per test, made the
+ * suite's idea of PEER and the NodeDB's drift apart: a test that removed PEER and a
+ * later one that seeded a fresh key left every PKC test after it holding the wrong
+ * key. A constant cannot drift. The forging trick at the top needs only the public
+ * half. */
+static const uint8_t peer_pubkey[MESHTASTIC_PKI_KEY_LEN] = {
+	0xde, 0x9e, 0xdb, 0x7d, 0x7b, 0x7d, 0xc1, 0xb4, 0xd3, 0x5b, 0x61,
+	0xc2, 0xec, 0xe4, 0x35, 0x37, 0x3f, 0x83, 0x43, 0xc8, 0x5b, 0x78,
+	0x67, 0x4d, 0xad, 0xfc, 0x7e, 0x14, 0x6f, 0x88, 0x2b, 0x4f,
+};
 
 /* A registered PhoneAPI transport so LOCAL admin replies (which go straight to
  * meshtastic_phoneapi_on_packet(), never onto the mock LoRa device — see
@@ -545,7 +556,6 @@ static void *admin_pki_setup(void)
 	zassert_ok(meshtastic_init(&cfg), "meshtastic_init failed");
 	zassert_true(meshtastic_pki_have_key(), "our X25519 keypair should be ready");
 
-	gen_x25519_pubkey(peer_pubkey);
 	seed_peer_pubkey(peer_pubkey);
 
 	meshtastic_phoneapi_init(&phone_api, "test", phone_q_storage, PHONE_Q_SIZE, NULL, NULL,
@@ -743,12 +753,10 @@ ZTEST(admin_pki, test_pki_init_rederives_public_key_from_private)
  * and the wire channel-hash byte is the 0x00 PKC marker (not a channel hash). */
 ZTEST(admin_pki, test_pkc_dm_uses_zero_wire_marker)
 {
-	uint8_t pub[MESHTASTIC_PKI_KEY_LEN];
 	const struct meshtastic_wire_header *hdr =
 		(const struct meshtastic_wire_header *)mock_lora.last_tx;
 
-	gen_x25519_pubkey(pub);
-	seed_peer_pubkey(pub);
+	seed_peer_pubkey(peer_pubkey);
 
 	zassert_ok(meshtastic_send_text(PEER_NODE_ID, "hi peer"), "pkc dm send failed");
 
@@ -762,14 +770,12 @@ ZTEST(admin_pki, test_pkc_dm_uses_zero_wire_marker)
  * carve-outs). Wire byte is the primary channel hash, not the 0x00 PKC marker. */
 ZTEST(admin_pki, test_directed_position_stays_on_channel)
 {
-	uint8_t pub[MESHTASTIC_PKI_KEY_LEN];
 	uint8_t payload[8] = {0};
 	uint8_t primary_hash = meshtastic_channels_get_hash(meshtastic_channels_primary_index());
 	const struct meshtastic_wire_header *hdr =
 		(const struct meshtastic_wire_header *)mock_lora.last_tx;
 
-	gen_x25519_pubkey(pub);
-	seed_peer_pubkey(pub);
+	seed_peer_pubkey(peer_pubkey);
 
 	zassert_ok(meshtastic_send_data(PEER_NODE_ID, MESHTASTIC_PORT_POSITION, payload,
 					sizeof(payload), K_FOREVER),
@@ -788,7 +794,6 @@ ZTEST(admin_pki, test_directed_position_stays_on_channel)
  * a SECONDARY channel deliberately provisioned to hash to 0x00. */
 ZTEST(admin_pki, test_rx_pkc_first_beats_colliding_channel)
 {
-	uint8_t pub[MESHTASTIC_PKI_KEY_LEN];
 	uint8_t plain[MESHTASTIC_MAX_PAYLOAD_LEN];
 	size_t plain_len = 0;
 	uint8_t enc[MESHTASTIC_MAX_PAYLOAD_LEN + MESHTASTIC_PKI_OVERHEAD];
@@ -801,8 +806,7 @@ ZTEST(admin_pki, test_rx_pkc_first_beats_colliding_channel)
 	enum meshtastic_decode_fail fail = MESHTASTIC_DECODE_FAIL_NONE;
 	int ret;
 
-	gen_x25519_pubkey(pub);
-	seed_peer_pubkey(pub);
+	seed_peer_pubkey(peer_pubkey);
 
 	/* Provision a SECONDARY at index 1 that hashes to the 0x00 PKC marker.
 	 * hash = xorHash(name) ^ xorHash(key); "aa" folds to 0 and a 16-byte key of
@@ -1227,7 +1231,6 @@ ZTEST(admin_pki, test_a_remote_admins_transaction_is_not_committed_by_the_local_
 {
 	uint8_t buf[256];
 	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
-	uint8_t peer_key_now[MESHTASTIC_PKI_KEY_LEN];
 	meshtastic_Config before = meshtastic_Config_init_zero;
 	meshtastic_Config managed = meshtastic_Config_init_zero;
 	meshtastic_MeshPacket pkt = meshtastic_MeshPacket_init_zero;
@@ -1236,14 +1239,13 @@ ZTEST(admin_pki, test_a_remote_admins_transaction_is_not_committed_by_the_local_
 						 sizeof(pkt.decoded.payload.bytes));
 	size_t len;
 
-	zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_NODE_ID, peer_key_now), "peer key");
 	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &before),
 		   "read security");
 	managed = before;
 	managed.payload_variant.security.is_managed = true;
 	managed.payload_variant.security.admin_key_count = 1U;
 	managed.payload_variant.security.admin_key[0].size = 32U;
-	memcpy(managed.payload_variant.security.admin_key[0].bytes, peer_key_now, 32U);
+	memcpy(managed.payload_variant.security.admin_key[0].bytes, peer_pubkey, 32U);
 	zassert_ok(meshtastic_config_store_set_config(&managed), "managed, PEER is its admin");
 	zassert_true(meshtastic_admin_is_managed(), "precondition: managed");
 
@@ -1299,17 +1301,9 @@ ZTEST(admin_pki, test_stray_commit_edit_settings_is_a_noop)
 {
 	uint8_t buf[256];
 	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
-	uint8_t peer_key_now[MESHTASTIC_PKI_KEY_LEN];
 	size_t len;
 
-	/* PEER's pinned NodeDB key is not suite-stable (see the comment in
-	 * test_remove_by_nodenum_purges_the_warm_pinned_key) -- admin_key[] must
-	 * match whatever it ACTUALLY is right now, not the suite's original
-	 * peer_pubkey, or this admin message silently fails authorization and the
-	 * test passes vacuously without ever exercising the guard. */
-	zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_NODE_ID, peer_key_now),
-		   "PEER must have SOME pinned key by this point in the suite");
-	set_admin_key(peer_key_now, sizeof(peer_key_now));
+	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
 
 	/* Simulate something else (e.g. an in-flight factory reset) having
 	 * deliberately suppressed saves, with no edit transaction actually open. */
@@ -1809,24 +1803,8 @@ ZTEST(admin_pki, test_remove_by_nodenum_purges_the_warm_pinned_key)
 	zassert_mem_equal(out, key, sizeof(key), "seeded key mismatch");
 
 	/* Admin-remove it (real PKC-authorized AdminMessage path, same as every
-	 * other mutating op in this suite). PEER's *pinned* NodeDB key is not
-	 * stable across the whole suite -- other tests (e.g.
-	 * test_pkc_dm_uses_zero_wire_marker, test_directed_position_stays_on_
-	 * channel) legitimately re-key PEER with a fresh random key for their own
-	 * unrelated scenarios and never restore peer_pubkey, and the impersonation
-	 * guard means a plain NodeInfo can never re-pin it back once changed. That
-	 * is harmless for inject_pkc_admin() itself (meshtastic_pki_encrypt() looks
-	 * up PEER's key fresh at encrypt time and the RX path looks it up fresh at
-	 * decrypt time -- always self-consistent, whatever the value is) but it
-	 * means admin_key[] must be set to whatever PEER's key ACTUALLY is right
-	 * now, not the suite's original peer_pubkey. */
-	{
-		uint8_t peer_key_now[MESHTASTIC_PKI_KEY_LEN];
-
-		zassert_ok(meshtastic_nodedb_copy_pubkey(PEER_NODE_ID, peer_key_now),
-			   "PEER must have SOME pinned key by this point in the suite");
-		set_admin_key(peer_key_now, sizeof(peer_key_now));
-	}
+	 * other mutating op in this suite). */
+	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
 	meshtastic_admin_session_reset();
 	meshtastic_admin_session_current(admin_key);
 	len = encode_admin_remove_by_nodenum(victim, admin_key, sizeof(admin_key), buf, sizeof(buf));
