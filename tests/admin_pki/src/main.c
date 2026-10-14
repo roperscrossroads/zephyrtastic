@@ -4264,3 +4264,157 @@ ZTEST(admin_pki, test_ack_for_a_pkc_dm_is_pkc)
 	zassert_equal(d.request_id, id, "for the DM");
 	(void)meshtastic_nodedb_remove(BOB_NODE_ID);
 }
+
+/* --- The admin-key fallback (agents-br3q; reference Router::perhapsDecode) --------
+ *
+ * An admin the node has never heard has no key in its NodeDB, so the sender's key
+ * cannot be looked up; the node tries each SecurityConfig.admin_key instead. The
+ * frames below are forged with the same ECDH symmetry as inject_pkc_admin(): sealed
+ * to the key of @p seal_to (a node whose key the NodeDB holds), with the nonce bound
+ * to @p from, a sender the NodeDB does not know. With admin_key = PEER's key, the
+ * node's fallback computes the same shared secret. */
+static void inject_pkc_admin_sealed(uint32_t seal_to, uint32_t from, const uint8_t *admin_bytes,
+				    size_t admin_len, uint32_t id)
+{
+	uint8_t data[MESHTASTIC_MAX_PAYLOAD_LEN];
+	size_t data_len = 0;
+	uint8_t enc[MESHTASTIC_MAX_PAYLOAD_LEN + MESHTASTIC_PKI_OVERHEAD];
+	size_t enc_len = 0;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	struct meshtastic_wire_header *hdr = (struct meshtastic_wire_header *)wire;
+
+	zassert_ok(meshtastic_encode_data(MESHTASTIC_PORT_ADMIN, admin_bytes, admin_len, data,
+					  sizeof(data), &data_len),
+		   "Data encode failed");
+	zassert_ok(meshtastic_pki_encrypt(seal_to, from, id, data, data_len, enc, sizeof(enc),
+					  &enc_len),
+		   "PKC encrypt (forged frame) failed");
+
+	hdr->dest = sys_cpu_to_le32(TEST_NODE_ID);
+	hdr->src = sys_cpu_to_le32(from);
+	hdr->id = sys_cpu_to_le32(id);
+	hdr->flags = 3U | (3U << MESHTASTIC_FLAGS_HOP_START_SHIFT);
+	hdr->channel = 0x00U;
+	hdr->next_hop = 0U;
+	hdr->relay_node = 0U;
+	memcpy(wire + MESHTASTIC_HDR_LEN, enc, enc_len);
+
+	inject_rx_frame(wire, MESHTASTIC_HDR_LEN + (uint32_t)enc_len);
+}
+
+static void inject_set_role_from_stranger(uint32_t seal_to, uint32_t from, uint32_t id,
+					  meshtastic_Config_DeviceConfig_Role role)
+{
+	uint8_t buf[256];
+	uint8_t key[MESHTASTIC_ADMIN_SESSION_KEY_LEN];
+	size_t len;
+
+	meshtastic_admin_session_current(key);
+	len = encode_admin_set_role(role, key, sizeof(key), buf, sizeof(buf));
+	inject_pkc_admin_sealed(seal_to, from, buf, len, id);
+	k_sleep(K_MSEC(50));
+}
+
+/* The bucket refills one attempt per 250 ms up to 8; waiting this long leaves it full
+ * whatever an earlier test spent. */
+#define ADMIN_FALLBACK_FULL_MS 2100
+
+/* An admin never heard on the mesh reaches the node: its frame opens with the
+ * configured admin key, the request is authorized and applied, and the key is stored
+ * for the sender, so the reply can be sealed to it and its next frame needs no
+ * fallback. */
+ZTEST(admin_pki, test_unheard_admin_is_decrypted_with_an_admin_key)
+{
+	const uint32_t stranger = 0x0ADA0001U;
+	uint8_t stored[MESHTASTIC_PKI_KEY_LEN];
+
+	k_sleep(K_MSEC(ADMIN_FALLBACK_FULL_MS));
+	zassert_not_equal(meshtastic_nodedb_copy_pubkey(stranger, stored), 0,
+			  "the sender must start unknown");
+	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
+	meshtastic_admin_session_reset();
+
+	inject_set_role_from_stranger(PEER_NODE_ID, stranger, 0x0ADA1001U,
+				      meshtastic_Config_DeviceConfig_Role_ROUTER);
+
+	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "an unheard admin's request must decrypt through admin_key and apply");
+	zassert_ok(meshtastic_nodedb_copy_pubkey(stranger, stored),
+		   "the admin key must be stored for the sender");
+	zassert_mem_equal(stored, peer_pubkey, sizeof(stored), "the key stored is the admin key");
+
+	/* The next frame takes the direct path (the key is known now). */
+	inject_set_role_from_stranger(PEER_NODE_ID, stranger, 0x0ADA1002U,
+				      meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE);
+	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE, "");
+
+	set_admin_key(NULL, 0U);
+}
+
+/* With no admin key configured there is nothing to try: an unknown sender's frame
+ * stays undecrypted, nothing applies and no key is stored. */
+ZTEST(admin_pki, test_unknown_sender_without_admin_keys_stays_undecrypted)
+{
+	const uint32_t stranger = 0x0ADA0002U;
+	uint8_t stored[MESHTASTIC_PKI_KEY_LEN];
+
+	set_admin_key(NULL, 0U);
+	meshtastic_admin_session_reset();
+
+	inject_set_role_from_stranger(PEER_NODE_ID, stranger, 0x0ADA2001U,
+				      meshtastic_Config_DeviceConfig_Role_ROUTER);
+
+	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "nothing may apply");
+	zassert_not_equal(meshtastic_nodedb_copy_pubkey(stranger, stored), 0,
+			  "no key may be stored");
+}
+
+/* The fallback costs an X25519 agreement per admin key and the sender id is the
+ * sender's to choose, so it is budgeted as the reference budgets it: 8 attempts,
+ * one back every 250 ms. Frames sealed to some other key spend the budget; a real
+ * admin frame right after is not tried; after the refill it is. */
+ZTEST(admin_pki, test_admin_key_fallback_is_budgeted)
+{
+	const uint32_t other = 0x0ADA00FFU;
+	uint8_t other_key[MESHTASTIC_PKI_KEY_LEN];
+
+	gen_x25519_pubkey(other_key);
+	seed_pubkey_for(other, other_key);
+	set_admin_key(peer_pubkey, sizeof(peer_pubkey));
+	meshtastic_admin_session_reset();
+	k_sleep(K_MSEC(ADMIN_FALLBACK_FULL_MS));
+
+	/* Eight strangers whose frames no admin key opens: the budget is spent. The
+	 * receive queue holds CONFIG_MESHTASTIC_RX_QUEUE_DEPTH frames and drops the next
+	 * one, and this thread does not yield between injections unless it sleeps, so
+	 * each frame is let through before the next (80 ms in all, under one refill); the
+	 * drop counter proves all eight reached the decoder. On air a frame cannot
+	 * arrive faster than its airtime. */
+	struct meshtastic_status before, after;
+
+	zassert_ok(meshtastic_get_status(&before));
+	for (uint32_t i = 0U; i < 8U; i++) {
+		uint8_t buf[256];
+		size_t len = encode_admin_set_role(meshtastic_Config_DeviceConfig_Role_ROUTER, NULL,
+						   0U, buf, sizeof(buf));
+
+		inject_pkc_admin_sealed(other, 0x0ADA3000U + i, buf, len, 0x0ADA3100U + i);
+		k_sleep(K_MSEC(10));
+	}
+	zassert_ok(meshtastic_get_status(&after));
+	zassert_equal(after.rx_dropped, before.rx_dropped, "every frame must reach the decoder");
+
+	inject_set_role_from_stranger(PEER_NODE_ID, 0x0ADA3010U, 0x0ADA3110U,
+				      meshtastic_Config_DeviceConfig_Role_ROUTER);
+	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_CLIENT,
+		      "with the budget spent, the fallback must not be tried");
+
+	k_sleep(K_MSEC(300));
+	inject_set_role_from_stranger(PEER_NODE_ID, 0x0ADA3011U, 0x0ADA3111U,
+				      meshtastic_Config_DeviceConfig_Role_ROUTER);
+	zassert_equal(current_role(), meshtastic_Config_DeviceConfig_Role_ROUTER,
+		      "after a refill the admin's frame decrypts and applies");
+
+	set_admin_key(NULL, 0U);
+}

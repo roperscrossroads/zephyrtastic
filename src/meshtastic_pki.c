@@ -350,6 +350,27 @@ int meshtastic_pki_decrypt(uint32_t from, uint32_t id, const uint8_t *enc, size_
 			   uint8_t *out, size_t out_cap, size_t *out_len)
 {
 	uint8_t peer_pub[PKI_KEY_LEN];
+	int ret;
+
+	if (enc == NULL || out == NULL || out_len == NULL || !g_have_key) {
+		return -EINVAL;
+	}
+	if (enc_len <= MESHTASTIC_PKI_OVERHEAD) {
+		return -EINVAL;
+	}
+
+	ret = pki_peer_pub(from, peer_pub);
+	if (ret != 0) {
+		return ret; /* -ENOENT: sender pubkey unknown */
+	}
+	return meshtastic_pki_decrypt_with(peer_pub, from, id, enc, enc_len, out, out_cap,
+					   out_len);
+}
+
+int meshtastic_pki_decrypt_with(const uint8_t peer_pub[MESHTASTIC_PKI_KEY_LEN], uint32_t from,
+				uint32_t id, const uint8_t *enc, size_t enc_len, uint8_t *out,
+				size_t out_cap, size_t *out_len)
+{
 	uint8_t aes_key[PKI_KEY_LEN];
 	uint8_t nonce[PKI_NONCE_LEN];
 	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
@@ -359,17 +380,12 @@ int meshtastic_pki_decrypt(uint32_t from, uint32_t id, const uint8_t *enc, size_
 	size_t ct_tag_len;
 	int ret;
 
-	if (enc == NULL || out == NULL || out_len == NULL || !g_have_key) {
+	if (peer_pub == NULL || enc == NULL || out == NULL || out_len == NULL || !g_have_key) {
 		return -EINVAL;
 	}
 	/* need at least 1 ciphertext byte + tag + extra nonce */
 	if (enc_len <= MESHTASTIC_PKI_OVERHEAD) {
 		return -EINVAL;
-	}
-
-	ret = pki_peer_pub(from, peer_pub);
-	if (ret != 0) {
-		return ret; /* -ENOKEY: sender pubkey unknown */
 	}
 
 	ret = pki_shared_aes_key(peer_pub, aes_key);

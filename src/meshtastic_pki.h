@@ -108,6 +108,17 @@ int meshtastic_pki_decrypt(uint32_t from, uint32_t id, const uint8_t *enc, size_
 			   uint8_t *out, size_t out_cap, size_t *out_len);
 
 /**
+ * meshtastic_pki_decrypt() with the sender's public key given, not looked up: the
+ * receive path's admin-key fallback tries each SecurityConfig.admin_key this way for
+ * a sender whose key the NodeDB does not hold (reference Router::perhapsDecode).
+ * The nonce is still bound to @p from. Returns 0 on authenticated success,
+ * -EBADMSG when the key is not the one the frame was sealed with.
+ */
+int meshtastic_pki_decrypt_with(const uint8_t peer_pub[MESHTASTIC_PKI_KEY_LEN], uint32_t from,
+				uint32_t id, const uint8_t *enc, size_t enc_len, uint8_t *out,
+				size_t out_cap, size_t *out_len);
+
+/**
  * PKC-encrypt @p plain (a serialized Data protobuf) for node @p to (public key
  * from the NodeDB). Writes ciphertext || tag[8] || extraNonce[4] to @p out;
  * @p out_len = @p plain_len + 12. Returns 0 on success, -ENOKEY if we have no

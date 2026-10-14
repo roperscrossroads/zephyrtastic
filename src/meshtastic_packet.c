@@ -444,6 +444,87 @@ static int try_decrypt_wire_hash(uint8_t wire_hash, uint8_t rx_preset, uint32_t 
 }
 
 #if defined(CONFIG_MESHTASTIC_PKI)
+/* The admin-key fallback (reference Router::perhapsDecode, 2.8.1): when the
+ * sender's key is not in the NodeDB, or the one there does not open the frame,
+ * try each configured SecurityConfig.admin_key as the sender's key, so an admin
+ * the node has never heard can still reach it. AES-CCM rejects a wrong key.
+ *
+ * Every attempt is an X25519 agreement, and the sender id on an unknown-key
+ * frame is anyone's to choose, so attempts are budgeted as the reference does:
+ * a bucket of 8, one back every 250 ms, and a success refunds its token. No
+ * admin key configured costs nothing and spends nothing. Called under
+ * mt_ws.lock, which serializes the bucket; plaintext lands in mt_ws.rx_dec. */
+#define ADMIN_KEY_FALLBACK_BURST     8U
+#define ADMIN_KEY_FALLBACK_REFILL_MS 250U
+
+static uint32_t admin_fallback_tokens = ADMIN_KEY_FALLBACK_BURST;
+static uint32_t admin_fallback_stamp_ms;
+static bool admin_fallback_stamped;
+
+static bool admin_fallback_take(void)
+{
+	uint32_t now = k_uptime_get_32();
+	uint32_t refill;
+
+	if (!admin_fallback_stamped) {
+		admin_fallback_stamp_ms = now;
+		admin_fallback_stamped = true;
+	}
+	refill = (now - admin_fallback_stamp_ms) / ADMIN_KEY_FALLBACK_REFILL_MS;
+	if (refill > 0U) {
+		admin_fallback_stamp_ms += refill * ADMIN_KEY_FALLBACK_REFILL_MS;
+		admin_fallback_tokens = MIN(ADMIN_KEY_FALLBACK_BURST,
+					    admin_fallback_tokens + MIN(refill,
+									ADMIN_KEY_FALLBACK_BURST));
+	}
+	if (admin_fallback_tokens == 0U) {
+		return false;
+	}
+	admin_fallback_tokens--;
+	return true;
+}
+
+static int try_admin_keys(uint32_t from, uint32_t id, const uint8_t *enc, size_t enc_len,
+			  size_t *plain_len, uint8_t used_key[MESHTASTIC_PKI_KEY_LEN])
+{
+	meshtastic_Config cfg;
+	const meshtastic_Config_SecurityConfig *sec;
+	bool have_key = false;
+
+	if (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg) != 0 ||
+	    cfg.which_payload_variant != meshtastic_Config_security_tag) {
+		return -ENOENT;
+	}
+	sec = &cfg.payload_variant.security;
+	for (pb_size_t i = 0; i < sec->admin_key_count && i < ARRAY_SIZE(sec->admin_key); i++) {
+		if (sec->admin_key[i].size == MESHTASTIC_PKI_KEY_LEN) {
+			have_key = true;
+		}
+	}
+	if (!have_key) {
+		return -ENOENT;
+	}
+	if (!admin_fallback_take()) {
+		LOG_DBG("admin-key fallback for 0x%08x: budget spent", from);
+		return -EBUSY;
+	}
+	for (pb_size_t i = 0; i < sec->admin_key_count && i < ARRAY_SIZE(sec->admin_key); i++) {
+		if (sec->admin_key[i].size != MESHTASTIC_PKI_KEY_LEN) {
+			continue;
+		}
+		if (meshtastic_pki_decrypt_with(sec->admin_key[i].bytes, from, id, enc, enc_len,
+						mt_ws.rx_dec, sizeof(mt_ws.rx_dec),
+						plain_len) == 0) {
+			memcpy(used_key, sec->admin_key[i].bytes, MESHTASTIC_PKI_KEY_LEN);
+			if (admin_fallback_tokens < ADMIN_KEY_FALLBACK_BURST) {
+				admin_fallback_tokens++;
+			}
+			return 0;
+		}
+	}
+	return -EBADMSG;
+}
+
 /* PKC (X25519 + AES-CCM) decrypt of a DM addressed to us, then decode the Data
  * protobuf. Mirrors decrypt_mesh_encrypted_key() but for the PKI path; uses the
  * shared rx workspace under its lock. */
@@ -454,9 +535,17 @@ static int try_decrypt_pki(uint32_t from, uint32_t id, const uint8_t *enc, size_
 	pb_istream_t stream;
 	int ret;
 
+	uint8_t admin_key[MESHTASTIC_PKI_KEY_LEN];
+	bool via_admin_key = false;
+
 	k_mutex_lock(&mt_ws.lock, K_FOREVER);
 	ret = meshtastic_pki_decrypt(from, id, enc, enc_len, mt_ws.rx_dec, sizeof(mt_ws.rx_dec),
 				     &plain_len);
+	if (ret < 0 && ret != -EINVAL &&
+	    try_admin_keys(from, id, enc, enc_len, &plain_len, admin_key) == 0) {
+		via_admin_key = true;
+		ret = 0;
+	}
 	if (ret < 0) {
 		k_mutex_unlock(&mt_ws.lock);
 		return ret;
@@ -471,6 +560,18 @@ static int try_decrypt_pki(uint32_t from, uint32_t id, const uint8_t *enc, size_
 
 	if (data->portnum == meshtastic_PortNum_UNKNOWN_APP) {
 		return -EIO;
+	}
+	if (via_admin_key) {
+		/* Keep the key for the sender, as the reference does (commitRemoteKey,
+		 * AdminChannelProven): the admin authorization and the PKC reply both
+		 * look it up there, and its next packet takes the direct path. Only
+		 * after the Data decoded: the AEAD already proved the key, a payload
+		 * that does not decode is still not a packet worth learning from. */
+		if (meshtastic_nodedb_commit_admin_pubkey(from, admin_key) != 0) {
+			LOG_WRN("PKC from 0x%08x via an admin key: could not store the key", from);
+		} else {
+			LOG_INF("PKC from 0x%08x decrypted with an admin key; key stored", from);
+		}
 	}
 	return 0;
 }

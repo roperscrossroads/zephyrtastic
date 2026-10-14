@@ -230,6 +230,19 @@ int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
 				    const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
 
 /**
+ * @brief Commit the key an admin's PKC packet was just authenticated with, through
+ *        the admin-key fallback (reference NodeDB::commitRemoteKey with
+ *        KeyCommitTrust::AdminChannelProven). As meshtastic_nodedb_commit_pubkey(),
+ *        but creates the entry when @p node_num is not in the NodeDB yet: an admin the
+ *        node has never heard is exactly the case. The AEAD nonce binds the sender id,
+ *        so the configured admin key authenticated the packet as coming from
+ *        @p node_num. -EINVAL for node 0, broadcast or our own id; -ENOMEM if no entry
+ *        could be made.
+ */
+int meshtastic_nodedb_commit_admin_pubkey(uint32_t node_num,
+					  const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
+
+/**
  * @brief Learn that @p node_num is a known XEdDSA signer, from a signature this node just
  *        verified (never from an inbound claim -- reference NodeDB::isKnownXeddsaSigner /
  *        the bit checkXeddsaReceivePolicy sets on a successful verify). Creates the hot

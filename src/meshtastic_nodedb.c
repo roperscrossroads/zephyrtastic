@@ -2631,8 +2631,8 @@ int meshtastic_nodedb_set_key_verified(uint32_t node_num, bool verified)
 	return nodedb_set_bit(node_num, NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_BIT, verified);
 }
 
-int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
-				    const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
+static int commit_pubkey(uint32_t node_num,
+			 const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN], bool create)
 {
 	struct nodedb_entry *entry;
 	meshtastic_NodeInfoLite *node;
@@ -2640,12 +2640,16 @@ int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
 	if (key == NULL) {
 		return -EINVAL;
 	}
+	if (create && (node_num == 0U || node_num == MESHTASTIC_NODE_BROADCAST ||
+		       node_num == meshtastic_get_node_id())) {
+		return -EINVAL;
+	}
 
 	k_mutex_lock(&nodedb_lock, K_FOREVER);
-	entry = find_entry_locked(node_num);
+	entry = create ? get_or_create_entry_locked(node_num) : find_entry_locked(node_num);
 	if (entry == NULL) {
 		k_mutex_unlock(&nodedb_lock);
-		return -ENOENT;
+		return create ? -ENOMEM : -ENOENT;
 	}
 	node = &entry->node;
 	node->public_key.size = MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN;
@@ -2664,6 +2668,18 @@ int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
 #endif
 	k_mutex_unlock(&nodedb_lock);
 	return 0;
+}
+
+int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
+				    const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
+{
+	return commit_pubkey(node_num, key, false);
+}
+
+int meshtastic_nodedb_commit_admin_pubkey(uint32_t node_num,
+					  const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
+{
+	return commit_pubkey(node_num, key, true);
 }
 
 void meshtastic_nodedb_note_xeddsa_signer(uint32_t node_num)
