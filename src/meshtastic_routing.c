@@ -118,12 +118,11 @@ static bool routing_ack_should_request_ack(const struct meshtastic_packet *req,
 
 /* Build and transmit a ROUTING reply (ACK when err == NONE, otherwise a NAK)
  * carrying request_id back to the originator. Shared by the ACK path and the
- * decode-failure NAK path. @p wait is the outbound send timeout: the ACK path
- * uses K_FOREVER (its historical behaviour); the NAK path uses K_NO_WAIT so it
- * never blocks the receive thread (the reference queues NAKs fire-and-forget). */
+ * decode-failure NAK path. Queued, never waited for: every caller runs on the
+ * receive thread, which must not stand still while a reply waits for the air. */
 static int routing_send_reply(uint32_t to, uint32_t request_id, uint8_t ch_index,
 			      meshtastic_Routing_Error err, uint8_t hop_limit, bool want_ack,
-			      k_timeout_t wait, uint8_t attach, bool pki)
+			      uint8_t attach, bool pki)
 {
 	meshtastic_Routing routing = meshtastic_Routing_init_zero;
 	uint8_t rbuf[16];
@@ -165,7 +164,7 @@ static int routing_send_reply(uint32_t to, uint32_t request_id, uint8_t ch_index
 	LOG_DBG("Sending ROUTING reply err=%d to 0x%08x for id=0x%08x ch=%u want_ack=%u hop=%u",
 		(int)err, to, request_id, ch_index, want_ack ? 1U : 0U, hop_limit);
 
-	return meshtastic_send_packet(&reply, wait);
+	return meshtastic_send_packet(&reply, K_NO_WAIT);
 }
 
 static int routing_send_ack(const struct meshtastic_packet *req, const meshtastic_MeshPacket *mesh)
@@ -205,10 +204,17 @@ static int routing_send_ack(const struct meshtastic_packet *req, const meshtasti
 
 	/* want-ack policy reads the decoded mesh (Phase 8d); hop-limit stays struct-based —
 	 * routing_hop_limit_for_reply is also fed synthesised structs (reack_duplicate /
-	 * send_error) with no mesh, so the struct is its natural input there. */
+	 * send_error) with no mesh, so the struct is its natural input there.
+	 *
+	 * Queued at the ACK tier, as the reference queues it (ReliableRouter::sniffReceived ->
+	 * sendAckNak -> sendLocal). This runs on the receive thread, which also drains the
+	 * receive queue: waiting here for the ACK to reach the air (the channel's contention,
+	 * then its airtime) held every frame behind it, and a node taking direct messages back
+	 * to back filled the queue and dropped (agents-y0dl). A queue too full to take the ACK
+	 * loses it as the reference's would; the sender's retransmission is re-ACKed. */
 	return routing_send_reply(from, id, ch_index, meshtastic_Routing_Error_NONE,
 				  routing_hop_limit_for_reply(req),
-				  routing_ack_should_request_ack(req, mesh), K_FOREVER, req->rx_attach,
+				  routing_ack_should_request_ack(req, mesh), req->rx_attach,
 				  mesh ? mesh->pki_encrypted : req->pki_encrypted);
 }
 
@@ -229,7 +235,7 @@ void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire
 	 * re-ACK is recoverable — the sender's next retransmission triggers
 	 * another. Never request an ACK for an ACK. */
 	(void)routing_send_reply(from, id, ch_index, meshtastic_Routing_Error_NONE,
-				 routing_hop_limit_for_reply(&req), false, K_NO_WAIT, attach, false);
+				 routing_hop_limit_for_reply(&req), false, attach, false);
 }
 
 void meshtastic_routing_send_error(const struct meshtastic_packet *req,
@@ -243,7 +249,7 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
 	 * the primary channel (as the reference does). Never request an ACK for a NAK
 	 * (avoid ack storms), and send fire-and-forget so we don't block RX. */
 	(void)routing_send_reply(req->from, req->id, meshtastic_channels_primary_index(), err,
-				 routing_hop_limit_for_reply(req), false, K_NO_WAIT, req->rx_attach,
+				 routing_hop_limit_for_reply(req), false, req->rx_attach,
 				 req->pki_encrypted);
 }
 
@@ -270,7 +276,7 @@ int meshtastic_routing_answer(uint32_t to, uint32_t request_id, uint8_t channel_
 					  ? channel_index
 					  : meshtastic_channels_primary_index(),
 				  err, meshtastic_routing_reply_hop_limit(req_hop_limit, req_hop_start),
-				  want_ack, K_NO_WAIT, attach, pki);
+				  want_ack, attach, pki);
 }
 
 void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet,

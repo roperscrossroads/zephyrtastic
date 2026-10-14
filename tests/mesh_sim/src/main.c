@@ -6906,6 +6906,84 @@ ZTEST(mesh_sim, test_a_channel_that_never_clears_drops_the_frame_at_the_defer_ca
 	lora_sim_set_busy(lora_dev, 0U);
 }
 
+/* The ROUTING ACK this node sent PEER, if one leaves within @p window_ms. */
+static bool take_ack_to_peer(int64_t window_ms)
+{
+	int64_t end = k_uptime_get() + window_ms;
+	struct lora_sim_frame f;
+
+	while (k_uptime_get() < end &&
+	       lora_sim_take_tx(lora_dev, &f, K_MSEC(end - k_uptime_get())) == 0) {
+		const struct meshtastic_wire_header *h = (const struct meshtastic_wire_header *)f.data;
+		uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+		struct meshtastic_packet pkt;
+		bool ok;
+
+		if (sys_le32_to_cpu(h->src) != TEST_NODE_ID ||
+		    sys_le32_to_cpu(h->dest) != PEER_NODE_ID) {
+			continue;
+		}
+		ok = meshtastic_decode_wire_packet(f.data, f.len, 0, 0, &pkt, payload,
+						   sizeof(payload)) == 0;
+#if defined(CONFIG_MESHTASTIC_PKI)
+		if (!ok) {
+			ok = peer_decrypt(f.data, f.len, &pkt, payload, sizeof(payload));
+		}
+#endif
+		if (ok && pkt.portnum == MESHTASTIC_PORT_ROUTING) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* agents-y0dl: the ACK of a direct message is queued, not transmitted from the
+ * receive thread. That thread drains the receive queue; while it waited for its
+ * ACK to reach the air -- the channel's contention, then the frame's airtime,
+ * ~200 ms on a quiet ShortTurbo channel and ~315 ms in a flood -- every frame
+ * behind it waited too, and a node taking direct messages back to back filled the
+ * queue and dropped (rzr4 and a brain on the bench, 2026-10-14). The reference
+ * queues its ACK (ReliableRouter::sniffReceived -> sendAckNak -> sendLocal) as
+ * this node already queued its NAKs and re-ACKs. Here the channel is held busy,
+ * so an ACK sent from the receive thread would hold that thread for as long. */
+ZTEST(mesh_sim, test_acking_a_direct_message_does_not_hold_the_receive_thread)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len;
+	const struct meshtastic_packet dm = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.id = 0xACC00001U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"ack me",
+		.payload_len = 6U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_ack = true,
+		.no_pkc = true,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	wait_rx_armed();
+	lora_sim_set_busy(lora_dev, 500U);
+
+	zassert_ok(meshtastic_build_wire_packet(&dm, wire, &wire_len), "build failed");
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(100)), "the direct message was not delivered");
+	zassert_equal(rx.from, PEER_NODE_ID, "wrong sender");
+
+	/* The next frame, right behind it, while the ACK still waits for the channel. */
+	build_peer_text(0xACC00002U, "right behind", wire, &wire_len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -50, 7), "inject failed");
+	zassert_ok(k_sem_take(&rx.sem, K_MSEC(100)),
+		   "the next frame waited for the ACK to reach the air");
+	zassert_mem_equal(rx.payload, "right behind", 12U, "wrong frame delivered");
+	zassert_equal(lora_sim_tx_pending(lora_dev), 0, "nothing may go out on a busy channel");
+
+	/* Queued, not lost: it leaves once the channel clears. */
+	zassert_true(take_ack_to_peer(3000), "the ACK never left");
+}
+
 
 #if !defined(CONFIG_MESHTASTIC_XEDDSA)
 /*
