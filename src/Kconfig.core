@@ -257,24 +257,31 @@ config MESHTASTIC_DUP_CACHE_SIZE
 	  older than the TTL no longer suppresses a re-sent packet).
 
 config MESHTASTIC_NODE_LONG_NAME
-	string "Default node long name"
-	default "Zephyr Meshtastic"
+	string "Default node long name (empty: derived from the node number)"
+	default ""
 	help
-	  Human-readable node name used when meshtastic_config.long_name is
-	  NULL. This is reported through local APIs such as Bluetooth PhoneAPI.
+	  The long name a node is given on first boot, when
+	  meshtastic_config.long_name is NULL. Empty (the default) gives the
+	  reference firmware's default, "Meshtastic xxxx", with xxxx the low 16
+	  bits of the node number in hex (NodeDB::installDefaultDeviceState).
+	  Non-empty is a fixed name for every node built with it, the
+	  counterpart of the reference's USERPREFS_CONFIG_OWNER_LONG_NAME.
 
 config MESHTASTIC_NODE_SHORT_NAME
-	string "Default node short name"
-	default "ZEPH"
+	string "Default node short name (empty: derived from the node number)"
+	default ""
 	help
-	  Transient value held between meshtastic_init() and
-	  meshtastic_config_store_apply_core(), a few lines later in the same
-	  call — meshtastic_config_store_seed() immediately overrides it with
-	  four hex digits of the node ID (e.g. "ce41") when
-	  meshtastic_config.short_name is NULL, per that field's documented
-	  contract. NOT what an unconfigured node actually ends up advertising;
-	  a fixed value here would collide across every such node (BLE advert,
-	  NodeInfo, the phone app's node list).
+	  The short name a node is given on first boot, when
+	  meshtastic_config.short_name is NULL. Empty (the default) gives the
+	  reference firmware's default: the low 16 bits of the node number as
+	  four hex digits, e.g. "4b74". Non-empty is a fixed name for every node
+	  built with it (the reference's USERPREFS_CONFIG_OWNER_SHORT_NAME), so
+	  every such node shows the same name in the app's node list.
+
+	  The node number used is the one the node has when its settings are
+	  first written. With MESHTASTIC_NODE_ID_FROM_KEY that is the
+	  provisional, hardware-derived number, as in the reference: the names
+	  keep its digits after the key-derived number is adopted.
 
 choice MESHTASTIC_NODE_ID_SOURCE
 	prompt "Node ID source"

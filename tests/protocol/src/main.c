@@ -517,6 +517,42 @@ ZTEST(protocol_stack, test_default_short_name_is_derived_from_node_id)
 		     "guards against");
 }
 
+/* The unconfigured long name is the reference's default, "Meshtastic xxxx" from
+ * the same 16 bits as the short name (NodeDB::installDefaultDeviceState), not a
+ * fixed string shared by every node. */
+ZTEST(protocol_stack, test_default_long_name_is_derived_from_node_id)
+{
+	zassert_str_equal(meshtastic_long_name(), "Meshtastic 5678",
+			  "expected the reference default for TEST_NODE_ID (0x%08x)",
+			  TEST_NODE_ID);
+}
+
+/* A short name written by a client is the one the node reports from then on, with
+ * no reboot: meshtastic_short_name() is what the screen's device page draws on
+ * every refresh, and what NodeInfo carries. An empty field leaves the other name
+ * alone, as the reference's handleSetOwner does. */
+ZTEST(protocol_stack, test_set_owner_short_name_is_live)
+{
+	char saved_long[sizeof(((meshtastic_User *)0)->long_name)];
+	char saved_short[sizeof(((meshtastic_User *)0)->short_name)];
+	meshtastic_User user = meshtastic_User_init_zero;
+
+	snprintk(saved_long, sizeof(saved_long), "%s", meshtastic_long_name());
+	snprintk(saved_short, sizeof(saved_short), "%s", meshtastic_short_name());
+
+	snprintk(user.short_name, sizeof(user.short_name), "rzr4");
+	zassert_ok(meshtastic_config_store_set_owner(&user));
+	zassert_str_equal(meshtastic_short_name(), "rzr4", "the new short name is live");
+	zassert_str_equal(meshtastic_long_name(), saved_long,
+			  "an empty long name leaves the long name alone");
+
+	user = (meshtastic_User)meshtastic_User_init_zero;
+	snprintk(user.long_name, sizeof(user.long_name), "%s", saved_long);
+	snprintk(user.short_name, sizeof(user.short_name), "%s", saved_short);
+	zassert_ok(meshtastic_config_store_set_owner(&user));
+	zassert_str_equal(meshtastic_short_name(), saved_short, "restored");
+}
+
 /* Every packet we originate must carry Data.bitfield, with bit 0 reflecting
  * config.lora.config_ok_to_mqtt (parity: mqtt #1, our half of the consent).
  *

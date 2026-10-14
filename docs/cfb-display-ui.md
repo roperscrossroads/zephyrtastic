@@ -49,7 +49,7 @@ long-press on **Next** advances to the following page.
 
 The **Nodes** page is special: its focus ring runs through each node (a `>`
 cursor scrolls the windowed list) and then the Back/Next footer. Long-press on a
-node opens a **node-detail** view — long name, node id + role, SNR, hops, and
+node opens a **node-detail** view — short name then long name, node id + role, SNR, hops, and
 `M`(MQTT)/`K`(public-key) flags. There, long-press **Next** flips to the next
 node and **Back** returns to the list with the cursor on the node you were
 viewing. The cursor is re-clamped every frame against the live NodeDB, so nodes
@@ -78,11 +78,17 @@ Pages (all read-only):
 |---|---|---|
 | Device | `<short>` · `ID xxxxxxxx` · `F<MHz> <chan>` | `meshtastic_short_name()`, `meshtastic_get_node_id()`, `meshtastic_runtime_frequency/channel_name()` |
 | Nodes | count, then `<cursor><*fav><short> <±snr>` per node; long-press for detail | `meshtastic_nodedb_count()` / `…_get_by_index()` |
-| ↳ node detail | long name · `<id> <role>` · `<±snr> h<hops> M K` | `meshtastic_nodedb_get_by_index()` (long_name, num, role, snr, hops, via_mqtt, public_key) |
+| ↳ node detail | `<short> <long>` · `<id> <role>` · `<±snr> h<hops> M K` | `meshtastic_nodedb_get_by_index()` (short_name, long_name, num, role, snr, hops, via_mqtt, public_key) |
 | Status | `TX` · `RX` · `RSSI` · uptime + `BLE` flag | `meshtastic_get_status()`, `k_uptime_get()` |
 | Radio | channel util % · TX util % · MQTT (or `F<MHz>`) | `meshtastic_airtime_channel_util_percent()` / `…_tx_util_percent()`, `meshtastic_mqtt_is_connected()` |
 | GPS | `Lat`/`Lon` (4 dp) · `Alt`m · sats — or "No GPS fix" | `meshtastic_position_get_current()` |
 | Time | `YYYY-MM-DD` · `HH:MM:SS UTC` · uptime — or "Clock unset" | `meshtastic_clock_valid()` / `…_now_epoch()` |
+
+A node is named by its **short name** everywhere on the screen, as on the reference
+firmware's (whose node list shows the long name only under `display.use_long_node_name`);
+the detail view adds the long name after it, cut at the panel width. The device page's
+name is read live from the owner record, so a short name set from the app or by admin
+shows on the next refresh, no reboot.
 
 The `*` before a node name marks a **favourite**. The **Radio**, **GPS** and
 **Time** pages read from optional subsystems: they are compile-guarded, so a

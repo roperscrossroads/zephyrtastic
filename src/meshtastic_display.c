@@ -518,16 +518,17 @@ static const char *role_abbrev(uint8_t role)
 static void render_node_detail(void)
 {
 	struct meshtastic_nodedb_node node;
-	const char *ln;
 
 	if (meshtastic_nodedb_get_by_index((size_t)detail_idx, &node) != 0) {
 		draw_row(0, "(node gone)");
 		return;
 	}
 
-	ln = (node.long_name[0] != '\0') ? node.long_name : node.short_name;
-
-	draw_row(0, "%s", ln);
+	/* The short name names a node everywhere on this screen, as on the
+	 * reference's (its node list shows the long name only under
+	 * display.use_long_node_name); the long name follows it on the same row,
+	 * cut at the panel width by draw_row. */
+	draw_row(0, "%s %s", node.short_name, node.long_name);
 	draw_row(1, "%08X %s", node.num, role_abbrev(node.role));
 
 	/* SNR (whole dB, no FP), hops, and flags: M = heard via MQTT, K = public

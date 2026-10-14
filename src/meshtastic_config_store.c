@@ -821,25 +821,33 @@ int meshtastic_config_store_seed(const struct meshtastic_config *cfg)
 
 	store_lock();
 
-	copy_string(store.long_name, sizeof(store.long_name),
-		    (cfg->long_name != NULL) ? cfg->long_name : CONFIG_MESHTASTIC_NODE_LONG_NAME);
+	/* The reference's defaults (NodeDB::installDefaultDeviceState): "Meshtastic
+	 * xxxx" and "xxxx", the low 16 bits of the node number, each replaced by a
+	 * build-time name when one is set (USERPREFS_CONFIG_OWNER_*_NAME there,
+	 * CONFIG_MESHTASTIC_NODE_*_NAME here). A fixed default would give every
+	 * never-configured node the same name in the BLE advert, NodeInfo and the
+	 * app's node list (agents-xhli.15).
+	 *
+	 * mt.node_id is the provisional number at this point: the key-derived one
+	 * is adopted after settings load (NODE_ID_FROM_KEY). The reference does the
+	 * same -- its defaults come from the MAC-derived number, and
+	 * createNewIdentity() moves the number without touching the names -- so a
+	 * node's default names keep its hardware digits. */
+	if (cfg->long_name != NULL) {
+		copy_string(store.long_name, sizeof(store.long_name), cfg->long_name);
+	} else if (CONFIG_MESHTASTIC_NODE_LONG_NAME[0] != '\0') {
+		copy_string(store.long_name, sizeof(store.long_name),
+			    CONFIG_MESHTASTIC_NODE_LONG_NAME);
+	} else {
+		(void)snprintf(store.long_name, sizeof(store.long_name), "Meshtastic %04x",
+			       (unsigned int)(mt.node_id & 0xffffU));
+	}
 	if (cfg->short_name != NULL) {
 		copy_string(store.short_name, sizeof(store.short_name), cfg->short_name);
+	} else if (CONFIG_MESHTASTIC_NODE_SHORT_NAME[0] != '\0') {
+		copy_string(store.short_name, sizeof(store.short_name),
+			    CONFIG_MESHTASTIC_NODE_SHORT_NAME);
 	} else {
-		/* zephyr/meshtastic/meshtastic.h documents short_name as "derived
-		 * from the node ID where needed" when unset -- but this used to
-		 * copy the fixed CONFIG_MESHTASTIC_NODE_SHORT_NAME string ("ZEPH")
-		 * instead, so every never-configured node had the IDENTICAL short
-		 * name everywhere it surfaces: the BLE advert, NodeInfo, the phone
-		 * app's node list. That's the exact collision class
-		 * meshtastic_ble_name.c's own node-id fallback exists to prevent
-		 * (agents-xhli.15) -- except this placeholder reached that
-		 * fallback's call site as a non-NULL, non-empty string and always
-		 * won, so the fallback never ran. Four hex digits of the node ID,
-		 * matching upstream's own default (NodeDB.cpp: "%04x",
-		 * getNodeNum() & 0xffff) and this field's width
-		 * (OWNER_SHORT_NAME_LEN == 5, i.e. 4 chars + NUL).
-		 */
 		(void)snprintf(store.short_name, sizeof(store.short_name), "%04x",
 			       (unsigned int)(mt.node_id & 0xffffU));
 	}
