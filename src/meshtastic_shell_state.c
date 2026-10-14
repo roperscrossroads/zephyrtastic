@@ -259,6 +259,18 @@ static void st_roles(struct st *s)
 #endif
 }
 
+/* The receive queue: its depth, its high-water mark and what it refused (all
+ * sources, and of them the frames a head injected). What sizes the queue. */
+static void st_rxq(struct st *s)
+{
+	struct meshtastic_status status;
+
+	(void)meshtastic_get_status(&status);
+	st_out(s, ",\"rxq\":{\"depth\":%u,\"peak\":%u,\"drop\":%u,\"drop_inj\":%u}",
+	       (unsigned int)CONFIG_MESHTASTIC_RX_QUEUE_DEPTH, status.rx_queue_peak,
+	       status.rx_dropped, status.rx_dropped_injected);
+}
+
 int meshtastic_shell_state(const struct shell *sh)
 {
 	struct st s = {.sh = sh, .crc = 0U};
@@ -287,6 +299,7 @@ int meshtastic_shell_state(const struct shell *sh)
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 	st_out(&s, ",\"managed\":%d", meshtastic_admin_is_managed() ? 1 : 0);
 #endif
+	st_rxq(&s);
 	st_out(&s, "}");
 	shell_fprintf(sh, SHELL_NORMAL, "*%04x\n", s.crc);
 	return 0;

@@ -229,6 +229,25 @@ struct mt_rx_slot {
 
 K_MSGQ_DEFINE(mt_rx_msgq, sizeof(struct mt_rx_slot), CONFIG_MESHTASTIC_RX_QUEUE_DEPTH, 4);
 
+/* The high-water mark: what sizes CONFIG_MESHTASTIC_RX_QUEUE_DEPTH. rx_dropped
+ * only says the queue overflowed; the peak says how close a node comes to it. A
+ * racy max (two putters can both read a stale peak): a lost update undercounts
+ * by one slot at most, and the next put corrects it. */
+static void mt_rx_queue_note_depth(void)
+{
+	uint32_t used = k_msgq_num_used_get(&mt_rx_msgq);
+
+	if (used > mt.status.rx_queue_peak) {
+		mt.status.rx_queue_peak = used;
+	}
+}
+
+/* The peak only: the drop counters count since boot, and a measurement diffs them. */
+void meshtastic_radio_rx_queue_peak_reset(void)
+{
+	mt.status.rx_queue_peak = 0U;
+}
+
 static void mt_rx_cb(const struct device *dev, uint8_t *data, uint16_t size, int16_t rssi,
 		     int8_t snr, void *user_data);
 
@@ -771,7 +790,9 @@ static void mt_rx_cb(const struct device *dev, uint8_t *data, uint16_t size, int
 	if (k_msgq_put(&mt_rx_msgq, &slot, K_NO_WAIT) != 0) {
 		mt.status.rx_dropped++;
 		LOG_DBG("RX queue full, dropped %u-byte frame", size);
+		return;
 	}
+	mt_rx_queue_note_depth();
 }
 
 int meshtastic_radio_rx_inject_meta(const uint8_t *buf, uint16_t len,
@@ -794,9 +815,11 @@ int meshtastic_radio_rx_inject_meta(const uint8_t *buf, uint16_t len,
 
 	if (k_msgq_put(&mt_rx_msgq, &slot, K_NO_WAIT) != 0) {
 		mt.status.rx_dropped++;
+		mt.status.rx_dropped_injected++;
 		LOG_DBG("RX queue full, dropped %u-byte bearer frame", len);
 		return -ENOBUFS;
 	}
+	mt_rx_queue_note_depth();
 	return 0;
 }
 

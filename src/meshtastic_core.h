@@ -360,6 +360,9 @@ struct meshtastic_radio_rx_activity_stats {
 void meshtastic_radio_rx_activity_stats_get(struct meshtastic_radio_rx_activity_stats *out);
 void meshtastic_radio_rx_activity_stats_reset(void);
 
+/* Restart the receive queue's high-water mark (`sched reset`). */
+void meshtastic_radio_rx_queue_peak_reset(void);
+
 /**
  * @brief Counters for the transmit defer path (MESHTASTIC_TX_DEFER), for `meshtastic rf`.
  *

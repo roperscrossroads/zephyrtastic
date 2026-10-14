@@ -1529,6 +1529,43 @@ ZTEST(meshtastic_shell, test_state_is_one_framed_line_with_the_node_s_facts)
 	zassert_is_null(strchr(json, '\n'), "one line");
 }
 
+/* The receive queue reports what sizes it: depth, high-water mark, drops by source. A burst
+ * the processing thread cannot drain (the scheduler held) fills it: the peak reaches the
+ * depth and every frame past it is a counted drop, attributed to the injecting bearer. */
+ZTEST(meshtastic_shell, test_state_reports_the_receive_queue_filling_and_dropping)
+{
+	const unsigned int depth = CONFIG_MESHTASTIC_RX_QUEUE_DEPTH;
+	struct meshtastic_status before, after;
+	uint8_t frame[MESHTASTIC_HDR_LEN + 4U] = {0};
+	uint32_t dropped;
+	char json[1024];
+	char want[96];
+
+	/* depth + 3 frames: the queue holds depth, and a receive thread already waiting
+	 * takes the first one straight from the put (k_msgq hands it over), so 2 or 3
+	 * are refused. */
+	zassert_ok(meshtastic_get_status(&before), "");
+	k_sched_lock();
+	for (unsigned int i = 0U; i < depth + 3U; i++) {
+		frame[MESHTASTIC_HDR_LEN] = (uint8_t)i;
+		(void)meshtastic_radio_rx_inject(frame, sizeof(frame), MESHTASTIC_BEARER_BLE_PEER);
+	}
+	k_sched_unlock();
+	zassert_ok(meshtastic_get_status(&after), "");
+
+	dropped = after.rx_dropped - before.rx_dropped;
+	zassert_true(dropped == 2U || dropped == 3U, "past the depth is dropped (%u)", dropped);
+	zassert_equal(after.rx_dropped_injected - before.rx_dropped_injected, dropped,
+		      "every one counted as injected");
+	zassert_equal(after.rx_queue_peak, depth, "the peak reached the depth");
+
+	k_msleep(100); /* let the thread drain the burst */
+	state_json(json, sizeof(json));
+	snprintk(want, sizeof(want), "\"rxq\":{\"depth\":%u,\"peak\":%u,\"drop\":%u,\"drop_inj\":%u}",
+		 depth, depth, after.rx_dropped, after.rx_dropped_injected);
+	zassert_not_null(strstr(json, want), "want %s in %s", want, json);
+}
+
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 ZTEST(meshtastic_shell, test_state_follows_what_is_set_and_never_prints_a_key)
 {

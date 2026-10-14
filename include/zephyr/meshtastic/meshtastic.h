@@ -326,7 +326,13 @@ struct meshtastic_status {
 	uint32_t relayed_packets;
 	uint32_t duplicate_packets;
 	uint32_t decode_failures;
+	/** Frames the receive queue refused (full), from every source. */
 	uint32_t rx_dropped;
+	/** Of rx_dropped, the frames another bearer injected (a head's, over BLE). */
+	uint32_t rx_dropped_injected;
+	/** Most frames the receive queue has held at once since boot or `sched reset`;
+	 *  CONFIG_MESHTASTIC_RX_QUEUE_DEPTH means it has been full. */
+	uint32_t rx_queue_peak;
 	uint32_t rx_rearm_failures;
 	/** Our own transmissions heard back through another of our radios (an
 	 *  attachment): counted, never treated as an echo. 0 on a single-radio node. */

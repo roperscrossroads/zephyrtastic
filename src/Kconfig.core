@@ -27,9 +27,13 @@ config MESHTASTIC_RX_QUEUE_DEPTH
 	range 2 16
 	help
 	  Number of raw LoRa frames buffered between the driver receive
-	  callback and the processing thread.  Each slot consumes about
-	  260 bytes of RAM.  Increase if rx_dropped climbs under bursty
-	  traffic (the processing thread fell behind incoming packets).
+	  callback and the processing thread; frames a head injects over
+	  BLE on a brain go through the same queue.  Each slot consumes
+	  about 260 bytes of RAM.  Size it from what the node reports
+	  (`meshtastic state` "rxq", `meshtastic status`): the high-water
+	  mark, and rx_dropped split by source.  A peak that reaches the
+	  depth, or drops that climb, mean the processing thread fell
+	  behind a burst.
 
 config MESHTASTIC_RX_REARM_RETRY_MS
 	int "Receive re-arm retry interval (ms)"

@@ -996,8 +996,9 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "tx: %u ok, %u failed", status.tx_packets, status.tx_failures);
 	shell_print(sh, "rx: %u decoded, %u duplicates, %u decode failures", status.rx_packets,
 		    status.duplicate_packets, status.decode_failures);
-	shell_print(sh, "rx dropped: %u, rx re-arm failures: %u", status.rx_dropped,
-		    status.rx_rearm_failures);
+	shell_print(sh, "rx dropped: %u (%u injected), queue peak %u/%u, rx re-arm failures: %u",
+		    status.rx_dropped, status.rx_dropped_injected, status.rx_queue_peak,
+		    (unsigned int)CONFIG_MESHTASTIC_RX_QUEUE_DEPTH, status.rx_rearm_failures);
 	shell_print(sh, "relayed: %u", status.relayed_packets);
 	shell_print(sh, "last rx: from=0x%08x rssi=%d snr=%d", status.last_rx_from,
 		    status.last_rssi, status.last_snr);
@@ -4936,6 +4937,7 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 		meshtastic_sched_stats_reset();
 		meshtastic_radio_cad_agc_stats_reset();
 		meshtastic_radio_rx_activity_stats_reset();
+		meshtastic_radio_rx_queue_peak_reset();
 		meshtastic_radio_tx_defer_stats_reset();
 		shell_print(sh, "sched stats reset");
 		return 0;
@@ -4944,8 +4946,10 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 	meshtastic_sched_stats_get(&st);
 	(void)meshtastic_get_status(&status);
 
-	shell_print(sh, "RX   pkts %u  drop(queue) %u  dup %u  decode-fail %u", status.rx_packets,
-		    status.rx_dropped, status.duplicate_packets, status.decode_failures);
+	shell_print(sh, "RX   pkts %u  drop(queue) %u (injected %u)  peak %u/%u  dup %u  decode-fail %u",
+		    status.rx_packets, status.rx_dropped, status.rx_dropped_injected,
+		    status.rx_queue_peak, (unsigned int)CONFIG_MESHTASTIC_RX_QUEUE_DEPTH,
+		    status.duplicate_packets, status.decode_failures);
 	shell_print(sh, "TX   pkts %u  failed %u  relayed %u", status.tx_packets,
 		    status.tx_failures, status.relayed_packets);
 	shell_print(sh, "TX egress by tier (enqueued / dropped):");
