@@ -22,7 +22,7 @@ config MESHTASTIC_PKI_SECRET_CACHE
 	int "Peers whose derived PKC key is kept"
 	depends on MESHTASTIC_PKI
 	range 0 32
-	default 8 if SOC_SERIES_NRF52X
+	default 8 if SOC_SERIES_NRF52
 	default 10
 	help
 	  Every PKC frame needs SHA256(X25519(our private key, the peer's
