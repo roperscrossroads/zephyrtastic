@@ -41,6 +41,8 @@ static uint8_t g_priv[PKI_KEY_LEN];
 static uint8_t g_pub[PKI_KEY_LEN];
 static bool g_have_key;
 
+static void pki_cache_clear(void);
+
 /* ---- key management ---------------------------------------------------- */
 
 /* The domain string of the identity derivation; changing it changes every key a fresh
@@ -168,6 +170,9 @@ int meshtastic_pki_init(void)
 	meshtastic_Config cfg = meshtastic_Config_init_zero;
 	int ret;
 
+	/* g_priv is about to be (re)set: every cached key was derived from the old one. */
+	pki_cache_clear();
+
 	ret = meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg);
 	if (ret == 0 && cfg.which_payload_variant == meshtastic_Config_security_tag &&
 	    cfg.payload_variant.security.private_key.size == PKI_KEY_LEN) {
@@ -256,8 +261,145 @@ size_t meshtastic_pki_get_public_key(uint8_t out[PKI_KEY_LEN])
 
 /* ---- crypto primitives ------------------------------------------------- */
 
-/* AES key = SHA256( X25519(our_priv, peer_pub) ). */
+/* What the key derivation costs, for `meshtastic state` and `sched stats` (agents-28qw). */
+static struct {
+	uint32_t derived;
+	uint32_t hits;
+	uint32_t failed;
+	uint32_t us_max;
+	uint64_t us_sum;
+} pki_stats;
+
+/* Derived AES keys of recent peers (reference CryptoEngine::setCryptoSharedSecret). A key
+ * is matched on the WHOLE peer public key, never a prefix or a node id: anyone can grind a
+ * keypair whose key shares a few bytes with a peer's, get it cached, and be handed the key
+ * this node uses with that peer. The entries hold no more than g_priv does (whoever reads
+ * one could read g_priv), and they are emptied wherever g_priv is set.
+ */
+#if CONFIG_MESHTASTIC_PKI_SECRET_CACHE > 0
+struct pki_cached_secret {
+	bool valid;
+	uint32_t last_used;
+	uint8_t peer_pub[PKI_KEY_LEN];
+	uint8_t aes_key[PKI_KEY_LEN];
+};
+
+static struct pki_cached_secret pki_cache[CONFIG_MESHTASTIC_PKI_SECRET_CACHE];
+static uint32_t pki_cache_clock;
+#endif
+/* Encrypt runs on its sender's thread, decrypt on the mesh thread: the table and the
+ * counters are shared. Held for the lookup and the insert, not across the derivation. */
+static K_MUTEX_DEFINE(pki_cache_lock);
+
+static void pki_cache_clear(void)
+{
+	k_mutex_lock(&pki_cache_lock, K_FOREVER);
+#if CONFIG_MESHTASTIC_PKI_SECRET_CACHE > 0
+	memset(pki_cache, 0, sizeof(pki_cache));
+	pki_cache_clock = 0U;
+#endif
+	k_mutex_unlock(&pki_cache_lock);
+}
+
+static bool pki_cache_get(const uint8_t peer_pub[PKI_KEY_LEN], uint8_t out_key[PKI_KEY_LEN])
+{
+	bool hit = false;
+
+	k_mutex_lock(&pki_cache_lock, K_FOREVER);
+#if CONFIG_MESHTASTIC_PKI_SECRET_CACHE > 0
+	for (size_t i = 0; i < ARRAY_SIZE(pki_cache); i++) {
+		if (pki_cache[i].valid && memcmp(pki_cache[i].peer_pub, peer_pub, PKI_KEY_LEN) == 0) {
+			memcpy(out_key, pki_cache[i].aes_key, PKI_KEY_LEN);
+			pki_cache[i].last_used = ++pki_cache_clock;
+			pki_stats.hits++;
+			hit = true;
+			break;
+		}
+	}
+#else
+	ARG_UNUSED(peer_pub);
+	ARG_UNUSED(out_key);
+#endif
+	k_mutex_unlock(&pki_cache_lock);
+	return hit;
+}
+
+/* Record one derivation: its cost, and (cache on) its key, in an empty slot or over the
+ * least recently used one. */
+static void pki_cache_put(const uint8_t peer_pub[PKI_KEY_LEN], const uint8_t key[PKI_KEY_LEN],
+			  uint32_t us)
+{
+	k_mutex_lock(&pki_cache_lock, K_FOREVER);
+	pki_stats.derived++;
+	pki_stats.us_sum += us;
+	pki_stats.us_max = MAX(pki_stats.us_max, us);
+#if CONFIG_MESHTASTIC_PKI_SECRET_CACHE > 0
+	struct pki_cached_secret *slot = &pki_cache[0];
+
+	for (size_t i = 0; i < ARRAY_SIZE(pki_cache); i++) {
+		if (!pki_cache[i].valid) {
+			slot = &pki_cache[i];
+			break;
+		}
+		if (pki_cache[i].last_used < slot->last_used) {
+			slot = &pki_cache[i];
+		}
+	}
+	slot->valid = true;
+	slot->last_used = ++pki_cache_clock;
+	memcpy(slot->peer_pub, peer_pub, PKI_KEY_LEN);
+	memcpy(slot->aes_key, key, PKI_KEY_LEN);
+#else
+	ARG_UNUSED(peer_pub);
+	ARG_UNUSED(key);
+#endif
+	k_mutex_unlock(&pki_cache_lock);
+}
+
+void meshtastic_pki_stats_get(struct meshtastic_pki_stats *out)
+{
+	k_mutex_lock(&pki_cache_lock, K_FOREVER);
+	out->derived = pki_stats.derived;
+	out->hits = pki_stats.hits;
+	out->failed = pki_stats.failed;
+	out->us_max = pki_stats.us_max;
+	out->us_avg = pki_stats.derived != 0U ? (uint32_t)(pki_stats.us_sum / pki_stats.derived)
+					      : 0U;
+	out->cache_size = CONFIG_MESHTASTIC_PKI_SECRET_CACHE;
+	k_mutex_unlock(&pki_cache_lock);
+}
+
+void meshtastic_pki_stats_reset(void)
+{
+	k_mutex_lock(&pki_cache_lock, K_FOREVER);
+	memset(&pki_stats, 0, sizeof(pki_stats));
+	k_mutex_unlock(&pki_cache_lock);
+}
+
+/* AES key = SHA256( X25519(our_priv, peer_pub) ), from the cache when we hold it. */
+static int pki_derive_aes_key(const uint8_t peer_pub[PKI_KEY_LEN], uint8_t out_key[PKI_KEY_LEN]);
+
 static int pki_shared_aes_key(const uint8_t peer_pub[PKI_KEY_LEN], uint8_t out_key[PKI_KEY_LEN])
+{
+	uint32_t t0;
+	int ret;
+
+	if (pki_cache_get(peer_pub, out_key)) {
+		return 0;
+	}
+	t0 = k_cycle_get_32();
+	ret = pki_derive_aes_key(peer_pub, out_key);
+	if (ret != 0) {
+		k_mutex_lock(&pki_cache_lock, K_FOREVER);
+		pki_stats.failed++;
+		k_mutex_unlock(&pki_cache_lock);
+		return ret;
+	}
+	pki_cache_put(peer_pub, out_key, k_cyc_to_us_floor32(k_cycle_get_32() - t0));
+	return 0;
+}
+
+static int pki_derive_aes_key(const uint8_t peer_pub[PKI_KEY_LEN], uint8_t out_key[PKI_KEY_LEN])
 {
 	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
 	psa_key_id_t kid = PSA_KEY_ID_NULL;

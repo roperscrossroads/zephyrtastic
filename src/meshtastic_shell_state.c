@@ -49,6 +49,9 @@
 #endif
 
 #include "meshtastic_shell_state.h"
+#if defined(CONFIG_MESHTASTIC_PKI)
+#include "meshtastic_pki.h"
+#endif
 
 /* Bump when a field changes meaning. Adding a field does not need it. */
 #define STATE_VERSION 1
@@ -271,6 +274,20 @@ static void st_rxq(struct st *s)
 	       status.rx_dropped, status.rx_dropped_injected);
 }
 
+#if defined(CONFIG_MESHTASTIC_PKI)
+/* What the per-peer PKC key costs: X25519s computed, cache hits, failures, the
+ * computation's mean and worst microseconds and the cache's size (agents-28qw). */
+static void st_pki(struct st *s)
+{
+	struct meshtastic_pki_stats p;
+
+	meshtastic_pki_stats_get(&p);
+	st_out(s, ",\"pki\":{\"x\":%u,\"hit\":%u,\"fail\":%u,\"avg_us\":%u,\"max_us\":%u,"
+		  "\"cache\":%u}",
+	       p.derived, p.hits, p.failed, p.us_avg, p.us_max, p.cache_size);
+}
+#endif
+
 int meshtastic_shell_state(const struct shell *sh)
 {
 	struct st s = {.sh = sh, .crc = 0U};
@@ -300,6 +317,9 @@ int meshtastic_shell_state(const struct shell *sh)
 	st_out(&s, ",\"managed\":%d", meshtastic_admin_is_managed() ? 1 : 0);
 #endif
 	st_rxq(&s);
+#if defined(CONFIG_MESHTASTIC_PKI)
+	st_pki(&s);
+#endif
 	st_out(&s, "}");
 	shell_fprintf(sh, SHELL_NORMAL, "*%04x\n", s.crc);
 	return 0;

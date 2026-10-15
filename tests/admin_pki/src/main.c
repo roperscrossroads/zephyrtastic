@@ -4418,3 +4418,157 @@ ZTEST(admin_pki, test_admin_key_fallback_is_budgeted)
 
 	set_admin_key(NULL, 0U);
 }
+
+/* ---- the per-peer key cache (agents-28qw) ---------------------------------------------
+ *
+ * Every PKC frame needs SHA256(X25519(our private, the peer's public)); a direct message
+ * needs it three times for one peer. The cache keeps the derived key of recent peers,
+ * matched on the whole public key (reference CryptoEngine::setCryptoSharedSecret). These
+ * cases read the counters `meshtastic state` reports ("pki": x = X25519s computed, hit =
+ * keys taken from the cache), so a cache that stops hitting, or hits for the wrong key,
+ * shows here before it shows as a slow node or a frame no peer can open.
+ */
+
+/* A peer's public key from a private scalar made of @p seed: distinct seeds, distinct keys. */
+static void cache_peer_pubkey(uint8_t seed, uint8_t pub[32])
+{
+	psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
+	uint8_t priv[32];
+	psa_key_id_t kid;
+	size_t n = 0;
+
+	memset(priv, seed, sizeof(priv));
+	psa_set_key_type(&a, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
+	psa_set_key_bits(&a, 255);
+	psa_set_key_usage_flags(&a, PSA_KEY_USAGE_EXPORT | PSA_KEY_USAGE_DERIVE);
+	psa_set_key_algorithm(&a, PSA_ALG_ECDH);
+	zassert_equal(psa_import_key(&a, priv, sizeof(priv), &kid), PSA_SUCCESS);
+	zassert_equal(psa_export_public_key(kid, pub, 32, &n), PSA_SUCCESS);
+	(void)psa_destroy_key(kid);
+}
+
+/* One key lookup for @p pub, through the receive path's decrypt-with-a-given-key (the
+ * admin-key fallback's): no NodeDB entry is made, so these cases cannot push another
+ * case's peers out of a small table. The frame is junk, so the decrypt itself fails after
+ * the key is derived; returns how many X25519s the lookup cost (0 or 1). */
+static uint32_t cache_lookup_cost(const uint8_t pub[32])
+{
+	uint8_t junk[MESHTASTIC_PKI_OVERHEAD + 8];
+	uint8_t out[sizeof(junk)];
+	struct meshtastic_pki_stats before, after;
+	size_t out_len = 0;
+
+	memset(junk, 0xA5, sizeof(junk));
+	meshtastic_pki_stats_get(&before);
+	zassert_equal(meshtastic_pki_decrypt_with(pub, 0x28A00001U, 0x28A00002U, junk, sizeof(junk),
+						  out, sizeof(out), &out_len),
+		      -EBADMSG, "a junk frame is refused by its tag, after the key");
+	meshtastic_pki_stats_get(&after);
+	zassert_equal(after.derived + after.hits, before.derived + before.hits + 1U,
+		      "one key lookup per frame");
+	return after.derived - before.derived;
+}
+
+#define CACHE_ON (CONFIG_MESHTASTIC_PKI_SECRET_CACHE > 0)
+
+ZTEST(admin_pki, test_pki_cache_derives_a_peer_once)
+{
+	uint8_t pub[32];
+
+	cache_peer_pubkey(0x41, pub);
+	zassert_equal(cache_lookup_cost(pub), 1U, "the first frame derives");
+	zassert_equal(cache_lookup_cost(pub), CACHE_ON ? 0U : 1U,
+		      "the second frame from the same peer %s", CACHE_ON ? "is a hit" : "derives");
+}
+
+/* The grinding case: a key one byte away from a cached peer's is another key. Were the
+ * cache matched on a prefix or a digest, the impostor would be handed the peer's key. */
+ZTEST(admin_pki, test_pki_cache_matches_the_whole_key)
+{
+	uint8_t pub[32];
+
+	cache_peer_pubkey(0x42, pub);
+	zassert_equal(cache_lookup_cost(pub), 1U);
+	pub[31] ^= 0x01U;
+	zassert_equal(cache_lookup_cost(pub), 1U, "a key differing in its last byte is not a hit");
+	pub[31] ^= 0x01U;
+	pub[0] ^= 0x01U;
+	zassert_equal(cache_lookup_cost(pub), 1U, "a key differing in its first byte is not a hit");
+}
+
+/* Reloading our keypair empties the cache: every entry was derived from the old one. */
+ZTEST(admin_pki, test_pki_cache_emptied_when_our_key_is_loaded)
+{
+	uint8_t pub[32];
+
+	cache_peer_pubkey(0x43, pub);
+	(void)cache_lookup_cost(pub);
+	zassert_equal(cache_lookup_cost(pub), CACHE_ON ? 0U : 1U);
+	zassert_ok(meshtastic_pki_init(), "reload the keypair");
+	zassert_equal(cache_lookup_cost(pub), 1U, "derived again after the reload");
+}
+
+/* Full, the cache evicts its least recently used peer, not the oldest inserted one. */
+ZTEST(admin_pki, test_pki_cache_evicts_least_recently_used)
+{
+#if CONFIG_MESHTASTIC_PKI_SECRET_CACHE == 0
+	ztest_test_skip();
+#else
+	const uint32_t n = CONFIG_MESHTASTIC_PKI_SECRET_CACHE;
+	uint8_t pub[CONFIG_MESHTASTIC_PKI_SECRET_CACHE + 1][32];
+
+	zassert_ok(meshtastic_pki_init(), "start empty");
+	for (uint32_t i = 0; i <= n; i++) {
+		cache_peer_pubkey((uint8_t)(0x60U + i), pub[i]);
+	}
+	for (uint32_t i = 0; i < n; i++) {
+		zassert_equal(cache_lookup_cost(pub[i]), 1U, "fill slot %u", i);
+	}
+	zassert_equal(cache_lookup_cost(pub[0]), 0U, "the first peer, touched");
+	zassert_equal(cache_lookup_cost(pub[n]), 1U, "one more peer evicts");
+	zassert_equal(cache_lookup_cost(pub[0]), 0U, "the touched peer survived the eviction");
+	zassert_equal(cache_lookup_cost(pub[1]), 1U,
+		      "the least recently used peer was the one evicted");
+#endif
+}
+
+/* A cached key opens what the peer seals: two frames to one peer, the second sealed with
+ * the cached key, and the peer -- holding its own private key -- opens it. */
+ZTEST(admin_pki, test_pki_cache_hit_is_the_peers_key)
+{
+	uint8_t bob_pub[32];
+	static const uint8_t text[] = "sealed with a cached key";
+	uint8_t enc[sizeof(text) + MESHTASTIC_PKI_OVERHEAD];
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	struct meshtastic_wire_header *hdr = (struct meshtastic_wire_header *)wire;
+	uint8_t plain[sizeof(text) + 8];
+	size_t enc_len = 0, plain_len = 0;
+	struct meshtastic_pki_stats st;
+
+	ack_peer_pubkey(bob_pub);
+	seed_pubkey_for(BOB_NODE_ID, bob_pub);
+	zassert_ok(meshtastic_pki_init(), "start empty");
+	zassert_ok(meshtastic_pki_encrypt(BOB_NODE_ID, TEST_NODE_ID, 0x28B00001U, text,
+					  sizeof(text), enc, sizeof(enc), &enc_len));
+	meshtastic_pki_stats_get(&st);
+	zassert_ok(meshtastic_pki_encrypt(BOB_NODE_ID, TEST_NODE_ID, 0x28B00002U, text,
+					  sizeof(text), enc, sizeof(enc), &enc_len));
+	{
+		struct meshtastic_pki_stats st2;
+
+		meshtastic_pki_stats_get(&st2);
+		zassert_equal(st2.derived, st.derived + (CACHE_ON ? 0U : 1U),
+			      "the second frame %s", CACHE_ON ? "is a hit" : "derives (no cache)");
+	}
+	memset(wire, 0, sizeof(wire));
+	hdr->dest = sys_cpu_to_le32(BOB_NODE_ID);
+	hdr->src = sys_cpu_to_le32(TEST_NODE_ID);
+	hdr->id = sys_cpu_to_le32(0x28B00002U);
+	memcpy(wire + MESHTASTIC_HDR_LEN, enc, enc_len);
+	zassert_true(ack_decrypt_as_peer(wire, MESHTASTIC_HDR_LEN + (uint32_t)enc_len, plain,
+					 sizeof(plain), &plain_len),
+		     "the peer opens the frame sealed with the cached key");
+	zassert_equal(plain_len, sizeof(text));
+	zassert_mem_equal(plain, text, sizeof(text));
+}
+

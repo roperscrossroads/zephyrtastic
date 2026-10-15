@@ -91,6 +91,20 @@ void meshtastic_pki_set_pending_key(uint32_t node, const uint8_t key[MESHTASTIC_
 bool meshtastic_pki_get_pending_key(uint32_t node, uint8_t out[MESHTASTIC_PKI_KEY_LEN]);
 void meshtastic_pki_clear_pending_key(void);
 
+/** What deriving the per-peer AES key has cost since boot or the last reset: X25519
+ *  computations, cache hits, failures, and the computation's mean and worst time. */
+struct meshtastic_pki_stats {
+	uint32_t derived;
+	uint32_t hits;
+	uint32_t failed;
+	uint32_t us_avg;
+	uint32_t us_max;
+	uint32_t cache_size;
+};
+
+void meshtastic_pki_stats_get(struct meshtastic_pki_stats *out);
+void meshtastic_pki_stats_reset(void);
+
 /** True once a keypair is loaded (and, if generated, persisted) — safe to
  *  advertise the public key and to do PKC. */
 bool meshtastic_pki_have_key(void);

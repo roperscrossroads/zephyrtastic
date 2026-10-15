@@ -34,6 +34,9 @@
 #include <zephyr/meshtastic/telemetry.h>
 
 #include "meshtastic_storage.h" /* declarations only; safe unconditionally */
+#if defined(CONFIG_MESHTASTIC_PKI)
+#include "meshtastic_pki.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #include "meshtastic_admin_client.h"
@@ -4957,6 +4960,9 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 		meshtastic_radio_rx_activity_stats_reset();
 		meshtastic_radio_rx_queue_peak_reset();
 		meshtastic_radio_tx_defer_stats_reset();
+#if defined(CONFIG_MESHTASTIC_PKI)
+		meshtastic_pki_stats_reset();
+#endif
 		shell_print(sh, "sched stats reset");
 		return 0;
 	}
@@ -4970,6 +4976,16 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 		    status.duplicate_packets, status.decode_failures);
 	shell_print(sh, "TX   pkts %u  failed %u  relayed %u", status.tx_packets,
 		    status.tx_failures, status.relayed_packets);
+#if defined(CONFIG_MESHTASTIC_PKI)
+	{
+		struct meshtastic_pki_stats p;
+
+		meshtastic_pki_stats_get(&p);
+		shell_print(sh, "PKI  x25519 %u (avg %u us, max %u us)  cache hits %u of %u slots  "
+				"failed %u",
+			    p.derived, p.us_avg, p.us_max, p.hits, p.cache_size, p.failed);
+	}
+#endif
 	shell_print(sh, "TX egress by tier (enqueued / dropped):");
 	for (uint8_t t = 0; t < MT_SCHED_TIER_COUNT; t++) {
 		shell_print(sh, "  %-6s %u / %u", meshtastic_sched_tier_name(t), st.tx_enq[t],

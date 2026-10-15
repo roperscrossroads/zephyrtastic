@@ -33,3 +33,10 @@ tests:
   meshtastic.admin_pki.warm_below_hot.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_NODEDB_WARM_KEYS=16
+
+  # No per-peer key cache: every PKC frame derives its key, as before agents-28qw. The
+  # cache cases expect a derivation where the default image expects a hit.
+  meshtastic.admin_pki.no_secret_cache.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_PKI_SECRET_CACHE=0
+

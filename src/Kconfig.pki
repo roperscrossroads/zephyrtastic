@@ -18,6 +18,23 @@ config MESHTASTIC_PKI
 	  build the ECC/AES/SHA pieces come from the TLS overlay; the overlay adds
 	  PSA_WANT_ALG_CCM.
 
+config MESHTASTIC_PKI_SECRET_CACHE
+	int "Peers whose derived PKC key is kept"
+	depends on MESHTASTIC_PKI
+	range 0 32
+	default 8 if SOC_SERIES_NRF52X
+	default 10
+	help
+	  Every PKC frame needs SHA256(X25519(our private key, the peer's
+	  public key)), and a direct message needs it three times for the same
+	  peer (its decrypt, our ACK's encrypt, the decrypt of the ACK the
+	  sender returns). Without a cache each is a full X25519: 115 ms on the
+	  ESP32-S3 with PSA's software ECDH, on the mesh thread. This keeps the
+	  derived keys of the most recently used peers, matched on the whole
+	  public key, as the reference does since 2.8 (CryptoEngine
+	  setCryptoSharedSecret: 10 entries, 8 on nRF52). 68 bytes each.
+	  Emptied whenever our own keypair is (re)loaded. 0 derives every time.
+
 config MESHTASTIC_NODE_ID_FROM_KEY
 	bool "Derive the node ID from the identity public key (reference >= 2.8)"
 	depends on MESHTASTIC_PKI
