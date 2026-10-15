@@ -40,3 +40,12 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_PKI_SECRET_CACHE=0
 
+  # The other X25519 implementations (agents-28qw): the whole suite, RFC 7748 vectors
+  # included, on each. Everest is a tf-psa-crypto switch; ref10 is our ladder over the
+  # vendored fe.c.
+  meshtastic.admin_pki.x25519_everest.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_PKI_X25519_EVEREST=y
+  meshtastic.admin_pki.x25519_ref10.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_PKI_X25519_REF10=y

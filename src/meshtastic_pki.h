@@ -141,6 +141,16 @@ int meshtastic_pki_decrypt_with(const uint8_t peer_pub[MESHTASTIC_PKI_KEY_LEN], 
 int meshtastic_pki_encrypt(uint32_t to, uint32_t from, uint32_t id, const uint8_t *plain,
 			   size_t plain_len, uint8_t *out, size_t out_cap, size_t *out_len);
 
+/**
+ * X25519(@p scalar, @p u) (RFC 7748 §5: the scalar clamped, u's top bit ignored) by the
+ * implementation CONFIG_MESHTASTIC_PKI_X25519 selects. Pure; exposed for the RFC 7748
+ * vector test, which every implementation must pass.
+ *
+ * @return 0, or -EIO when the result is all zero (a small-order u) or PSA refused.
+ */
+int meshtastic_pki_x25519(const uint8_t scalar[MESHTASTIC_PKI_KEY_LEN],
+			  const uint8_t u[MESHTASTIC_PKI_KEY_LEN], uint8_t out[MESHTASTIC_PKI_KEY_LEN]);
+
 /*
  * AES-CCM nonce byte-packing -- pure, no crypto. Matches reference
  * CryptoEngine::initNonce(from, id, extraNonce): [0..3]=id LE32, [4..7]=extraNonce

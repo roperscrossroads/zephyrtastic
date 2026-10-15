@@ -35,6 +35,50 @@ config MESHTASTIC_PKI_SECRET_CACHE
 	  setCryptoSharedSecret: 10 entries, 8 on nRF52). 68 bytes each.
 	  Emptied whenever our own keypair is (re)loaded. 0 derives every time.
 
+choice MESHTASTIC_PKI_X25519
+	prompt "X25519 implementation for the per-peer key"
+	default MESHTASTIC_PKI_X25519_PSA
+	depends on MESHTASTIC_PKI
+	help
+	  Which code computes X25519(our private key, the peer's public key)
+	  for a PKC frame (agents-28qw). All three give the same bytes; they
+	  differ in speed, flash and stack. Measure with `meshtastic sched
+	  stats` (the PKI line) or the "pki" object of `meshtastic state`.
+	  Our own public key is derived through PSA whichever is chosen (once
+	  per boot).
+
+config MESHTASTIC_PKI_X25519_PSA
+	bool "PSA, tf-psa-crypto's generic elliptic-curve code"
+	help
+	  psa_raw_key_agreement on the builtin driver: the Montgomery ladder
+	  over mbedTLS's general bignum code. 115 ms on the ESP32-S3.
+
+config MESHTASTIC_PKI_X25519_EVEREST
+	bool "PSA, with Project Everest's verified Curve25519"
+	help
+	  The same PSA call, routed by tf-psa-crypto to HACL* Curve25519 from
+	  Project Everest (MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED, set through
+	  TF_PSA_CRYPTO_USER_CONFIG_FILE). Formally verified, constant time.
+	  Apache-2.0 only, which suits this GPL-3 project. On a 32-bit core it
+	  emulates its 128-bit multiplies (FStar_UInt128_extracted), so a
+	  native_sim timing does not predict a board's.
+
+config MESHTASTIC_PKI_X25519_REF10
+	bool "ref10 field arithmetic (the vendored orlp/ed25519 fe.c)"
+	help
+	  RFC 7748's Montgomery ladder (src/crypto/x25519_ref10.c, ours) over
+	  the ref10 field code already vendored for XEdDSA verification
+	  (src/crypto/ed25519/fe.c, zlib). Constant time (conditional swaps).
+	  Shares fe.c with MESHTASTIC_XEDDSA, so it costs little flash where
+	  that is on.
+
+endchoice
+
+# The Everest switch is a tf-psa-crypto build option, not a Kconfig one: a user config
+# header carries it (src/crypto/psa/meshtastic_psa_everest.h).
+config TF_PSA_CRYPTO_USER_CONFIG_FILE
+	default "meshtastic_psa_everest.h" if MESHTASTIC_PKI_X25519_EVEREST
+
 config MESHTASTIC_NODE_ID_FROM_KEY
 	bool "Derive the node ID from the identity public key (reference >= 2.8)"
 	depends on MESHTASTIC_PKI

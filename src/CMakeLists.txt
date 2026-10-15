@@ -223,6 +223,15 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_WIFI_AUTOCONNECT meshtastic_wifi_auto.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SNTP meshtastic_sntp.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_PKI meshtastic_pki.c)
+  # The per-peer key's X25519 (agents-28qw): ref10's ladder needs the vendored fe.c, which
+  # XEdDSA may already bring; Everest is a tf-psa-crypto switch whose header sits here.
+  if(CONFIG_MESHTASTIC_PKI_X25519_REF10)
+    zephyr_library_sources(crypto/x25519_ref10.c)
+    if(NOT CONFIG_MESHTASTIC_XEDDSA)
+      zephyr_library_sources(crypto/ed25519/fe.c)
+    endif()
+  endif()
+  zephyr_include_directories_ifdef(CONFIG_MESHTASTIC_PKI_X25519_EVEREST crypto/psa)
 
   # XEdDSA verify: our wrapper (the X25519 -> Ed25519 map and the entry point) plus the
   # vendored orlp/ed25519 verify path. The vendored .c files are byte-identical to

@@ -4572,3 +4572,85 @@ ZTEST(admin_pki, test_pki_cache_hit_is_the_peers_key)
 	zassert_mem_equal(plain, text, sizeof(text));
 }
 
+/* ---- X25519 against RFC 7748 (agents-28qw) --------------------------------------------
+ *
+ * The X25519 implementation is a build choice (PSA, PSA with Everest, ref10); each image
+ * of this suite runs these with its own. A wrong one fails here, before it derives a key
+ * no stock node shares.
+ */
+static void hex32(const char *hex, uint8_t out[32])
+{
+	zassert_equal(hex2bin(hex, 64, out, 32), 32U, "bad vector hex");
+}
+
+static void x25519_vector(const char *k, const char *u, const char *want)
+{
+	uint8_t kb[32], ub[32], wb[32], out[32];
+
+	hex32(k, kb);
+	hex32(u, ub);
+	hex32(want, wb);
+	zassert_ok(meshtastic_pki_x25519(kb, ub, out));
+	zassert_mem_equal(out, wb, 32, "X25519 differs from RFC 7748");
+}
+
+/* §5.2: an unclamped scalar, and (second vector) a u with its top bit set. */
+ZTEST(admin_pki, test_x25519_rfc7748_vectors)
+{
+	x25519_vector("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4",
+		      "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c",
+		      "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552");
+	x25519_vector("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d",
+		      "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493",
+		      "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957");
+}
+
+/* §6.1: both halves of the Diffie-Hellman agree on K. */
+ZTEST(admin_pki, test_x25519_rfc7748_dh)
+{
+	static const char *const a = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
+	static const char *const b = "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb";
+	static const char *const a_pub =
+		"8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a";
+	static const char *const b_pub =
+		"de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f";
+	static const char *const k = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+	static const char *const nine =
+		"0900000000000000000000000000000000000000000000000000000000000000";
+
+	x25519_vector(a, nine, a_pub);
+	x25519_vector(b, nine, b_pub);
+	x25519_vector(a, b_pub, k);
+	x25519_vector(b, a_pub, k);
+}
+
+/* §5.2's iteration: k = X25519(k, u), u = old k, from k = u = 9; 1 and 1000 rounds. */
+ZTEST(admin_pki, test_x25519_rfc7748_iterated)
+{
+	uint8_t k[32] = {9}, u[32] = {9}, next[32], want[32];
+
+	for (int i = 1; i <= 1000; i++) {
+		zassert_ok(meshtastic_pki_x25519(k, u, next));
+		memcpy(u, k, 32);
+		memcpy(k, next, 32);
+		if (i == 1) {
+			hex32("422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079",
+			      want);
+			zassert_mem_equal(k, want, 32, "after one iteration");
+		}
+	}
+	hex32("684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51", want);
+	zassert_mem_equal(k, want, 32, "after 1000 iterations");
+}
+
+/* A small-order peer key (u = 0, u = 1) gives the all-zero secret, which every
+ * implementation refuses (reference Curve25519::dh2's weak-point check). */
+ZTEST(admin_pki, test_x25519_refuses_small_order_points)
+{
+	uint8_t k[32], u[32] = {0}, out[32];
+
+	hex32("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", k);
+	zassert_not_equal(meshtastic_pki_x25519(k, u, out), 0, "u = 0 refused");
+	u[0] = 1U;
+	zassert_not_equal(meshtastic_pki_x25519(k, u, out), 0, "u = 1 refused");
+}

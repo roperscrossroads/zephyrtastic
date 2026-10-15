@@ -26,6 +26,9 @@
 #include "meshtastic_settings.h"
 #include "meshtastic_pki.h"
 #include "meshtastic/config.pb.h"
+#if defined(CONFIG_MESHTASTIC_PKI_X25519_REF10)
+#include "crypto/x25519_ref10.h"
+#endif
 
 LOG_MODULE_REGISTER(meshtastic_pki, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -399,11 +402,27 @@ static int pki_shared_aes_key(const uint8_t peer_pub[PKI_KEY_LEN], uint8_t out_k
 	return 0;
 }
 
-static int pki_derive_aes_key(const uint8_t peer_pub[PKI_KEY_LEN], uint8_t out_key[PKI_KEY_LEN])
+/* X25519(scalar, u) by the configured implementation. Every one refuses a u whose result
+ * is all zero (a small-order point): PSA's builtin and Everest paths check it themselves,
+ * the ref10 ladder does not, so the check is here for it. */
+int meshtastic_pki_x25519(const uint8_t scalar[MESHTASTIC_PKI_KEY_LEN],
+			  const uint8_t u[MESHTASTIC_PKI_KEY_LEN], uint8_t out[MESHTASTIC_PKI_KEY_LEN])
 {
+#if defined(CONFIG_MESHTASTIC_PKI_X25519_REF10)
+	uint8_t acc = 0U;
+
+	meshtastic_x25519_ref10(out, scalar, u);
+	for (size_t i = 0; i < PKI_KEY_LEN; i++) {
+		acc |= out[i];
+	}
+	if (acc == 0U) {
+		LOG_DBG("pki ECDH: small-order peer key");
+		return -EIO;
+	}
+	return 0;
+#else
 	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
 	psa_key_id_t kid = PSA_KEY_ID_NULL;
-	uint8_t secret[PKI_KEY_LEN];
 	size_t olen;
 	psa_status_t st;
 
@@ -412,18 +431,33 @@ static int pki_derive_aes_key(const uint8_t peer_pub[PKI_KEY_LEN], uint8_t out_k
 	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_DERIVE);
 	psa_set_key_algorithm(&attr, PSA_ALG_ECDH);
 
-	st = psa_import_key(&attr, g_priv, PKI_KEY_LEN, &kid);
+	st = psa_import_key(&attr, scalar, PKI_KEY_LEN, &kid);
 	if (st != PSA_SUCCESS) {
 		LOG_ERR("pki import priv failed (%d)", (int)st);
 		return -EIO;
 	}
 
-	st = psa_raw_key_agreement(PSA_ALG_ECDH, kid, peer_pub, PKI_KEY_LEN, secret, sizeof(secret),
-				   &olen);
+	st = psa_raw_key_agreement(PSA_ALG_ECDH, kid, u, PKI_KEY_LEN, out, PKI_KEY_LEN, &olen);
 	(void)psa_destroy_key(kid);
 	if (st != PSA_SUCCESS || olen != PKI_KEY_LEN) {
 		LOG_DBG("pki ECDH failed (%d)", (int)st);
 		return -EIO;
+	}
+	return 0;
+#endif
+}
+
+static int pki_derive_aes_key(const uint8_t peer_pub[PKI_KEY_LEN], uint8_t out_key[PKI_KEY_LEN])
+{
+	uint8_t secret[PKI_KEY_LEN];
+	size_t olen;
+	psa_status_t st;
+	int ret;
+
+	ret = meshtastic_pki_x25519(g_priv, peer_pub, secret);
+	if (ret != 0) {
+		memset(secret, 0, sizeof(secret));
+		return ret;
 	}
 
 	st = psa_hash_compute(PSA_ALG_SHA_256, secret, sizeof(secret), out_key, PKI_KEY_LEN, &olen);
