@@ -1,0 +1,10 @@
+# nanopb sizing for the gateway's Sparkplug payloads (meshtastic_sparkplug_session.c).
+#
+# A device's birth is the largest message: 11 metrics. 16 leaves room. Metric names are the
+# session's own ("radio/snr", "node/long_name"); 32 holds the longest with margin. A string
+# value is at most a long name (24 + NUL) or a build id. An incoming command with a longer
+# name or string, or more metrics, fails to decode and is ignored; only "Node Control/Rebirth"
+# is acted on anyway.
+zt_sparkplug.Payload.metrics max_count:16
+zt_sparkplug.Metric.name max_size:32
+zt_sparkplug.Metric.string_value max_size:40

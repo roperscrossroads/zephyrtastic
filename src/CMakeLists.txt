@@ -38,6 +38,11 @@ if(CONFIG_MESHTASTIC)
     # private protocol on PRIVATE_APP, forks nothing upstream.
     list(APPEND MESHTASTIC_NANOPB_PROTOS proto/zephyrtastic/cluster.proto)
   endif()
+  if(CONFIG_MESHTASTIC_SPARKPLUG_SESSION)
+    # The gateway's Sparkplug B payload (scalar metrics only), our own schema, wire-compatible
+    # with the specification's; MQTT telemetry, never on air.
+    list(APPEND MESHTASTIC_NANOPB_PROTOS proto/zephyrtastic/sparkplug.proto)
+  endif()
   zephyr_nanopb_sources(meshtastic ${MESHTASTIC_NANOPB_PROTOS})
 
   # The generated *.pb.h land in this library's binary dir, and every test suite puts that
@@ -222,6 +227,9 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_MQTT_BROKER meshtastic_mqtt_broker.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_WIFI_AUTOCONNECT meshtastic_wifi_auto.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SNTP meshtastic_sntp.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SPARKPLUG_SESSION meshtastic_sparkplug_session.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SPARKPLUG meshtastic_sparkplug.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SIM_RADIO_SHELL meshtastic_sim_radio_shell.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_PKI meshtastic_pki.c)
   # The per-peer key's X25519 (agents-28qw): ref10's ladder needs the vendored fe.c, which
   # XEdDSA may already bring; Everest is a tf-psa-crypto switch whose header sits here.

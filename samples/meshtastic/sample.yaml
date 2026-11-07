@@ -270,6 +270,14 @@ tests:
     integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nobt.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-mqtt-tls.conf"
+  sample.meshtastic.fleet.gateway_sparkplug:
+    # The R8 WiFi gateway (net, no BT) with the Sparkplug B Edge Node (overlay-sparkplug.conf):
+    # the nodes it hears published as Sparkplug Devices over MQTT.
+    tags: [meshtastic, fleet, net, mqtt, sparkplug]
+    platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    extra_args:
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nobt.conf;overlay-pm-off.conf;overlay-mqtt.conf;overlay-sparkplug.conf"
   sample.meshtastic.fleet.v3_net:
     # The V3 (no PSRAM) on the shared profile. It rotted twice over: the profile enabled
     # PSRAM and put WiFi's heap there. Both now belong to the V4 board files.

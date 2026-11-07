@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Adam Roper
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_SPARKPLUG_SESSION
+	bool "Sparkplug B session core (no network; the gateway's and the tests')"
+	help
+	  The Sparkplug B 3.0 Edge Node logic of the mesh gateway: births, deaths, data by
+	  exception, sequence numbers, rebirth requests, with the nodes heard as Devices.
+	  It publishes through a function the caller gives it; MESHTASTIC_SPARKPLUG is that
+	  caller on a networked image. On its own it is what the sparkplug test suite builds.
+
+config MESHTASTIC_SPARKPLUG
+	bool "Mesh gateway as a Sparkplug B Edge Node over MQTT"
+	depends on NETWORKING && NET_SOCKETS && MQTT_LIB && MESHTASTIC_NODEDB
+	select MESHTASTIC_SPARKPLUG_SESSION
+	help
+	  Publish the nodes this gateway hears to an MQTT broker as Sparkplug B Devices
+	  (spBv1.0/<group>/.../<edge>/<node id>): names, hardware, role, SNR, hops, channel,
+	  when last heard, position. A node not heard for MESHTASTIC_SPARKPLUG_DEATH_SEC gets a
+	  DDEATH. Its own MQTT connection, whose Will is the Edge Node's NDEATH; bdSeq is kept in
+	  settings. Telemetry only: no command is acted on but a rebirth request, and nothing is
+	  ever forwarded into the mesh.
+
+if MESHTASTIC_SPARKPLUG_SESSION
+
+config MESHTASTIC_SPARKPLUG_MAX_DEVICES
+	int "Nodes reported at once"
+	default 32
+
+config MESHTASTIC_SPARKPLUG_BUF_SIZE
+	int "Encoded payload buffer"
+	default 1024
+
+endif
+
+if MESHTASTIC_SPARKPLUG
+
+config MESHTASTIC_SPARKPLUG_BROKER
+	string "MQTT broker host"
+	default "127.0.0.1"
+
+config MESHTASTIC_SPARKPLUG_PORT
+	int "MQTT broker port"
+	default 1883
+
+config MESHTASTIC_SPARKPLUG_GROUP
+	string "Sparkplug group id"
+	default "bench"
+
+config MESHTASTIC_SPARKPLUG_EDGE
+	string "Sparkplug edge node id (empty: gw-<node id>)"
+	default ""
+
+config MESHTASTIC_SPARKPLUG_INTERVAL_SEC
+	int "Seconds between NodeDB snapshots"
+	default 10
+
+config MESHTASTIC_SPARKPLUG_DEATH_SEC
+	int "A node not heard for this long gets a DDEATH"
+	default 900
+
+config MESHTASTIC_SPARKPLUG_STACK_SIZE
+	int "Sparkplug thread stack size"
+	default 4096
+
+config MESHTASTIC_SPARKPLUG_PRIORITY
+	int "Sparkplug thread priority"
+	default 12
+
+endif
+
+config MESHTASTIC_SIM_RADIO_SHELL
+	bool "Shell: make the simulated radio hear made-up peers (native_sim)"
+	depends on LORA_SIM && SHELL
+	help
+	  `simradio nodeinfo <from> <long> <short> [snr]` and `simradio text <from> <text>
+	  [snr]` build a frame from a peer and inject it into the simulated LoRa driver, so it
+	  takes the real receive path. For simulated benches, where boards cannot hear each
+	  other; never on hardware.

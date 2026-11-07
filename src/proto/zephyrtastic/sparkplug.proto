@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: GPL-3.0
+//
+// The part of the Sparkplug B 3.0 payload a gateway Edge Node needs (spec chapter 6.4):
+// a payload of scalar metrics. Written for this project from the specification's wire
+// format (field numbers and types); it is wire-compatible with the full schema, which other
+// Sparkplug software (Eclipse Tahu's sparkplug_b.proto) uses: a reader of the full schema
+// reads these messages, and fields this file leaves out (metadata, properties, datasets,
+// templates, extensions, uuid, body) are skipped by nanopb when they arrive.
+//
+// Not upstream Meshtastic: this is the gateway's telemetry to an MQTT broker, never on air.
+
+syntax = "proto2";
+
+package zt_sparkplug;
+
+message Metric {
+  optional string name = 1;
+  optional uint64 alias = 2;
+  optional uint64 timestamp = 3;          // UTC milliseconds since the epoch
+  optional uint32 datatype = 4;           // births only (spec: SHOULD NOT in DATA, CMD)
+  optional bool is_historical = 5;
+  optional bool is_transient = 6;
+  optional bool is_null = 7;
+  oneof value {
+    uint32 int_value = 10;                // Int8/16/32 sign-extended, UInt8/16/32
+    uint64 long_value = 11;               // Int64 (two's complement), UInt64, DateTime
+    float float_value = 12;
+    double double_value = 13;
+    bool boolean_value = 14;
+    string string_value = 15;             // String, Text, UUID
+  }
+}
+
+message Payload {
+  optional uint64 timestamp = 1;          // UTC milliseconds since the epoch
+  repeated Metric metrics = 2;
+  optional uint64 seq = 3;                // 0..255; none on NDEATH
+}

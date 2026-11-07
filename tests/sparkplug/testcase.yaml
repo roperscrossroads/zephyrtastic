@@ -1,0 +1,36 @@
+common:
+  tags:
+    - meshtastic
+    - sparkplug
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # The gateway's Sparkplug B session core: births, data by exception, deaths, sequence
+  # numbers, the bdSeq Will, rebirth requests (Eclipse Tahu's captured NCMD among them).
+  meshtastic.sparkplug.native_sim: {}
+
+  # The whole transport (MQTT client, NodeDB snapshot, bdSeq in settings, the sim radio's
+  # shell) on native_sim with the host's sockets: built, not run (it would need a broker).
+  # End to end against a broker: docs in src/meshtastic_sparkplug.c and overlay-sparkplug-sim.conf.
+  meshtastic.sparkplug.transport.native_sim:
+    build_only: true
+    extra_configs:
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_MESHTASTIC_NODEDB=y
+      - CONFIG_MESHTASTIC_SHELL=y
+      - CONFIG_SHELL=y
+      - CONFIG_NETWORKING=y
+      - CONFIG_NET_DRIVERS=y
+      - CONFIG_NET_SOCKETS=y
+      - CONFIG_NET_SOCKETS_OFFLOAD=y
+      - CONFIG_NET_NATIVE_OFFLOADED_SOCKETS=y
+      - CONFIG_ETH_NATIVE_TAP=n
+      - CONFIG_NET_IPV4=y
+      - CONFIG_NET_IPV6=n
+      - CONFIG_NET_TCP=y
+      - CONFIG_MQTT_LIB=y
+      - CONFIG_MESHTASTIC_SPARKPLUG=y
+      - CONFIG_MESHTASTIC_SIM_RADIO_SHELL=y
