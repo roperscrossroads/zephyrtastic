@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Adam Roper
+# SPDX-License-Identifier: GPL-3.0
+
+config MESHTASTIC_HAWKBIT
+	bool "Firmware updates from an Eclipse hawkBit server (DDI polling)"
+	depends on HAWKBIT && HAWKBIT_SET_SETTINGS_RUNTIME
+	depends on !HAWKBIT_AUTOHANDLER && !HAWKBIT_SHELL && !HAWKBIT_CONFIRM_IMG_ON_INIT
+	depends on !MESHTASTIC_OTA
+	select NET_MGMT_EVENT
+	help
+	  Poll a hawkBit server for an update and install it into the MCUboot
+	  second slot, through Zephyr's hawkBit client (subsys/mgmt/hawkbit).
+
+	  How it sits with the rest of the update path:
+	  - It probes from its own thread, never the system work queue: a probe
+	    downloads the whole image, and the stack's senders run on the work queue.
+	    So HAWKBIT_AUTOHANDLER (which uses the work queue) must be off.
+	  - The running image is confirmed by the healthy-window rule, not at init:
+	    HAWKBIT_CONFIRM_IMG_ON_INIT must be off. The client then refuses to
+	    probe until the image is confirmed, so the server hears "success" only
+	    from an image that came up and stayed up.
+	  - One writer of slot 1: the SMP update path (MESHTASTIC_OTA) is not built
+	    beside it.
+	  - The server and the device token are set at run time (`hawkbit server`,
+	    `hawkbit token`) and kept in settings, never in the build.
+
+if MESHTASTIC_HAWKBIT
+
+config MESHTASTIC_HAWKBIT_STACK_SIZE
+	int "hawkBit probe thread stack size"
+	default 6144
+
+config MESHTASTIC_HAWKBIT_PRIORITY
+	int "hawkBit probe thread priority"
+	default 12
+	help
+	  Low: a probe can download for minutes and must not hold up radio work.
+
+config MESHTASTIC_HAWKBIT_CONFIRM_DELAY_SEC
+	int "Confirm the running image after this many seconds of uptime"
+	default 120
+	help
+	  The healthy window: a freshly swapped image that resets before this
+	  is reverted by MCUboot. 0 leaves confirming to someone else.
+
+config MESHTASTIC_HAWKBIT_MIN_POLL_SEC
+	int "Never probe more often than this"
+	default 60
+	help
+	  The server sets the poll interval; this is a floor under it.
+
+endif

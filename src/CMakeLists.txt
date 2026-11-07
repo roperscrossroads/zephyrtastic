@@ -230,6 +230,7 @@ if(CONFIG_MESHTASTIC)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SPARKPLUG_SESSION meshtastic_sparkplug_session.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SPARKPLUG meshtastic_sparkplug.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_SIM_RADIO_SHELL meshtastic_sim_radio_shell.c)
+  zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_HAWKBIT meshtastic_hawkbit.c)
   zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_PKI meshtastic_pki.c)
   # The per-peer key's X25519 (agents-28qw): ref10's ladder needs the vendored fe.c, which
   # XEdDSA may already bring; Everest is a tf-psa-crypto switch whose header sits here.
