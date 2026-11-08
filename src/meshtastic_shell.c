@@ -11,6 +11,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/meshtastic/bootlog.h>
 #include <zephyr/meshtastic/reboot_trace.h>
+#include <zephyr/meshtastic/sparkplug.h>
 #include <zephyr/meshtastic/intents.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/meshtastic/diagnostics.h>
@@ -7803,6 +7804,7 @@ static void intents_print_one(const struct meshtastic_intent *it, bool set, cons
 static void intents_reboot_fn(struct k_work *work)
 {
 	ARG_UNUSED(work);
+	(void)meshtastic_sparkplug_stop(MESHTASTIC_SPARKPLUG_STOP_TIMEOUT); /* NDEATH, DISCONNECT */
 	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_SHELL, "intents clear");
 	sys_reboot(SYS_REBOOT_COLD);
 }

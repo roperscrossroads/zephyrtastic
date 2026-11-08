@@ -19,7 +19,9 @@ config MESHTASTIC_SPARKPLUG
 	  when last heard, position. A node not heard for MESHTASTIC_SPARKPLUG_DEATH_SEC gets a
 	  DDEATH. Its own MQTT connection, whose Will is the Edge Node's NDEATH; bdSeq is kept in
 	  settings. Telemetry only: no command is acted on but a rebirth request, and nothing is
-	  ever forwarded into the mesh.
+	  ever forwarded into the mesh. A planned reboot (admin, lockdown, `intents clear`) ends
+	  the session first with the NDEATH and an MQTT DISCONNECT; `sparkplug stop` / `start` do
+	  the same by hand.
 
 if MESHTASTIC_SPARKPLUG_SESSION
 

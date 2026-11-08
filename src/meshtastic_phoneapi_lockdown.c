@@ -44,6 +44,7 @@
 #include <pb_decode.h>
 
 #include <zephyr/meshtastic/reboot_trace.h>
+#include <zephyr/meshtastic/sparkplug.h>
 
 #include "meshtastic/admin.pb.h"
 #include "meshtastic_core.h"
@@ -205,6 +206,7 @@ static void reboot_work_fn(struct k_work *work)
 	meshtastic_settings_flush();
 #endif
 	LOG_WRN("lockdown: rebooting now");
+	(void)meshtastic_sparkplug_stop(MESHTASTIC_SPARKPLUG_STOP_TIMEOUT); /* NDEATH, DISCONNECT */
 	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_LOCKDOWN, NULL);
 	sys_reboot(SYS_REBOOT_COLD);
 }

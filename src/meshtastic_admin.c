@@ -27,6 +27,7 @@
 #include <zephyr/sys/reboot.h>
 
 #include <zephyr/meshtastic/reboot_trace.h>
+#include <zephyr/meshtastic/sparkplug.h>
 #if defined(CONFIG_POWEROFF)
 #include <zephyr/sys/poweroff.h>
 #endif
@@ -192,6 +193,7 @@ static void admin_reboot_work_fn(struct k_work *work)
 	meshtastic_settings_flush(); /* persist pending/committed writes first */
 #endif
 	LOG_WRN("admin: rebooting now");
+	(void)meshtastic_sparkplug_stop(MESHTASTIC_SPARKPLUG_STOP_TIMEOUT); /* NDEATH, DISCONNECT */
 	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_ADMIN, NULL);
 	sys_reboot(SYS_REBOOT_COLD);
 }
@@ -208,6 +210,7 @@ static void admin_reset_reboot_work_fn(struct k_work *work)
 	ARG_UNUSED(work);
 
 	LOG_WRN("admin: rebooting now (post-reset, no flush)");
+	(void)meshtastic_sparkplug_stop(MESHTASTIC_SPARKPLUG_STOP_TIMEOUT); /* NDEATH, DISCONNECT */
 	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_ADMIN, "post-reset");
 	sys_reboot(SYS_REBOOT_COLD);
 }

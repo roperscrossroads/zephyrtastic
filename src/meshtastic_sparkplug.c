@@ -11,6 +11,10 @@
  * the session, which sends what changed. A dropped connection is retried with a backoff and a
  * new bdSeq. Telemetry only: an NCMD rebirth request is answered, nothing else is acted on.
  *
+ * A planned reboot (admin, lockdown, `intents clear`) or `sparkplug stop` ends the session on
+ * purpose first: the NDEATH (QoS 1, its PUBACK awaited briefly), then MQTT DISCONNECT, then no
+ * reconnect until `sparkplug start` (meshtastic_sparkplug_stop() / _start()).
+ *
  * Timestamps are UTC milliseconds when the node's clock is set (SNTP, GNSS, a phone); before
  * that, milliseconds of uptime, and `sparkplug status` says so.
  */
@@ -30,6 +34,7 @@
 
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
+#include <zephyr/meshtastic/sparkplug.h>
 
 #include "meshtastic_build.h"
 #include "meshtastic_clock.h"
@@ -59,6 +64,15 @@ static struct mt_spb_node snap[SNAP_MAX];
 static bool connected;
 static uint32_t sessions;
 static int last_err;
+
+/* Stopping on purpose: the request, the thread's answer, and its wake-up from a backoff. */
+static atomic_t stop_req;
+static bool stopped;
+static K_SEM_DEFINE(stopped_sem, 0, 1);
+static K_SEM_DEFINE(wake_sem, 0, 1);
+#define NDEATH_MSG_ID 0xDEADU
+static bool ndeath_acked;
+static uint32_t intentional_deaths;
 
 /* --- bdSeq across reboots ----------------------------------------------------------------- */
 
@@ -234,6 +248,11 @@ static void evt_handler(struct mqtt_client *c, const struct mqtt_evt *evt)
 	case MQTT_EVT_PUBLISH:
 		on_publish(c, evt);
 		break;
+	case MQTT_EVT_PUBACK:
+		if (evt->param.puback.message_id == NDEATH_MSG_ID) {
+			ndeath_acked = true;
+		}
+		break;
 	default:
 		break;
 	}
@@ -311,6 +330,9 @@ static void serve(void)
 			LOG_WRN("Sparkplug: no CONNACK");
 			return;
 		}
+		if (atomic_get(&stop_req)) {
+			return;
+		}
 		int rc = zsock_poll(&fd, 1, timeout);
 
 		if (rc < 0 || (rc > 0 && (fd.revents & (ZSOCK_POLLERR | ZSOCK_POLLHUP)))) {
@@ -337,6 +359,54 @@ static void serve(void)
 			}
 		}
 	}
+}
+
+/* The NDEATH an intentional disconnect owes (the same message as the Will), at QoS 1 with its
+ * PUBACK awaited up to 500 ms, so it has reached the broker before the DISCONNECT. */
+static void say_ndeath(void)
+{
+	struct mqtt_publish_param p = {0};
+	int64_t end;
+
+	p.message.topic.topic.utf8 = (const uint8_t *)will_topic;
+	p.message.topic.topic.size = strlen(will_topic);
+	p.message.topic.qos = MQTT_QOS_1_AT_LEAST_ONCE;
+	p.message.payload.data = will_payload;
+	p.message.payload.len = will_m.size;
+	p.message_id = NDEATH_MSG_ID;
+	ndeath_acked = false;
+	if (mqtt_publish(&client, &p) != 0) {
+		return;
+	}
+	intentional_deaths++;
+	end = k_uptime_get() + 500;
+	while (!ndeath_acked && connected && k_uptime_get() < end) {
+		struct zsock_pollfd fd = {.fd = client.transport.tcp.sock, .events = ZSOCK_POLLIN};
+
+		if (zsock_poll(&fd, 1, 50) > 0 && mqtt_input(&client) != 0) {
+			break;
+		}
+	}
+}
+
+int meshtastic_sparkplug_stop(k_timeout_t timeout)
+{
+	if (k_current_get() == &spb_thread) {
+		return -EDEADLK;
+	}
+	k_sem_reset(&stopped_sem);
+	atomic_set(&stop_req, 1);
+	k_sem_give(&wake_sem);          /* out of a backoff at once */
+	if (stopped) {
+		return 0;
+	}
+	return k_sem_take(&stopped_sem, timeout);
+}
+
+void meshtastic_sparkplug_start(void)
+{
+	atomic_clear(&stop_req);
+	k_sem_give(&wake_sem);
 }
 
 static void spb_thread_fn(void *a, void *b, void *c)
@@ -367,6 +437,16 @@ static void spb_thread_fn(void *a, void *b, void *c)
 	(void)mt_spb_ncmd_topic(&sess, ncmd_topic, sizeof(ncmd_topic));
 
 	while (true) {
+		if (atomic_get(&stop_req)) {
+			stopped = true;
+			k_sem_give(&stopped_sem);
+			LOG_INF("Sparkplug: stopped");
+			while (atomic_get(&stop_req)) {
+				(void)k_sem_take(&wake_sem, K_FOREVER);
+			}
+			stopped = false;
+			LOG_INF("Sparkplug: started");
+		}
 		int rc = resolve();
 
 		if (rc == 0) {
@@ -375,6 +455,9 @@ static void spb_thread_fn(void *a, void *b, void *c)
 		if (rc == 0) {
 			serve();
 			if (connected) {
+				if (atomic_get(&stop_req)) {
+					say_ndeath();
+				}
 				(void)mqtt_disconnect(&client, NULL);
 			} else {
 				(void)mqtt_abort(&client);
@@ -386,7 +469,9 @@ static void spb_thread_fn(void *a, void *b, void *c)
 			last_err = rc;
 			backoff = MIN(backoff * 2, 60U);
 		}
-		k_sleep(K_SECONDS(backoff));
+		if (!atomic_get(&stop_req)) {
+			(void)k_sem_take(&wake_sem, K_SECONDS(backoff));
+		}
 	}
 }
 
@@ -407,9 +492,10 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 	const struct mt_spb_stats *st = &sess.stats;
 
-	shell_print(sh, "broker:   %s:%d  %s (sessions %u, last error %d)",
+	shell_print(sh, "broker:   %s:%d  %s (sessions %u, intentional NDEATH %u, last error %d)",
 		    CONFIG_MESHTASTIC_SPARKPLUG_BROKER, CONFIG_MESHTASTIC_SPARKPLUG_PORT,
-		    connected ? "connected" : "not connected", sessions, last_err);
+		    stopped ? "stopped" : connected ? "connected" : "not connected", sessions,
+		    intentional_deaths, last_err);
 	shell_print(sh, "edge:     spBv1.0/%s/+/%s  bdSeq %u  seq %u", sess.group, sess.edge,
 		    sess.bdseq, sess.seq);
 	shell_print(sh, "clock:    %s", meshtastic_clock_valid() ? "UTC" : "not set: timestamps are uptime");
@@ -420,8 +506,30 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_stop(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	int rc = meshtastic_sparkplug_stop(MESHTASTIC_SPARKPLUG_STOP_TIMEOUT);
+
+	shell_print(sh, rc == 0 ? "stopped (NDEATH, DISCONNECT); `sparkplug start` resumes"
+				: "not stopped yet (%d)", rc);
+	return rc;
+}
+
+static int cmd_start(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	meshtastic_sparkplug_start();
+	shell_print(sh, "started: a new session (next bdSeq)");
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(spb_cmds,
 	SHELL_CMD(status, NULL, "Connection, session and counters", cmd_status),
+	SHELL_CMD(stop, NULL, "End the session on purpose: NDEATH, DISCONNECT, no reconnect", cmd_stop),
+	SHELL_CMD(start, NULL, "Resume after `sparkplug stop`", cmd_start),
 	SHELL_SUBCMD_SET_END);
 SHELL_CMD_REGISTER(sparkplug, &spb_cmds, "The gateway's Sparkplug B Edge Node", NULL);
 #endif /* CONFIG_SHELL */
