@@ -40,6 +40,10 @@ if MESHTASTIC_SPARKPLUG
 config MESHTASTIC_SPARKPLUG_BROKER
 	string "MQTT broker host"
 	default "127.0.0.1"
+	help
+	  The default. Broker, port, group, edge id and the MQTT login (user, password) are
+	  settings: `sparkplug set|unset <key>` changes one at runtime, saves it, and reconnects.
+	  Use the edge id as the username where the broker gives each Edge Node its own login.
 
 config MESHTASTIC_SPARKPLUG_PORT
 	int "MQTT broker port"

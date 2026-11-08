@@ -180,7 +180,7 @@ void mt_spb_device_id(uint32_t num, char out[9])
 
 /* --- the session ----------------------------------------------------------------------------- */
 
-static bool valid_id(const char *id)
+bool mt_spb_valid_id(const char *id)
 {
 	if (id == NULL || id[0] == '\0' || strlen(id) >= MT_SPB_ID_MAX) {
 		return false;
@@ -192,7 +192,7 @@ int mt_spb_init(struct mt_spb_session *s, const char *group, const char *edge,
 		mt_spb_publish_fn publish, void *ctx, mt_spb_now_ms_fn now_ms,
 		uint32_t death_after_s, const char *build, uint32_t own_num)
 {
-	if (!valid_id(group) || !valid_id(edge) || publish == NULL || now_ms == NULL) {
+	if (!mt_spb_valid_id(group) || !mt_spb_valid_id(edge) || publish == NULL || now_ms == NULL) {
 		return -EINVAL;
 	}
 	memset(s, 0, sizeof(*s));

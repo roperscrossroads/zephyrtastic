@@ -109,6 +109,9 @@ struct mt_spb_session {
 	char topic[MT_SPB_TOPIC_MAX];
 };
 
+/* A usable group or edge node id: non-empty, shorter than MT_SPB_ID_MAX, no '+', '/', '#'. */
+bool mt_spb_valid_id(const char *id);
+
 /* Set up; ids must be non-empty and free of '+', '/', '#'. -EINVAL otherwise. */
 int mt_spb_init(struct mt_spb_session *s, const char *group, const char *edge,
 		mt_spb_publish_fn publish, void *ctx, mt_spb_now_ms_fn now_ms,

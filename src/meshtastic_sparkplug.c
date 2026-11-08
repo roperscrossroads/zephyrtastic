@@ -11,6 +11,11 @@
  * the session, which sends what changed. A dropped connection is retried with a backoff and a
  * new bdSeq. Telemetry only: an NCMD rebirth request is answered, nothing else is acted on.
  *
+ * Broker, port, group, edge id and the MQTT login are settings (`sparkplug set|unset`, subtree
+ * mtspb), the Kconfig values their defaults; a change ends the session cleanly and reconnects
+ * with the new values. The username is meant to be the edge id (one login per Edge Node, the
+ * bench broker's ACL). The password is stored in the clear in settings, like the hawkBit token.
+ *
  * A planned reboot (admin, lockdown, `intents clear`) or `sparkplug stop` ends the session on
  * purpose first: the NDEATH (QoS 1, its PUBACK awaited briefly), then MQTT DISCONNECT, then no
  * reconnect until `sparkplug start` (meshtastic_sparkplug_stop() / _start()).
@@ -20,6 +25,7 @@
  */
 
 #include <errno.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -54,7 +60,6 @@ static uint8_t rx_buf[512];
 static uint8_t tx_buf[CONFIG_MESHTASTIC_SPARKPLUG_BUF_SIZE + MT_SPB_TOPIC_MAX + 16];
 static uint8_t in_buf[256];
 static char client_id[48];
-static char edge_id[MT_SPB_ID_MAX];
 static char will_topic[MT_SPB_TOPIC_MAX];
 static uint8_t will_payload[64];
 static char ncmd_topic[MT_SPB_TOPIC_MAX];
@@ -74,20 +79,74 @@ static K_SEM_DEFINE(wake_sem, 0, 1);
 static bool ndeath_acked;
 static uint32_t intentional_deaths;
 
-/* --- bdSeq across reboots ----------------------------------------------------------------- */
+/* --- settings: bdSeq across reboots, and where and as whom to connect ---------------------- */
 
+#define SPB_HOST_MAX 64
+#define SPB_CRED_MAX 64
+
+struct spb_cfg {
+	char broker[SPB_HOST_MAX];
+	uint16_t port;
+	char group[MT_SPB_ID_MAX];
+	char edge[MT_SPB_ID_MAX];       /* empty: gw-<node id> */
+	char user[SPB_CRED_MAX];        /* empty: no login */
+	char pass[SPB_CRED_MAX];
+};
+
+static K_MUTEX_DEFINE(cfg_lock);
+static struct spb_cfg cfg;              /* what the settings say (under cfg_lock) */
+static struct spb_cfg live;             /* what this session uses (the thread's copy) */
+static struct mqtt_utf8 user_m, pass_m;
+static atomic_t restart_req;
 static bool bdseq_known;
 static uint8_t bdseq_last;
 
-static int bdseq_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+static void cfg_defaults(struct spb_cfg *c)
 {
+	memset(c, 0, sizeof(*c));
+	strncpy(c->broker, CONFIG_MESHTASTIC_SPARKPLUG_BROKER, sizeof(c->broker) - 1);
+	c->port = (uint16_t)CONFIG_MESHTASTIC_SPARKPLUG_PORT;
+	strncpy(c->group, CONFIG_MESHTASTIC_SPARKPLUG_GROUP, sizeof(c->group) - 1);
+	strncpy(c->edge, CONFIG_MESHTASTIC_SPARKPLUG_EDGE, sizeof(c->edge) - 1);
+}
+
+/* A setting's text value, NUL-terminated; a value that does not fit is ignored. */
+static void read_str(char *dst, size_t cap, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	char tmp[SPB_HOST_MAX];
+
+	if (len == 0 || len >= cap || len >= sizeof(tmp)) {
+		return;
+	}
+	if (read_cb(cb_arg, tmp, len) == (ssize_t)len) {
+		memcpy(dst, tmp, len);
+		dst[len] = '\0';
+	}
+}
+
+static int spb_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	if (strcmp(key, "bdseq") == 0 && len == 1 && read_cb(cb_arg, &bdseq_last, 1) == 1) {
 		bdseq_known = true;
+	} else if (strcmp(key, "broker") == 0) {
+		read_str(cfg.broker, sizeof(cfg.broker), len, read_cb, cb_arg);
+	} else if (strcmp(key, "port") == 0 && len == sizeof(cfg.port)) {
+		(void)read_cb(cb_arg, &cfg.port, sizeof(cfg.port));
+	} else if (strcmp(key, "group") == 0) {
+		read_str(cfg.group, sizeof(cfg.group), len, read_cb, cb_arg);
+	} else if (strcmp(key, "edge") == 0) {
+		read_str(cfg.edge, sizeof(cfg.edge), len, read_cb, cb_arg);
+	} else if (strcmp(key, "user") == 0) {
+		read_str(cfg.user, sizeof(cfg.user), len, read_cb, cb_arg);
+	} else if (strcmp(key, "pass") == 0) {
+		read_str(cfg.pass, sizeof(cfg.pass), len, read_cb, cb_arg);
 	}
+	k_mutex_unlock(&cfg_lock);
 	return 0;
 }
 
-SETTINGS_STATIC_HANDLER_DEFINE(mt_spb, "mtspb", NULL, bdseq_set, NULL, NULL);
+SETTINGS_STATIC_HANDLER_DEFINE(mt_spb, "mtspb", NULL, spb_set, NULL, NULL);
 
 static uint8_t bdseq_next(void)
 {
@@ -266,8 +325,8 @@ static int resolve(void)
 	char port[8];
 	int rc;
 
-	snprintf(port, sizeof(port), "%u", (unsigned int)CONFIG_MESHTASTIC_SPARKPLUG_PORT);
-	rc = zsock_getaddrinfo(CONFIG_MESHTASTIC_SPARKPLUG_BROKER, port, &hints, &res);
+	snprintf(port, sizeof(port), "%u", (unsigned int)live.port);
+	rc = zsock_getaddrinfo(live.broker, port, &hints, &res);
 	if (rc != 0 || res == NULL || res->ai_addrlen > sizeof(broker_addr)) {
 		if (res != NULL) {
 			zsock_freeaddrinfo(res);
@@ -296,6 +355,18 @@ static int connect_once(void)
 	client.client_id.size = strlen(client_id);
 	client.protocol_version = MQTT_VERSION_3_1_1;
 	client.clean_session = 1U;
+	client.user_name = NULL;
+	client.password = NULL;
+	if (live.user[0] != '\0') {
+		user_m.utf8 = (const uint8_t *)live.user;
+		user_m.size = strlen(live.user);
+		client.user_name = &user_m;
+		if (live.pass[0] != '\0') {
+			pass_m.utf8 = (const uint8_t *)live.pass;
+			pass_m.size = strlen(live.pass);
+			client.password = &pass_m;
+		}
+	}
 	will_t.topic.utf8 = (const uint8_t *)will_topic;
 	will_t.topic.size = strlen(will_topic);
 	will_t.qos = MQTT_QOS_1_AT_LEAST_ONCE;           /* spec 5.4: QoS 1, not retained */
@@ -330,7 +401,7 @@ static void serve(void)
 			LOG_WRN("Sparkplug: no CONNACK");
 			return;
 		}
-		if (atomic_get(&stop_req)) {
+		if (atomic_get(&stop_req) || atomic_get(&restart_req)) {
 			return;
 		}
 		int rc = zsock_poll(&fd, 1, timeout);
@@ -409,6 +480,29 @@ void meshtastic_sparkplug_start(void)
 	k_sem_give(&wake_sem);
 }
 
+/* The settings, for this session: a new group or edge id starts a new Edge Node session. */
+static int take_config(uint32_t own)
+{
+	struct spb_cfg next;
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	next = cfg;
+	k_mutex_unlock(&cfg_lock);
+	if (next.edge[0] == '\0') {
+		snprintf(next.edge, sizeof(next.edge), "gw-%08x", own);
+	}
+	if (strcmp(next.group, sess.group) != 0 || strcmp(next.edge, sess.edge) != 0) {
+		if (mt_spb_init(&sess, next.group, next.edge, publish, NULL, now_ms,
+				CONFIG_MESHTASTIC_SPARKPLUG_DEATH_SEC, meshtastic_build_id(), own) != 0) {
+			LOG_ERR("Sparkplug: group %s / edge %s not usable", next.group, next.edge);
+			return -EINVAL;
+		}
+		(void)mt_spb_ncmd_topic(&sess, ncmd_topic, sizeof(ncmd_topic));
+	}
+	live = next;
+	return 0;
+}
+
 static void spb_thread_fn(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a);
@@ -419,22 +513,13 @@ static void spb_thread_fn(void *a, void *b, void *c)
 	k_sleep(K_SECONDS(3));          /* the node id and settings are ready by now */
 	/* The firmware loads named subtrees only (a full settings_load() runs on BLE images
 	 * alone), so the last bdSeq is loaded here, before the first CONNECT uses the next. */
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	cfg_defaults(&cfg);
+	k_mutex_unlock(&cfg_lock);
 	(void)settings_load_subtree("mtspb");
 	uint32_t own = meshtastic_get_node_id();
 
-	if (CONFIG_MESHTASTIC_SPARKPLUG_EDGE[0] != '\0') {
-		strncpy(edge_id, CONFIG_MESHTASTIC_SPARKPLUG_EDGE, sizeof(edge_id) - 1);
-	} else {
-		snprintf(edge_id, sizeof(edge_id), "gw-%08x", own);
-	}
 	snprintf(client_id, sizeof(client_id), "zt-spb-%08x", own);
-	if (mt_spb_init(&sess, CONFIG_MESHTASTIC_SPARKPLUG_GROUP, edge_id, publish, NULL, now_ms,
-			CONFIG_MESHTASTIC_SPARKPLUG_DEATH_SEC, meshtastic_build_id(), own) != 0) {
-		LOG_ERR("Sparkplug: group or edge id not usable (no + / #, at most %d chars)",
-			MT_SPB_ID_MAX - 1);
-		return;
-	}
-	(void)mt_spb_ncmd_topic(&sess, ncmd_topic, sizeof(ncmd_topic));
 
 	while (true) {
 		if (atomic_get(&stop_req)) {
@@ -447,15 +532,21 @@ static void spb_thread_fn(void *a, void *b, void *c)
 			stopped = false;
 			LOG_INF("Sparkplug: started");
 		}
-		int rc = resolve();
+		atomic_clear(&restart_req);
+		int rc = take_config(own);
 
+		if (rc == 0) {
+			rc = resolve();
+		}
 		if (rc == 0) {
 			rc = connect_once();
 		}
 		if (rc == 0) {
+			uint32_t before = sessions;
+
 			serve();
 			if (connected) {
-				if (atomic_get(&stop_req)) {
+				if (atomic_get(&stop_req) || atomic_get(&restart_req)) {
 					say_ndeath();
 				}
 				(void)mqtt_disconnect(&client, NULL);
@@ -464,10 +555,15 @@ static void spb_thread_fn(void *a, void *b, void *c)
 			}
 			connected = false;
 			mt_spb_disconnected(&sess);
-			backoff = 2;
+			/* refused (a login the broker does not take) or no CONNACK: back off as for a
+			 * failed connect, not every 2 s for ever */
+			backoff = sessions != before ? 2U : MIN(backoff * 2, 60U);
 		} else {
 			last_err = rc;
 			backoff = MIN(backoff * 2, 60U);
+		}
+		if (atomic_get(&restart_req)) {
+			continue;               /* new settings: reconnect at once */
 		}
 		if (!atomic_get(&stop_req)) {
 			(void)k_sem_take(&wake_sem, K_SECONDS(backoff));
@@ -492,10 +588,17 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 	const struct mt_spb_stats *st = &sess.stats;
 
-	shell_print(sh, "broker:   %s:%d  %s (sessions %u, intentional NDEATH %u, last error %d)",
-		    CONFIG_MESHTASTIC_SPARKPLUG_BROKER, CONFIG_MESHTASTIC_SPARKPLUG_PORT,
+	struct spb_cfg c;
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	c = cfg;
+	k_mutex_unlock(&cfg_lock);
+	shell_print(sh, "broker:   %s:%u  %s (sessions %u, intentional NDEATH %u, last error %d)",
+		    c.broker, c.port,
 		    stopped ? "stopped" : connected ? "connected" : "not connected", sessions,
 		    intentional_deaths, last_err);
+	shell_print(sh, "login:    %s%s", c.user[0] ? c.user : "none",
+		    c.user[0] ? (c.pass[0] ? " (password set)" : " (no password)") : "");
 	shell_print(sh, "edge:     spBv1.0/%s/+/%s  bdSeq %u  seq %u", sess.group, sess.edge,
 		    sess.bdseq, sess.seq);
 	shell_print(sh, "clock:    %s", meshtastic_clock_valid() ? "UTC" : "not set: timestamps are uptime");
@@ -517,6 +620,89 @@ static int cmd_stop(const struct shell *sh, size_t argc, char **argv)
 	return rc;
 }
 
+/* sparkplug set|unset <key> [value]: keys broker port group edge user password */
+static const char *const cfg_keys[] = {"broker", "port", "group", "edge", "user", "password"};
+
+static int cfg_key(const struct shell *sh, const char *k)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(cfg_keys); i++) {
+		if (strcmp(k, cfg_keys[i]) == 0) {
+			return (int)i;
+		}
+	}
+	shell_error(sh, "keys: broker port group edge user password");
+	return -1;
+}
+
+static int cfg_apply(const struct shell *sh, int key, const char *value)
+{
+	struct spb_cfg def;
+	char *dst;
+	size_t cap;
+	const char *skey;
+	int rc;
+
+	cfg_defaults(&def);
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	switch (key) {
+	case 0: dst = cfg.broker; cap = sizeof(cfg.broker); skey = "mtspb/broker"; break;
+	case 2: dst = cfg.group; cap = sizeof(cfg.group); skey = "mtspb/group"; break;
+	case 3: dst = cfg.edge; cap = sizeof(cfg.edge); skey = "mtspb/edge"; break;
+	case 4: dst = cfg.user; cap = sizeof(cfg.user); skey = "mtspb/user"; break;
+	case 5: dst = cfg.pass; cap = sizeof(cfg.pass); skey = "mtspb/pass"; break;
+	default: dst = NULL; cap = 0; skey = "mtspb/port"; break;
+	}
+	if (key == 1) {
+		unsigned long port = value ? strtoul(value, NULL, 10) : def.port;
+
+		if (port == 0 || port > 65535) {
+			k_mutex_unlock(&cfg_lock);
+			shell_error(sh, "port: 1-65535");
+			return -EINVAL;
+		}
+		cfg.port = (uint16_t)port;
+		rc = value ? settings_save_one(skey, &cfg.port, sizeof(cfg.port))
+			   : settings_delete(skey);
+	} else {
+		const char *v = value;
+
+		if (v == NULL) {        /* unset: back to the build's default */
+			v = key == 0 ? def.broker : key == 2 ? def.group : key == 3 ? def.edge : "";
+		}
+		if (strlen(v) >= cap || ((key == 2 || (key == 3 && v[0])) && !mt_spb_valid_id(v))) {
+			k_mutex_unlock(&cfg_lock);
+			shell_error(sh, "%s: not usable (at most %u chars%s)", cfg_keys[key],
+				    (unsigned int)cap - 1U, key == 2 || key == 3 ? ", no + / #" : "");
+			return -EINVAL;
+		}
+		strncpy(dst, v, cap - 1);
+		dst[cap - 1] = '\0';
+		rc = value ? settings_save_one(skey, dst, strlen(dst)) : settings_delete(skey);
+	}
+	k_mutex_unlock(&cfg_lock);
+	if (rc != 0) {
+		shell_error(sh, "saving %s: %d", skey, rc);
+	}
+	atomic_set(&restart_req, 1);    /* NDEATH, DISCONNECT, reconnect with it */
+	k_sem_give(&wake_sem);
+	shell_print(sh, "%s %s; reconnecting", cfg_keys[key], value ? "set" : "back to the default");
+	return rc;
+}
+
+static int cmd_set(const struct shell *sh, size_t argc, char **argv)
+{
+	int key = cfg_key(sh, argv[1]);
+
+	return key < 0 ? -EINVAL : cfg_apply(sh, key, argv[2]);
+}
+
+static int cmd_unset(const struct shell *sh, size_t argc, char **argv)
+{
+	int key = cfg_key(sh, argv[1]);
+
+	return key < 0 ? -EINVAL : cfg_apply(sh, key, NULL);
+}
+
 static int cmd_start(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -530,6 +716,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(spb_cmds,
 	SHELL_CMD(status, NULL, "Connection, session and counters", cmd_status),
 	SHELL_CMD(stop, NULL, "End the session on purpose: NDEATH, DISCONNECT, no reconnect", cmd_stop),
 	SHELL_CMD(start, NULL, "Resume after `sparkplug stop`", cmd_start),
+	SHELL_CMD_ARG(set, NULL, "set <broker|port|group|edge|user|password> <value>: saved, "
+		      "reconnects", cmd_set, 3, 0),
+	SHELL_CMD_ARG(unset, NULL, "unset <key>: back to the build's default, reconnects",
+		      cmd_unset, 2, 0),
 	SHELL_SUBCMD_SET_END);
 SHELL_CMD_REGISTER(sparkplug, &spb_cmds, "The gateway's Sparkplug B Edge Node", NULL);
 #endif /* CONFIG_SHELL */
