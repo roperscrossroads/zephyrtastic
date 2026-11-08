@@ -45,8 +45,28 @@ config MESHTASTIC_SPARKPLUG_BROKER
 	  settings: `sparkplug set|unset <key>` changes one at runtime, saves it, and reconnects.
 	  Use the edge id as the username where the broker gives each Edge Node its own login.
 
+config MESHTASTIC_SPARKPLUG_TLS
+	bool "Connect over TLS, the broker's certificate and name verified"
+	depends on MQTT_LIB_TLS && NET_SOCKETS_SOCKOPT_TLS && TLS_CREDENTIALS
+	help
+	  Every connection is TLS; a build with this on never falls back to plain MQTT. The
+	  broker's certificate must chain to the root in src/meshtastic_sparkplug_ca.h (Let's
+	  Encrypt's ECDSA root, ISRG Root X2), and its name must match the broker setting, which
+	  is also the SNI: give the broker by name, not by address. There is no switch to skip the
+	  check: a broker that cannot be verified is not sent the password. Needs the mbedTLS
+	  X.509 layer (overlay-sparkplug-tls.conf).
+
+config MESHTASTIC_SPARKPLUG_TLS_SEC_TAG
+	int "TLS credential tag of the trust anchors"
+	depends on MESHTASTIC_SPARKPLUG_TLS
+	default 21328
+	help
+	  The tag the CA certificates are registered under (0x5350, "SP"); distinct from the MQTT
+	  bridge's.
+
 config MESHTASTIC_SPARKPLUG_PORT
 	int "MQTT broker port"
+	default 8883 if MESHTASTIC_SPARKPLUG_TLS
 	default 1883
 
 config MESHTASTIC_SPARKPLUG_GROUP
@@ -67,7 +87,10 @@ config MESHTASTIC_SPARKPLUG_DEATH_SEC
 
 config MESHTASTIC_SPARKPLUG_STACK_SIZE
 	int "Sparkplug thread stack size"
+	default 8192 if MESHTASTIC_SPARKPLUG_TLS
 	default 4096
+	help
+	  The TLS handshake (certificate parsing, the signature checks) runs on this thread.
 
 config MESHTASTIC_SPARKPLUG_PRIORITY
 	int "Sparkplug thread priority"

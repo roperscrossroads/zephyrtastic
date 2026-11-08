@@ -20,6 +20,10 @@
  * purpose first: the NDEATH (QoS 1, its PUBACK awaited briefly), then MQTT DISCONNECT, then no
  * reconnect until `sparkplug start` (meshtastic_sparkplug_stop() / _start()).
  *
+ * With MESHTASTIC_SPARKPLUG_TLS every connection is TLS, the broker's certificate checked against
+ * the root in meshtastic_sparkplug_ca.h (ISRG Root X2) and its name against the broker setting (also the SNI);
+ * no plaintext fallback, no way to skip the check.
+ *
  * Timestamps are UTC milliseconds when the node's clock is set (SNTP, GNSS, a phone); before
  * that, milliseconds of uptime, and `sparkplug status` says so.
  */
@@ -45,6 +49,13 @@
 #include "meshtastic_build.h"
 #include "meshtastic_clock.h"
 #include "meshtastic_sparkplug_session.h"
+
+#if defined(CONFIG_MESHTASTIC_SPARKPLUG_TLS)
+#include <zephyr/net/tls_credentials.h>
+#include "meshtastic_sparkplug_ca.h"
+
+static const sec_tag_t spb_sec_tags[] = {CONFIG_MESHTASTIC_SPARKPLUG_TLS_SEC_TAG};
+#endif
 
 LOG_MODULE_REGISTER(mt_sparkplug, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -338,6 +349,45 @@ static int resolve(void)
 	return 0;
 }
 
+/* The connection's socket, for poll(): the transport keeps it in its TLS or TCP half. */
+static int sock_fd(void)
+{
+#if defined(CONFIG_MESHTASTIC_SPARKPLUG_TLS)
+	return client.transport.tls.sock;
+#else
+	return client.transport.tcp.sock;
+#endif
+}
+
+#if defined(CONFIG_MESHTASTIC_SPARKPLUG_TLS)
+/* The trust anchors are registered once; each connection then asks for the peer to be verified
+ * against them, under the broker's name. */
+static int tls_setup(void)
+{
+	static bool ca_added;
+	struct mqtt_sec_config *t = &client.transport.tls.config;
+
+	if (!ca_added) {
+		int rc = tls_credential_add(CONFIG_MESHTASTIC_SPARKPLUG_TLS_SEC_TAG,
+					    TLS_CREDENTIAL_CA_CERTIFICATE, spb_ca_pem,
+					    sizeof(spb_ca_pem));
+
+		if (rc < 0 && rc != -EEXIST) {
+			LOG_ERR("Sparkplug: trust anchors not registered (%d)", rc);
+			return rc;
+		}
+		ca_added = true;
+	}
+	t->peer_verify = TLS_PEER_VERIFY_REQUIRED;
+	t->cipher_list = NULL;
+	t->sec_tag_list = spb_sec_tags;
+	t->sec_tag_count = ARRAY_SIZE(spb_sec_tags);
+	t->hostname = live.broker;
+	client.transport.type = MQTT_TRANSPORT_SECURE;
+	return 0;
+}
+#endif
+
 static int connect_once(void)
 {
 	size_t wlen = sizeof(will_payload);
@@ -379,7 +429,14 @@ static int connect_once(void)
 	client.rx_buf_size = sizeof(rx_buf);
 	client.tx_buf = tx_buf;
 	client.tx_buf_size = sizeof(tx_buf);
+#if defined(CONFIG_MESHTASTIC_SPARKPLUG_TLS)
+	rc = tls_setup();
+	if (rc != 0) {
+		return rc;
+	}
+#else
 	client.transport.type = MQTT_TRANSPORT_NON_SECURE;
+#endif
 	return mqtt_connect(&client);
 }
 
@@ -389,7 +446,7 @@ static void serve(void)
 	int64_t deadline = k_uptime_get() + 10000;   /* CONNACK within 10 s */
 
 	while (true) {
-		struct zsock_pollfd fd = {.fd = client.transport.tcp.sock, .events = ZSOCK_POLLIN};
+		struct zsock_pollfd fd = {.fd = sock_fd(), .events = ZSOCK_POLLIN};
 		int64_t now = k_uptime_get();
 		int timeout = 1000;
 
@@ -452,7 +509,7 @@ static void say_ndeath(void)
 	intentional_deaths++;
 	end = k_uptime_get() + 500;
 	while (!ndeath_acked && connected && k_uptime_get() < end) {
-		struct zsock_pollfd fd = {.fd = client.transport.tcp.sock, .events = ZSOCK_POLLIN};
+		struct zsock_pollfd fd = {.fd = sock_fd(), .events = ZSOCK_POLLIN};
 
 		if (zsock_poll(&fd, 1, 50) > 0 && mqtt_input(&client) != 0) {
 			break;
@@ -593,8 +650,9 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	k_mutex_lock(&cfg_lock, K_FOREVER);
 	c = cfg;
 	k_mutex_unlock(&cfg_lock);
-	shell_print(sh, "broker:   %s:%u  %s (sessions %u, intentional NDEATH %u, last error %d)",
+	shell_print(sh, "broker:   %s:%u %s  %s (sessions %u, intentional NDEATH %u, last error %d)",
 		    c.broker, c.port,
+		    IS_ENABLED(CONFIG_MESHTASTIC_SPARKPLUG_TLS) ? "TLS (verified)" : "plain",
 		    stopped ? "stopped" : connected ? "connected" : "not connected", sessions,
 		    intentional_deaths, last_err);
 	shell_print(sh, "login:    %s%s", c.user[0] ? c.user : "none",

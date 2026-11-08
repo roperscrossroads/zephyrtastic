@@ -34,3 +34,28 @@ tests:
       - CONFIG_MQTT_LIB=y
       - CONFIG_MESHTASTIC_SPARKPLUG=y
       - CONFIG_MESHTASTIC_SIM_RADIO_SHELL=y
+
+  # The same transport over TLS (MESHTASTIC_SPARKPLUG_TLS): the trust anchor, peer verification
+  # under the broker's name, no plaintext fallback. Built, not run; checked end to end against a
+  # Let's Encrypt-certified Mosquitto by hand (overlay-sparkplug-tls.conf).
+  meshtastic.sparkplug.transport_tls.native_sim:
+    build_only: true
+    extra_args:
+      - EXTRA_CONF_FILE=../../samples/meshtastic/overlay-sparkplug-tls.conf
+    extra_configs:
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_MESHTASTIC_NODEDB=y
+      - CONFIG_MESHTASTIC_SHELL=y
+      - CONFIG_SHELL=y
+      - CONFIG_NETWORKING=y
+      - CONFIG_NET_DRIVERS=y
+      - CONFIG_NET_SOCKETS=y
+      - CONFIG_NET_SOCKETS_OFFLOAD=y
+      - CONFIG_NET_NATIVE_OFFLOADED_SOCKETS=y
+      - CONFIG_ETH_NATIVE_TAP=n
+      - CONFIG_NET_IPV4=y
+      - CONFIG_NET_IPV6=n
+      - CONFIG_NET_TCP=y
+      - CONFIG_MQTT_LIB=y
+      - CONFIG_MESHTASTIC_SPARKPLUG=y
+      - CONFIG_MESHTASTIC_SIM_RADIO_SHELL=y
