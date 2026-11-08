@@ -38,6 +38,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/mqtt.h>
 #include <zephyr/net/socket.h>
+#include <zephyr/sys/sys_heap.h>
 #include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/shell/shell.h>
@@ -639,6 +640,36 @@ static int meshtastic_sparkplug_init(void)
 SYS_INIT(meshtastic_sparkplug_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 #if defined(CONFIG_SHELL)
+#if defined(CONFIG_COMMON_LIBC_MALLOC) && defined(CONFIG_SYS_HEAP_RUNTIME_STATS)
+/* lib/libc/common/include/sys_malloc.h is not on an application's include path. */
+int malloc_runtime_stats_get(struct sys_memory_stats *stats);
+#endif
+
+/* What the TLS session costs: mbedTLS takes its record buffers and handshake state from the C
+ * library's malloc arena (MBEDTLS_ENABLE_HEAP is off), the handshake runs on this module's
+ * thread. The peaks are since boot, so they include the first handshake. */
+static void print_memory(const struct shell *sh)
+{
+#if defined(CONFIG_COMMON_LIBC_MALLOC) && defined(CONFIG_SYS_HEAP_RUNTIME_STATS)
+	struct sys_memory_stats m;
+
+	if (malloc_runtime_stats_get(&m) == 0) {
+		shell_print(sh, "malloc:   %zu B in use, peak %zu B, %zu B free", m.allocated_bytes,
+			    m.max_allocated_bytes, m.free_bytes);
+	}
+#endif
+#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
+	size_t unused;
+
+	if (k_thread_stack_space_get(&spb_thread, &unused) == 0) {
+		size_t size = K_THREAD_STACK_SIZEOF(spb_stack);
+
+		shell_print(sh, "stack:    peak %zu of %zu B", size - unused, size);
+	}
+#endif
+	ARG_UNUSED(sh);
+}
+
 static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -664,6 +695,7 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 		    st->nbirths, st->dbirths, st->ddata, st->ddeaths, st->ndata);
 	shell_print(sh, "rebirths: %u asked; errors: publish %u, encode %u; table full %u",
 		    st->rebirth_requests, st->publish_errors, st->encode_errors, st->table_full);
+	print_memory(sh);
 	return 0;
 }
 
