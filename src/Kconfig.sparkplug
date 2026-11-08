@@ -83,7 +83,13 @@ config MESHTASTIC_SPARKPLUG_INTERVAL_SEC
 
 config MESHTASTIC_SPARKPLUG_DEATH_SEC
 	int "A node not heard for this long gets a DDEATH"
-	default 900
+	default 22500
+	help
+	  Seconds since a node was last heard before its Device dies. A quiet mesh node's only
+	  regular packet may be its NodeInfo broadcast (MESHTASTIC_NODEINFO_INTERVAL_SEC, 3 h
+	  by default, as stock), so a window shorter than that interval marks every quiet node
+	  dead between broadcasts. The default is two intervals plus 15 minutes: one lost
+	  broadcast is tolerated, two are a death. A mesh with faster telemetry can set less.
 
 config MESHTASTIC_SPARKPLUG_STACK_SIZE
 	int "Sparkplug thread stack size"
