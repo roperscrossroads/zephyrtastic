@@ -1165,9 +1165,26 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 #endif
 
 	if (decoded) {
-		LOG_INF("RX from 0x%08x to 0x%08x port=%u len=%zu ch_idx=%u", pkt->from,
-			pkt->to, (unsigned int)pkt->portnum, pkt->payload_len,
-			pkt->channel_index);
+		/* Off a radio, the line carries the frame's signal and how many hops it
+		 * took, so a console reader can tell who hears whom and how well. A relayed
+		 * frame's signal is the last relay's, not the origin's. hops is "?" for a
+		 * sender that does not set hop_start (firmware before 2.3). */
+		if (rf && pkt->hop_start != 0U && pkt->hop_start >= pkt->hop_limit) {
+			LOG_INF("RX from 0x%08x to 0x%08x port=%u len=%zu ch_idx=%u rssi=%d "
+				"snr=%d hops=%u",
+				pkt->from, pkt->to, (unsigned int)pkt->portnum, pkt->payload_len,
+				pkt->channel_index, (int)pkt->rssi, (int)pkt->snr,
+				(unsigned int)(pkt->hop_start - pkt->hop_limit));
+		} else if (rf) {
+			LOG_INF("RX from 0x%08x to 0x%08x port=%u len=%zu ch_idx=%u rssi=%d "
+				"snr=%d hops=?",
+				pkt->from, pkt->to, (unsigned int)pkt->portnum, pkt->payload_len,
+				pkt->channel_index, (int)pkt->rssi, (int)pkt->snr);
+		} else {
+			LOG_INF("RX from 0x%08x to 0x%08x port=%u len=%zu ch_idx=%u", pkt->from,
+				pkt->to, (unsigned int)pkt->portnum, pkt->payload_len,
+				pkt->channel_index);
+		}
 
 		if (meshtastic_rebroadcast_mode() ==
 			    meshtastic_Config_DeviceConfig_RebroadcastMode_CORE_PORTNUMS_ONLY &&
