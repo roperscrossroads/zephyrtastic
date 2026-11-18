@@ -37,7 +37,7 @@ config MESHTASTIC_PKI_SECRET_CACHE
 
 choice MESHTASTIC_PKI_X25519
 	prompt "X25519 implementation for the per-peer key"
-	default MESHTASTIC_PKI_X25519_PSA
+	default MESHTASTIC_PKI_X25519_REF10
 	depends on MESHTASTIC_PKI
 	help
 	  Which code computes X25519(our private key, the peer's public key)
@@ -51,7 +51,8 @@ config MESHTASTIC_PKI_X25519_PSA
 	bool "PSA, tf-psa-crypto's generic elliptic-curve code"
 	help
 	  psa_raw_key_agreement on the builtin driver: the Montgomery ladder
-	  over mbedTLS's general bignum code. 115 ms on the ESP32-S3.
+	  over mbedTLS's general bignum code. 115 ms on the ESP32-S3, 419 ms on
+	  the nRF52840 (REF10 is 9x and 15x faster, and is the default).
 
 config MESHTASTIC_PKI_X25519_EVEREST
 	bool "PSA, with Project Everest's verified Curve25519"
