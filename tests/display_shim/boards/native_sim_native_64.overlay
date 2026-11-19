@@ -10,3 +10,9 @@
 		width = <128>;
 	};
 };
+
+/* native_sim enables an SDL display of its own; with CONFIG_DISPLAY=y its driver is built and
+ * needs the host's SDL2, which a CI runner does not have. The test never draws to it. */
+&sdl_dc {
+	status = "disabled";
+};
