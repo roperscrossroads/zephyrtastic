@@ -38,10 +38,14 @@ config MESHTASTIC_HAWKBIT_PRIORITY
 
 config MESHTASTIC_HAWKBIT_CONFIRM_DELAY_SEC
 	int "Confirm the running image after this many seconds of uptime"
-	default 120
+	default 240
 	help
 	  The healthy window: a freshly swapped image that resets before this
 	  is reverted by MCUboot. 0 leaves confirming to someone else.
+
+	  Keep it longer than MESHTASTIC_WATCHDOG_TIMEOUT_MS (180 s by default):
+	  an image that hangs without a fatal error is only reset by the
+	  watchdog, and must not have confirmed itself by then.
 
 config MESHTASTIC_HAWKBIT_MIN_POLL_SEC
 	int "Never probe more often than this"
