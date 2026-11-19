@@ -802,3 +802,31 @@ patches:
       The non-MMU double-exception vector runs no handler, so FATAL,
       coredump and every breadcrumb built on the C fatal path are
       structurally blind to it. Cost: a few loads/stores per interrupt.
+  - path: 0022-mgmt-hawkbit-report-failure-when-the-installed-update-was-reverted.patch
+    sha256sum: 3416c1d3ec5712f2f3225a63b662d2a316045012c5749406bcc09afb79401b00
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-11-17"
+    upstreamable: true
+    comments: |
+      CONFIG_HAWKBIT_REPORT_REVERT (default y; MCUboot swap modes only, no
+      encryption key). The stock client reports closed/success whenever the
+      action id it saved before the reboot equals the open deployment's, but
+      that id only says the artifact was written to the secondary slot and
+      marked for a test boot. If the new image never confirmed itself,
+      MCUboot swaps the previous image back, and that image finds the same
+      saved id and reports the reverted update as a success: the server shows
+      a device as updated that is not. Before reporting, the client now
+      compares the primary slot with the artifact's SHA-256 from the
+      deployment (flash_img_check on slot0, over the artifact's size) and
+      reports closed/failure when they differ. The server closes the action
+      on either result, so a reverted image is not offered again. A
+      deployment that cannot be parsed at that point reports failure (the safe
+      side: a good update always had a parseable one-chunk deployment).
+
+      Seen with CONFIG_HAWKBIT_CONFIRM_IMG_ON_INIT=n on a nucleo_f767zi (swap
+      using offset) against hawkBit 1.1.0, on a Pico 2 W, and on native_sim
+      with the bootloader's trailer handling played on the flash file. Not
+      for XIP or RAM-load modes, where the running image may not be in slot 0.
+      An image must also reset on a fatal error, or it never reverts.

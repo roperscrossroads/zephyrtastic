@@ -1,0 +1,112 @@
+diff --git a/subsys/mgmt/hawkbit/Kconfig b/subsys/mgmt/hawkbit/Kconfig
+index 3a97bb54bc..23c7e60b8d 100644
+--- a/subsys/mgmt/hawkbit/Kconfig
++++ b/subsys/mgmt/hawkbit/Kconfig
+@@ -258,6 +258,26 @@ config HAWKBIT_CONFIRM_IMG_ON_INIT
+ 	  Automatically confirm current boot image at hawkBit initialization.
+ 	  Application shall handle image confirmation when set to false.
+ 
++config HAWKBIT_REPORT_REVERT
++	bool "Report failure when an installed update is not the running image"
++	default y
++	depends on BOOTLOADER_MCUBOOT
++	depends on MCUBOOT_BOOTLOADER_MODE_SWAP_USING_OFFSET || \
++		   MCUBOOT_BOOTLOADER_MODE_SWAP_USING_MOVE || \
++		   MCUBOOT_BOOTLOADER_MODE_SWAP_SCRATCH
++	depends on MCUBOOT_ENCRYPTION_KEY_FILE = ""
++	help
++	  After an update was written to the secondary slot the device reboots, and the
++	  result is reported to the server by whichever image comes up. If the new image
++	  never confirmed itself, MCUboot reverts to the previous image, which would then
++	  report the update as a success.
++
++	  With this option the client compares the primary slot with the artifact's
++	  SHA-256 from the deployment before it reports, and reports failure when they
++	  differ. It needs the artifact to be stored in the slot unchanged, so it is not
++	  available for encrypted images, and it needs the running image to be in the
++	  primary slot after a swap, so it is not available for the XIP and RAM-load modes.
++
+ config HAWKBIT_ERASE_SECOND_SLOT_ON_CONFIRM
+ 	bool "Erase second slot after confirming boot image"
+ 	default y
+diff --git a/subsys/mgmt/hawkbit/hawkbit.c b/subsys/mgmt/hawkbit/hawkbit.c
+index 7b0aee7959..82a09e3491 100644
+--- a/subsys/mgmt/hawkbit/hawkbit.c
++++ b/subsys/mgmt/hawkbit/hawkbit.c
+@@ -146,6 +146,7 @@ struct hawkbit_context {
+ 	bool final_data_received;
+ 	enum hawkbit_http_request type;
+ 	union hawkbit_results results;
++	bool report_failure;
+ };
+ 
+ struct s_object {
+@@ -752,6 +753,30 @@ static int hawkbit_parse_deployment(struct hawkbit_context *hb_context, struct h
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_HAWKBIT_REPORT_REVERT
++/*
++ * Is the running image the one this deployment delivered? The saved action id says only that
++ * the artifact was written to the secondary slot and marked for a test boot. If that image
++ * did not confirm itself, MCUboot swapped the previous image back, and it is the previous
++ * image that is asking now. The artifact is the signed image as it is stored in a slot, so
++ * after a swap that held, the primary slot starts with exactly the artifact's bytes.
++ */
++static bool hawkbit_deployment_is_running(struct hawkbit_context *hb_context)
++{
++	struct flash_img_check fic = {0};
++
++	if (hawkbit_parse_deployment(hb_context, &hb_context->results.dep, NULL) < 0) {
++		LOG_ERR("Failed to parse %s", "deploymentBase");
++		return false;
++	}
++
++	fic.match = hb_context->dl.file_hash;
++	fic.clen = hb_context->dl.file_size;
++
++	return flash_img_check(&hb_context->flash_ctx, &fic, PARTITION_ID(slot0_partition)) == 0;
++}
++#endif /* CONFIG_HAWKBIT_REPORT_REVERT */
++
+ static void hawkbit_dump_deployment(struct hawkbit_dep_res *d)
+ {
+ 	struct hawkbit_dep_res_chunk *c = &d->deployment.chunks[0];
+@@ -1485,6 +1510,14 @@ static enum smf_state_result s_probe_deployment_base(void *o)
+ 	}
+ 
+ 	if (hb_cfg.action_id == s->hb_context.json_action_id) {
++		s->hb_context.report_failure = false;
++#ifdef CONFIG_HAWKBIT_REPORT_REVERT
++		if (!hawkbit_deployment_is_running(&s->hb_context)) {
++			LOG_ERR("Action %d was installed but is not the running image: "
++				"the update was reverted", s->hb_context.json_action_id);
++			s->hb_context.report_failure = true;
++		}
++#endif
+ 		smf_set_state(SMF_CTX(s), &hawkbit_states[S_HAWKBIT_REPORT]);
+ 		return SMF_EVENT_HANDLED;
+ 	}
+@@ -1504,7 +1537,9 @@ static enum smf_state_result s_report(void *o)
+ 	struct s_object *s = (struct s_object *)o;
+ 	struct hawkbit_dep_fbk feedback = {
+ 		.status.execution = hawkbit_status_execution(HAWKBIT_STATUS_EXEC_CLOSED),
+-		.status.result.finished = hawkbit_status_finished(HAWKBIT_STATUS_FINISHED_SUCCESS),
++		.status.result.finished = hawkbit_status_finished(
++			s->hb_context.report_failure ? HAWKBIT_STATUS_FINISHED_FAILURE
++						     : HAWKBIT_STATUS_FINISHED_SUCCESS),
+ 	};
+ 	uint8_t status_buffer[CONFIG_HAWKBIT_STATUS_BUFFER_SIZE] = {0};
+ 	char url_buffer[URL_BUFFER_SIZE] = {0};
+@@ -1531,8 +1566,9 @@ static enum smf_state_result s_report(void *o)
+ 		return SMF_EVENT_HANDLED;
+ 	}
+ 
+-	/* After reporting the successful update to the hawkBit server, we can reset the saved
+-	 * action ID to 0, as we don't need it anymore.
++	/* After reporting the outcome of the update to the hawkBit server, we can reset the saved
++	 * action ID to 0, as we don't need it anymore. The server closes the action on either
++	 * result, so a reverted update is not offered again.
+ 	 */
+ 	(void)hawkbit_device_acid_update(0);
+ 
