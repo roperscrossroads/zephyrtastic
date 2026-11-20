@@ -1,0 +1,36 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menuconfig MESHTASTIC_TEXT_INBOX
+	bool "Keep the last text messages this node received"
+	help
+	  A small RAM ring of the text messages (TEXT_MESSAGE_APP, port 1)
+	  delivered to this node, addressed to it or broadcast, with who sent
+	  each, where it was going, the channel it was filed under, the radio
+	  and preset it was heard on, its signal, its hops, whether it came as
+	  a PKC direct message, and the text. `meshtastic text inbox` lists them
+	  on the shell, newest first.
+
+	  For a console and for tests: without a phone attached a node has no
+	  other way to say what it received. Nothing is persisted, and the ring
+	  is not the phone's message history (the phone still gets every
+	  message through the PhoneAPI as before).
+
+if MESHTASTIC_TEXT_INBOX
+
+config MESHTASTIC_TEXT_INBOX_ENTRIES
+	int "Messages kept"
+	default 8
+	range 1 32
+	help
+	  The newest this many are kept; a new one replaces the oldest.
+
+config MESHTASTIC_TEXT_INBOX_TEXT_LEN
+	int "Bytes of each message's text kept"
+	default 200
+	range 16 233
+	help
+	  A longer text is cut to this many bytes and marked truncated. 200 is
+	  the reference clients' limit for a message they send.
+
+endif # MESHTASTIC_TEXT_INBOX

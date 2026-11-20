@@ -40,6 +40,9 @@
 #include "meshtastic_position.h"
 #include "meshtastic_core.h"
 #include "meshtastic_preset.h"
+#if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
+#include "meshtastic_text_inbox.h"
+#endif
 
 #define TEST_NODE_ID 0x12345678U
 
@@ -2061,3 +2064,64 @@ ZTEST(meshtastic_shell, test_attach_preset_takes_a_name_or_a_number_and_refuses_
 }
 
 #endif /* CONFIG_MESHTASTIC_ATTACHMENT_BRAIN */
+
+#if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
+/* `meshtastic text inbox`: one line per kept message, newest first, the text last with
+ * a control byte shown as '?'; `clear` empties it; a bad argument is a usage error. */
+ZTEST(meshtastic_shell, test_text_inbox_lists_newest_first_and_clears)
+{
+	static const char msg1[] = "first";
+	static const char msg2[] = "hi\nthere";
+	struct meshtastic_packet p = {
+		.from = 0x0B000001U,
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.id = 0x71000001U,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)msg1,
+		.payload_len = sizeof(msg1) - 1U,
+		.rssi = -61,
+		.snr = 9,
+		.hop_limit = 1U,
+		.hop_start = 3U,
+		.channel_index = 1U,
+		.rx_attach = 2U,
+		.rx_heard_on = 1U + meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST,
+	};
+	const char *out;
+	uint32_t total;
+
+	zassert_ok(run_cmd("meshtastic text inbox clear", &out));
+	zassert_not_null(strstr(out, "inbox cleared"), "%s", out);
+	total = meshtastic_text_inbox_total();
+
+	meshtastic_text_inbox_record(&p);
+	p.payload = (const uint8_t *)msg2;
+	p.payload_len = sizeof(msg2) - 1U;
+	p.id = 0x71000002U;
+	p.to = TEST_NODE_ID;
+	p.rx_attach = 0U;
+	p.rx_heard_on = 1U + meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO;
+	p.pki_encrypted = true;
+	meshtastic_text_inbox_record(&p);
+
+	zassert_ok(run_cmd("meshtastic text inbox", &out));
+	zassert_not_null(strstr(out, "inbox: 2 kept of"), "%s", out);
+	zassert_not_null(strstr(out, "from 0x0b000001 to 0x12345678 ch 1 on ShortTurbo via own "
+				     "rssi -61 snr 9 hops 2 pki: hi?there"),
+			 "the newest, its newline shown as '?': %s", out);
+	zassert_not_null(strstr(out, "from 0x0b000001 to 0xffffffff ch 1 on MediumFast via head 2 "
+				     "rssi -61 snr 9 hops 2: first"),
+			 "the older, heard through head 2: %s", out);
+	zassert_true(strstr(out, "hi?there") < strstr(out, ": first"), "newest first: %s", out);
+	zassert_true(meshtastic_text_inbox_total() == total + 2U);
+
+	zassert_ok(run_cmd("meshtastic text inbox 1", &out));
+	zassert_is_null(strstr(out, ": first"), "a count limits the list: %s", out);
+
+	zassert_not_equal(run_cmd("meshtastic text inbox nonsense", &out), 0);
+
+	zassert_ok(run_cmd("meshtastic text inbox clear", &out));
+	zassert_ok(run_cmd("meshtastic text inbox", &out));
+	zassert_not_null(strstr(out, "inbox: 0 kept of"), "%s", out);
+}
+#endif /* CONFIG_MESHTASTIC_TEXT_INBOX */

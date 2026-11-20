@@ -1,0 +1,22 @@
+common:
+  tags:
+    - meshtastic
+    - text_inbox
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # The ring at its default size and text length.
+  meshtastic.text_inbox.native_sim: {}
+
+  # A ring of three, so eviction of the oldest is reachable with a few frames.
+  meshtastic.text_inbox.small_ring.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_TEXT_INBOX_ENTRIES=3
+
+  # The shortest text kept, so a message longer than it is cut and marked.
+  meshtastic.text_inbox.short_text.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_TEXT_INBOX_TEXT_LEN=16

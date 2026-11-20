@@ -144,6 +144,12 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_RELAY=y
 
+  # The text inbox is default-N: only bench images carry it (overlay-bench.conf).
+  # Its behaviour lives in tests/text_inbox; this builds it beside the baseline.
+  meshtastic.variants.text_inbox.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_TEXT_INBOX=y
+
   # The relay's ear, as its image is built: transmit compiled out. That shares
   # the scanner's RX-only branch in meshtastic_radio_send_wire_now(), which no
   # -Werror build had compiled until this scenario (its first run found two

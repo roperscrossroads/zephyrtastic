@@ -37,6 +37,9 @@
 #include "meshtastic_relay.h"
 #endif
 #include "meshtastic_router.h"
+#if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
+#include "meshtastic_text_inbox.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 #include "meshtastic_traffic.h"
 #endif
@@ -544,6 +547,11 @@ static void deliver_packet(const struct meshtastic_packet *packet,
 	}
 
 	meshtastic_emit_event(MESHTASTIC_EVENT_PACKET_RECEIVED, 0, packet);
+#if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
+	/* Every delivered text message, for `meshtastic text inbox`: a console has no
+	 * other way to say what this node received. The router dropped duplicates. */
+	meshtastic_text_inbox_record(packet);
+#endif
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
 	/* The cluster's broadcasts are fleet protocol, not messages: keep them off
 	 * the phone queue (see meshtastic_cluster_is_internal_frame). The module

@@ -24,6 +24,12 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_SHELL_PSK_HEX=y
 
+  # `meshtastic text inbox`: the command's line format (what the bench's scenarios
+  # match) and its clear. The ring itself is tests/text_inbox's.
+  meshtastic.shell.text_inbox.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_TEXT_INBOX=y
+
   # Compiles the shell WITH the scanner. Neither the base shell config nor the
   # mesh_sim scanner config builds both, and that gap let a plain compile error
   # ship: `scan presets` calls shell_parse_modem_preset(), which is defined
