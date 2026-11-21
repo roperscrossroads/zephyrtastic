@@ -1511,7 +1511,7 @@ static void state_json(char *json, size_t cap)
 
 ZTEST(meshtastic_shell, test_state_is_one_framed_line_with_the_node_s_facts)
 {
-	char json[1024];
+	char json[1280];
 	char want[48];
 
 	state_json(json, sizeof(json));
@@ -1541,7 +1541,7 @@ ZTEST(meshtastic_shell, test_state_reports_the_receive_queue_filling_and_droppin
 	struct meshtastic_status before, after;
 	uint8_t frame[MESHTASTIC_HDR_LEN + 4U] = {0};
 	uint32_t dropped;
-	char json[1024];
+	char json[1280];
 	char want[96];
 
 	/* depth + 3 frames: the queue holds depth, and a receive thread already waiting
@@ -1569,10 +1569,42 @@ ZTEST(meshtastic_shell, test_state_reports_the_receive_queue_filling_and_droppin
 	zassert_not_null(strstr(json, want), "want %s in %s", want, json);
 }
 
+/* The health object: every error counter a test judges by its change, under names that do not
+ * move with the prose commands. The node's own counters and the line agree, the keys are all
+ * there (a reader keys on them), and it closes the line. */
+ZTEST(meshtastic_shell, test_state_reports_health_counters)
+{
+	static const char *const keys[] = {
+		"\"up\":", "\"tx\":", "\"rx\":", "\"tx_fail\":", "\"rx_drop\":", "\"rx_rearm\":",
+		"\"decode_fail\":", "\"cad_err\":", "\"cad_timeout\":", "\"agc_fail\":",
+		"\"agc_patch_fail\":", "\"busy_streak\":", "\"wedge\":", "\"defer_drop\":",
+		"\"sched_drop\":", "\"air_drop\":", "\"rel_fail\":", "\"phone_drop\":",
+		"\"duty_refused\":", "\"stale\":", "\"xeddsa_bad\":", "\"xeddsa_malformed\":",
+		"\"log_drop\":",
+	};
+	struct meshtastic_status st;
+	char json[1280];
+	char want[96];
+	const char *h;
+
+	state_json(json, sizeof(json));
+	zassert_ok(meshtastic_get_status(&st), "");
+	h = strstr(json, ",\"health\":{\"up\":");
+	zassert_not_null(h, "%s", json);
+	for (size_t i = 0U; i < ARRAY_SIZE(keys); i++) {
+		zassert_not_null(strstr(h, keys[i]), "%s missing: %s", keys[i], h);
+	}
+	snprintk(want, sizeof(want), "\"tx_fail\":%u,\"rx_drop\":%u,\"rx_rearm\":%u,", st.tx_failures,
+		 st.rx_dropped, st.rx_rearm_failures);
+	zassert_not_null(strstr(h, want), "want %s in %s", want, h);
+	zassert_equal(json[strlen(json) - 2U], '}', "health closes the line: %s", h);
+	zassert_is_null(strstr(h, "\"cad_err\":-"), "counts are unsigned");
+}
+
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 ZTEST(meshtastic_shell, test_state_follows_what_is_set_and_never_prints_a_key)
 {
-	char json[1024];
+	char json[1280];
 	meshtastic_Config before;
 
 	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &before));
@@ -1633,7 +1665,7 @@ ZTEST(meshtastic_shell, test_state_follows_what_is_set_and_never_prints_a_key)
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 ZTEST(meshtastic_shell, test_state_reports_the_scanner)
 {
-	char json[1024];
+	char json[1280];
 
 	state_json(json, sizeof(json));
 	zassert_not_null(strstr(json, "\"scanner\""), "the feature: %s", json);
@@ -2028,7 +2060,7 @@ ZTEST(meshtastic_shell, test_attach_preset_takes_a_name_or_a_number_and_refuses_
 		.hwid = SHELL_HEAD_NODE,
 	};
 	const char *out = NULL;
-	char json[1024];
+	char json[1280];
 	int len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
 
 	/* A head, admitted by the allow-list: there is no link in this build to trust. */

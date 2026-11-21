@@ -31,6 +31,13 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_duty.h"
+#include "meshtastic_phonelog.h"
+#include "meshtastic_preset.h"
+#include "meshtastic_sched.h"
+#if defined(CONFIG_MESHTASTIC_XEDDSA)
+#include "meshtastic_xeddsa.h"
+#endif
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #endif
@@ -292,6 +299,60 @@ static void st_pki(struct st *s)
 }
 #endif
 
+/* What went wrong since boot, as counters a tool can read before and after a test and judge
+ * by the difference. Every one of these is already on a prose command (`status`, `sched
+ * stats`, `rf`, `duty`, `preset`, `xeddsa`, `phonelog`); here they are in one place, by a
+ * name that does not change with the prose. All count from boot (or the command's `reset`),
+ * except busy_streak, which is the current streak, not a count. up is the uptime in seconds:
+ * a reader that sees it go down knows the counters restarted. tx and rx are the traffic the
+ * errors are out of. On a build without a feature its counters read 0. */
+static void st_health(struct st *s)
+{
+	struct meshtastic_status st;
+	struct meshtastic_sched_stats sc;
+	struct meshtastic_radio_tx_defer_stats df;
+	struct meshtastic_duty_stats du;
+	struct meshtastic_phonelog_stats pl;
+	uint32_t sched_drop = 0U;
+	uint32_t xd_bad = 0U;
+	uint32_t xd_malf = 0U;
+
+	(void)meshtastic_get_status(&st);
+	meshtastic_sched_stats_get(&sc);
+	meshtastic_radio_tx_defer_stats_get(&df);
+	meshtastic_duty_stats_get(&du);
+	meshtastic_phonelog_get_stats(&pl);
+	for (uint8_t t = 0U; t < MT_SCHED_TIER_COUNT; t++) {
+		sched_drop += sc.tx_drop[t];
+	}
+#if defined(CONFIG_MESHTASTIC_XEDDSA)
+	{
+		struct meshtastic_xeddsa_stats x;
+
+		meshtastic_xeddsa_get_stats(&x);
+		xd_bad = x.failed;
+		xd_malf = x.malformed;
+	}
+#endif
+
+	st_out(s, ",\"health\":{\"up\":%u,\"tx\":%u,\"rx\":%u,",
+	       (unsigned int)(k_uptime_get() / 1000), st.tx_packets, st.rx_packets);
+	st_out(s, "\"tx_fail\":%u,\"rx_drop\":%u,\"rx_rearm\":%u,\"decode_fail\":%u,",
+	       st.tx_failures, st.rx_dropped, st.rx_rearm_failures, st.decode_failures);
+	st_out(s, "\"cad_err\":%u,\"cad_timeout\":%u,\"agc_fail\":%u,\"agc_patch_fail\":%u,",
+	       meshtastic_radio_cad_error_count(), meshtastic_radio_cad_timeout_count(),
+	       meshtastic_radio_agc_reset_fail_count(), meshtastic_radio_agc_patch_fail_count());
+	st_out(s, "\"busy_streak\":%u,\"wedge\":%u,\"defer_drop\":%u,",
+	       meshtastic_radio_busy_timeout_streak(), meshtastic_radio_wedge_reset_count(),
+	       df.dropped);
+	st_out(s, "\"sched_drop\":%u,\"air_drop\":%u,\"rel_fail\":%u,\"phone_drop\":%u,",
+	       sched_drop, sc.tx_airtime_drop, sc.reliable_failed, sc.phone_drop);
+	st_out(s, "\"duty_refused\":%u,\"stale\":%u,\"xeddsa_bad\":%u,\"xeddsa_malformed\":%u,",
+	       du.blocked, meshtastic_preset_tx_stale(), xd_bad, xd_malf);
+	st_out(s, "\"log_drop\":%u}",
+	       pl.dropped_rate + pl.dropped_queue + pl.dropped_core);
+}
+
 int meshtastic_shell_state(const struct shell *sh)
 {
 	struct st s = {.sh = sh, .crc = 0U};
@@ -324,6 +385,7 @@ int meshtastic_shell_state(const struct shell *sh)
 #if defined(CONFIG_MESHTASTIC_PKI)
 	st_pki(&s);
 #endif
+	st_health(&s);
 	st_out(&s, "}");
 	shell_fprintf(sh, SHELL_NORMAL, "*%04x\n", s.crc);
 	return 0;
