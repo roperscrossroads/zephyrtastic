@@ -299,18 +299,46 @@ static void st_pki(struct st *s)
 }
 #endif
 
-/* What went wrong since boot, as counters a tool can read before and after a test and judge
- * by the difference. Every one of these is already on a prose command (`status`, `sched
- * stats`, `rf`, `duty`, `preset`, `xeddsa`, `phonelog`); here they are in one place, by a
- * name that does not change with the prose. All count from boot (or the command's `reset`),
- * except busy_streak, which is the current streak, not a count. up is the uptime in seconds:
- * a reader that sees it go down knows the counters restarted. tx and rx are the traffic the
- * errors are out of. On a build without a feature its counters read 0. */
+/* The health object, a key at a time (no piece outgrows st_out's buffer, and no table
+ * of names and values sits on the shell thread's stack). */
+static void st_hgroup(struct st *s, const char *group)
+{
+	st_out(s, ",\"%s\":{", group);
+}
+
+static void st_hk(struct st *s, bool first, const char *name, uint32_t value)
+{
+	st_out(s, "%s\"%s\":%u", first ? "" : ",", name, value);
+}
+
+/* The node's communication counters since boot, sorted by what they mean, so a tool can read
+ * them before and after a test and judge the change without knowing each one:
+ *
+ *   ops    work done: frames sent and heard, duplicates, relays, clear channel checks, and
+ *          frames that were not ours to read (a DM between two other nodes, a channel this
+ *          node does not hold)
+ *   retry  work that succeeded on a later try: sends put back because the channel was busy
+ *          or a frame was arriving, AGC resets postponed
+ *   warn   worth a look, nothing lost: false preambles and headers, a DM from a sender whose
+ *          key we lack (the node asks for it), the phone queue and log forwarding dropping
+ *          because nothing reads them, broadcasts held back by the airtime budget, the
+ *          current SPI BUSY streak (a gauge, not a count)
+ *   err    work lost or a fault: failed sends, receive queue drops, a radio that did not
+ *          re-arm, failed or timed-out channel checks, failed AGC resets, wedge recoveries,
+ *          frames dropped from the transmit queues, reliable sends never acked, duty-cycle
+ *          refusals, frames that outlived their preset, bad signatures, and frames that
+ *          should have decoded and did not
+ *
+ * up is the uptime in seconds: a reader that sees it go down knows the counters restarted.
+ * A build without a feature reads 0 for its counters. The names are a contract (adding one
+ * needs nothing; changing one's meaning bumps STATE_VERSION). Every one is also on a prose
+ * command (`status`, `sched stats`, `rf`, `duty`, `preset`, `xeddsa`, `phonelog`). */
 static void st_health(struct st *s)
 {
 	struct meshtastic_status st;
 	struct meshtastic_sched_stats sc;
 	struct meshtastic_radio_tx_defer_stats df;
+	struct meshtastic_radio_rx_activity_stats ra;
 	struct meshtastic_duty_stats du;
 	struct meshtastic_phonelog_stats pl;
 	uint32_t sched_drop = 0U;
@@ -320,6 +348,7 @@ static void st_health(struct st *s)
 	(void)meshtastic_get_status(&st);
 	meshtastic_sched_stats_get(&sc);
 	meshtastic_radio_tx_defer_stats_get(&df);
+	meshtastic_radio_rx_activity_stats_get(&ra);
 	meshtastic_duty_stats_get(&du);
 	meshtastic_phonelog_get_stats(&pl);
 	for (uint8_t t = 0U; t < MT_SCHED_TIER_COUNT; t++) {
@@ -335,22 +364,50 @@ static void st_health(struct st *s)
 	}
 #endif
 
-	st_out(s, ",\"health\":{\"up\":%u,\"tx\":%u,\"rx\":%u,",
-	       (unsigned int)(k_uptime_get() / 1000), st.tx_packets, st.rx_packets);
-	st_out(s, "\"tx_fail\":%u,\"rx_drop\":%u,\"rx_rearm\":%u,\"decode_fail\":%u,",
-	       st.tx_failures, st.rx_dropped, st.rx_rearm_failures, st.decode_failures);
-	st_out(s, "\"cad_err\":%u,\"cad_timeout\":%u,\"agc_fail\":%u,\"agc_patch_fail\":%u,",
-	       meshtastic_radio_cad_error_count(), meshtastic_radio_cad_timeout_count(),
-	       meshtastic_radio_agc_reset_fail_count(), meshtastic_radio_agc_patch_fail_count());
-	st_out(s, "\"busy_streak\":%u,\"wedge\":%u,\"defer_drop\":%u,",
-	       meshtastic_radio_busy_timeout_streak(), meshtastic_radio_wedge_reset_count(),
-	       df.dropped);
-	st_out(s, "\"sched_drop\":%u,\"air_drop\":%u,\"rel_fail\":%u,\"phone_drop\":%u,",
-	       sched_drop, sc.tx_airtime_drop, sc.reliable_failed, sc.phone_drop);
-	st_out(s, "\"duty_refused\":%u,\"stale\":%u,\"xeddsa_bad\":%u,\"xeddsa_malformed\":%u,",
-	       du.blocked, meshtastic_preset_tx_stale(), xd_bad, xd_malf);
-	st_out(s, "\"log_drop\":%u}",
-	       pl.dropped_rate + pl.dropped_queue + pl.dropped_core);
+	st_out(s, ",\"health\":{\"up\":%u", (unsigned int)(k_uptime_get() / 1000));
+	st_hgroup(s, "ops");
+	st_hk(s, true, "tx", st.tx_packets);
+	st_hk(s, false, "rx", st.rx_packets);
+	st_hk(s, false, "dup", st.duplicate_packets);
+	st_hk(s, false, "relayed", st.relayed_packets);
+	st_hk(s, false, "cad_clear", meshtastic_radio_cad_clear_count());
+	st_hk(s, false, "rx_not_for_us", st.rx_not_for_us);
+	st_hk(s, false, "rx_other_channel", st.rx_other_channel);
+	st_out(s, "}");
+	st_hgroup(s, "retry");
+	st_hk(s, true, "cad_busy", df.cad_busy);
+	st_hk(s, false, "busy_rx", df.busy_rx);
+	st_hk(s, false, "defer_requeued", df.requeued);
+	st_hk(s, false, "agc_deferred", ra.agc_deferred + ra.agc_radio_busy);
+	st_out(s, "}");
+	st_hgroup(s, "warn");
+	st_hk(s, true, "false_preamble", ra.false_preamble);
+	st_hk(s, false, "false_header", ra.false_header);
+	st_hk(s, false, "pki_no_key", st.rx_pki_no_key);
+	st_hk(s, false, "phone_drop", sc.phone_drop);
+	st_hk(s, false, "log_drop", pl.dropped_rate + pl.dropped_queue + pl.dropped_core);
+	st_hk(s, false, "air_drop", sc.tx_airtime_drop);
+	st_hk(s, false, "busy_streak", meshtastic_radio_busy_timeout_streak());
+	st_out(s, "}");
+	st_hgroup(s, "err");
+	st_hk(s, true, "tx_fail", st.tx_failures);
+	st_hk(s, false, "rx_drop", st.rx_dropped);
+	st_hk(s, false, "rx_rearm", st.rx_rearm_failures);
+	st_hk(s, false, "cad_err", meshtastic_radio_cad_error_count());
+	st_hk(s, false, "cad_timeout", meshtastic_radio_cad_timeout_count());
+	st_hk(s, false, "agc_fail", meshtastic_radio_agc_reset_fail_count());
+	st_hk(s, false, "agc_patch_fail", meshtastic_radio_agc_patch_fail_count());
+	st_hk(s, false, "wedge", meshtastic_radio_wedge_reset_count());
+	st_hk(s, false, "defer_drop", df.dropped);
+	st_hk(s, false, "sched_drop", sched_drop);
+	st_hk(s, false, "rel_fail", sc.reliable_failed);
+	st_hk(s, false, "duty_refused", du.blocked);
+	st_hk(s, false, "stale", meshtastic_preset_tx_stale());
+	st_hk(s, false, "xeddsa_bad", xd_bad);
+	st_hk(s, false, "xeddsa_malformed", xd_malf);
+	st_hk(s, false, "decode_bad", st.rx_decode_bad);
+	st_out(s, "}");
+	st_out(s, "}");
 }
 
 int meshtastic_shell_state(const struct shell *sh)

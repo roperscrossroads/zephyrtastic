@@ -663,6 +663,43 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 	meshtastic_router_process_rx_meta(buf, len, &meta);
 }
 
+/* Why a frame whose header parsed did not decode, as four counters (their sum is
+ * decode_failures). The router already knows each case; lumped together, a bystander's
+ * view of other nodes' DMs looked like damage. */
+static bool channel_hash_held(uint8_t wire_hash, uint8_t preset)
+{
+	for (uint8_t ch = 0U; ch < MESHTASTIC_MAX_CHANNELS; ch++) {
+		const meshtastic_Channel *slot = meshtastic_channels_get(ch);
+
+		if (slot != NULL && slot->role != meshtastic_Channel_Role_DISABLED &&
+		    meshtastic_channels_decrypt_for_hash_on(ch, wire_hash, preset)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void count_undecoded(uint8_t wire_hash, uint32_t to, uint8_t preset,
+			    enum meshtastic_decode_fail reason)
+{
+	if (reason == MESHTASTIC_DECODE_FAIL_NONE) {
+		/* set aside before decryption (decode-known-only): policy, not damage */
+		mt.status.rx_not_for_us++;
+	} else if (reason == MESHTASTIC_DECODE_FAIL_PKI_UNKNOWN_PUBKEY) {
+		mt.status.rx_pki_no_key++;
+	} else if (wire_hash == 0U && to == mt.node_id) {
+		/* the PKC marker, to us, and our key did not open it */
+		mt.status.rx_decode_bad++;
+	} else if (wire_hash == 0U && to != MESHTASTIC_NODE_BROADCAST) {
+		/* the PKC marker, to another node: a bystander cannot read it */
+		mt.status.rx_not_for_us++;
+	} else if (channel_hash_held(wire_hash, preset)) {
+		mt.status.rx_decode_bad++;
+	} else {
+		mt.status.rx_other_channel++;
+	}
+}
+
 void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 				       const struct meshtastic_rx_meta *meta)
 {
@@ -891,6 +928,7 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 
 	if (!decoded) {
 		mt.status.decode_failures++;
+		count_undecoded(hdr->channel, packet.to, meta->preset, fail_reason);
 
 		/* A want_ack unicast addressed to us that we can't decode: tell the
 		 * sender why (NO_CHANNEL / PKI_UNKNOWN_PUBKEY) so its reliable layer

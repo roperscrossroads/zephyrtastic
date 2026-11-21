@@ -25,6 +25,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_dummy.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/ztest.h>
 
@@ -39,6 +40,7 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_position.h"
 #include "meshtastic_core.h"
+#include "meshtastic_packet.h"
 #include "meshtastic_preset.h"
 #if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
 #include "meshtastic_text_inbox.h"
@@ -1511,7 +1513,7 @@ static void state_json(char *json, size_t cap)
 
 ZTEST(meshtastic_shell, test_state_is_one_framed_line_with_the_node_s_facts)
 {
-	char json[1280];
+	char json[1536];
 	char want[48];
 
 	state_json(json, sizeof(json));
@@ -1541,7 +1543,7 @@ ZTEST(meshtastic_shell, test_state_reports_the_receive_queue_filling_and_droppin
 	struct meshtastic_status before, after;
 	uint8_t frame[MESHTASTIC_HDR_LEN + 4U] = {0};
 	uint32_t dropped;
-	char json[1280];
+	char json[1536];
 	char want[96];
 
 	/* depth + 3 frames: the queue holds depth, and a receive thread already waiting
@@ -1569,42 +1571,128 @@ ZTEST(meshtastic_shell, test_state_reports_the_receive_queue_filling_and_droppin
 	zassert_not_null(strstr(json, want), "want %s in %s", want, json);
 }
 
-/* The health object: every error counter a test judges by its change, under names that do not
- * move with the prose commands. The node's own counters and the line agree, the keys are all
- * there (a reader keys on them), and it closes the line. */
-ZTEST(meshtastic_shell, test_state_reports_health_counters)
+/* The health object: the node's communication counters in four groups (ops, retry, warn,
+ * err) under names that do not move with the prose commands. Every key is there (a reader
+ * keys on them), the groups are in order, the values agree with the node's own counters, and
+ * the object closes the line. */
+ZTEST(meshtastic_shell, test_state_reports_health_counters_in_four_groups)
 {
 	static const char *const keys[] = {
-		"\"up\":", "\"tx\":", "\"rx\":", "\"tx_fail\":", "\"rx_drop\":", "\"rx_rearm\":",
-		"\"decode_fail\":", "\"cad_err\":", "\"cad_timeout\":", "\"agc_fail\":",
-		"\"agc_patch_fail\":", "\"busy_streak\":", "\"wedge\":", "\"defer_drop\":",
-		"\"sched_drop\":", "\"air_drop\":", "\"rel_fail\":", "\"phone_drop\":",
-		"\"duty_refused\":", "\"stale\":", "\"xeddsa_bad\":", "\"xeddsa_malformed\":",
-		"\"log_drop\":",
+		"\"ops\":{\"tx\":", "\"rx\":", "\"dup\":", "\"relayed\":", "\"cad_clear\":",
+		"\"rx_not_for_us\":", "\"rx_other_channel\":",
+		"\"retry\":{\"cad_busy\":", "\"busy_rx\":", "\"defer_requeued\":", "\"agc_deferred\":",
+		"\"warn\":{\"false_preamble\":", "\"false_header\":", "\"pki_no_key\":",
+		"\"phone_drop\":", "\"log_drop\":", "\"air_drop\":", "\"busy_streak\":",
+		"\"err\":{\"tx_fail\":", "\"rx_drop\":", "\"rx_rearm\":", "\"cad_err\":",
+		"\"cad_timeout\":", "\"agc_fail\":", "\"agc_patch_fail\":", "\"wedge\":",
+		"\"defer_drop\":", "\"sched_drop\":", "\"rel_fail\":", "\"duty_refused\":",
+		"\"stale\":", "\"xeddsa_bad\":", "\"xeddsa_malformed\":", "\"decode_bad\":",
 	};
 	struct meshtastic_status st;
-	char json[1280];
+	char json[1536];
 	char want[96];
 	const char *h;
+	const char *prev;
 
 	state_json(json, sizeof(json));
 	zassert_ok(meshtastic_get_status(&st), "");
 	h = strstr(json, ",\"health\":{\"up\":");
 	zassert_not_null(h, "%s", json);
+	prev = h;
 	for (size_t i = 0U; i < ARRAY_SIZE(keys); i++) {
-		zassert_not_null(strstr(h, keys[i]), "%s missing: %s", keys[i], h);
+		const char *k = strstr(prev, keys[i]);
+
+		zassert_not_null(k, "%s missing or out of order: %s", keys[i], h);
+		prev = k;
 	}
-	snprintk(want, sizeof(want), "\"tx_fail\":%u,\"rx_drop\":%u,\"rx_rearm\":%u,", st.tx_failures,
-		 st.rx_dropped, st.rx_rearm_failures);
+	snprintk(want, sizeof(want), "\"err\":{\"tx_fail\":%u,\"rx_drop\":%u,\"rx_rearm\":%u,",
+		 st.tx_failures, st.rx_dropped, st.rx_rearm_failures);
 	zassert_not_null(strstr(h, want), "want %s in %s", want, h);
-	zassert_equal(json[strlen(json) - 2U], '}', "health closes the line: %s", h);
-	zassert_is_null(strstr(h, "\"cad_err\":-"), "counts are unsigned");
+	zassert_true(strcmp(json + strlen(json) - 3U, "}}}") == 0, "health closes the line: %s", h);
+}
+
+/* A frame whose header parsed and whose payload did not decode is counted by why: a DM
+ * between two other nodes, a channel we do not hold, a DM to us from a sender whose key we
+ * lack, or a frame on a channel we hold that does not parse. The four add up to the old
+ * total. Each frame goes through the real receive path (dedup, decode, the router). */
+static void inject_undecodable(uint32_t dest, uint32_t src, uint8_t hash, uint8_t payload_len)
+{
+	static uint32_t id = 0x5eed0000U;
+	uint8_t frame[MESHTASTIC_HDR_LEN + 16U] = {0};
+	struct meshtastic_wire_header *hdr = (struct meshtastic_wire_header *)frame;
+
+	hdr->dest = sys_cpu_to_le32(dest);
+	hdr->src = sys_cpu_to_le32(src);
+	hdr->id = sys_cpu_to_le32(++id);
+	hdr->flags = 0U; /* hop limit 0: nothing to relay */
+	hdr->channel = hash;
+	for (uint8_t i = 0U; i < payload_len; i++) {
+		frame[MESHTASTIC_HDR_LEN + i] = (uint8_t)(0xa5U ^ i);
+	}
+	zassert_ok(meshtastic_radio_rx_inject(frame, MESHTASTIC_HDR_LEN + payload_len,
+					      MESHTASTIC_BEARER_LORA));
+	k_msleep(50);
+}
+
+static uint8_t unheld_hash(void)
+{
+	for (unsigned int h = 1U; h < 256U; h++) {
+		bool held = false;
+
+		for (uint8_t ch = 0U; ch < MESHTASTIC_MAX_CHANNELS; ch++) {
+			const meshtastic_Channel *slot = meshtastic_channels_get(ch);
+
+			if (slot != NULL && slot->role != meshtastic_Channel_Role_DISABLED &&
+			    meshtastic_channels_decrypt_for_hash_on(ch, (uint8_t)h,
+								   (uint8_t)mt.modem_preset)) {
+				held = true;
+			}
+		}
+		if (!held) {
+			return (uint8_t)h;
+		}
+	}
+	ztest_test_fail();
+	return 0U;
+}
+
+ZTEST(meshtastic_shell, test_undecoded_frames_are_counted_by_cause)
+{
+	const uint32_t me = meshtastic_get_node_id();
+	struct meshtastic_status a, b;
+
+	zassert_ok(meshtastic_get_status(&a), "");
+
+	/* the PKC marker (hash 0), addressed to another node: a bystander's view */
+	inject_undecodable(0x1234abcdU, 0x0bad0001U, 0U, 12U);
+	/* a channel hash no slot of ours holds */
+	inject_undecodable(MESHTASTIC_NODE_BROADCAST, 0x0bad0002U, unheld_hash(), 12U);
+	/* our own primary's hash, one byte of payload: decrypts, and never parses */
+	inject_undecodable(MESHTASTIC_NODE_BROADCAST, 0x0bad0003U,
+			   meshtastic_channels_get_hash(0U), 1U);
+
+	zassert_ok(meshtastic_get_status(&b), "");
+	zassert_equal(b.rx_not_for_us - a.rx_not_for_us, 1U, "a DM between two others");
+	zassert_equal(b.rx_other_channel - a.rx_other_channel, 1U, "a channel we do not hold");
+	zassert_equal(b.rx_decode_bad - a.rx_decode_bad, 1U, "a held channel that does not parse");
+	zassert_equal(b.decode_failures - a.decode_failures, 3U, "the total is the four together");
+
+#if defined(CONFIG_MESHTASTIC_PKI)
+	/* the PKC marker, to us, from a sender we hold no key for: a warning, the node asks */
+	zassert_ok(meshtastic_get_status(&a), "");
+	inject_undecodable(me, 0x0bad0004U, 0U, 12U);
+	zassert_ok(meshtastic_get_status(&b), "");
+	zassert_equal(b.rx_pki_no_key - a.rx_pki_no_key, 1U, "a DM to us, sender's key unknown");
+	zassert_equal(b.rx_decode_bad - a.rx_decode_bad, 0U, "not damage");
+#else
+	ARG_UNUSED(me);
+#endif
 }
 
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 ZTEST(meshtastic_shell, test_state_follows_what_is_set_and_never_prints_a_key)
 {
-	char json[1280];
+	char json[1536];
 	meshtastic_Config before;
 
 	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &before));
@@ -1665,7 +1753,7 @@ ZTEST(meshtastic_shell, test_state_follows_what_is_set_and_never_prints_a_key)
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 ZTEST(meshtastic_shell, test_state_reports_the_scanner)
 {
-	char json[1280];
+	char json[1536];
 
 	state_json(json, sizeof(json));
 	zassert_not_null(strstr(json, "\"scanner\""), "the feature: %s", json);
@@ -2060,7 +2148,7 @@ ZTEST(meshtastic_shell, test_attach_preset_takes_a_name_or_a_number_and_refuses_
 		.hwid = SHELL_HEAD_NODE,
 	};
 	const char *out = NULL;
-	char json[1280];
+	char json[1536];
 	int len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
 
 	/* A head, admitted by the allow-list: there is no link in this build to trust. */

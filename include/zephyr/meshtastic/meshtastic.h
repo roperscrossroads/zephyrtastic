@@ -326,6 +326,15 @@ struct meshtastic_status {
 	uint32_t relayed_packets;
 	uint32_t duplicate_packets;
 	uint32_t decode_failures;
+	/** decode_failures by cause (their sum): a PKC DM addressed to another node, which a
+	 *  bystander cannot read; a channel hash this node does not hold; a DM to us from a
+	 *  sender whose key we lack (the node asks for it); and a frame that should have
+	 *  decoded and did not (a DM to us failing its authentication, a held channel failing
+	 *  to decrypt or parse). Only the last is damage. */
+	uint32_t rx_not_for_us;
+	uint32_t rx_other_channel;
+	uint32_t rx_pki_no_key;
+	uint32_t rx_decode_bad;
 	/** Frames the receive queue refused (full), from every source. */
 	uint32_t rx_dropped;
 	/** Of rx_dropped, the frames another bearer injected (a head's, over BLE). */
