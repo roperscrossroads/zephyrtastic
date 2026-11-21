@@ -830,3 +830,28 @@ patches:
       with the bootloader's trailer handling played on the flash file. Not
       for XIP or RAM-load modes, where the running image may not be in slot 0.
       An image must also reset on a fatal error, or it never reverts.
+  - path: 0023-sx126x-probe-the-chip-at-init-and-refuse-an-all-ones-cad-status.patch
+    sha256sum: 49a6f2b5acad3a5b556596c1a0ee33fa9d6ba7477b2332575967764b7aa1aad1
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-11-21"
+    upstreamable: true
+    comments: |
+      The driver had no way to notice a radio that is not there. Its commands
+      are writes and its reads take whatever comes back, so a missing, unseated
+      or dead SX126x leaves MISO idle (0xFF), passes init while BUSY reads low,
+      "configures" without an error, and reports an IRQ status of 0xFFFF. In
+      that status every CAD hears activity: the node deferred each send until it
+      dropped it, and never received; it looked like a crowded channel. Seen on a
+      XIAO whose Wio-SX1262 stopped answering after a replug (CAD clear 0,
+      busy 66 against 30/6 on a healthy neighbour).
+
+      At init, after reset and standby, the driver reads the 16-byte version
+      string at 0x0320 and checks it begins "SX126" (an SX1262 reports
+      "SX1261"), up to 3 tries with a reset between: RadioLib's findChip(),
+      which upstream Meshtastic relies on. A chip that does not answer is logged
+      and remembered, not refused (sx126x_chip_present(): 1, 0, or -ENODATA
+      before the probe), so the application keeps its shell, BLE and phone API
+      without a radio, as upstream does. A CAD whose IRQ status reads 0xFFFF is
+      an error (-EIO, cad_error), not activity.

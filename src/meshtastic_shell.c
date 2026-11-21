@@ -5568,6 +5568,18 @@ static void cmd_lora_show(const struct shell *sh)
 	 * failure these two used to have. */
 	shell_print(sh, "tx enabled:   %s",
 		    cfg.payload_variant.lora.tx_enabled ? "yes" : "NO — receive only");
+	switch (meshtastic_radio_chip_present()) {
+	case MESHTASTIC_RADIO_TRI_ON:
+		shell_print(sh, "radio chip:   answered at boot");
+		break;
+	case MESHTASTIC_RADIO_TRI_OFF:
+		shell_print(sh, "radio chip:   NOT ANSWERING since boot (absent, unseated or "
+				"dead): this node can neither send nor hear");
+		break;
+	default:
+		shell_print(sh, "radio chip:   unknown (the driver cannot say)");
+		break;
+	}
 	switch (cfg.payload_variant.lora.fem_lna_mode) {
 	case meshtastic_Config_LoRaConfig_FEM_LNA_Mode_ENABLED:
 		shell_print(sh, "fem lna:      enabled%s",

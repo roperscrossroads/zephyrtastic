@@ -1053,6 +1053,14 @@ __weak uint32_t sx126x_hal_busy_timeout_streak(void)
 	return 0U;
 }
 
+/* Carried patch 0023: did the chip answer its version-string probe at boot?
+ * 1 yes, 0 no, negative when the driver cannot say (an unpatched tree). */
+__weak int sx126x_chip_present(const struct device *dev)
+{
+	ARG_UNUSED(dev);
+	return -ENOTSUP;
+}
+
 static enum meshtastic_radio_tristate mt_tri(bool got, bool value)
 {
 	if (!got) {
@@ -1078,6 +1086,13 @@ enum meshtastic_radio_tristate meshtastic_radio_rx_boosted_applied(void)
 uint32_t meshtastic_radio_busy_timeout_streak(void)
 {
 	return sx126x_hal_busy_timeout_streak();
+}
+
+enum meshtastic_radio_tristate meshtastic_radio_chip_present(void)
+{
+	int r = sx126x_chip_present(mt.lora_dev);
+
+	return mt_tri(r >= 0, r > 0);
 }
 
 static void mt_agc_reset_work_fn(struct k_work *work);

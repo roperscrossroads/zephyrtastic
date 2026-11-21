@@ -1613,7 +1613,9 @@ ZTEST(meshtastic_shell, test_state_follows_what_is_set_and_never_prints_a_key)
 	zassert_ok(run_cmd("meshtastic lora power 2", NULL));
 	zassert_ok(run_cmd("meshtastic lora tx off", NULL));
 	state_json(json, sizeof(json));
-	zassert_not_null(strstr(json, "\"pwr\":2,\"tx\":0}"), "%s", json);
+	zassert_not_null(strstr(json, "\"pwr\":2,\"tx\":0,"), "%s", json);
+	/* The sim radio is no SX126x: whether its chip answered is unknown, not "no". */
+	zassert_not_null(strstr(json, "\"chip\":-1}"), "%s", json);
 
 	/* A name with a quote and a backslash stays valid JSON. */
 	zassert_ok(run_cmd("meshtastic owner set \"a\\\"b\" ab", NULL));

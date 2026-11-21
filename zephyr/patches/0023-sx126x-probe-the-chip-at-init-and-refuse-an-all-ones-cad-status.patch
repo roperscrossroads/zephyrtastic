@@ -1,0 +1,121 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -3,6 +3,8 @@
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
++#include <string.h>
++
+ #include <zephyr/kernel.h>
+ #include <zephyr/device.h>
+ #include <zephyr/drivers/lora.h>
+@@ -560,6 +562,70 @@
+ 	return sx126x_hal_write_regs(dev, SX126X_REG_RETENTION_LIST, buf, sizeof(buf));
+ }
+ 
++/*
++ * Is there an SX126x on the other end of the SPI bus at all?
++ *
++ * Nothing else in this driver can tell. Every command it sends is a write, and
++ * the reads (IRQ status, registers) take whatever bytes come back: a chip that
++ * is missing, unseated or dead leaves MISO idle, so they read 0xFF (or 0x00),
++ * and as long as BUSY reads low no wait ever times out. Such a radio passes
++ * init, "configures" without an error, and then reports an IRQ status of
++ * 0xFFFF, in which every flag is set: every CAD hears activity, so a node
++ * defers each send until it drops it, and it never receives. Seen on a XIAO
++ * with a Wio-SX1262 that stopped answering after a replug.
++ *
++ * Parity: RadioLib's SX126x::findChip(), which upstream Meshtastic relies on
++ * to report "No SX126x found": reset, read the 16-byte version string at
++ * 0x0320, compare its start; up to 10 tries. We take 3, and compare "SX126"
++ * (an SX1262 reports "SX1261" too, and the STM32WL's sub-GHz radio is
++ * the same core).
++ *
++ * A chip that does not answer is LOGGED and REMEMBERED, not refused: the
++ * application keeps running without a radio (its shell, its BLE, its phone
++ * API, and the tools that manage the board through them), as upstream does,
++ * and reports the radio absent (sx126x_chip_present()). It is decided once at
++ * boot; a module reseated while running needs a reboot to be seen.
++ */
++#define SX126X_PROBE_TRIES 3
++#define SX126X_PROBE_MAGIC "SX126"
++
++/* -1 not probed yet, 0 did not answer, 1 found. */
++static int sx126x_chip_found = -1;
++
++int sx126x_chip_present(const struct device *dev)
++{
++	ARG_UNUSED(dev);
++	return (sx126x_chip_found < 0) ? -ENODATA : sx126x_chip_found;
++}
++
++static bool sx126x_probe(const struct device *dev)
++{
++	char ver[16];
++
++	for (int i = 0; i < SX126X_PROBE_TRIES; i++) {
++		if (i > 0) {
++			/* As RadioLib: a fresh reset before each retry. */
++			(void)sx126x_hal_reset(dev);
++			(void)sx126x_set_standby(dev, SX126X_STANDBY_RC);
++		}
++		memset(ver, 0, sizeof(ver));
++		if (sx126x_hal_read_regs(dev, SX126X_REG_VERSION_STRING, (uint8_t *)ver,
++					 sizeof(ver)) == 0 &&
++		    strncmp(ver, SX126X_PROBE_MAGIC, strlen(SX126X_PROBE_MAGIC)) == 0) {
++			ver[sizeof(ver) - 1] = '\0';
++			LOG_INF("SX126x found: \"%s\"", ver);
++			return true;
++		}
++	}
++
++	LOG_ERR("SX126x not answering: version string reads %02x %02x %02x %02x %02x "
++		"(want \"%s\"); the radio is absent, unseated or dead, and this node "
++		"can neither send nor hear",
++		(uint8_t)ver[0], (uint8_t)ver[1], (uint8_t)ver[2], (uint8_t)ver[3],
++		(uint8_t)ver[4], SX126X_PROBE_MAGIC);
++	return false;
++}
++
+ static int sx126x_chip_init(const struct device *dev)
+ {
+ 	const struct sx126x_hal_config *config = dev->config;
+@@ -579,6 +645,9 @@
+ 		return ret;
+ 	}
+ 
++	/* Logged and remembered, not fatal: see sx126x_probe(). */
++	sx126x_chip_found = sx126x_probe(dev) ? 1 : 0;
++
+ 	/* Configure TCXO if enabled */
+ 	if (config->dio3_tcxo_enable) {
+ 		ret = sx126x_set_dio3_as_tcxo_ctrl(dev, config->dio3_tcxo_voltage,
+@@ -1636,6 +1705,15 @@
+ 		return ret;
+ 	}
+ 
++	/* Every flag at once is not an answer from the chip: it is MISO idle high,
++	 * a radio that is not there (see sx126x_probe()). Counted as "busy" it
++	 * deferred every send until the send was dropped, and looked like a
++	 * crowded channel; as an error the send fails and says so. */
++	if (status == 0xFFFFU) {
++		sx126x_cad_error_count++;
++		return -EIO;
++	}
++
+ 	if (status & SX126X_IRQ_CAD_ACTIVITY_DETECTED) {
+ 		sx126x_cad_busy_count++;
+ 		return -EBUSY;
+diff --git a/drivers/lora/native/sx126x/sx126x_regs.h b/drivers/lora/native/sx126x/sx126x_regs.h
+--- a/drivers/lora/native/sx126x/sx126x_regs.h
++++ b/drivers/lora/native/sx126x/sx126x_regs.h
+@@ -252,6 +252,8 @@
+ /* Register Addresses */
+ 
+ /* LoRa Sync Word */
++/* 16 bytes of ASCII, "SX1261 V2D 2D02" on an SX1261 and an SX1262 alike (sic). */
++#define SX126X_REG_VERSION_STRING           0x0320
+ #define SX126X_REG_LORA_SYNC_WORD_MSB       0x0740
+ #define SX126X_REG_LORA_SYNC_WORD_LSB       0x0741
+ 

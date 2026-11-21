@@ -174,8 +174,12 @@ static void st_radio(struct st *s)
 		 * now (a brain may have retuned a head, a scanner may be hopping). */
 		st_out(s, ",\"lora\":{\"preset\":%d,\"use_preset\":%d,\"live\":%d,", (int)l->modem_preset,
 		       l->use_preset ? 1 : 0, (int)mt.modem_preset);
-		st_out(s, "\"region\":%d,\"pwr\":%d,\"tx\":%d}", (int)l->region, (int)l->tx_power,
-		       l->tx_enabled ? 1 : 0);
+		/* chip: did the radio answer at boot (1), not (0), cannot say (-1). */
+		enum meshtastic_radio_tristate chip = meshtastic_radio_chip_present();
+
+		st_out(s, "\"region\":%d,\"pwr\":%d,\"tx\":%d,\"chip\":%d}", (int)l->region,
+		       (int)l->tx_power, l->tx_enabled ? 1 : 0,
+		       chip == MESHTASTIC_RADIO_TRI_ON ? 1 : (chip == MESHTASTIC_RADIO_TRI_OFF ? 0 : -1));
 	}
 	if (meshtastic_config_store_get_config(meshtastic_Config_device_tag, &cfg) == 0) {
 		st_out(s, ",\"dev\":{\"role\":%d,\"rb\":%d}", (int)cfg.payload_variant.device.role,

@@ -471,12 +471,22 @@ enum meshtastic_radio_tristate meshtastic_radio_rx_boosted_applied(void);
 
 /** @brief Consecutive SPI BUSY-line timeouts; a wiring/driver-health signal. */
 uint32_t meshtastic_radio_busy_timeout_streak(void);
+
+/**
+ * @brief Did the radio chip answer at boot? OFF: it did not (absent, unseated or
+ * dead: the node can neither send nor hear). UNKNOWN: the driver cannot say.
+ */
+enum meshtastic_radio_tristate meshtastic_radio_chip_present(void);
 #else
 static inline enum meshtastic_radio_tristate meshtastic_radio_rx_boosted_staged(void)
 {
 	return MESHTASTIC_RADIO_TRI_UNKNOWN;
 }
 static inline enum meshtastic_radio_tristate meshtastic_radio_rx_boosted_applied(void)
+{
+	return MESHTASTIC_RADIO_TRI_UNKNOWN;
+}
+static inline enum meshtastic_radio_tristate meshtastic_radio_chip_present(void)
 {
 	return MESHTASTIC_RADIO_TRI_UNKNOWN;
 }
