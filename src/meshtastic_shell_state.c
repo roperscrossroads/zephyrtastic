@@ -319,10 +319,11 @@ static void st_hk(struct st *s, bool first, const char *name, uint32_t value)
  *          node does not hold)
  *   retry  work that succeeded on a later try: sends put back because the channel was busy
  *          or a frame was arriving, AGC resets postponed
- *   warn   worth a look, nothing lost: false preambles and headers, a DM from a sender whose
- *          key we lack (the node asks for it), the phone queue and log forwarding dropping
- *          because nothing reads them, broadcasts held back by the airtime budget, the
- *          current SPI BUSY streak (a gauge, not a count)
+ *   warn   worth a look: false preambles and headers, a DM from a sender whose key we lack
+ *          (the node asks for it), log lines the log core dropped before any output printed
+ *          them (log_lost: a burst outran its buffer), the phone queue and log records for a
+ *          phone dropping (phone_drop, phone_log_drop: mostly nothing reads them), broadcasts
+ *          held back by the airtime budget, the current SPI BUSY streak (a gauge)
  *   err    work lost or a fault: failed sends, receive queue drops, a radio that did not
  *          re-arm, failed or timed-out channel checks, failed AGC resets, wedge recoveries,
  *          frames dropped from the transmit queues, reliable sends never acked, duty-cycle
@@ -384,8 +385,9 @@ static void st_health(struct st *s)
 	st_hk(s, true, "false_preamble", ra.false_preamble);
 	st_hk(s, false, "false_header", ra.false_header);
 	st_hk(s, false, "pki_no_key", st.rx_pki_no_key);
+	st_hk(s, false, "log_lost", pl.dropped_core);
 	st_hk(s, false, "phone_drop", sc.phone_drop);
-	st_hk(s, false, "log_drop", pl.dropped_rate + pl.dropped_queue + pl.dropped_core);
+	st_hk(s, false, "phone_log_drop", pl.dropped_rate + pl.dropped_queue);
 	st_hk(s, false, "air_drop", sc.tx_airtime_drop);
 	st_hk(s, false, "busy_streak", meshtastic_radio_busy_timeout_streak());
 	st_out(s, "}");
