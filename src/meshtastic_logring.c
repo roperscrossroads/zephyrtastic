@@ -347,6 +347,17 @@ void meshtastic_logring_dump(void)
 		return;
 	}
 
+	if (!IS_ENABLED(CONFIG_MESHTASTIC_LOGRING_REPLAY_AT_BOOT)) {
+		/* Not replayed: a USB console is not read during boot, so the lines would
+		 * be lost, and replaying them overflowed the log buffer (agents-qdgm). They
+		 * stay in RAM for `logring prev`. */
+		LOG_INF("Log ring: %u bytes recovered from before the last reset; "
+			"`logring prev` shows them",
+			(unsigned int)prev_len);
+		dumped_once = true;
+		return;
+	}
+
 	dumping = true;
 
 	LOG_INF("===== Log ring: %u bytes recovered from before the last reset =====",

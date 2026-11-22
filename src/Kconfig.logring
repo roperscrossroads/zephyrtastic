@@ -52,6 +52,16 @@ config MESHTASTIC_LOGRING_LINE_MAX
 	  Bounds the memcpy done under irq_lock. Longer lines are written in
 	  several chunks; only their tail survives if a line exceeds the ring.
 
+config MESHTASTIC_LOGRING_REPLAY_AT_BOOT
+	bool "Print the ring recovered from before a reset on the console at boot"
+	help
+	  Off by default: at boot the node says how much it recovered and that
+	  `logring prev` shows it. On a USB console (every bench board: the XIAOs'
+	  CDC ACM, the Heltecs' USB-Serial/JTAG) the device re-enumerates on reset
+	  and nothing reads it during boot, so a replay is lost, and it used to
+	  overflow the log buffer and take live boot lines with it (bead
+	  agents-qdgm). Turn on for a console attached from power-on (a UART).
+
 config MESHTASTIC_LOGRING_LOG_LEVEL
 	int "Log level for the ring module itself"
 	default 3
