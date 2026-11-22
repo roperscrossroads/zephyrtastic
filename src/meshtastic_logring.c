@@ -355,16 +355,41 @@ void meshtastic_logring_dump(void)
 	/* Emitted as raw printk lines rather than LOG_INF per line: the content is
 	 * already formatted log output (it has its own timestamps and levels), so
 	 * re-wrapping it in another LOG_INF would double every prefix and make the
-	 * recovered timestamps much harder to read against the live ones. */
-	for (uint32_t i = 0; i < prev_len; i++) {
-		char c = prev_buf[i];
+	 * recovered timestamps much harder to read against the live ones.
+	 *
+	 * A LINE per printk, never a character, and paced. With LOG_PRINTK every
+	 * printk is one deferred log message: written a character at a time, a full
+	 * 4 KB ring was ~4000 messages at once into the 2 KB log buffer, which in
+	 * overflow mode kept the last few dozen and dropped the rest, recovered lines
+	 * and live ones alike (every warm-reset XIAO lost ~4050 at boot, bead
+	 * agents-qdgm). After each line the log thread is given a moment to drain the
+	 * buffer; bounded, so a console nobody reads cannot hold the boot up. */
+	{
+		static char line[CONFIG_MESHTASTIC_LOGRING_LINE_MAX + 1];
+		size_t n = 0U;
 
-		if (c == '\r') {
-			continue;
+		for (uint32_t i = 0; i <= prev_len; i++) {
+			char c = (i < prev_len) ? prev_buf[i] : '\n';
+
+			if (c == '\r') {
+				continue;
+			}
+			if (c != '\n' && n < sizeof(line) - 1U) {
+				line[n++] = c;
+				continue;
+			}
+			if (c != '\n') {
+				/* longer than a ring line can be: emit what fits, keep going */
+				i--;
+			}
+			line[n] = '\0';
+			printk("%s\n", line);
+			n = 0U;
+			for (int t = 0; t < 25 && log_buffered_cnt() > 0U; t++) {
+				k_msleep(2);
+			}
 		}
-		printk("%c", c);
 	}
-	printk("\n");
 
 	LOG_INF("===== end of recovered log ring =====");
 
