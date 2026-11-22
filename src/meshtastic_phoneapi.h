@@ -111,6 +111,16 @@ struct meshtastic_phoneapi {
 	 * event, and logging it per-drop was 19 %% of all log output. */
 	bool saturated;
 	bool current_valid;
+	/* A client has started the API (want_config) on this transport: upstream's
+	 * PhoneAPI::isConnected(), its state past STATE_SEND_NOTHING. Cleared when the session
+	 * resets (the transport's disconnect) or, on a stream transport, when the client has
+	 * been silent longer than CONFIG_MESHTASTIC_PHONEAPI_CONTACT_TIMEOUT_S. */
+	bool started;
+	/* A stream transport (serial, TCP, the shell tunnel): the stock protocol has no
+	 * disconnect, so silence ends the connection, as upstream's SerialConsole. */
+	bool contact_timeout;
+	/* k_uptime_get_32() of the last ToRadio (upstream's lastContactMsec). */
+	uint32_t last_contact_ms;
 	uint32_t from_num;
 	enum meshtastic_phoneapi_config_state config_state;
 	/* uint16_t: a NodeDB or replay larger than 255 frames must not wrap
@@ -190,6 +200,20 @@ void meshtastic_phoneapi_reset(struct meshtastic_phoneapi *api);
  *        in-flight frame is lost.
  */
 void meshtastic_phoneapi_session_reset(struct meshtastic_phoneapi *api);
+
+/* Whether a client reads this transport now (design: tooling docs/PHONE-QUEUE-READERS.md):
+ * it has started the API and, for a stream transport, has sent a ToRadio within the contact
+ * timeout. Frames are queued either way (a phone that connects later gets what was heard
+ * meanwhile, as upstream); what changes with no reader is how a drop is counted, and that
+ * log records are not queued at all. */
+bool meshtastic_phoneapi_has_reader(const struct meshtastic_phoneapi *api);
+
+/* Mark @p api a stream transport: silence past the contact timeout ends its session. */
+void meshtastic_phoneapi_set_contact_timeout(struct meshtastic_phoneapi *api, bool on);
+
+/* Start a session as want_config does (tests, and the transports that start one without
+ * it). */
+void meshtastic_phoneapi_session_start(struct meshtastic_phoneapi *api);
 void meshtastic_phoneapi_notify_data_ready(struct meshtastic_phoneapi *api);
 uint32_t meshtastic_phoneapi_from_num(struct meshtastic_phoneapi *api);
 uint32_t meshtastic_phoneapi_pending_count(struct meshtastic_phoneapi *api);

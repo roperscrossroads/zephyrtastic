@@ -461,6 +461,9 @@ int meshtastic_tcp_init(void)
 	meshtastic_phoneapi_init(&tcp.api, "tcp", tcp_queue, ARRAY_SIZE(tcp_queue),
 				 tcp_data_ready, tcp_disconnect, NULL, NULL, &tcp_to_scratch,
 				 &tcp_from_scratch);
+	/* A stream client too (upstream's StreamAPI on a socket): silence ends it as well
+	 * as a closed socket. */
+	meshtastic_phoneapi_set_contact_timeout(&tcp.api, true);
 
 	/* Wake eventfd for the thread's blocking poll (queued FromRadio frames).
 	 * Non-fatal if unavailable — the poll then caps its wait at 200 ms so TX

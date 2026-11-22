@@ -5065,6 +5065,7 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 	}
 	shell_print(sh, "outbound hi-water: %u / %u", st.ob_hiwater,
 		    CONFIG_MESHTASTIC_OUTBOUND_QUEUE_MAX);
+	shell_print(sh, "phone FromRadio drops with no client reading: %u", st.phone_drop_idle);
 	shell_print(sh, "phone FromRadio drops: %u (%u protected)", st.phone_drop,
 		    st.phone_drop_protected);
 	shell_print(sh, "airtime-gated BG broadcasts: %u", st.tx_airtime_drop);

@@ -37,6 +37,9 @@ static void phonequeue_before(void *fixture)
 	meshtastic_sched_stats_reset();
 	meshtastic_phoneapi_init(&api, "test", q_storage, Q_SIZE, NULL, NULL, NULL, NULL,
 				 &to_scratch, &from_scratch);
+	/* These cases are a connected phone's eviction policy: its client has started the
+	 * API, as want_config does. The no-reader cases below say otherwise themselves. */
+	meshtastic_phoneapi_session_start(&api);
 }
 
 /* Build a FromRadio carrying a decoded MeshPacket on the given portnum. `id`
@@ -362,3 +365,71 @@ ZTEST(phonequeue, test_at_equal_rank_the_newer_sample_wins)
 }
 
 ZTEST_SUITE(phonequeue, NULL, NULL, phonequeue_before, NULL, NULL);
+
+
+/* ---- with and without a reader (tooling docs/PHONE-QUEUE-READERS.md) ---------------- */
+
+static void fill_and_overflow(void)
+{
+	meshtastic_FromRadio from;
+
+	for (uint32_t i = 0U; i <= Q_SIZE; i++) {
+		from = make_pkt(0x100U + i, meshtastic_PortNum_TELEMETRY_APP);
+		zassert_true(meshtastic_phoneapi_enqueue_fromradio(&api, &from) >= 0, "");
+	}
+}
+
+/* Upstream holds packets for a phone that is not there (toPhoneQueue is filled either way),
+ * so frames are still queued; a drop where no client reads is work done for nobody and is
+ * counted apart from a drop a connected phone suffered. */
+ZTEST(phonequeue, test_a_drop_with_no_reader_is_counted_as_idle)
+{
+	struct meshtastic_sched_stats st;
+
+	meshtastic_phoneapi_session_reset(&api);
+	zassert_false(meshtastic_phoneapi_has_reader(&api), "no client has started the API");
+	fill_and_overflow();
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.phone_drop_idle, 1U, "the overflow, counted as idle");
+	zassert_equal(st.phone_drop, 0U, "no reader lost anything");
+	zassert_equal(api.count, Q_SIZE, "still held for a phone");
+}
+
+ZTEST(phonequeue, test_a_drop_with_a_reader_is_a_phone_drop)
+{
+	struct meshtastic_sched_stats st;
+
+	zassert_true(meshtastic_phoneapi_has_reader(&api), "started in the fixture");
+	fill_and_overflow();
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.phone_drop, 1U, "");
+	zassert_equal(st.phone_drop_idle, 0U, "");
+}
+
+/* upstream's isConnected(): from want_config until the session ends */
+ZTEST(phonequeue, test_a_session_makes_a_reader_until_it_resets)
+{
+	meshtastic_phoneapi_session_reset(&api);
+	zassert_false(meshtastic_phoneapi_has_reader(&api), "");
+	meshtastic_phoneapi_session_start(&api);
+	zassert_true(meshtastic_phoneapi_has_reader(&api), "");
+	meshtastic_phoneapi_session_reset(&api);
+	zassert_false(meshtastic_phoneapi_has_reader(&api), "the disconnect ends it");
+}
+
+/* upstream's checkConnectionTimeout() on a stream transport: silence ends the session; a
+ * transport with a disconnect of its own (BLE) is not timed out */
+ZTEST(phonequeue, test_a_silent_stream_client_stops_being_a_reader)
+{
+	meshtastic_phoneapi_set_contact_timeout(&api, false);
+	meshtastic_phoneapi_session_start(&api);
+	k_sleep(K_MSEC(CONFIG_MESHTASTIC_PHONEAPI_CONTACT_TIMEOUT_S * 1000 + 100));
+	zassert_true(meshtastic_phoneapi_has_reader(&api), "no timeout without contact_timeout");
+
+	meshtastic_phoneapi_set_contact_timeout(&api, true);
+	meshtastic_phoneapi_session_start(&api);
+	zassert_true(meshtastic_phoneapi_has_reader(&api), "");
+	k_sleep(K_MSEC(CONFIG_MESHTASTIC_PHONEAPI_CONTACT_TIMEOUT_S * 1000 + 100));
+	zassert_false(meshtastic_phoneapi_has_reader(&api), "silent past the timeout");
+	meshtastic_phoneapi_set_contact_timeout(&api, false);
+}

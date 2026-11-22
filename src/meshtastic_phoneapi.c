@@ -14,6 +14,7 @@
 #include <pb_decode.h>
 #include <pb_encode.h>
 
+#include "meshtastic_config_store.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
@@ -135,6 +136,7 @@ void meshtastic_phoneapi_session_reset(struct meshtastic_phoneapi *api)
 	 * content: queue_take_servable() withholds it from an unauthorized
 	 * connection. */
 	api->current_valid = false;
+	api->started = false;
 	api->config_state = MESHTASTIC_PHONEAPI_CONFIG_IDLE;
 	api->config_index = 0U;
 	api->config_node_cursor = 0U;
@@ -148,6 +150,38 @@ void meshtastic_phoneapi_session_reset(struct meshtastic_phoneapi *api)
 	api->conn_epoch++;
 #endif
 	k_mutex_unlock(&api->lock);
+}
+
+void meshtastic_phoneapi_session_start(struct meshtastic_phoneapi *api)
+{
+	k_mutex_lock(&api->lock, K_FOREVER);
+	api->started = true;
+	api->last_contact_ms = k_uptime_get_32();
+	k_mutex_unlock(&api->lock);
+}
+
+void meshtastic_phoneapi_set_contact_timeout(struct meshtastic_phoneapi *api, bool on)
+{
+	api->contact_timeout = on;
+}
+
+static bool contact_expired(const struct meshtastic_phoneapi *api)
+{
+	return api->contact_timeout &&
+	       (uint32_t)(k_uptime_get_32() - api->last_contact_ms) >
+		       (uint32_t)CONFIG_MESHTASTIC_PHONEAPI_CONTACT_TIMEOUT_S * 1000U;
+}
+
+bool meshtastic_phoneapi_has_reader(const struct meshtastic_phoneapi *api)
+{
+	return api->started && !contact_expired(api);
+}
+
+/* A frame dropped from @p api's queue: work done for nobody when no client reads it
+ * (an operation), a frame a reader lost otherwise (a warning). */
+static void phone_drop_stat(const struct meshtastic_phoneapi *api, bool protected_frame)
+{
+	meshtastic_sched_stat_phone_drop(protected_frame, !meshtastic_phoneapi_has_reader(api));
 }
 
 void meshtastic_phoneapi_reset(struct meshtastic_phoneapi *api)
@@ -406,7 +440,7 @@ static uint8_t fromradio_frame_flags(const meshtastic_FromRadio *from)
 /* Drop the oldest frame (tail). Caller holds api->lock. */
 static void queue_drop_oldest(struct meshtastic_phoneapi *api)
 {
-	meshtastic_sched_stat_phone_drop(rank_is_protected(api->queue[api->tail].evict_rank));
+	phone_drop_stat(api, rank_is_protected(api->queue[api->tail].evict_rank));
 	api->tail = (uint8_t)((api->tail + 1U) % api->queue_size);
 	api->count--;
 }
@@ -461,7 +495,7 @@ int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 				 * queued. At equal rank the OLDEST goes: for a repeating
 				 * measurement the newer sample is the better one to keep. */
 				queue_remove_at(api, (uint8_t)victim);
-				meshtastic_sched_stat_phone_drop(false);
+				phone_drop_stat(api, false);
 				LOG_DBG("%s queue full, evicted rank-%u frame for a rank-%u",
 					api->name, (unsigned int)victim_rank, (unsigned int)rank);
 			} else if (rank < MT_PHONE_RANK_KEEP) {
@@ -469,7 +503,7 @@ int meshtastic_phoneapi_enqueue_fromradio(struct meshtastic_phoneapi *api,
 				 * all protected, or all of a higher rank. Drop the newcomer
 				 * rather than something more valuable. */
 				k_mutex_unlock(&api->lock);
-				meshtastic_sched_stat_phone_drop(false);
+				phone_drop_stat(api, false);
 				LOG_DBG("%s queue full of rank-%u-or-better frames, dropping "
 					"incoming rank-%u frame",
 					api->name, (unsigned int)victim_rank, (unsigned int)rank);
@@ -637,6 +671,15 @@ void meshtastic_phoneapi_handle_toradio(struct meshtastic_phoneapi *api, const u
 	pb_istream_t stream;
 	int ret = 0;
 
+	/* Upstream's checkConnectionTimeout(): a stream client silent past the timeout has
+	 * gone, and what it sends now starts over (a returning app sends want_config). */
+	if (api->started && contact_expired(api)) {
+		LOG_INF("%s: lost phone connection (no ToRadio for %u s)", api->name,
+			(unsigned int)CONFIG_MESHTASTIC_PHONEAPI_CONTACT_TIMEOUT_S);
+		meshtastic_phoneapi_session_reset(api);
+	}
+	api->last_contact_ms = k_uptime_get_32(); /* upstream's lastContactMsec */
+
 	*to = (meshtastic_ToRadio)meshtastic_ToRadio_init_zero;
 	stream = pb_istream_from_buffer(buf, len);
 	if (!pb_decode(&stream, meshtastic_ToRadio_fields, to)) {
@@ -711,6 +754,7 @@ toradio_decoded:
 #if IS_ENABLED(CONFIG_MESHTASTIC_ADMIN)
 		meshtastic_admin_reset(); /* clear stale edit txn on (re)connect */
 #endif
+		meshtastic_phoneapi_session_start(api); /* upstream: STATE_SEND_MY_INFO */
 		meshtastic_phoneapi_enqueue_phone_config(api, to->want_config_id);
 		break;
 	case meshtastic_ToRadio_disconnect_tag:
@@ -795,6 +839,13 @@ int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, u
 
 	k_mutex_lock(&phoneapi_lock, K_FOREVER);
 
+	/* Upstream sends log records only when SecurityConfig.debug_log_api_enabled is set
+	 * (RedirectablePrint::log_to_ble, SerialConsole::log_to_serial), and only to a client
+	 * that is there; a transport with no reader is skipped below, not counted. */
+	if (!meshtastic_config_store_debug_log_api_enabled()) {
+		k_mutex_unlock(&phoneapi_lock);
+		return 0;
+	}
 	count = phoneapi.count;
 	if (count == 0U) {
 		/* Nobody attached: not a drop, there was never a reader. */
@@ -826,9 +877,10 @@ int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, u
 	for (uint8_t i = 0; i < count; i++) {
 		struct meshtastic_phoneapi *api = transports[i];
 
-		if (!meshtastic_phoneapi_authorized(api)) {
+		if (!meshtastic_phoneapi_authorized(api) || !meshtastic_phoneapi_has_reader(api)) {
 			/* Lockdown: diagnostics describe the traffic an unauthorized
-			 * client may not see. Not a drop -- it was never a reader. */
+			 * client may not see; and no client reads this transport. Not a
+			 * drop either way -- there is no reader. */
 			continue;
 		}
 		k_mutex_lock(&api->lock, K_FOREVER);

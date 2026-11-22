@@ -61,6 +61,18 @@ config MESHTASTIC_PHONEAPI
 	  transport is enabled; can also be turned on directly for a custom
 	  transport or for host-side tests.
 
+config MESHTASTIC_PHONEAPI_CONTACT_TIMEOUT_S
+	int "Seconds of silence that end a stream client's session"
+	depends on MESHTASTIC_PHONEAPI
+	default 900
+	range 1 86400
+	help
+	  A client on a stream transport (serial, TCP, the shell tunnel) is a reader
+	  until it has sent no ToRadio for this long; then its session ends, as
+	  upstream's SerialConsole (SERIAL_CONNECTION_TIMEOUT, 15 minutes). The
+	  stock clients send heartbeats, so an attached app stays a reader. BLE
+	  ends with its link instead.
+
 config MESHTASTIC_ADMIN
 	bool "Handle AdminMessage config-write from the connected app"
 	depends on MESHTASTIC_PHONEAPI

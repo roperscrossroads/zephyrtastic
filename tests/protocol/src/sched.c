@@ -224,7 +224,7 @@ ZTEST(sched, test_stats_reset_on_mode_change)
 	zassert_equal(st.tx_drop[MT_SCHED_TIER_BG], 0, "preset must reset drop stats");
 
 	/* defaults() resets. */
-	meshtastic_sched_stat_phone_drop(true);
+	meshtastic_sched_stat_phone_drop(true, false);
 	meshtastic_sched_defaults();
 	meshtastic_sched_stats_get(&st);
 	zassert_equal(st.phone_drop, 0, "defaults must reset drop stats");

@@ -30,6 +30,7 @@
 
 #include "meshtastic/mesh.pb.h"
 
+#include "meshtastic_config_store.h"
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_phonelog.h"
 
@@ -67,6 +68,24 @@ static void empty(struct meshtastic_phoneapi *api)
 	}
 }
 
+static void set_debug_log_api(bool on)
+{
+	meshtastic_Config cfg;
+
+	if (meshtastic_config_store_debug_log_api_enabled() == on) {
+		return;
+	}
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg));
+	cfg.which_payload_variant = meshtastic_Config_security_tag;
+	cfg.payload_variant.security.debug_log_api_enabled = on;
+	zassert_ok(meshtastic_config_store_set_config(&cfg));
+	zassert_equal(meshtastic_config_store_debug_log_api_enabled(), on, "");
+	/* The store logs as it saves; those lines are records too, and they spend the rate
+	 * cap's tokens. Let them drain and the bucket refill before a test counts anything. */
+	drain_log();
+	k_sleep(K_MSEC(1100));
+}
+
 static void phonelog_before(void *fixture)
 {
 	ARG_UNUSED(fixture);
@@ -82,6 +101,12 @@ static void phonelog_before(void *fixture)
 	meshtastic_phoneapi_register(&big);
 	meshtastic_phoneapi_reset(&small);
 	meshtastic_phoneapi_reset(&big);
+	/* Each transport has a client that started the API, and the node is set to send it its
+	 * log (security.debug_log_api_enabled), as upstream requires for any log record. The
+	 * cases that take either away say so. */
+	meshtastic_phoneapi_session_start(&small);
+	meshtastic_phoneapi_session_start(&big);
+	set_debug_log_api(true);
 	(void)meshtastic_phonelog_set_level(LOG_LEVEL_INF);
 	meshtastic_phonelog_reset_stats();
 }
@@ -287,4 +312,39 @@ ZTEST(phonelog, test_backend_never_reports_itself)
 		zassert_not_equal(strcmp(from.log_record.source, "mt_phonelog"), 0,
 				  "the log backend must never forward its own output");
 	}
+}
+
+
+/* Upstream sends log records only with security.debug_log_api_enabled
+ * (RedirectablePrint::log_to_ble, SerialConsole::log_to_serial). */
+ZTEST(phonelog, test_nothing_is_sent_unless_the_debug_log_api_is_enabled)
+{
+	struct meshtastic_phonelog_stats st;
+
+	set_debug_log_api(false);
+	LOG_INF("not for the phone");
+	drain_log();
+	meshtastic_phonelog_get_stats(&st);
+	zassert_equal(drain(&big, NULL, NULL, NULL), 0U, "no record queued");
+	zassert_equal(drain(&small, NULL, NULL, NULL), 0U, "");
+	zassert_equal(st.dropped_queue, 0U, "and nothing counted as lost");
+}
+
+/* A transport no client reads gets no log records, and is not a loss: they are for a phone
+ * that is there (upstream writes them only to a connected client). */
+ZTEST(phonelog, test_a_transport_without_a_reader_gets_no_log_records)
+{
+	struct meshtastic_phonelog_stats st;
+	bool found = false;
+
+	meshtastic_phoneapi_session_reset(&small);
+	empty(&small); /* what it got while it still had a reader */
+	empty(&big);
+	LOG_INF("only for the reader");
+	drain_log();
+	meshtastic_phonelog_get_stats(&st);
+	zassert_equal(drain(&small, NULL, NULL, NULL), 0U, "the reader-less transport");
+	zassert_equal(drain(&big, "only for the reader", NULL, &found), 1U, "");
+	zassert_true(found, "the reader got it");
+	zassert_equal(st.dropped_queue, 0U, "");
 }

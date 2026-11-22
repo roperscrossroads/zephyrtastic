@@ -1194,6 +1194,21 @@ int meshtastic_config_store_get_config(pb_size_t tag, meshtastic_Config *config)
 	return 0;
 }
 
+bool meshtastic_config_store_debug_log_api_enabled(void)
+{
+	int idx = index_for_config_tag(meshtastic_Config_security_tag);
+	bool on;
+
+	if (idx < 0) {
+		return false;
+	}
+	store_lock();
+	on = store.configs[idx].which_payload_variant == meshtastic_Config_security_tag &&
+	     store.configs[idx].payload_variant.security.debug_log_api_enabled;
+	store_unlock();
+	return on;
+}
+
 int meshtastic_config_store_set_config(const meshtastic_Config *config)
 {
 	int idx;

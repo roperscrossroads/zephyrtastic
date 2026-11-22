@@ -1579,7 +1579,7 @@ ZTEST(meshtastic_shell, test_state_reports_health_counters_in_four_groups)
 {
 	static const char *const keys[] = {
 		"\"ops\":{\"tx\":", "\"rx\":", "\"dup\":", "\"relayed\":", "\"cad_clear\":",
-		"\"rx_not_for_us\":", "\"rx_other_channel\":",
+		"\"rx_not_for_us\":", "\"rx_other_channel\":", "\"phone_idle_drop\":",
 		"\"retry\":{\"cad_busy\":", "\"busy_rx\":", "\"defer_requeued\":", "\"agc_deferred\":",
 		"\"warn\":{\"false_preamble\":", "\"false_header\":", "\"pki_no_key\":",
 		"\"log_lost\":", "\"phone_drop\":", "\"phone_log_drop\":", "\"air_drop\":",

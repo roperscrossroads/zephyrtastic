@@ -319,6 +319,7 @@ static atomic_t st_drop[MT_SCHED_TIER_COUNT];
 static atomic_t st_hiwater;
 static atomic_t st_phone_drop;
 static atomic_t st_phone_drop_protected;
+static atomic_t st_phone_drop_idle;
 static atomic_t st_airtime_drop;
 static atomic_t st_dedup_expired;
 static atomic_t st_reliable_acked;
@@ -346,8 +347,14 @@ void meshtastic_sched_stat_drop(uint8_t tier)
 	}
 }
 
-void meshtastic_sched_stat_phone_drop(bool protected_frame)
+void meshtastic_sched_stat_phone_drop(bool protected_frame, bool idle)
 {
+	if (idle) {
+		/* No client reads this transport: the queue is holding frames for a phone that
+		 * may come later, and the oldest goes. Work done for nobody, not a loss. */
+		atomic_inc(&st_phone_drop_idle);
+		return;
+	}
 	atomic_inc(&st_phone_drop);
 	if (protected_frame) {
 		atomic_inc(&st_phone_drop_protected);
@@ -420,6 +427,7 @@ void meshtastic_sched_stats_get(struct meshtastic_sched_stats *out)
 	out->ob_hiwater = (uint32_t)atomic_get(&st_hiwater);
 	out->phone_drop = (uint32_t)atomic_get(&st_phone_drop);
 	out->phone_drop_protected = (uint32_t)atomic_get(&st_phone_drop_protected);
+	out->phone_drop_idle = (uint32_t)atomic_get(&st_phone_drop_idle);
 	out->tx_airtime_drop = (uint32_t)atomic_get(&st_airtime_drop);
 	out->dedup_expired = (uint32_t)atomic_get(&st_dedup_expired);
 	out->reliable_acked = (uint32_t)atomic_get(&st_reliable_acked);
@@ -442,6 +450,7 @@ void meshtastic_sched_stats_reset(void)
 	atomic_set(&st_hiwater, 0);
 	atomic_set(&st_phone_drop, 0);
 	atomic_set(&st_phone_drop_protected, 0);
+	atomic_set(&st_phone_drop_idle, 0);
 	atomic_set(&st_airtime_drop, 0);
 	atomic_set(&st_dedup_expired, 0);
 	atomic_set(&st_reliable_acked, 0);

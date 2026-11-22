@@ -99,6 +99,8 @@ void meshtastic_shell_api_init(void)
 	k_sem_init(&tun.done, 0, 1);
 	meshtastic_phoneapi_init(&tun.api, "shell", api_queue, ARRAY_SIZE(api_queue), NULL,
 				 api_disconnect, NULL, NULL, &api_to_scratch, &api_from_scratch);
+	/* A stream client (the stock CLI through rxrbench's tunnel): it ends by silence. */
+	meshtastic_phoneapi_set_contact_timeout(&tun.api, true);
 	meshtastic_phoneapi_register(&tun.api);
 }
 

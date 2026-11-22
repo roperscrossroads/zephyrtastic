@@ -455,6 +455,8 @@ int meshtastic_serial_init(void)
 	meshtastic_phoneapi_init(&serial.api, "serial", serial.queue, ARRAY_SIZE(serial.queue),
 				 serial_data_ready, serial_disconnect, NULL, NULL,
 				 &serial_to_scratch, &serial_from_scratch);
+	/* Upstream's StreamAPI over a UART: no disconnect on the wire, silence ends it. */
+	meshtastic_phoneapi_set_contact_timeout(&serial.api, true);
 	meshtastic_phoneapi_register(&serial.api);
 
 	k_work_queue_start(&serial.work_q, serial_work_stack,

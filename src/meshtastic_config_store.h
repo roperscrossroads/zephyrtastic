@@ -38,6 +38,9 @@ int meshtastic_config_store_get_channel(uint8_t index, meshtastic_Channel *chann
 int meshtastic_config_store_set_channel(uint8_t index, const meshtastic_Channel *channel);
 
 int meshtastic_config_store_get_config(pb_size_t tag, meshtastic_Config *config);
+/* security.debug_log_api_enabled, read without copying the whole Config (the log thread asks
+ * for every record, on a small stack). */
+bool meshtastic_config_store_debug_log_api_enabled(void);
 int meshtastic_config_store_set_config(const meshtastic_Config *config);
 
 /** Set the position config's fixed_position flag (admin set/remove fixed

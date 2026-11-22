@@ -314,15 +314,15 @@ static void st_hk(struct st *s, bool first, const char *name, uint32_t value)
 /* The node's communication counters since boot, sorted by what they mean, so a tool can read
  * them before and after a test and judge the change without knowing each one:
  *
- *   ops    work done: frames sent and heard, duplicates, relays, clear channel checks, and
+ *   ops    work done: frames sent and heard, duplicates, relays, clear channel checks,
  *          frames that were not ours to read (a DM between two other nodes, a channel this
- *          node does not hold)
+ *          node does not hold), and phone frames dropped where no client reads them
  *   retry  work that succeeded on a later try: sends put back because the channel was busy
  *          or a frame was arriving, AGC resets postponed
  *   warn   worth a look: false preambles and headers, a DM from a sender whose key we lack
  *          (the node asks for it), log lines the log core dropped before any output printed
- *          them (log_lost: a burst outran its buffer), the phone queue and log records for a
- *          phone dropping (phone_drop, phone_log_drop: mostly nothing reads them), broadcasts
+ *          them (log_lost: a burst outran its buffer), frames and log records a connected
+ *          phone lost (phone_drop, phone_log_drop), broadcasts
  *          held back by the airtime budget, the current SPI BUSY streak (a gauge)
  *   err    work lost or a fault: failed sends, receive queue drops, a radio that did not
  *          re-arm, failed or timed-out channel checks, failed AGC resets, wedge recoveries,
@@ -374,6 +374,7 @@ static void st_health(struct st *s)
 	st_hk(s, false, "cad_clear", meshtastic_radio_cad_clear_count());
 	st_hk(s, false, "rx_not_for_us", st.rx_not_for_us);
 	st_hk(s, false, "rx_other_channel", st.rx_other_channel);
+	st_hk(s, false, "phone_idle_drop", sc.phone_drop_idle);
 	st_out(s, "}");
 	st_hgroup(s, "retry");
 	st_hk(s, true, "cad_busy", df.cad_busy);

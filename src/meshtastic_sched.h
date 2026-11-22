@@ -107,6 +107,7 @@ struct meshtastic_sched_stats {
 	uint32_t tx_drop[MT_SCHED_TIER_COUNT]; /* frames dropped at egress, per tier */
 	uint32_t ob_hiwater;                   /* peak outbound queue occupancy */
 	uint32_t phone_drop;                   /* phone FromRadio frames dropped (droppable) */
+	uint32_t phone_drop_idle;              /* of no use: dropped where no client reads */
 	uint32_t phone_drop_protected;         /* protected frames dropped (queue saturated) */
 	uint32_t tx_airtime_drop;              /* background self-broadcasts suppressed by gate */
 	uint32_t dedup_expired;                /* dup-cache hits ignored because TTL had elapsed */
@@ -189,7 +190,8 @@ void meshtastic_sched_stats_reset(void);
 /* Counter hooks, called from the outbound, phone-queue, TX-gate and dedup paths. */
 void meshtastic_sched_stat_enq(uint8_t tier, uint8_t occupancy);
 void meshtastic_sched_stat_drop(uint8_t tier);
-void meshtastic_sched_stat_phone_drop(bool protected_frame);
+/* @p idle: no client reads that transport (counted as phone_drop_idle, not phone_drop). */
+void meshtastic_sched_stat_phone_drop(bool protected_frame, bool idle);
 void meshtastic_sched_stat_airtime_drop(void);
 void meshtastic_sched_stat_dedup_expired(void);
 void meshtastic_sched_stat_reliable_ack(void);
