@@ -433,3 +433,31 @@ ZTEST(phonequeue, test_a_silent_stream_client_stops_being_a_reader)
 	zassert_false(meshtastic_phoneapi_has_reader(&api), "silent past the timeout");
 	meshtastic_phoneapi_set_contact_timeout(&api, false);
 }
+
+/* A polled client killed without a disconnect: its session runs on to the contact timeout, but
+ * what the queue drops meanwhile no reader lost. A read makes it a reader again. */
+ZTEST(phonequeue, test_a_polled_client_that_stopped_reading_loses_nothing)
+{
+	struct meshtastic_phoneapi_frame frame;
+	struct meshtastic_sched_stats st;
+	meshtastic_FromRadio from;
+
+	meshtastic_phoneapi_set_read_window(&api, 1U);
+	meshtastic_phoneapi_session_start(&api);
+	k_sleep(K_MSEC(1100));
+	zassert_true(meshtastic_phoneapi_has_reader(&api), "the session is still up");
+	fill_and_overflow();
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.phone_drop_idle, 1U, "past the window: idle");
+	zassert_equal(st.phone_drop, 0U, "");
+
+	zassert_true(meshtastic_phoneapi_pop_frame(&api, &frame), "");
+	for (uint32_t i = 0U; i < 2U; i++) {
+		from = make_pkt(0x200U + i, meshtastic_PortNum_TELEMETRY_APP);
+		zassert_true(meshtastic_phoneapi_enqueue_fromradio(&api, &from) >= 0, "");
+	}
+	meshtastic_sched_stats_get(&st);
+	zassert_equal(st.phone_drop, 1U, "it read again: a drop it suffered");
+	zassert_equal(st.phone_drop_idle, 1U, "");
+	meshtastic_phoneapi_set_read_window(&api, 0U);
+}

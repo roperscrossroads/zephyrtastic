@@ -121,6 +121,12 @@ struct meshtastic_phoneapi {
 	bool contact_timeout;
 	/* k_uptime_get_32() of the last ToRadio (upstream's lastContactMsec). */
 	uint32_t last_contact_ms;
+	/* A transport whose client must ask for every frame (the shell tunnel polls): seconds
+	 * without a read after which its client is taken to be gone for counting and log
+	 * records. 0: the transport has no such signal. The session itself is not affected. */
+	uint16_t read_window_s;
+	/* k_uptime_get_32() of the last pop_frame. */
+	uint32_t last_read_ms;
 	uint32_t from_num;
 	enum meshtastic_phoneapi_config_state config_state;
 	/* uint16_t: a NodeDB or replay larger than 255 frames must not wrap
@@ -210,6 +216,12 @@ bool meshtastic_phoneapi_has_reader(const struct meshtastic_phoneapi *api);
 
 /* Mark @p api a stream transport: silence past the contact timeout ends its session. */
 void meshtastic_phoneapi_set_contact_timeout(struct meshtastic_phoneapi *api, bool on);
+
+/* Mark @p api a transport its client polls: with no read for @p seconds, a drop is not a drop
+ * a reader suffered and log records are not queued, while the session runs on to the contact
+ * timeout as upstream's does. A client killed without a disconnect would otherwise count as a
+ * reader losing frames for the whole timeout. 0 turns it off. */
+void meshtastic_phoneapi_set_read_window(struct meshtastic_phoneapi *api, uint16_t seconds);
 
 /* Start a session as want_config does (tests, and the transports that start one without
  * it). */

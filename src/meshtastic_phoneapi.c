@@ -157,12 +157,18 @@ void meshtastic_phoneapi_session_start(struct meshtastic_phoneapi *api)
 	k_mutex_lock(&api->lock, K_FOREVER);
 	api->started = true;
 	api->last_contact_ms = k_uptime_get_32();
+	api->last_read_ms = api->last_contact_ms;
 	k_mutex_unlock(&api->lock);
 }
 
 void meshtastic_phoneapi_set_contact_timeout(struct meshtastic_phoneapi *api, bool on)
 {
 	api->contact_timeout = on;
+}
+
+void meshtastic_phoneapi_set_read_window(struct meshtastic_phoneapi *api, uint16_t seconds)
+{
+	api->read_window_s = seconds;
 }
 
 static bool contact_expired(const struct meshtastic_phoneapi *api)
@@ -177,11 +183,20 @@ bool meshtastic_phoneapi_has_reader(const struct meshtastic_phoneapi *api)
 	return api->started && !contact_expired(api);
 }
 
+/* A reader that is still reading: on a polled transport, one that asked within its window. */
+static bool being_read(const struct meshtastic_phoneapi *api)
+{
+	return meshtastic_phoneapi_has_reader(api) &&
+	       (api->read_window_s == 0U ||
+		(uint32_t)(k_uptime_get_32() - api->last_read_ms) <=
+			(uint32_t)api->read_window_s * 1000U);
+}
+
 /* A frame dropped from @p api's queue: work done for nobody when no client reads it
  * (an operation), a frame a reader lost otherwise (a warning). */
 static void phone_drop_stat(const struct meshtastic_phoneapi *api, bool protected_frame)
 {
-	meshtastic_sched_stat_phone_drop(protected_frame, !meshtastic_phoneapi_has_reader(api));
+	meshtastic_sched_stat_phone_drop(protected_frame, !being_read(api));
 }
 
 void meshtastic_phoneapi_reset(struct meshtastic_phoneapi *api)
@@ -275,6 +290,7 @@ bool meshtastic_phoneapi_pop_frame(struct meshtastic_phoneapi *api,
 				   struct meshtastic_phoneapi_frame *frame)
 {
 	k_mutex_lock(&api->lock, K_FOREVER);
+	api->last_read_ms = k_uptime_get_32();
 	/* The config stream goes FIRST, then the queue — upstream's order
 	 * (STATE_SEND_PACKETS only after config_complete), and what makes
 	 * keeping the backlog across want_config safe: the app finishes its
@@ -846,8 +862,7 @@ bool meshtastic_phoneapi_log_records_wanted(void)
 		const struct meshtastic_phoneapi *api =
 			*(struct meshtastic_phoneapi *volatile *)&phoneapi.transports[i];
 
-		if (api != NULL && meshtastic_phoneapi_authorized(api) &&
-		    meshtastic_phoneapi_has_reader(api)) {
+		if (api != NULL && meshtastic_phoneapi_authorized(api) && being_read(api)) {
 			return true;
 		}
 	}
@@ -902,7 +917,7 @@ int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, u
 	for (uint8_t i = 0; i < count; i++) {
 		struct meshtastic_phoneapi *api = transports[i];
 
-		if (!meshtastic_phoneapi_authorized(api) || !meshtastic_phoneapi_has_reader(api)) {
+		if (!meshtastic_phoneapi_authorized(api) || !being_read(api)) {
 			/* Lockdown: diagnostics describe the traffic an unauthorized
 			 * client may not see; and no client reads this transport. Not a
 			 * drop either way -- there is no reader. */

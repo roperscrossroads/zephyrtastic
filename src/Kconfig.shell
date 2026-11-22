@@ -93,6 +93,16 @@ config MESHTASTIC_SHELL_PHONEAPI_QUEUE_SIZE
 	  by itself: replies, queue status, mesh traffic. A full queue drops the
 	  cheapest frame first.
 
+config MESHTASTIC_SHELL_PHONEAPI_READ_WINDOW_S
+	int "Seconds without a poll after which a tunnel client counts as gone"
+	default 30
+	range 1 900
+	help
+	  The tunnel's client asks for every frame. With no request for this long,
+	  a frame the queue drops is counted as idle, not as one a reader lost,
+	  and log records are no longer queued for it. The session itself still
+	  ends at MESHTASTIC_PHONEAPI_CONTACT_TIMEOUT_S, as upstream's does.
+
 config MESHTASTIC_SHELL_PHONEAPI_BURST
 	int "Frames served per command"
 	default 16

@@ -101,6 +101,9 @@ void meshtastic_shell_api_init(void)
 				 api_disconnect, NULL, NULL, &api_to_scratch, &api_from_scratch);
 	/* A stream client (the stock CLI through rxrbench's tunnel): it ends by silence. */
 	meshtastic_phoneapi_set_contact_timeout(&tun.api, true);
+	/* It polls every half second, so a client that stopped asking has gone long before
+	 * the contact timeout says so. */
+	meshtastic_phoneapi_set_read_window(&tun.api, CONFIG_MESHTASTIC_SHELL_PHONEAPI_READ_WINDOW_S);
 	meshtastic_phoneapi_register(&tun.api);
 }
 

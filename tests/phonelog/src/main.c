@@ -349,6 +349,28 @@ ZTEST(phonelog, test_a_transport_without_a_reader_gets_no_log_records)
 	zassert_equal(st.dropped_queue, 0U, "");
 }
 
+/* A polled client that stopped asking gets no log records, though its session is still up. */
+ZTEST(phonelog, test_a_polled_transport_not_reading_gets_no_log_records)
+{
+	struct meshtastic_phonelog_stats st;
+	bool found = false;
+
+	empty(&small);
+	empty(&big);
+	meshtastic_phoneapi_set_read_window(&small, 1U);
+	k_sleep(K_MSEC(1100));
+	zassert_true(meshtastic_phoneapi_has_reader(&small), "the session is still up");
+	empty(&big);
+	LOG_INF("only for the one reading");
+	drain_log();
+	meshtastic_phoneapi_set_read_window(&small, 0U);
+	meshtastic_phonelog_get_stats(&st);
+	zassert_equal(drain(&small, NULL, NULL, NULL), 0U, "the transport nobody polls");
+	zassert_equal(drain(&big, "only for the one reading", NULL, &found), 1U, "");
+	zassert_true(found, "the reader got it");
+	zassert_equal(st.dropped_queue, 0U, "");
+}
+
 /* With no client anywhere, the log is nobody's business: a burst past the rate cap is not
  * formatted, not rate-limited and not counted as dropped (the boot burst on the bench read as
  * lost records for a phone that was never there). */
