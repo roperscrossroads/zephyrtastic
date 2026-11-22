@@ -1209,6 +1209,14 @@ bool meshtastic_config_store_debug_log_api_enabled(void)
 	return on;
 }
 
+bool meshtastic_config_store_debug_log_api_enabled_unlocked(void)
+{
+	int idx = index_for_config_tag(meshtastic_Config_security_tag);
+
+	return idx >= 0 && store.configs[idx].which_payload_variant == meshtastic_Config_security_tag &&
+	       store.configs[idx].payload_variant.security.debug_log_api_enabled;
+}
+
 int meshtastic_config_store_set_config(const meshtastic_Config *config)
 {
 	int idx;

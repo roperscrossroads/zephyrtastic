@@ -165,6 +165,14 @@ static void backend_process(const struct log_backend *const backend, union log_m
 		phonelog.dropped_level++;
 		return;
 	}
+	/* Nobody to send it to (debug_log_api_enabled off, or no client reads any transport):
+	 * not a drop of any kind, so nothing is counted, and nothing is formatted. Upstream
+	 * builds a LogRecord only for a connected client with the debug log API on. After the
+	 * level filter, never before: this takes locks, and a message the filter drops must cost
+	 * none (a build that logs its kernel's mutexes would otherwise feed itself). */
+	if (!meshtastic_phoneapi_log_records_wanted()) {
+		return;
+	}
 
 	if (source_id >= 0) {
 		source = log_source_name_get(log_msg_get_domain(m), (uint32_t)source_id);

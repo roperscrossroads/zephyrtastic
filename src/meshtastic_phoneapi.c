@@ -829,6 +829,31 @@ static MESHTASTIC_EXT_RAM_BSS_ATTR meshtastic_FromRadio log_scratch;
  * the right policy for diagnostics anyway: they must never be able to push out
  * the traffic they were meant to help explain.
  */
+bool meshtastic_phoneapi_log_records_wanted(void)
+{
+	/* Lock-free on purpose: the log backend asks this for every message that passes its
+	 * level filter, on the logging thread, and a lock per message both slows the thread
+	 * and, in a build that logs its kernel's mutexes, feeds the log it is draining. It only
+	 * decides whether to bother: enqueue_log_record() takes phoneapi_lock and tests each
+	 * transport again, and a transport only ever joins (registration is at init). A stale
+	 * answer costs one record built or skipped, never a wrong delivery. */
+	uint8_t count = *(volatile uint8_t *)&phoneapi.count;
+
+	if (!meshtastic_config_store_debug_log_api_enabled_unlocked()) {
+		return false;
+	}
+	for (uint8_t i = 0; i < count; i++) {
+		const struct meshtastic_phoneapi *api =
+			*(struct meshtastic_phoneapi *volatile *)&phoneapi.transports[i];
+
+		if (api != NULL && meshtastic_phoneapi_authorized(api) &&
+		    meshtastic_phoneapi_has_reader(api)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, uint32_t *dropped)
 {
 	struct meshtastic_phoneapi *transports[MESHTASTIC_PHONEAPI_MAX_TRANSPORTS];

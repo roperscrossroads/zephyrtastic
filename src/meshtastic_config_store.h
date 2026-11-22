@@ -41,6 +41,9 @@ int meshtastic_config_store_get_config(pb_size_t tag, meshtastic_Config *config)
 /* security.debug_log_api_enabled, read without copying the whole Config (the log thread asks
  * for every record, on a small stack). */
 bool meshtastic_config_store_debug_log_api_enabled(void);
+/* The same without the store's lock, for a caller that asks per log message and re-checks
+ * under a lock of its own (a torn read of one bool is the only risk, and harmless there). */
+bool meshtastic_config_store_debug_log_api_enabled_unlocked(void);
 int meshtastic_config_store_set_config(const meshtastic_Config *config);
 
 /** Set the position config's fixed_position flag (admin set/remove fixed

@@ -278,6 +278,11 @@ void meshtastic_phoneapi_handle_toradio(struct meshtastic_phoneapi *api, const u
  */
 int meshtastic_phoneapi_enqueue_log_record(const meshtastic_LogRecord *record, uint32_t *dropped);
 
+/* Whether a log record would go anywhere now: security.debug_log_api_enabled, and some
+ * authorized transport with a reader. The log backend asks first, so nothing is formatted,
+ * rate-limited or counted as dropped for a phone that is not there. */
+bool meshtastic_phoneapi_log_records_wanted(void);
+
 #endif
 /*
  * @param decoded_mesh Optional fully decoded MeshPacket for this frame. When non-NULL it

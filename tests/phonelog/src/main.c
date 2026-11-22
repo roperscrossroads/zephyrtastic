@@ -348,3 +348,26 @@ ZTEST(phonelog, test_a_transport_without_a_reader_gets_no_log_records)
 	zassert_true(found, "the reader got it");
 	zassert_equal(st.dropped_queue, 0U, "");
 }
+
+/* With no client anywhere, the log is nobody's business: a burst past the rate cap is not
+ * formatted, not rate-limited and not counted as dropped (the boot burst on the bench read as
+ * lost records for a phone that was never there). */
+ZTEST(phonelog, test_with_no_reader_anywhere_nothing_is_counted)
+{
+	struct meshtastic_phonelog_stats st;
+
+	meshtastic_phoneapi_session_reset(&small);
+	meshtastic_phoneapi_session_reset(&big);
+	empty(&small);
+	empty(&big);
+	meshtastic_phonelog_reset_stats();
+	for (int i = 0; i < CONFIG_MESHTASTIC_PHONELOG_RATE * 3; i++) {
+		LOG_INF("burst %d", i);
+	}
+	drain_log();
+	meshtastic_phonelog_get_stats(&st);
+	zassert_equal(st.dropped_rate, 0U, "no rate drop for nobody");
+	zassert_equal(st.dropped_queue, 0U, "");
+	zassert_equal(st.forwarded, 0U, "");
+	zassert_equal(drain(&big, NULL, NULL, NULL), 0U, "");
+}
