@@ -147,6 +147,26 @@ static const char *fatal_reason_name(uint32_t reason)
 	}
 }
 
+/* Everything logged before main sits in the deferred log's buffer, and the log thread, below
+ * main's priority, cannot run until main blocks. The rest of init, and the boot report, whose
+ * history grows with every reboot, would overflow the buffer and lose the oldest lines. Let the
+ * thread drain it, for at most 100 ms. Only on main: on a networked build the report runs from
+ * the network event thread, which must not wait on the log. */
+static k_tid_t boot_log_settle_thread;
+
+static void boot_log_settle(void)
+{
+#if defined(CONFIG_LOG_MODE_DEFERRED) && defined(CONFIG_LOG_PROCESS_THREAD)
+	if (k_current_get() != boot_log_settle_thread) {
+		return;
+	}
+	for (int i = 0; i < 100 && log_data_pending(); i++) {
+		log_thread_trigger();
+		k_msleep(1);
+	}
+#endif
+}
+
 static void log_boot_reset_cause(void)
 {
 	struct meshtastic_watchdog_crash_info wdt_crash;
@@ -159,6 +179,7 @@ static void log_boot_reset_cause(void)
 	 * whether the RAM rail held, which is the half that distinguishes a hang
 	 * from a power event — and the half nRF targets had no way to answer. */
 	meshtastic_bootlog_report();
+	boot_log_settle();
 #endif
 
 #if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
@@ -171,6 +192,7 @@ static void log_boot_reset_cause(void)
 		}
 		log_reset_cause_line("  ", rtc_history[idx].boot_count, rtc_history[idx].reset_cause);
 	}
+	boot_log_settle();
 #endif /* CONFIG_SOC_FAMILY_ESPRESSIF_ESP32 */
 
 	/* Companion to the ring above: if the *last* reset was watchdog-forced,
@@ -206,6 +228,8 @@ static void log_boot_reset_cause(void)
 			fatal_crash.heap_free, fatal_crash.heap_allocated,
 			fatal_crash.heap_max_allocated, fatal_crash.thread_name);
 	}
+
+	boot_log_settle();
 
 	/* Last, and deliberately so: the breadcrumbs above are one-line summaries
 	 * of machine state, and this is the raw log tail leading up to whatever
@@ -247,19 +271,6 @@ static void on_event(const struct meshtastic_event *event, void *user_data)
 	default:
 		break;
 	}
-}
-
-/* Everything logged before main sits in the deferred log's buffer, and the log thread, below
- * main's priority, cannot run until main blocks. The rest of init would overflow the buffer and
- * lose the oldest lines, the first of the boot. Let the thread drain it now, for at most 100 ms. */
-static void boot_log_settle(void)
-{
-#if defined(CONFIG_LOG_MODE_DEFERRED) && defined(CONFIG_LOG_PROCESS_THREAD)
-	for (int i = 0; i < 100 && log_data_pending(); i++) {
-		log_thread_trigger();
-		k_msleep(1);
-	}
-#endif
 }
 
 int main(void)
@@ -319,6 +330,7 @@ int main(void)
 	rtc_history_next = (rtc_history_next + 1U) % RESET_HISTORY_LEN;
 #endif /* CONFIG_SOC_FAMILY_ESPRESSIF_ESP32 */
 
+	boot_log_settle_thread = k_current_get();
 	boot_log_settle();
 
 	/* The crash-info report runs on every board, RTC ring or not. On a
