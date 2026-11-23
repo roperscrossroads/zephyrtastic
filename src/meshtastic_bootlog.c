@@ -582,7 +582,7 @@ void meshtastic_bootlog_durable_report(void)
 			hist[i].prev_uptime_s, hist[i].wall_s, hist[i].cause,
 			(hist[i].flags & MESHTASTIC_BOOT_F_CAUSE_OK)
 				? meshtastic_bootlog_cause_str(hist[i].cause, cbuf, sizeof(cbuf))
-				: "(cause unavailable)");
+				: "(" MESHTASTIC_BOOTLOG_NO_CAUSE ")");
 	}
 }
 
@@ -903,9 +903,7 @@ void meshtastic_bootlog_report(void)
 		LOG_INF("  reset cause 0x%08x: %s", bl_this.cause,
 			meshtastic_bootlog_cause_str(bl_this.cause, cbuf, sizeof(cbuf)));
 	} else {
-		/* Not "cause: none" — that would claim a reading we did not get. */
-		LOG_INF("  reset cause unavailable (register empty or consumed by the "
-			"bootloader before the app ran)");
+		LOG_INF("  reset cause " MESHTASTIC_BOOTLOG_NO_CAUSE);
 	}
 
 	n = meshtastic_bootlog_history(hist, ARRAY_SIZE(hist));

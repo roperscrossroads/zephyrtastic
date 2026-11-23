@@ -5869,11 +5869,7 @@ static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "cause       0x%08x  %s", now.cause,
 			    meshtastic_bootlog_cause_str(now.cause, cbuf, sizeof(cbuf)));
 	} else {
-		/* Deliberately not "cause: none". Claiming a reading we did not get is
-		 * how a diagnostic starts lying: on this board the bootloader consumes
-		 * the reset-reason register before the app ever runs. */
-		shell_print(sh, "cause       unavailable — register empty, or consumed by the "
-				"bootloader before the app ran");
+		shell_print(sh, "cause       " MESHTASTIC_BOOTLOG_NO_CAUSE);
 	}
 	shell_print(sh, "uptime      %lld s", (long long)k_uptime_seconds());
 

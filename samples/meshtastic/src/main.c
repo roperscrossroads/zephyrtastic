@@ -24,6 +24,7 @@
 
 #include <zephyr/meshtastic/bootlog.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/logging/log_ctrl.h>
 #include <zephyr/net/net_event.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_mgmt.h>
@@ -248,6 +249,19 @@ static void on_event(const struct meshtastic_event *event, void *user_data)
 	}
 }
 
+/* Everything logged before main sits in the deferred log's buffer, and the log thread, below
+ * main's priority, cannot run until main blocks. The rest of init would overflow the buffer and
+ * lose the oldest lines, the first of the boot. Let the thread drain it now, for at most 100 ms. */
+static void boot_log_settle(void)
+{
+#if defined(CONFIG_LOG_MODE_DEFERRED) && defined(CONFIG_LOG_PROCESS_THREAD)
+	for (int i = 0; i < 100 && log_data_pending(); i++) {
+		log_thread_trigger();
+		k_msleep(1);
+	}
+#endif
+}
+
 int main(void)
 {
 	struct meshtastic_config cfg = {
@@ -304,6 +318,8 @@ int main(void)
 	rtc_history[rtc_history_next].reset_cause = cause;
 	rtc_history_next = (rtc_history_next + 1U) % RESET_HISTORY_LEN;
 #endif /* CONFIG_SOC_FAMILY_ESPRESSIF_ESP32 */
+
+	boot_log_settle();
 
 	/* The crash-info report runs on every board, RTC ring or not. On a
 	 * networked build it is deferred to the first IPv4 lease so it lands in

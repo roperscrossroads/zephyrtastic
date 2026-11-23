@@ -165,7 +165,9 @@ static void confirm_work_fn(struct k_work *work)
 
 static K_WORK_DELAYABLE_DEFINE(confirm_work, confirm_work_fn);
 
-#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
+/* With the boot log, it owns the register: it reads and clears it at PRE_KERNEL_1, so a second
+ * read here could only ever report "power-on/none". */
+#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF) && !defined(CONFIG_MESHTASTIC_BOOTLOG)
 #include <hal/nrf_power.h>
 /* Why did we boot? RESETREAS is sticky until written, so after a board comes
  * back from the dark (a bootloader drop, a DFU) this line names every reset
@@ -194,7 +196,7 @@ static void reset_reason_report(void)
 
 static int ota_confirm_init(void)
 {
-#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
+#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF) && !defined(CONFIG_MESHTASTIC_BOOTLOG)
 	reset_reason_report();
 #endif
 #if defined(CONFIG_MESHTASTIC_OTA_HOLD_DURING_DFU)

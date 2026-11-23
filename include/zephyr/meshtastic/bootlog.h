@@ -33,6 +33,16 @@ struct meshtastic_boot_record {
  *  meaningless rather than merely zero — the two must not look alike. */
 #define MESHTASTIC_BOOT_F_CAUSE_OK BIT(1)
 
+/* What an empty reset-cause register means. On the nRF52 every reset source but power-on and
+ * brownout latches a bit, and the UF2 bootloader and MCUboot leave the register alone (a soft
+ * reset reads back as SOFTWARE through both), so nothing latched is a power event, even when
+ * retained RAM survived a short dip. Elsewhere the empty register says nothing. */
+#if defined(CONFIG_SOC_FAMILY_NORDIC_NRF)
+#define MESHTASTIC_BOOTLOG_NO_CAUSE "none latched: a power-on or brownout"
+#else
+#define MESHTASTIC_BOOTLOG_NO_CAUSE "unavailable: register empty, or consumed before the app ran"
+#endif
+
 /**
  * One boot, in FLASH. Sixteen bytes.
  *
