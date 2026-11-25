@@ -12,6 +12,7 @@
 #include <psa/crypto.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
+#include <meshtastic/lora_sim.h>
 
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_config_store.h"
@@ -69,4 +70,30 @@ ZTEST(config_apply, test_a_write_to_another_section_keeps_a_live_only_preset)
 	zassert_equal(mt.modem_preset, meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
 		      "a device write must not move mt off the preset the chip is on");
 	zassert_equal(mt.modem.spread_factor, sf_before, "nor its modem params");
+}
+
+/* agents-ls39.1.12: a LoRa section that arrives by cluster merge is a stored
+ * change, so it retunes the chip now (RX side, before any transmit) -- even over
+ * a live-only hop, which a stored change is meant to replace. */
+ZTEST(config_apply, test_z_a_merged_lora_section_retunes_the_chip_before_any_tx)
+{
+	meshtastic_Config c;
+	struct meshtastic_hlc_stamp newer = {.physical_ms = INT64_C(1) << 51, .node_id = 0x77U};
+	struct meshtastic_modem_params want;
+	uint32_t f0, f1;
+	uint8_t sf0, sf1, bw;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &c), "");
+	c.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST;
+	zassert_ok(meshtastic_preset_to_params(meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST,
+					       false, &want), "");
+	zassert_ok(lora_sim_get_tuning(lora_dev, &f0, &sf0, &bw), "");
+	zassert_not_equal(sf0, want.spread_factor, "the chip starts on another modem");
+
+	zassert_equal(meshtastic_config_store_merge_config(&c, &newer), 1, "the merge applied");
+
+	zassert_ok(lora_sim_get_tuning(lora_dev, &f1, &sf1, &bw), "");
+	zassert_equal(sf1, want.spread_factor, "the chip's modem followed the merged preset");
+	zassert_not_equal(f1, f0, "and its frequency");
+	zassert_equal(mt.modem_preset, meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST, "");
 }
