@@ -208,7 +208,35 @@ enum shell_work_op {
 	/* One step of `meshtastic api`; what to do is in meshtastic_shell_api.c. */
 	SHELL_WORK_API,
 #endif
+#if defined(CONFIG_MESHTASTIC_FLEET)
+	/* `fleet desire` / `pin` / `unpin`: payload is a struct shell_fleet_work. The
+	 * publish copies an entry, encodes the intent, signs the cluster entry and stores it;
+	 * on the XIAO's 2048-byte shell stack `fleet desire` overflowed it every time
+	 * (bench 2026-11-24, rzr7, agents-vnfu). */
+	SHELL_WORK_FLEET,
+#endif
 };
+
+#if defined(CONFIG_MESHTASTIC_FLEET)
+enum shell_fleet_verb {
+	SHELL_FLEET_DESIRE,
+	SHELL_FLEET_PIN,
+	SHELL_FLEET_UNPIN,
+};
+
+/* What the shell thread parsed; the work thread publishes it and prints the answer. */
+struct shell_fleet_work {
+	uint8_t verb; /* enum shell_fleet_verb */
+	uint8_t class_id;
+	bool has_hash;
+	uint8_t hash[4];
+	uint16_t hw_model;
+	uint32_t node;
+	uint32_t version;
+	uint32_t flags;
+	char version_str[16]; /* as typed, for the confirmation line */
+};
+#endif
 
 enum admin_remote_op {
 	ADMIN_REMOTE_GET_OWNER,
@@ -263,6 +291,46 @@ static void shell_report_result(const struct shell *sh, int ret)
 		shell_print(sh, "done");
 	}
 }
+
+#if defined(CONFIG_MESHTASTIC_FLEET)
+static int shell_fleet_work_run(const struct shell *sh, const struct shell_fleet_work *fw)
+{
+	const uint8_t *hash = fw->has_hash ? fw->hash : NULL;
+	int ret;
+
+	switch (fw->verb) {
+	case SHELL_FLEET_DESIRE:
+		ret = meshtastic_fleet_desire(fw->class_id, fw->version, hash, fw->flags,
+					      fw->hw_model);
+		if (ret == -EPERM) {
+			shell_error(sh, "refused: this node may not write the document (managed?)");
+		} else if (ret == -ENOSPC) {
+			shell_error(sh, "refused: four classes already have rows");
+		} else if (ret == 0) {
+			shell_print(sh, "published: class %u -> %s%s", fw->class_id,
+				    fw->version_str, fw->flags ? " (flagged)" : "");
+		}
+		return ret;
+	case SHELL_FLEET_PIN:
+	case SHELL_FLEET_UNPIN: {
+		bool withdraw = (fw->verb == SHELL_FLEET_UNPIN);
+
+		ret = meshtastic_fleet_pin(fw->node, withdraw ? 0U : fw->version, hash, fw->flags);
+		if (ret == 0) {
+			shell_print(sh, "%s 0x%08x%s%s", withdraw ? "withdrew the pin on" : "pinned",
+				    fw->node, withdraw ? "" : " -> ",
+				    withdraw ? "" : fw->version_str);
+		}
+		return ret;
+	}
+	default:
+		return -EINVAL;
+	}
+}
+
+BUILD_ASSERT(sizeof(struct shell_fleet_work) <= MESHTASTIC_MAX_PAYLOAD_LEN,
+	     "the fleet verb's arguments ride in a shell work item's payload");
+#endif
 
 K_MSGQ_DEFINE(shell_work_msgq, sizeof(struct shell_work_item), CONFIG_MESHTASTIC_SHELL_QUEUE_SIZE,
 	      4);
@@ -497,6 +565,11 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 			} else if (ret == -EACCES) {
 				shell_error(item.sh, "wrong passphrase");
 			}
+			break;
+#endif
+#if defined(CONFIG_MESHTASTIC_FLEET)
+		case SHELL_WORK_FLEET:
+			ret = shell_fleet_work_run(item.sh, (const struct shell_fleet_work *)item.payload);
 			break;
 #endif
 		default:
@@ -7710,30 +7783,37 @@ static int cmd_fleet_clear(const struct shell *sh, size_t argc, char **argv)
 }
 #endif /* CONFIG_MESHTASTIC_FLEET_COURIER */
 
+static void fleet_version_copy(struct shell_fleet_work *fw, const char *v)
+{
+	strncpy(fw->version_str, v, sizeof(fw->version_str) - 1U);
+	fw->version_str[sizeof(fw->version_str) - 1U] = '\0';
+}
+
+/* Parses on the shell thread (cheap, and a bad argument is answered at once); the publish
+ * runs on the work thread (agents-vnfu: it overflowed the XIAO's shell stack). */
 static int cmd_fleet_desire(const struct shell *sh, size_t argc, char **argv)
 {
-	uint32_t version;
-	uint16_t hw_model = 0U;
-	uint8_t hash[4];
-	const uint8_t *hash_p = NULL;
-	uint32_t flags = 0U;
+	struct shell_work_item item = {.op = SHELL_WORK_FLEET};
+	struct shell_fleet_work *fw = (struct shell_fleet_work *)item.payload;
 	unsigned long cls;
-	int ret;
 
 	if (argc < 3U) {
 		shell_error(sh, "usage: fleet desire <class> <maj.min.rev> [hash8hex] [pause|downgrade] [hw=<model>]");
 		return -EINVAL;
 	}
 	cls = strtoul(argv[1], NULL, 0);
-	if (cls == 0UL || cls > 255UL || fleet_version_parse(argv[2], &version) != 0) {
+	if (cls == 0UL || cls > 255UL || fleet_version_parse(argv[2], &fw->version) != 0) {
 		shell_error(sh, "class 1..255 and a version maj.min.rev are required");
 		return -EINVAL;
 	}
+	fw->verb = SHELL_FLEET_DESIRE;
+	fw->class_id = (uint8_t)cls;
+	fleet_version_copy(fw, argv[2]);
 	for (size_t i = 3U; i < argc; i++) {
 		if (strcmp(argv[i], "pause") == 0) {
-			flags |= MESHTASTIC_FLEET_FLAG_PAUSE;
+			fw->flags |= MESHTASTIC_FLEET_FLAG_PAUSE;
 		} else if (strcmp(argv[i], "downgrade") == 0) {
-			flags |= MESHTASTIC_FLEET_FLAG_ALLOW_DOWNGRADE;
+			fw->flags |= MESHTASTIC_FLEET_FLAG_ALLOW_DOWNGRADE;
 		} else if (strncmp(argv[i], "hw=", 3) == 0) {
 			unsigned long m = strtoul(argv[i] + 3, NULL, 0);
 
@@ -7741,71 +7821,54 @@ static int cmd_fleet_desire(const struct shell *sh, size_t argc, char **argv)
 				shell_error(sh, "hw=<meshtastic HardwareModel number>, e.g. hw=88");
 				return -EINVAL;
 			}
-			hw_model = (uint16_t)m;
-		} else if (fleet_hash_parse(argv[i], hash) == 0) {
-			hash_p = hash;
+			fw->hw_model = (uint16_t)m;
+		} else if (fleet_hash_parse(argv[i], fw->hash) == 0) {
+			fw->has_hash = true;
 		} else {
 			shell_error(sh, "unknown argument '%s'", argv[i]);
 			return -EINVAL;
 		}
 	}
-	ret = meshtastic_fleet_desire((uint8_t)cls, version, hash_p, flags, hw_model);
-	if (ret == -EPERM) {
-		shell_error(sh, "refused: this node may not write the document (managed?)");
-	} else if (ret == -ENOSPC) {
-		shell_error(sh, "refused: four classes already have rows");
-	} else if (ret < 0) {
-		shell_error(sh, "desire failed (%d)", ret);
-	} else {
-		shell_print(sh, "published: class %lu -> %s%s", cls, argv[2],
-			    flags ? " (flagged)" : "");
-	}
-	return ret;
+	item.payload_len = sizeof(*fw);
+	return enqueue_shell_work(sh, &item);
 }
 
 static int cmd_fleet_pin(const struct shell *sh, size_t argc, char **argv)
 {
-	uint32_t node, version = 0U;
-	uint8_t hash[4];
-	const uint8_t *hash_p = NULL;
-	uint32_t flags = 0U;
+	struct shell_work_item item = {.op = SHELL_WORK_FLEET};
+	struct shell_fleet_work *fw = (struct shell_fleet_work *)item.payload;
 	bool withdraw = (strcmp(argv[0], "unpin") == 0);
-	int ret;
 
 	if (argc < (withdraw ? 2U : 3U)) {
 		shell_error(sh, "usage: fleet pin <node-hex> <maj.min.rev> [hash8hex] [downgrade] | "
 				"fleet unpin <node-hex>");
 		return -EINVAL;
 	}
-	node = (uint32_t)strtoul(argv[1], NULL, 16);
-	if (node == 0U) {
+	fw->verb = withdraw ? SHELL_FLEET_UNPIN : SHELL_FLEET_PIN;
+	fw->node = (uint32_t)strtoul(argv[1], NULL, 16);
+	if (fw->node == 0U) {
 		shell_error(sh, "node id required (hex)");
 		return -EINVAL;
 	}
 	if (!withdraw) {
-		if (fleet_version_parse(argv[2], &version) != 0) {
+		if (fleet_version_parse(argv[2], &fw->version) != 0) {
 			shell_error(sh, "version maj.min.rev required");
 			return -EINVAL;
 		}
+		fleet_version_copy(fw, argv[2]);
 		for (size_t i = 3U; i < argc; i++) {
 			if (strcmp(argv[i], "downgrade") == 0) {
-				flags |= MESHTASTIC_FLEET_FLAG_ALLOW_DOWNGRADE;
-			} else if (fleet_hash_parse(argv[i], hash) == 0) {
-				hash_p = hash;
+				fw->flags |= MESHTASTIC_FLEET_FLAG_ALLOW_DOWNGRADE;
+			} else if (fleet_hash_parse(argv[i], fw->hash) == 0) {
+				fw->has_hash = true;
 			} else {
 				shell_error(sh, "unknown argument '%s'", argv[i]);
 				return -EINVAL;
 			}
 		}
 	}
-	ret = meshtastic_fleet_pin(node, version, hash_p, flags);
-	if (ret < 0) {
-		shell_error(sh, "%s failed (%d)", withdraw ? "unpin" : "pin", ret);
-	} else {
-		shell_print(sh, "%s 0x%08x%s%s", withdraw ? "withdrew the pin on" : "pinned", node,
-			    withdraw ? "" : " -> ", withdraw ? "" : argv[2]);
-	}
-	return ret;
+	item.payload_len = sizeof(*fw);
+	return enqueue_shell_work(sh, &item);
 }
 
 #if defined(CONFIG_MESHTASTIC_DEPOT)

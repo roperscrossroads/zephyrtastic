@@ -999,7 +999,25 @@ ZTEST(meshtastic_shell, test_cluster_promote_is_idempotent_via_origin_marker)
  * for a class, `status` reads it back per class, `pin`/`unpin` write and
  * withdraw a node's own row. Driven through the real handlers; what a master's
  * shell session looks like.
+ *
+ * The three writers run on the shell work thread, not the shell's own (agents-vnfu:
+ * `fleet desire` overflowed a XIAO's 2048-byte shell stack every time). The shell thread
+ * still refuses a bad argument at once; the answer to a good one comes from the work
+ * thread, after "queued".
  */
+static const char *fleet_cmd(const char *cmd)
+{
+	const struct shell *sh = shell_backend_dummy_get_ptr();
+	const char *out = NULL;
+	size_t len = 0;
+
+	zassert_ok(run_cmd(cmd, &out), "%s failed", cmd);
+	zassert_not_null(strstr(out, "queued"), "%s must be queued, not run on the shell "
+			 "thread: %s", cmd, out);
+	k_msleep(200);
+	return shell_backend_dummy_get_output(sh, &len);
+}
+
 ZTEST(meshtastic_shell, test_fleet_desire_status_pin_and_unpin)
 {
 	const char *out = NULL;
@@ -1011,12 +1029,20 @@ ZTEST(meshtastic_shell, test_fleet_desire_status_pin_and_unpin)
 
 	zassert_not_equal(run_cmd("meshtastic fleet desire 0 0.3.0", &out), 0,
 			  "class 0 is not a class");
+	zassert_is_null(strstr(out, "queued"), "a refused argument queues nothing: %s", out);
 	zassert_not_equal(run_cmd("meshtastic fleet desire 1 three", &out), 0,
 			  "a version must be maj.min.rev");
-	zassert_ok(run_cmd("meshtastic fleet desire 1 0.3.0", &out), "desire failed");
-	zassert_not_null(strstr(out, "published: class 1 -> 0.3.0"), "desire should confirm");
-	zassert_ok(run_cmd("meshtastic fleet desire 2 0.2.7 deadbeef pause", &out),
-		   "desire with hash + flag failed");
+	zassert_not_equal(run_cmd("meshtastic fleet desire 1 0.3.0 nonsense", &out), 0,
+			  "an unknown argument is refused on the shell thread");
+	zassert_not_equal(run_cmd("meshtastic fleet pin 0 0.2.4", &out), 0,
+			  "a pin needs a node id");
+
+	out = fleet_cmd("meshtastic fleet desire 1 0.3.0");
+	zassert_not_null(strstr(out, "published: class 1 -> 0.3.0"), "desire should confirm: %s",
+			 out);
+	out = fleet_cmd("meshtastic fleet desire 2 0.2.7 deadbeef pause");
+	zassert_not_null(strstr(out, "published: class 2 -> 0.2.7 (flagged)"),
+			 "desire with hash + flag should confirm: %s", out);
 
 	/* The reconciler (and the fleet hook) run on the system workqueue. */
 	k_sleep(K_MSEC(50));
@@ -1027,10 +1053,13 @@ ZTEST(meshtastic_shell, test_fleet_desire_status_pin_and_unpin)
 	zassert_not_null(strstr(out, "PAUSED"), "the flag must read back");
 	zassert_not_null(strstr(out, "2 base rows"), "two classes, two rows");
 
-	zassert_ok(run_cmd("meshtastic fleet pin 0b0b0b0b 0.2.4", &out), "pin failed");
+	out = fleet_cmd("meshtastic fleet pin 0b0b0b0b 0.2.4");
+	zassert_not_null(strstr(out, "pinned 0x0b0b0b0b -> 0.2.4"), "pin should confirm: %s", out);
 	zassert_ok(run_cmd("meshtastic fleet status", &out), "status failed");
 	zassert_not_null(strstr(out, "pin     0x0b0b0b0b"), "the pin must be listed");
-	zassert_ok(run_cmd("meshtastic fleet unpin 0b0b0b0b", &out), "unpin failed");
+	out = fleet_cmd("meshtastic fleet unpin 0b0b0b0b");
+	zassert_not_null(strstr(out, "withdrew the pin on 0x0b0b0b0b"), "unpin should confirm: %s",
+			 out);
 	zassert_ok(run_cmd("meshtastic fleet status", &out), "status failed");
 	zassert_not_null(strstr(out, "withdrawn (tombstone)"),
 			 "a withdrawn pin is a tombstone, and says so");
