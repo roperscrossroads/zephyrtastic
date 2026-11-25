@@ -89,9 +89,16 @@ configdefault ASSERT
 # lever: a failed assert still halts and the coredump still has the PC; only
 # the human-readable console line is lost. The operator settled this as the
 # DIAGNOSTIC TIER (terse on field images, verbose on bench/dev), not a fleet flag.
-# Cost of the strings: -11.2 KB dram0 (-9.4 KB iram) on V4 | -37.9 KB XIAO flash.
-configdefault ASSERT_VERBOSE
-	default y
+# Cost of the strings: -11.2 KB dram0 (-9.4 KB iram) on V4 | -37.9 KB XIAO flash
+# (measured on Zephyr 4.4).
+#
+# Since Zephyr 4.5 the level is the choice ASSERT_MODULE_DEFAULT_LEVEL_{OFF,TERSE,
+# NORMAL,VERBOSE} (subsys/debug/zassert), default VERBOSE, so nothing is set here.
+# The field rung is CONFIG_ASSERT_MODULE_DEFAULT_LEVEL_TERSE=y. ASSERT_VERBOSE is
+# deprecated, and `=n` ALONE no longer drops the strings: the 4.5 rule maps it to
+# Terse only together with an ASSERT_NO_* symbol, so the terse fleet images went
+# on carrying every string with no warning (found 2026-11-25; agents-xf7q's class
+# of bug). Do not use ASSERT_VERBOSE again.
 
 # Reboot after a fatal error instead of arch_system_halt() (spin forever with
 # IRQs locked -- the "needs a power cycle" outage class). The coredump is taken

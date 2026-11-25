@@ -154,7 +154,8 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_GNSS=n
   sample.meshtastic.fleet.c4.terse_asserts:
-    # The diagnostic tier's field rung: ASSERT_VERBOSE=n keeps every check, drops the text.
+    # The diagnostic tier's field rung: Terse asserts keep every check, drop the text
+    # (Zephyr 4.5's ASSERT_MODULE_DEFAULT_LEVEL choice; ASSERT_VERBOSE=n no longer does it).
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
@@ -162,7 +163,7 @@ tests:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
     extra_configs:
-      - CONFIG_ASSERT_VERBOSE=n
+      - CONFIG_ASSERT_MODULE_DEFAULT_LEVEL_TERSE=y
   sample.meshtastic.fleet.c2:
     # Class 2, the V4-R8 courier (depot, SMP central). The tightest dram0 in the fleet.
     tags: [meshtastic, fleet]
@@ -207,7 +208,8 @@ tests:
       - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sig-required.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
   sample.meshtastic.fleet.c1.terse_signed:
     # Class 1 with terse asserts AND cluster + packet signing: the image agents-ooma.38 will
-    # prove on hardware. It only fits because ASSERT_VERBOSE=n frees ~39 KB of flash.
+    # prove on hardware. It only fits because Terse asserts free ~38 KB of flash (on Zephyr
+    # 4.5 that is ASSERT_MODULE_DEFAULT_LEVEL_TERSE; ASSERT_VERBOSE=n alone no longer does it).
     tags: [meshtastic, fleet]
     platform_allow: [xiao_ble/nrf52840]
     integration_platforms: [xiao_ble/nrf52840]
@@ -216,7 +218,7 @@ tests:
       - SHIELD=wio_sx1262_xiao
       - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sig-required.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-quiet-first-boot.conf"
     extra_configs:
-      - CONFIG_ASSERT_VERBOSE=n
+      - CONFIG_ASSERT_MODULE_DEFAULT_LEVEL_TERSE=y
   sample.meshtastic.fleet.c12:
     # Class 12, XIAO keyless radio head (ATTACHMENT-DESIGN S5): the peer link and OTA,
     # nothing that holds a key or speaks. The post-build keyless assert runs on this ELF.
