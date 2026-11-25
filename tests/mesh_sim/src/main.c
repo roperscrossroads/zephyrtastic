@@ -6186,7 +6186,7 @@ ZTEST(mesh_sim, test_duty_cycle_refuses_all_egress_and_tells_the_phone)
 
 	/* Leave the hour window clean: every later test in this suite transmits,
 	 * and a leftover 11% would follow them around. */
-	(void)meshtastic_airtime_init();
+	meshtastic_airtime_reset();
 	meshtastic_duty_stats_reset();
 }
 

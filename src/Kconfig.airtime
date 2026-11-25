@@ -4,7 +4,13 @@
 config MESHTASTIC_AIRTIME
 	bool "Meshtastic channel and TX airtime accounting"
 	default y
-	depends on MESHTASTIC_DEVICE_METRICS
 	help
-	  Track LoRa time-on-air for TX and RX and expose channel_utilization
-	  and air_util_tx in DeviceMetrics telemetry, matching official firmware.
+	  Track LoRa time-on-air for TX and RX: the regulatory duty-cycle gate
+	  (MESHTASTIC_DUTY_CYCLE) and the contention window read it, and, when
+	  device metrics are built, DeviceMetrics telemetry reports it as
+	  channel_utilization and air_util_tx, matching official firmware.
+
+	  Not dependent on MESHTASTIC_DEVICE_METRICS (agents-ls39.1.13): until
+	  2026-11-25 it was, so turning off device-metrics telemetry silently
+	  removed the duty-cycle gate with it. The telemetry reads this under its
+	  own #if; the accounting itself needs nothing from it.

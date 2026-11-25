@@ -40,6 +40,15 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
 
+#if defined(CONFIG_TEST_EXPECT_DUTY_GATE)
+/* agents-ls39.1.13: turning off device-metrics telemetry used to take airtime
+ * accounting, and with it the regulatory duty-cycle gate, out of the build. */
+BUILD_ASSERT(IS_ENABLED(CONFIG_MESHTASTIC_AIRTIME),
+	     "airtime accounting went missing with this configuration");
+BUILD_ASSERT(IS_ENABLED(CONFIG_MESHTASTIC_DUTY_CYCLE),
+	     "the regulatory duty-cycle gate went missing with this configuration");
+#endif
+
 #define TEST_NODE_ID 0x0A0A0A0AU
 
 static const struct device *const lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));

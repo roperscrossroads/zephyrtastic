@@ -100,10 +100,12 @@ tests:
       - CONFIG_MESHTASTIC_CLUSTER=n
   meshtastic.variants.no_device_metrics.native_sim:
     extra_configs:
-      # AIRTIME depends on DEVICE_METRICS (the regulatory gate reads the TX
-      # window), so this subtracts both.
+      # Device-metrics telemetry off. Airtime accounting and the regulatory
+      # duty-cycle gate must stay (agents-ls39.1.13: until 2026-11-25 AIRTIME
+      # depended on DEVICE_METRICS, so this scenario subtracted the gate too).
+      # TEST_EXPECT_DUTY_GATE makes the build fail if they go missing.
       - CONFIG_MESHTASTIC_DEVICE_METRICS=n
-      - CONFIG_MESHTASTIC_AIRTIME=n
+      - CONFIG_TEST_EXPECT_DUTY_GATE=y
 
   # --- combinations ------------------------------------------------------
   # The shape of fleet class 5: survey autostarted on a fixed preset, no cluster

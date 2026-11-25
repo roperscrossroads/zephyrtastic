@@ -826,15 +826,6 @@ static void telemetry_thread_fn(void *p1, void *p2, void *p3)
 
 int meshtastic_metrics_init(void)
 {
-#if defined(CONFIG_MESHTASTIC_AIRTIME)
-	int ret;
-
-	ret = meshtastic_airtime_init();
-	if (ret < 0) {
-		return ret;
-	}
-#endif
-
 #if defined(CONFIG_MESHTASTIC_TELEMETRY_WANT_RESPONSE)
 	k_mutex_init(&device_telemetry_state.lock);
 #endif

@@ -31,7 +31,7 @@ static void airtime_before(void *fixture)
 	/* Reset the static accounting state before every test; the first
 	 * access after init re-seeds the bucket ticks from current uptime.
 	 */
-	(void)meshtastic_airtime_init();
+	meshtastic_airtime_reset();
 }
 
 ZTEST(airtime, test_fresh_is_zero)
@@ -116,6 +116,43 @@ ZTEST(airtime, test_channel_rolling_window)
 		       "A expired, B(2000) survives -> 3.333%%");
 }
 
+/* agents-ls39.1.13: the RX log, the TX log and a head's channel-util read take
+ * the accounting's lock from different threads. Hold it, and a second logger must
+ * wait on it and then count, not fault. Before the lock was static, its one
+ * k_mutex_init lived in the device-metrics init, so a build without device
+ * metrics would have pended on a zeroed mutex (NULL wait-queue pointers) here.
+ * The no_device_metrics scenario runs this in exactly that build. */
+#define CONTENDER_STACK 2048
+static K_THREAD_STACK_DEFINE(contender_stack, CONTENDER_STACK);
+static struct k_thread contender;
+
+static void contender_fn(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+	meshtastic_airtime_log(MESHTASTIC_AIRTIME_RX, 1000U);
+}
+
+ZTEST(airtime, test_a_contended_lock_waits_and_then_counts)
+{
+	struct k_mutex *lock = meshtastic_airtime_test_lock();
+
+	zassert_ok(k_mutex_lock(lock, K_NO_WAIT), "the lock must be free between tests");
+	k_thread_create(&contender, contender_stack, K_THREAD_STACK_SIZEOF(contender_stack),
+			contender_fn, NULL, NULL, NULL, k_thread_priority_get(k_current_get()), 0,
+			K_NO_WAIT);
+	k_msleep(50);
+	zassert_equal(k_thread_join(&contender, K_NO_WAIT), -EBUSY,
+		      "the second logger must be waiting on the held lock");
+	k_mutex_unlock(lock);
+	zassert_ok(k_thread_join(&contender, K_SECONDS(1)),
+		   "the second logger must finish once the lock is released");
+	zassert_within(meshtastic_airtime_channel_util_percent(), 1.6667f, CH_EPS,
+		       "the waiting logger's 1000 ms must be counted");
+}
+
+#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
 /* TELEM-2: native_sim has no fuel_gauge0, so this exercises the no-battery path.
  * With no valid state-of-charge, the port must advertise the ">100 = powered"
  * sentinel (101) rather than leave battery_level unset — an unset field decodes
@@ -132,5 +169,6 @@ ZTEST(airtime, test_device_metrics_powered_sentinel_without_fuel_gauge)
 	zassert_false(m.has_voltage, "voltage must stay unset with no reading");
 	zassert_true(m.has_uptime_seconds, "uptime must always be present");
 }
+#endif
 
 ZTEST_SUITE(airtime, NULL, NULL, airtime_before, NULL, NULL);

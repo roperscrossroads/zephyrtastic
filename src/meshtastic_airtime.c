@@ -25,8 +25,14 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
+/* Statically initialised (agents-ls39.1.13): the lock must be valid before the
+ * first RX/TX log or channel-util read, whatever init runs or does not run. Its
+ * one init call used to sit in meshtastic_metrics_init(), so a build without
+ * device metrics would have taken a zeroed mutex: fine until the first contended
+ * lock, which pends on a wait queue whose list pointers are NULL. */
+static K_MUTEX_DEFINE(airtime_lock);
+
 struct meshtastic_airtime_state {
-	struct k_mutex lock;
 	/* One 60 s ring per preset — see the note in meshtastic_airtime.h for why
 	 * this is split and the TX ring below is not. */
 	uint32_t channel_utilization[MESHTASTIC_AIRTIME_PRESET_SLOTS]
@@ -86,7 +92,7 @@ static uint8_t period_util_hour(uint32_t sec)
  * Advance both rolling windows to `sec` (seconds of uptime), zeroing every
  * bucket newly entered since the previous call — the lazy equivalent of the
  * former 1 Hz tick, which cleared the just-entered bucket on each rollover.
- * Must be called with airtime.lock held, before any add or read.
+ * Must be called with airtime_lock held, before any add or read.
  */
 static void airtime_advance(uint32_t sec)
 {
@@ -142,7 +148,7 @@ void meshtastic_airtime_log(enum meshtastic_airtime_type type, uint32_t ms)
 	uint32_t sec = now_seconds();
 	uint8_t slot;
 
-	k_mutex_lock(&airtime.lock, K_FOREVER);
+	k_mutex_lock(&airtime_lock, K_FOREVER);
 	airtime_advance(sec);
 
 	slot = airtime_slot();
@@ -167,7 +173,7 @@ void meshtastic_airtime_log(enum meshtastic_airtime_type type, uint32_t ms)
 		break;
 	}
 
-	k_mutex_unlock(&airtime.lock);
+	k_mutex_unlock(&airtime_lock);
 }
 
 uint32_t meshtastic_airtime_packet_ms(uint32_t wire_len)
@@ -195,10 +201,10 @@ float meshtastic_airtime_channel_util_percent(void)
 {
 	float percent;
 
-	k_mutex_lock(&airtime.lock, K_FOREVER);
+	k_mutex_lock(&airtime_lock, K_FOREVER);
 	airtime_advance(now_seconds());
 	percent = channel_util_slot_locked(airtime_slot());
-	k_mutex_unlock(&airtime.lock);
+	k_mutex_unlock(&airtime_lock);
 
 	return percent;
 }
@@ -211,10 +217,10 @@ float meshtastic_airtime_channel_util_percent_slot(uint8_t slot)
 		return 0.0f;
 	}
 
-	k_mutex_lock(&airtime.lock, K_FOREVER);
+	k_mutex_lock(&airtime_lock, K_FOREVER);
 	airtime_advance(now_seconds());
 	percent = channel_util_slot_locked(slot);
-	k_mutex_unlock(&airtime.lock);
+	k_mutex_unlock(&airtime_lock);
 
 	return percent;
 }
@@ -229,12 +235,12 @@ float meshtastic_airtime_tx_util_percent(void)
 	uint32_t sum = 0U;
 	float percent;
 
-	k_mutex_lock(&airtime.lock, K_FOREVER);
+	k_mutex_lock(&airtime_lock, K_FOREVER);
 	airtime_advance(now_seconds());
 	for (size_t i = 0; i < MESHTASTIC_MINUTES_IN_HOUR; i++) {
 		sum += airtime.utilization_tx[i];
 	}
-	k_mutex_unlock(&airtime.lock);
+	k_mutex_unlock(&airtime_lock);
 
 	percent = ((float)sum / (float)MESHTASTIC_MS_IN_HOUR) * 100.0f;
 
@@ -250,7 +256,7 @@ uint8_t meshtastic_airtime_silent_minutes(float tx_percent, float duty_cycle_pct
 		return 0U;
 	}
 
-	k_mutex_lock(&airtime.lock, K_FOREVER);
+	k_mutex_lock(&airtime_lock, K_FOREVER);
 	airtime_advance(now_seconds());
 
 	/* Walk the window OLDEST bucket first: one minute from now the oldest
@@ -276,18 +282,26 @@ uint8_t meshtastic_airtime_silent_minutes(float tx_percent, float duty_cycle_pct
 		}
 	}
 
-	k_mutex_unlock(&airtime.lock);
+	k_mutex_unlock(&airtime_lock);
 	return minutes;
 }
 
-int meshtastic_airtime_init(void)
+void meshtastic_airtime_reset(void)
 {
+	k_mutex_lock(&airtime_lock, K_FOREVER);
 	memset(&airtime, 0, sizeof(airtime));
-	k_mutex_init(&airtime.lock);
+	k_mutex_unlock(&airtime_lock);
 	/*
 	 * No periodic timer: the rolling windows decay lazily on access
 	 * (airtime_advance), so an idle node adds no wakeup here.  `initialized`
-	 * is false until the first access seeds the bucket ticks.
+	 * is false until the first access seeds the bucket ticks. The zeroed
+	 * static is that same state at boot, so nothing has to call this.
 	 */
-	return 0;
 }
+
+#if defined(CONFIG_ZTEST)
+struct k_mutex *meshtastic_airtime_test_lock(void)
+{
+	return &airtime_lock;
+}
+#endif

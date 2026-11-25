@@ -1,0 +1,7 @@
+config TEST_EXPECT_DUTY_GATE
+	bool "Fail the build unless airtime accounting and the duty-cycle gate are on"
+	help
+	  Set by scenarios that subtract a module the regulatory gate must survive
+	  (no_device_metrics, agents-ls39.1.13).
+
+source "Kconfig.zephyr"

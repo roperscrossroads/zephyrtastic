@@ -27,7 +27,7 @@
 static void duty_before(void *fixture)
 {
 	ARG_UNUSED(fixture);
-	(void)meshtastic_airtime_init();
+	meshtastic_airtime_reset();
 	meshtastic_duty_stats_reset();
 	meshtastic_duty_set_override(false);
 	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);

@@ -45,7 +45,19 @@ enum meshtastic_airtime_type {
 	MESHTASTIC_AIRTIME_RX_ALL,
 };
 
-int meshtastic_airtime_init(void);
+/**
+ * @brief Empty every window (the state a node boots with).
+ *
+ * The accounting needs no init: its state and lock are static and valid from
+ * boot, so it works in any build that compiles it, with or without device
+ * metrics (agents-ls39.1.13). Tests call this to start from a clean hour.
+ */
+void meshtastic_airtime_reset(void);
+
+#if defined(CONFIG_ZTEST)
+/** @brief Test-only: the accounting's lock, to hold it and force contention. */
+struct k_mutex *meshtastic_airtime_test_lock(void);
+#endif
 
 uint32_t meshtastic_airtime_packet_ms(uint32_t wire_len);
 

@@ -9,3 +9,9 @@ common:
     - native_sim/native/64
 tests:
   meshtastic.airtime.native_sim: {}
+  meshtastic.airtime.no_device_metrics.native_sim:
+    extra_configs:
+      # Airtime accounting and the duty gate without device-metrics telemetry,
+      # as every keyless head builds them (agents-ls39.1.13): nothing in this
+      # build would initialise the accounting if it needed initialising.
+      - CONFIG_MESHTASTIC_DEVICE_METRICS=n
