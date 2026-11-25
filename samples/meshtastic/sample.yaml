@@ -237,7 +237,7 @@ tests:
     extra_args:
       - SHIELD=wio_sx1262_xiao
       - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sig-required.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-quiet-first-boot.conf"
-      - CONFIG_MESHTASTIC_FLEET_BUNDLE=xiao-node
+      - CONFIG_MESHTASTIC_FLEET_BUNDLE="xiao-node"
       - CONFIG_ASSERT_MODULE_DEFAULT_LEVEL_TERSE=y
   sample.meshtastic.fleet.xiao-worker:
     # Class 12, XIAO keyless radio head (ATTACHMENT-DESIGN S5): the peer link and OTA,
