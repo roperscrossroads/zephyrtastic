@@ -193,6 +193,30 @@ struct meshtastic_fatal_crash_info {
 	uint32_t heap_max_allocated;
 	/** Name of the thread that faulted, best-effort. */
 	char thread_name[20];
+	/** The exception frame (agents-ninc): the faulting PC, LR and xPSR from
+	 * the frame Zephyr passed in. Zero where the architecture gives none
+	 * (native_sim, Xtensa). For an assert or k_panic() the PC is inside the
+	 * assert machinery and LR is the more telling of the two. */
+	uint32_t pc;
+	uint32_t lr;
+	uint32_t xpsr;
+	/** Cortex-M fault status at the moment of the fault: CFSR (a stack
+	 * overflow into the MPU guard is MSTKERR/MMARVALID here), HFSR, and the
+	 * fault addresses. Zero on other architectures. */
+	uint32_t cfsr;
+	uint32_t hfsr;
+	uint32_t mmfar;
+	uint32_t bfar;
+	/** Faults that re-entered the fatal handler after this record was made.
+	 * The record always names the FIRST fault; a second one raised inside
+	 * the fatal path (a log flush, the reboot) only bumps this. */
+	uint8_t nested;
+	/** The fault was raised in handler mode (xPSR's exception number is
+	 * set) -- inside another exception or ISR. When this is the record's
+	 * own fault (nested == 0), the handler never saw the fault that
+	 * started the chain: something before it (coredump(), Zephyr's own
+	 * fatal path) faulted first. Look in `logring prev`. */
+	uint8_t in_handler;
 };
 
 /**

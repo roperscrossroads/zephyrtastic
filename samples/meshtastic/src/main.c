@@ -241,6 +241,12 @@ static void log_boot_reset_cause(void)
 			fatal_reason_name(fatal_crash.reason), fatal_crash.reason,
 			fatal_crash.heap_free, fatal_crash.heap_allocated,
 			fatal_crash.heap_max_allocated, fatal_crash.thread_name);
+		LOG_INF("Fatal error frame: pc=0x%08x lr=0x%08x xpsr=0x%08x cfsr=0x%08x "
+			"hfsr=0x%08x mmfar=0x%08x bfar=0x%08x%s, %u nested",
+			fatal_crash.pc, fatal_crash.lr, fatal_crash.xpsr, fatal_crash.cfsr,
+			fatal_crash.hfsr, fatal_crash.mmfar, fatal_crash.bfar,
+			fatal_crash.in_handler ? " (raised in handler mode)" : "",
+			fatal_crash.nested);
 	}
 
 	boot_log_settle();

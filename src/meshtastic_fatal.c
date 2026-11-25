@@ -21,6 +21,10 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/arch/cpu.h>
+#include <zephyr/devicetree.h>
+#if defined(CONFIG_CPU_CORTEX_M)
+#include <cmsis_core.h>
+#endif
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/sys/reboot.h>
@@ -94,7 +98,33 @@ static void fatal_collect_heap_stats(struct meshtastic_fatal_crash_info *info)
 
 #define FATAL_CRASH_MAGIC 0x46415441U /* "FATA" */
 
-#define FATAL_CRASH_VERSION 1U
+#define FATAL_CRASH_VERSION 2U /* 2: exception frame, fault status, nested count */
+
+/*
+ * A coredump into a partition on the nRF QSPI NOR CANNOT work, and makes every
+ * fault on such a board panic twice (agents-ninc, 2026-11-24). Zephyr's
+ * z_fatal_error() runs coredump() BEFORE this file's handler; the flash
+ * partition backend writes through the ordinary nrf_qspi_nor driver, whose
+ * every operation takes a semaphore with K_FOREVER (qspi_lock()) and then waits
+ * for the QSPI completion interrupt on another one. From exception context the
+ * first is the sem.c "k_sem_take with a timeout in an ISR" assert, and the
+ * second could never be given. The assert re-enters the fatal path, coredump's
+ * re-entry guard lets the second pass through, and this handler records only
+ * the second fault: rzr5 (z7rg) and rzr7 (vnfu) on 2026-11-24, both XIAOs on
+ * the sysbuild layout, whose coredump_partition is on the QSPI chip. Refuse the
+ * combination at build time rather than rediscover it on a crash.
+ */
+#if defined(CONFIG_DEBUG_COREDUMP_BACKEND_FLASH_PARTITION) &&                                  \
+	DT_NODE_EXISTS(DT_NODELABEL(coredump_partition))
+BUILD_ASSERT(!DT_NODE_HAS_COMPAT(DT_GPARENT(DT_NODELABEL(coredump_partition)), nordic_qspi_nor),
+	     "coredump_partition is on the nRF QSPI NOR, whose driver blocks: a coredump "
+	     "from a fault asserts in it and hides the fault (agents-ninc)");
+#endif
+
+/* Set on the first entry into the handler this boot (plain .bss: zeroed by every
+ * boot). A second entry is a fault inside the fatal path itself; it must not
+ * overwrite the record of the fault that started the chain. */
+static bool fatal_entered;
 
 /* Sealed (meshtastic_retained.h): a magic alone also passes over another image's bytes
  * after an update (agents-8h29). */
@@ -115,6 +145,7 @@ bool meshtastic_fatal_take_last_crash(struct meshtastic_fatal_crash_info *out)
 
 	*out = rtc_fatal_info;
 	meshtastic_retained_void(&rtc_fatal_seal); /* one-shot: not re-reported on a later boot */
+	fatal_entered = false;                     /* a fault after this is a new chain */
 
 	return true;
 }
@@ -134,17 +165,61 @@ bool meshtastic_fatal_peek_last_crash(struct meshtastic_fatal_crash_info *out)
  * behavior (LOG_PANIC() + reset-or-halt per CONFIG_RESET_ON_FATAL_ERROR)
  * so nothing about the existing fatal-error path changes -- this only adds
  * the breadcrumb capture ahead of it. */
+/* The exception frame and fault status, where the architecture has them. Plain
+ * loads: no driver, nothing that can block. */
+static void fatal_collect_frame(struct meshtastic_fatal_crash_info *info,
+				const struct arch_esf *esf)
+{
+#if defined(CONFIG_CPU_CORTEX_M)
+	if (esf != NULL) {
+		info->pc = esf->basic.pc;
+		info->lr = esf->basic.lr;
+		info->xpsr = esf->basic.xpsr;
+		/* IPSR, the exception number, in the stacked xPSR: non-zero means the
+		 * fault was taken in handler mode ("Fault during interrupt handling"). */
+		info->in_handler = (esf->basic.xpsr & 0x1FFU) != 0U ? 1U : 0U;
+	}
+#if defined(CONFIG_ARMV7_M_ARMV8_M_MAINLINE)
+	info->cfsr = SCB->CFSR;
+	info->hfsr = SCB->HFSR;
+	info->mmfar = SCB->MMFAR;
+	info->bfar = SCB->BFAR;
+#endif
+#else
+	ARG_UNUSED(info);
+	ARG_UNUSED(esf);
+#endif
+}
+
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
 	const char *tname;
 
-	ARG_UNUSED(esf);
+	/* A fault inside the fatal path (LOG_PANIC's flush, the reboot): keep the
+	 * first fault's record and count this one (agents-ninc). */
+	if (fatal_entered) {
+		if (fatal_record_valid()) {
+			meshtastic_retained_void(&rtc_fatal_seal);
+			if (rtc_fatal_info.nested < UINT8_MAX) {
+				rtc_fatal_info.nested++;
+			}
+			meshtastic_retained_seal(&rtc_fatal_seal, FATAL_CRASH_MAGIC,
+						 FATAL_CRASH_VERSION, &rtc_fatal_info,
+						 sizeof(rtc_fatal_info));
+		}
+		goto finish;
+	}
+	fatal_entered = true;
 
 	/* Plain memory stores -- no driver, no log subsystem -- same reasoning
 	 * as watchdog_pre_reset_cb(), and doubly so here: this can run from a
-	 * genuine CPU exception context, not just a device-driver ISR. */
+	 * genuine CPU exception context, not just a device-driver ISR. Nothing on
+	 * this path may block either: a semaphore taken here is the nested panic
+	 * of agents-ninc. */
 	meshtastic_retained_void(&rtc_fatal_seal); /* invalid while it changes */
+	memset(&rtc_fatal_info, 0, sizeof(rtc_fatal_info));
 	rtc_fatal_info.reason = reason;
+	fatal_collect_frame(&rtc_fatal_info, esf);
 
 	fatal_collect_heap_stats(&rtc_fatal_info);
 
@@ -157,6 +232,7 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 	meshtastic_retained_seal(&rtc_fatal_seal, FATAL_CRASH_MAGIC, FATAL_CRASH_VERSION,
 				 &rtc_fatal_info, sizeof(rtc_fatal_info));
 
+finish:
 	LOG_PANIC();
 
 #if defined(CONFIG_MESHTASTIC_DFU_ON_FATAL)
