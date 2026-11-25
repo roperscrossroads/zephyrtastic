@@ -734,7 +734,8 @@ void meshtastic_mqtt_core_downlink(const uint8_t *payload, size_t len, const cha
 	LOG_DBG("MQTT downlink 0x%08x->0x%08x id=0x%08x via %s topic %s", inject.from, inject.to,
 		inject.id, env.gateway_id, topic);
 	LOG_INF("MQTT downlink topic %s len %zu", topic, len);
-	ret = meshtastic_inject_downlink_mesh_packet(&inject);
+	/* Not on this thread: dedup and dispatch belong to the RX thread (agents-ls39.5.2). */
+	ret = meshtastic_radio_rx_inject_mqtt(&inject);
 	if (ret != 0) {
 		LOG_DBG("MQTT downlink inject failed (%d)", ret);
 	}

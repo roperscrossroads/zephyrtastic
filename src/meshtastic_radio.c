@@ -10,12 +10,15 @@
 
 #include <zephyr/drivers/lora.h>
 #include <zephyr/kernel.h>
+#include <zephyr/spinlock.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
 #include <zephyr/meshtastic/fem.h>
 
 #include "meshtastic_core.h"
+#include "meshtastic_ext_ram.h"
+#include "meshtastic/mesh.pb.h"
 #include "meshtastic_outbound.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_preset.h"
@@ -840,6 +843,72 @@ int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic
 	return meshtastic_radio_rx_inject_meta(buf, len, &meta);
 }
 
+#if defined(CONFIG_MESHTASTIC_MQTT) && !defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+/* MQTT downlink MeshPackets waiting for the RX thread: one per queue slot, so a full pool
+ * and a full queue are the same condition. The queue slot's buf[0] is the pool index. */
+static meshtastic_MeshPacket mqtt_pool[CONFIG_MESHTASTIC_RX_QUEUE_DEPTH] MESHTASTIC_EXT_RAM_BSS_ATTR;
+static uint32_t mqtt_pool_used; /* bit i set: mqtt_pool[i] is taken */
+static struct k_spinlock mqtt_pool_lock;
+
+int meshtastic_radio_rx_inject_mqtt(const void *mesh_packet)
+{
+	struct mt_rx_slot slot = {0};
+	k_spinlock_key_t key;
+	int idx = -1;
+
+	if (mesh_packet == NULL) {
+		return -EINVAL;
+	}
+
+	key = k_spin_lock(&mqtt_pool_lock);
+	for (int i = 0; i < CONFIG_MESHTASTIC_RX_QUEUE_DEPTH; i++) {
+		if ((mqtt_pool_used & BIT(i)) == 0U) {
+			mqtt_pool_used |= BIT(i);
+			idx = i;
+			break;
+		}
+	}
+	k_spin_unlock(&mqtt_pool_lock, key);
+	if (idx < 0) {
+		mt.status.rx_dropped++;
+		mt.status.rx_dropped_injected++;
+		return -ENOBUFS;
+	}
+
+	mqtt_pool[idx] = *(const meshtastic_MeshPacket *)mesh_packet;
+	slot.len = 1U;
+	slot.bearer = MESHTASTIC_BEARER_MQTT;
+	slot.preset = MESHTASTIC_PRESET_UNKNOWN;
+	slot.rx_ms = (uint32_t)k_uptime_get();
+	slot.buf[0] = (uint8_t)idx;
+
+	if (k_msgq_put(&mt_rx_msgq, &slot, K_NO_WAIT) != 0) {
+		key = k_spin_lock(&mqtt_pool_lock);
+		mqtt_pool_used &= ~BIT(idx);
+		k_spin_unlock(&mqtt_pool_lock, key);
+		mt.status.rx_dropped++;
+		mt.status.rx_dropped_injected++;
+		return -ENOBUFS;
+	}
+	mt_rx_queue_note_depth();
+	return 0;
+}
+
+/* RX thread: run the downlink through the same dedup, dispatch and relay rules as
+ * every other frame, then give the pool slot back. */
+static void mqtt_slot_process(uint8_t idx)
+{
+	k_spinlock_key_t key;
+
+	if (idx < CONFIG_MESHTASTIC_RX_QUEUE_DEPTH) {
+		(void)meshtastic_inject_downlink_mesh_packet(&mqtt_pool[idx]);
+		key = k_spin_lock(&mqtt_pool_lock);
+		mqtt_pool_used &= ~BIT(idx);
+		k_spin_unlock(&mqtt_pool_lock, key);
+	}
+}
+#endif
+
 static void mt_thread_fn(void *p1, void *p2, void *p3)
 {
 	struct mt_rx_slot slot;
@@ -875,6 +944,12 @@ static void mt_thread_fn(void *p1, void *p2, void *p3)
 								 slot.snr, slot.preset, slot.rx_ms);
 			}
 #else
+#if defined(CONFIG_MESHTASTIC_MQTT)
+			if (slot.bearer == MESHTASTIC_BEARER_MQTT) {
+				mqtt_slot_process(slot.buf[0]);
+				continue;
+			}
+#endif
 			const struct meshtastic_rx_meta meta = {
 				.bearer = slot.bearer,
 				.attach = slot.attach,

@@ -6674,6 +6674,40 @@ ZTEST(protocol_stack, test_downlink_foreign_packet_relays_without_local_delivery
 		      "relay should emit TX_DONE only");
 }
 
+/* agents-ls39.1.2: a downlink is relayed under the same rules as an RF frame: not by a
+ * CLIENT_MUTE node and not with LOCAL_ONLY (it used to relay regardless). */
+ZTEST(protocol_stack, test_downlink_relay_follows_the_rebroadcast_rules)
+{
+	const uint8_t body[] = "rules";
+	meshtastic_MeshPacket mesh = meshtastic_MeshPacket_init_zero;
+	const meshtastic_Config_DeviceConfig_RebroadcastMode saved = meshtastic_rebroadcast_mode();
+
+	mesh.from = PEER_NODE_ID;
+	mesh.to = OTHER_NODE_ID;
+	mesh.hop_limit = 2U;
+	mesh.hop_start = 2U;
+	mesh.channel = meshtastic_channels_primary_index();
+	mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+	mesh.decoded.portnum = MESHTASTIC_PORT_TEXT_MESSAGE;
+	mesh.decoded.payload.size = sizeof(body) - 1U;
+	memcpy(mesh.decoded.payload.bytes, body, sizeof(body) - 1U);
+
+	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY);
+	mesh.id = 0x5911U;
+	zassert_ok(meshtastic_inject_downlink_mesh_packet(&mesh), "");
+	assert_mock_send_count(0U);
+
+	meshtastic_set_rebroadcast_mode(meshtastic_Config_DeviceConfig_RebroadcastMode_NONE);
+	mesh.id = 0x5912U;
+	zassert_ok(meshtastic_inject_downlink_mesh_packet(&mesh), "");
+	assert_mock_send_count(0U);
+
+	meshtastic_set_rebroadcast_mode(saved);
+	mesh.id = 0x5913U;
+	zassert_ok(meshtastic_inject_downlink_mesh_packet(&mesh), "");
+	assert_mock_send_count(1U);
+}
+
 /* Verifies duplicate MQTT downlinks are rejected before relay or local delivery. */
 ZTEST(protocol_stack, test_duplicate_downlink_returns_ealready)
 {

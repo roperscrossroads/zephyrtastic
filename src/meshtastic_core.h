@@ -49,6 +49,11 @@ enum meshtastic_bearer {
 	 * preset -- so everything that describes RF applies to them; only the
 	 * things priced with the LOCAL modem (airtime, the ear) stay LoRa-only. */
 	MESHTASTIC_BEARER_ATTACHMENT,
+	/* A packet an MQTT broker delivered (downlink). It never crossed our air and is
+	 * not a wire frame: the MeshPacket waits in a pool and the queue slot carries its
+	 * index, so dedup, dispatch and relay run on the RX thread like any other frame
+	 * (upstream: MQTT -> enqueueReceivedMessage). */
+	MESHTASTIC_BEARER_MQTT,
 };
 
 /* "Did this frame cross the air?" -- the question the router's link-local rule
@@ -238,6 +243,12 @@ int meshtastic_radio_init(void);
  * counted, same as an RF frame in that state).
  */
 int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic_bearer bearer);
+
+#if defined(CONFIG_MESHTASTIC_MQTT)
+/* Hand an MQTT downlink MeshPacket to the RX thread (copied; the caller keeps its own).
+ * Returns 0, or -ENOBUFS when the pool or the queue is full (counted in rx_dropped). */
+int meshtastic_radio_rx_inject_mqtt(const void *mesh_packet);
+#endif
 
 /* The same, with everything the receiving radio knew: bearer, attachment id,
  * preset, rssi/snr, its uptime at reception. This is how a head's frames enter

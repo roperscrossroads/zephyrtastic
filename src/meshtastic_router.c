@@ -1056,7 +1056,11 @@ int meshtastic_inject_downlink_mesh_packet(const meshtastic_MeshPacket *mesh)
 		0U, 0U);
 
 	local = (work.to == mt.node_id || work.to == MESHTASTIC_NODE_BROADCAST);
-	relay = (work.to != mt.node_id &&
+	/* Relay under the same rules as an RF frame (upstream: the router, not the MQTT
+	 * module, decides): not as CLIENT_MUTE or with rebroadcast NONE / LOCAL_ONLY. */
+	relay = (work.to != mt.node_id && meshtastic_is_rebroadcaster() &&
+		 meshtastic_rebroadcast_mode() !=
+			 meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY &&
 		 (work.hop_limit > 0U ||
 		  (work.hop_limit == 0U &&
 		   work.which_payload_variant == meshtastic_MeshPacket_encrypted_tag)));
