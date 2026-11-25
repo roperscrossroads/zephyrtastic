@@ -16,6 +16,10 @@
 #include <zephyr/drivers/lora.h>
 #include <zephyr/kernel.h>
 #include <zephyr/settings/settings.h>
+#if defined(CONFIG_MESHTASTIC_SHELL)
+#include <zephyr/shell/shell.h>
+#include <zephyr/shell/shell_dummy.h>
+#endif
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/ztest.h>
 #include <psa/crypto.h>
@@ -26,6 +30,7 @@
 
 #include "meshtastic/mesh.pb.h"
 #include "meshtastic_channels.h"
+#include "meshtastic_clock.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_lockdown.h"
@@ -634,3 +639,98 @@ ZTEST(lockdown_store, test_provision_seals_the_sparkplug_login)
 	zassert_mem_equal(got.buf, "hunter2", 7);
 	(void)settings_delete("mtspb/pass");
 }
+
+#if defined(CONFIG_MESHTASTIC_SHELL)
+static int run_cmd(const char *cmd, const char **out)
+{
+	const struct shell *sh = shell_backend_dummy_get_ptr();
+	size_t len = 0;
+	int ret;
+
+	shell_backend_dummy_clear_output(sh);
+	ret = shell_execute_cmd(sh, cmd);
+	if (out != NULL) {
+		*out = shell_backend_dummy_get_output(sh, &len);
+	}
+	return ret;
+}
+
+static void lock_and_boot(void)
+{
+	set_long_name("sealed name");
+	flush_all();
+	zassert_ok(meshtastic_lockdown_provision(PP, PPLEN, 0U, 0U, 0U), "");
+	wait_idle();
+	meshtastic_lockdown_lock_now();
+	stage_boot();
+	zassert_true(meshtastic_lockdown_locked(), "");
+	zassert_str_equal(long_name(), "stock name", "placeholders");
+}
+
+/*
+ * agents-ls39.1.8. The admin dispatcher drops every payload while the store is
+ * locked; the console did not. A shell write changed the live state (a
+ * placeholder owner, a preset, a tx power the radio would use after unlock's
+ * reload threw it away) and its save was then refused by the wrap with nothing
+ * said to the operator. The console now refuses the write, as admin does.
+ */
+ZTEST(lockdown_store, test_shell_writes_are_refused_while_locked)
+{
+	meshtastic_Config lora;
+	int8_t power_before;
+	const char *out = NULL;
+
+	lock_and_boot();
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &lora), "");
+	power_before = lora.payload_variant.lora.tx_power;
+
+	zassert_not_equal(run_cmd("meshtastic owner set Typed typd", &out), 0,
+			  "a write on a locked node must be refused");
+	zassert_not_null(strstr(out, "locked"), "say why, got: %s", out);
+	zassert_str_equal(long_name(), "stock name", "and change nothing live");
+
+	zassert_not_equal(run_cmd("meshtastic lora power 7", &out), 0, "lora power refused");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &lora), "");
+	zassert_equal(lora.payload_variant.lora.tx_power, power_before, "power unchanged");
+
+	zassert_not_equal(run_cmd("meshtastic device role CLIENT_MUTE", &out), 0,
+			  "role refused");
+
+	/* The clock is not sealed, and a token's epoch needs one: still settable.
+	 * Then back to no clock: with one, the unlock backoff runs on the epoch,
+	 * which a staged boot does not advance, and the tests after this one
+	 * stage boots to pay it. */
+	zassert_ok(run_cmd("meshtastic time set 1780000000", &out), "time set: %s", out);
+	meshtastic_clock_test_reset();
+
+	/* Unlocked and reloaded: the console writes again. */
+	zassert_ok(meshtastic_lockdown_unlock(PP, PPLEN, 0U, 0U, 0U), "");
+	wait_idle();
+	zassert_true(meshtastic_lockdown_store_ready(), "");
+	zassert_ok(run_cmd("meshtastic owner set Typed typd", &out), "after unlock: %s", out);
+	zassert_str_equal(long_name(), "Typed", "");
+}
+
+/* LOCKDOWN-DESIGN's promise: console commands that read config refuse while
+ * locked, rather than print the placeholders as if they were the node's. */
+ZTEST(lockdown_store, test_shell_config_reads_refuse_while_locked)
+{
+	const char *out = NULL;
+
+	lock_and_boot();
+	zassert_not_equal(run_cmd("meshtastic owner", &out), 0, "owner read refused");
+	zassert_not_null(strstr(out, "locked"), "got: %s", out);
+	zassert_is_null(strstr(out, "stock name"), "no placeholder shown: %s", out);
+	zassert_not_equal(run_cmd("meshtastic channel list", &out), 0, "channels refused");
+	zassert_not_equal(run_cmd("meshtastic lora", &out), 0, "lora refused");
+
+	/* What the operator needs to get out of this state still answers. */
+	zassert_ok(run_cmd("meshtastic lockdown status", &out), "status: %s", out);
+	zassert_ok(run_cmd("meshtastic version", &out), "");
+
+	zassert_ok(meshtastic_lockdown_unlock(PP, PPLEN, 0U, 0U, 0U), "");
+	wait_idle();
+	zassert_ok(run_cmd("meshtastic owner", &out), "");
+	zassert_not_null(strstr(out, "sealed name"), "the real owner after unlock: %s", out);
+}
+#endif /* CONFIG_MESHTASTIC_SHELL */

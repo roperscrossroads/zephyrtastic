@@ -13,3 +13,16 @@ common:
     - native_sim/native/64
 tests:
   meshtastic.lockdown_store.native_sim: {}
+
+  # The console on a locked node (agents-ls39.1.8): the same staged locked boot
+  # with the shell on. A config write must be refused, not applied live and then
+  # lost when the persist is refused; config reads say "locked" rather than show
+  # the placeholders. The clock and the lockdown command itself stay usable.
+  meshtastic.lockdown_store.shell.native_sim:
+    extra_configs:
+      - CONFIG_SHELL=y
+      - CONFIG_SHELL_BACKEND_DUMMY=y
+      - CONFIG_SHELL_BACKEND_DUMMY_BUF_SIZE=4096
+      - CONFIG_SHELL_BACKEND_SERIAL=n
+      - CONFIG_MESHTASTIC_SHELL=y
+      - CONFIG_MESHTASTIC_ADMIN=y

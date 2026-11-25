@@ -704,7 +704,9 @@ static const char *shell_device_role_name(meshtastic_Config_DeviceConfig_Role ro
 static const char *shell_rebroadcast_mode_name(meshtastic_Config_DeviceConfig_RebroadcastMode mode);
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static bool shell_config_write_refused(const struct shell *sh);
+static bool shell_managed_refused(const struct shell *sh);
 #endif
+static bool shell_store_locked(const struct shell *sh);
 
 static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 {
@@ -810,6 +812,9 @@ static const char *clock_quality_name(enum meshtastic_clock_quality q)
  */
 static int cmd_owner(const struct shell *sh, size_t argc, char **argv)
 {
+	if (shell_store_locked(sh)) {
+		return -EACCES;
+	}
 	if (argc == 1U) {
 		bool licensed = false;
 		bool unmessagable = false;
@@ -1045,7 +1050,9 @@ static int cmd_time(const struct shell *sh, size_t argc, char **argv)
 			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
 	return -ENOTSUP;
 #else
-	if (shell_config_write_refused(sh)) {
+	/* Managed only, not the lockdown gate: the clock is not sealed, and a
+	 * token's expiry epoch needs one on a locked node. */
+	if (shell_managed_refused(sh)) {
 		return -EACCES;
 	}
 
@@ -1395,6 +1402,30 @@ static void shell_print_psk_hex(const struct shell *sh, const meshtastic_Channel
 #endif
 }
 
+/* Refuse a config read or write while lockdown holds the store: locked, or
+ * unlocked but not yet reloaded (agents-ls39.1.8). RAM then holds the seed's
+ * placeholders, not the node's config. A write would change them live and its
+ * save would be refused by the wrap, with nothing said; a read would show them
+ * as if they were the node's. The admin dispatcher drops every payload in the
+ * same state; this is the console's half. `lockdown`, `version`, `status`,
+ * `resets` and the clock stay usable: they are how the operator gets out.
+ *
+ * Here and not in the config store's setters for now: the store's one
+ * config_write_allowed(origin) is agents-ls39.4.2. */
+static bool shell_store_locked(const struct shell *sh)
+{
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
+	if (meshtastic_lockdown_active() && !meshtastic_lockdown_store_ready()) {
+		shell_error(sh, "refused: the store is locked (`meshtastic lockdown unlock` "
+				"first); config is not readable or writable until then");
+		return true;
+	}
+#else
+	ARG_UNUSED(sh);
+#endif
+	return false;
+}
+
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 /* Refuse a config write when the node is administratively managed. The admin
  * model says a managed node takes configuration only from an authorized remote
@@ -1404,7 +1435,7 @@ static void shell_print_psk_hex(const struct shell *sh, const meshtastic_Channel
  * With admin compiled out there is no admin model to defer to, so nothing is
  * refused — the compile-time CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE switch is the
  * control that still applies in that build. */
-static bool shell_config_write_refused(const struct shell *sh)
+static bool shell_managed_refused(const struct shell *sh)
 {
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 	if (meshtastic_admin_is_managed()) {
@@ -1416,6 +1447,12 @@ static bool shell_config_write_refused(const struct shell *sh)
 	ARG_UNUSED(sh);
 #endif
 	return false;
+}
+
+/* Every config write: refused while the store is locked, then on a managed node. */
+static bool shell_config_write_refused(const struct shell *sh)
+{
+	return shell_store_locked(sh) || shell_managed_refused(sh);
 }
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
@@ -1454,6 +1491,10 @@ static int cmd_channel_list(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
+	if (shell_store_locked(sh)) {
+		return -EACCES;
+	}
+
 	for (uint8_t i = 0; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		shell_print_channel_line(sh, i);
 	}
@@ -1466,6 +1507,10 @@ static int cmd_channel_show(const struct shell *sh, size_t argc, char **argv)
 	uint8_t index;
 	const meshtastic_Channel *ch;
 	int ret;
+
+	if (shell_store_locked(sh)) {
+		return -EACCES;
+	}
 
 	if (argc != 2U) {
 		shell_error(sh, "usage: meshtastic channel show <index>");
@@ -1717,6 +1762,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 
 static int cmd_device_role(const struct shell *sh, size_t argc, char **argv)
 {
+	if (shell_store_locked(sh)) {
+		return -EACCES;
+	}
 	if (argc == 1U) {
 		shell_print(sh, "role: %s", shell_device_role_name(meshtastic_device_role()));
 		return 0;
@@ -1760,6 +1808,9 @@ static int cmd_device_role(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_device_rebroadcast(const struct shell *sh, size_t argc, char **argv)
 {
+	if (shell_store_locked(sh)) {
+		return -EACCES;
+	}
 	if (argc == 1U) {
 		shell_print(sh, "rebroadcast: %s",
 			    shell_rebroadcast_mode_name(meshtastic_rebroadcast_mode()));
@@ -3097,6 +3148,10 @@ static int cmd_position_show(const struct shell *sh, size_t argc, char **argv)
 	meshtastic_Position pos;
 	bool have;
 	bool stored;
+
+	if (shell_store_locked(sh)) {
+		return -EACCES;
+	}
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
@@ -6186,6 +6241,9 @@ static int cmd_lora_power_set(const struct shell *sh, const char *arg)
 
 static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 {
+	if (shell_store_locked(sh)) {
+		return -EACCES;
+	}
 	if (argc == 1U) {
 		cmd_lora_show(sh);
 		return 0;
@@ -6758,6 +6816,9 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
 	pb_size_t match;
 	int ret;
 
+	if (shell_store_locked(sh)) {
+		return -EACCES;
+	}
 	ret = meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg);
 	if (ret < 0 || cfg.which_payload_variant != meshtastic_Config_security_tag) {
 		shell_error(sh, "security config unavailable (%d)", ret);
@@ -7246,6 +7307,9 @@ static int cmd_cluster_promote(const struct shell *sh, size_t argc, char **argv)
 	uint16_t tag;
 	int ret;
 
+	if (shell_store_locked(sh)) {
+		return -EACCES;
+	}
 	if (argc != 2U || cluster_section_parse(argv[1], &tag) != 0) {
 		shell_error(sh, "usage: meshtastic cluster promote "
 			    "<device|position|power|display|bluetooth>");
@@ -7456,6 +7520,9 @@ static int cmd_cluster_reset(const struct shell *sh, size_t argc, char **argv)
 	 * versioned entry that the fleet can argue with; this one throws away
 	 * the whole local copy, and a fat-fingered `cluster reset` next to
 	 * `cluster status` should not be able to do that silently. */
+	if (shell_store_locked(sh)) {
+		return -EACCES;
+	}
 	if (argc != 2 || strcmp(argv[1], "--confirm") != 0) {
 		shell_error(sh, "usage: meshtastic cluster reset --confirm");
 		shell_print(sh, "drops the ENTIRE document — every entry, the persisted "
