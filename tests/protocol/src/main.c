@@ -58,6 +58,11 @@ struct mock_lora_state {
 	struct k_sem entered; /* given as the worker enters a gated send() */
 	uint32_t tx_ids[16];  /* wire ids in transmit order */
 	uint8_t tx_ids_count;
+
+	/* The last few frames, by send_count modulo the ring, so a test that sees
+	 * several frames go out can decode each one, not only the last. */
+	uint8_t tx_ring[4][MESHTASTIC_PKT_MAX];
+	uint32_t tx_ring_len[4];
 };
 
 static struct mock_lora_state mock_lora;
@@ -105,6 +110,9 @@ static int mock_lora_send(const struct device *dev, uint8_t *data, uint32_t data
 	zassert_true(data_len <= sizeof(mock_lora.last_tx), "unexpected tx len %u", data_len);
 	memcpy(mock_lora.last_tx, data, data_len);
 	mock_lora.last_tx_len = data_len;
+	memcpy(mock_lora.tx_ring[mock_lora.send_count % ARRAY_SIZE(mock_lora.tx_ring)], data,
+	       data_len);
+	mock_lora.tx_ring_len[mock_lora.send_count % ARRAY_SIZE(mock_lora.tx_ring)] = data_len;
 	mock_lora.send_count++;
 	if (mock_lora.tx_ids_count < ARRAY_SIZE(mock_lora.tx_ids) &&
 	    data_len >= MESHTASTIC_HDR_LEN) {
@@ -7630,29 +7638,33 @@ ZTEST(protocol_stack, test_egress_timed_out_wait_does_not_complete_a_later_one)
 	egress_end();
 }
 
-/* ls39.5.5 (zt-gateway-claude's research, unchecked until now): a request to us with
- * want_response AND want_ack, answered by an ordinary module, must get ONE frame back:
- * the module's reply, which is the reference's implicit ACK. Upstream skips the
- * generic ACK when a module answered (ReliableRouter::sniffReceived acks only when
+/* ls39.5.5 (zt-gateway-claude's research): a request to us with want_response AND
+ * want_ack, answered by an ordinary module, must get ONE frame back: the module's
+ * reply, which is the reference's implicit ACK. Upstream skips the generic ACK when a
+ * module answered (ReliableRouter::sniffReceived acks only when
  * !MeshModule::currentReply: "one request, one answer"). Ours decides that before
  * module dispatch runs (module_answered is set only for the hard-coded admin path,
  * meshtastic_router.c), so a traceroute reply goes out AND the generic routing ACK.
- * Traceroute is the case because it always answers, unthrottled. The peer's first
- * frame is spent first: it triggers our NodeInfo request, which is not an answer. */
-/* Known to fail (agents-ls39.1.14): 2 frames, the reply and the routing ACK. When the
- * router lets a module's answer suppress the ACK this passes, ztest reports an
- * unexpected pass, and this marker goes. */
-ZTEST_EXPECT_FAIL(protocol_stack, test_a_module_reply_is_the_only_answer_to_a_reliable_request);
-ZTEST(protocol_stack, test_a_module_reply_is_the_only_answer_to_a_reliable_request)
+ * Traceroute is the case because it always answers, unthrottled.
+ *
+ * Two tests on one helper, so a regression either way shows: the first (a plain pass)
+ * says the request is answered with a traceroute reply; the second (a known failure)
+ * says that reply is the only frame. */
+struct reliable_answer {
+	uint32_t sent;    /* frames transmitted in answer to the request */
+	bool replied;     /* a TRACEROUTE frame to the peer was among them */
+};
+
+static struct reliable_answer send_reliable_traceroute_request(uint32_t prime_id, uint32_t req_id)
 {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t wire_len = 0U;
 	uint32_t before;
-	uint32_t sent;
+	struct reliable_answer out = {0};
 	struct meshtastic_packet req = {
 		.from = PEER_NODE_ID,
 		.to = TEST_NODE_ID,
-		.id = 0x0E5A0001U,
+		.id = req_id,
 		.portnum = MESHTASTIC_PORT_TRACEROUTE,
 		.payload = NULL, /* an empty RouteDiscovery: no hops yet */
 		.payload_len = 0U,
@@ -7666,8 +7678,7 @@ ZTEST(protocol_stack, test_a_module_reply_is_the_only_answer_to_a_reliable_reque
 	/* Prime: a first frame from an unknown peer makes us ask for its NodeInfo (a
 	 * frame of its own, throttled per peer). Spend that here so the count below is
 	 * only the answer to the request. */
-	build_peer_wire_packet(MESHTASTIC_NODE_BROADCAST, 0x0E5A0000U, 3U, "prime", wire,
-			       &wire_len);
+	build_peer_wire_packet(MESHTASTIC_NODE_BROADCAST, prime_id, 3U, "prime", wire, &wire_len);
 	inject_rx_frame(wire, wire_len, -60, 8);
 	k_msleep(500);
 
@@ -7681,12 +7692,44 @@ ZTEST(protocol_stack, test_a_module_reply_is_the_only_answer_to_a_reliable_reque
 	k_msleep(1500); /* the reply and any ACK go out at once (unicast, no own delay) */
 
 	k_mutex_lock(&mock_lora.lock, K_FOREVER);
-	sent = mock_lora.send_count - before;
+	out.sent = mock_lora.send_count - before;
+	for (uint32_t n = before; n < mock_lora.send_count; n++) {
+		const uint32_t slot = n % ARRAY_SIZE(mock_lora.tx_ring);
+		struct meshtastic_packet decoded;
+		uint8_t payload[MESHTASTIC_PKT_MAX];
+
+		if (mock_lora.send_count - n > ARRAY_SIZE(mock_lora.tx_ring)) {
+			continue; /* overwritten: more frames than the ring holds */
+		}
+		if (meshtastic_decode_wire_packet(mock_lora.tx_ring[slot], mock_lora.tx_ring_len[slot],
+						  0, 0, &decoded, payload, sizeof(payload)) == 0 &&
+		    decoded.portnum == MESHTASTIC_PORT_TRACEROUTE && decoded.to == PEER_NODE_ID) {
+			out.replied = true;
+		}
+	}
 	k_mutex_unlock(&mock_lora.lock);
 
-	zassert_true(sent >= 1U, "the traceroute request was not answered at all");
-	zassert_equal(sent, 1U,
+	return out;
+}
+
+ZTEST(protocol_stack, test_a_reliable_module_request_is_answered_by_the_module)
+{
+	struct reliable_answer a = send_reliable_traceroute_request(0x0E5A0000U, 0x0E5A0001U);
+
+	zassert_true(a.sent >= 1U, "the traceroute request was not answered at all");
+	zassert_true(a.replied, "no traceroute reply among the %u frames that went back", a.sent);
+}
+
+/* Known to fail (agents-ls39.1.14): 2 frames, the reply and the routing ACK. When the
+ * router lets a module's answer suppress the ACK this passes, ztest reports an
+ * unexpected pass, and this marker goes. */
+ZTEST_EXPECT_FAIL(protocol_stack, test_a_module_reply_is_the_only_answer_to_a_reliable_request);
+ZTEST(protocol_stack, test_a_module_reply_is_the_only_answer_to_a_reliable_request)
+{
+	struct reliable_answer a = send_reliable_traceroute_request(0x0E5A0010U, 0x0E5A0011U);
+
+	zassert_equal(a.sent, 1U,
 		      "one request, one answer: %u frames went back (the traceroute reply and the "
 		      "generic routing ACK); upstream sends the reply alone (ls39.5.5)",
-		      sent);
+		      a.sent);
 }
