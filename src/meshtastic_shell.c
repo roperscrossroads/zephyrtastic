@@ -732,9 +732,16 @@ static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 	} else {
 		shell_print(sh, "image:  header read failed (%d)", rc);
 	}
-	shell_print(sh, "class:  %u%s", CONFIG_MESHTASTIC_FLEET_CLASS,
-		    CONFIG_MESHTASTIC_FLEET_CLASS == 0 ? " (unset: no courier will offer this node an image)"
-						       : "");
+	/* "class:  15 (r8-gateway)": the number first, so a reader that matches
+	 * `^class:\s+(\d+)` (rxrbench's probe) still reads it. */
+	if (CONFIG_MESHTASTIC_FLEET_CLASS == 0) {
+		shell_print(sh, "class:  0 (unset: no courier will offer this node an image)");
+	} else if (CONFIG_MESHTASTIC_FLEET_BUNDLE[0] != '\0') {
+		shell_print(sh, "class:  %u (%s)", CONFIG_MESHTASTIC_FLEET_CLASS,
+			    CONFIG_MESHTASTIC_FLEET_BUNDLE);
+	} else {
+		shell_print(sh, "class:  %u", CONFIG_MESHTASTIC_FLEET_CLASS);
+	}
 	return 0;
 }
 

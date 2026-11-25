@@ -12,6 +12,13 @@ tests:
   # is_managed; raw PSK hex disclosure off.
   meshtastic.shell.native_sim: {}
 
+  # A class and its bundle name, as the bench recipe sets them: `version` prints
+  # "class:  15 (r8-gateway)" and `state` carries "bundle" (agents-ls39.2.13).
+  meshtastic.shell.bundle.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_FLEET_CLASS=15
+      - CONFIG_MESHTASTIC_FLEET_BUNDLE="r8-gateway"
+
   # Writes compiled out entirely. Also the build-coverage half: without this
   # scenario the CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE=n paths never compile.
   meshtastic.shell.no_config_write.native_sim:

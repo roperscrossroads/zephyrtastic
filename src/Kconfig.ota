@@ -167,6 +167,17 @@ config MESHTASTIC_FLEET_CLASS
 	  node with class 0 is offered nothing. Shown by `meshtastic version`;
 	  carried in the peer-link beat from version 2 of that frame.
 
+config MESHTASTIC_FLEET_BUNDLE
+	string "Bundle name of this build's class"
+	default ""
+	help
+	  The name people use for the class above (e.g. "xiao-node",
+	  "r8-gateway"), set by the bench recipe from the rxrbench catalog
+	  beside the number. Printed by `meshtastic version` ("class: 15
+	  (r8-gateway)") and `meshtastic state` ("bundle"); empty for a build made
+	  outside the recipe. Never on the wire: the number is what nodes, the
+	  signed image and fleet intents carry (tooling docs/CLASS-NAMING.md v3).
+
 config MESHTASTIC_FLEET
 	bool "Fleet firmware intent on the cluster document (the courier's orders)"
 	depends on MESHTASTIC_CLUSTER

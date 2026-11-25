@@ -1547,7 +1547,8 @@ ZTEST(meshtastic_shell, test_state_is_one_framed_line_with_the_node_s_facts)
 
 	state_json(json, sizeof(json));
 	zassert_not_null(strstr(json, "{\"v\":1,\"build\":\""), "%s", json);
-	snprintk(want, sizeof(want), "\"class\":%u,", (unsigned int)CONFIG_MESHTASTIC_FLEET_CLASS);
+	snprintk(want, sizeof(want), "\"class\":%u,\"bundle\":\"%s\",",
+		 (unsigned int)CONFIG_MESHTASTIC_FLEET_CLASS, CONFIG_MESHTASTIC_FLEET_BUNDLE);
 	zassert_not_null(strstr(json, want), "%s", json);
 	snprintk(want, sizeof(want), "\"id\":\"0x%08x\"", meshtastic_get_node_id());
 	zassert_not_null(strstr(json, want), "%s", json);
@@ -2308,3 +2309,33 @@ ZTEST(meshtastic_shell, test_statusmsg_set_and_clear_reach_the_status_message)
 	zassert_str_equal(stored, "", "cleared, still \"%s\"", stored);
 }
 #endif
+
+/*
+ * `meshtastic version`'s class line: the number first (rxrbench's probe matches
+ * `^class:\s+(\d+)`), then the bundle name the recipe set, if any (agents-ls39.2.13).
+ * The suite runs with and without a bundle (testcase.yaml, meshtastic.shell.bundle).
+ */
+ZTEST(meshtastic_shell, test_version_prints_the_class_and_its_bundle)
+{
+	const char *out = NULL;
+	const char *at;
+	char want[64];
+
+	zassert_ok(run_cmd("meshtastic version", &out), "version failed");
+	if (CONFIG_MESHTASTIC_FLEET_CLASS == 0) {
+		snprintk(want, sizeof(want), "class:  0 (unset");
+	} else if (CONFIG_MESHTASTIC_FLEET_BUNDLE[0] != '\0') {
+		snprintk(want, sizeof(want), "class:  %u (%s)", CONFIG_MESHTASTIC_FLEET_CLASS,
+			 CONFIG_MESHTASTIC_FLEET_BUNDLE);
+	} else {
+		snprintk(want, sizeof(want), "class:  %u", CONFIG_MESHTASTIC_FLEET_CLASS);
+	}
+	at = strstr(out, want);
+	zassert_not_null(at, "want '%s' in: %s", want, out);
+	/* The whole line, not a prefix of a longer one ("class:  1" in "class:  15"). The shell
+	 * ends lines with CR LF. */
+	if (CONFIG_MESHTASTIC_FLEET_CLASS != 0) {
+		zassert_true(at[strlen(want)] == '\r' || at[strlen(want)] == '\n',
+			     "'%s' is not the whole line in: %s", want, out);
+	}
+}

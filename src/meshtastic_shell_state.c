@@ -443,8 +443,9 @@ int meshtastic_shell_state(const struct shell *sh)
 	} else {
 		st_out(&s, ",\"image\":null");
 	}
-	st_out(&s, ",\"class\":%u,\"board\":\"%s\",", (unsigned int)CONFIG_MESHTASTIC_FLEET_CLASS,
-	       CONFIG_BOARD);
+	st_out(&s, ",\"class\":%u,\"bundle\":", (unsigned int)CONFIG_MESHTASTIC_FLEET_CLASS);
+	st_str(&s, CONFIG_MESHTASTIC_FLEET_BUNDLE);
+	st_out(&s, ",\"board\":\"%s\",", CONFIG_BOARD);
 	st_features(&s);
 	st_out(&s, ",\"id\":\"0x%08x\"", meshtastic_get_node_id());
 	st_radio(&s);
