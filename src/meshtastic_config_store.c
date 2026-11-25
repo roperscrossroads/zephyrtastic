@@ -960,7 +960,14 @@ static int lora_bw_code_to_hz(uint32_t code)
 	}
 }
 
-int meshtastic_config_store_apply_core(void)
+/* @p radio: also (re)derive the radio's operating state (preset, modem, power,
+ * licence, frequency, tx) from the STORED LoRa section. Only a LoRa write, a boot,
+ * a restore or a reload says that section changed. Any other write leaves the
+ * radio alone: a live-only preset (a hop, a head's SET_PRESET, the scanner) is
+ * the operating state, the stored section is not, and re-deriving it here made
+ * mt describe a preset the chip was not on (agents-ls39.1.7). The structural
+ * fix, an operating preset apart from the stored one, is ls39.4.1. */
+static int apply_core(bool radio)
 {
 	meshtastic_Config_DeviceConfig device;
 	meshtastic_Config_LoRaConfig lora;
@@ -1008,15 +1015,17 @@ int meshtastic_config_store_apply_core(void)
 	 * preset's display name, and set_slot hashes that name as it stores each
 	 * slot. Applying the preset afterwards would hash every channel against
 	 * the previous preset. */
-	k_mutex_lock(&mt.lock, K_FOREVER);
-	mt.modem_preset = lora.modem_preset;
-	mt.use_preset = lora.use_preset;
-	/* What stays in force where nothing below resolves a new value: a
-	 * failed preset lookup keeps the radio's modem, no plan keeps its
-	 * frequency. */
-	modem = mt.modem;
-	frequency = mt.frequency;
-	k_mutex_unlock(&mt.lock);
+	if (radio) {
+		k_mutex_lock(&mt.lock, K_FOREVER);
+		mt.modem_preset = lora.modem_preset;
+		mt.use_preset = lora.use_preset;
+		/* What stays in force where nothing below resolves a new value: a
+		 * failed preset lookup keeps the radio's modem, no plan keeps its
+		 * frequency. */
+		modem = mt.modem;
+		frequency = mt.frequency;
+		k_mutex_unlock(&mt.lock);
+	}
 	mt.config_ok_to_mqtt = lora.config_ok_to_mqtt;
 	meshtastic_duty_set_override(lora.override_duty_cycle);
 
@@ -1039,6 +1048,10 @@ int meshtastic_config_store_apply_core(void)
 
 	if (lora.hop_limit >= 1U && lora.hop_limit <= 7U) {
 		mt.hop_limit = (uint8_t)lora.hop_limit;
+	}
+
+	if (!radio) {
+		return 0;
 	}
 
 	/* Resolve tx_power to a radiated-dBm figure the way the reference does:
@@ -1194,6 +1207,11 @@ int meshtastic_config_store_apply_core(void)
 	return 0;
 }
 
+int meshtastic_config_store_apply_core(void)
+{
+	return apply_core(true);
+}
+
 const char *meshtastic_config_store_long_name(void)
 {
 	return store.long_name;
@@ -1344,7 +1362,7 @@ int meshtastic_config_store_set_config(const meshtastic_Config *config)
 	stamp_local(&store.config_stamps[idx]);
 	store_unlock();
 
-	ret = meshtastic_config_store_apply_core();
+	ret = apply_core(config->which_payload_variant == meshtastic_Config_lora_tag);
 	if (ret < 0) {
 		return ret;
 	}
@@ -1557,7 +1575,7 @@ int meshtastic_config_store_merge_config(const meshtastic_Config *config,
 		return 0;
 	}
 
-	(void)meshtastic_config_store_apply_core();
+	(void)apply_core(config->which_payload_variant == meshtastic_Config_lora_tag);
 	merged_section_applied(config->which_payload_variant);
 	store_schedule_save();
 
