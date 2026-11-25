@@ -1298,7 +1298,7 @@ int meshtastic_config_store_set_channel(uint8_t index, const meshtastic_Channel 
 	/* A channel edit can move the PRIMARY channel (role promotion) or rename
 	 * it, and the frequency slot is derived from the primary channel's
 	 * resolved name (meshtastic_channels_set_slot() above has already
-	 * refreshed mt.ch_hash/mt.psk/mt.channel_name) -- so this needs the same
+	 * refreshed mt.ch_hash/mt.channel_name) -- so this needs the same
 	 * live retune the lora-config path gets, not for decrypt (which was
 	 * already live: channel_get_key() reads channel_slots[] directly, no
 	 * cache) but for the radio to actually land on the right frequency. */
