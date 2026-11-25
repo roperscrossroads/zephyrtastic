@@ -7629,3 +7629,51 @@ ZTEST(protocol_stack, test_egress_timed_out_wait_does_not_complete_a_later_one)
 	k_msleep(50);
 	egress_end();
 }
+
+/* ls39.5.5 (zt-gateway-claude's research, unchecked until now): a request to us with
+ * want_response AND want_ack, answered by an ordinary module, must get ONE frame back:
+ * the module's reply, which is the reference's implicit ACK. Upstream skips the
+ * generic ACK when a module answered (ReliableRouter::sniffReceived acks only when
+ * !MeshModule::currentReply: "one request, one answer"). Ours decides that before
+ * module dispatch runs (module_answered is set only for the hard-coded admin path,
+ * meshtastic_router.c), so a traceroute reply goes out AND the generic routing ACK.
+ * Traceroute is the case because it always answers, unthrottled. */
+ZTEST(protocol_stack, test_a_module_reply_is_the_only_answer_to_a_reliable_request)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len = 0U;
+	uint32_t before;
+	uint32_t sent;
+	struct meshtastic_packet req = {
+		.from = PEER_NODE_ID,
+		.to = TEST_NODE_ID,
+		.id = 0x0E5A0001U,
+		.portnum = MESHTASTIC_PORT_TRACEROUTE,
+		.payload = NULL, /* an empty RouteDiscovery: no hops yet */
+		.payload_len = 0U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.want_ack = true,
+		.want_response = true,
+		.channel_index = meshtastic_channels_primary_index(),
+	};
+
+	zassert_ok(meshtastic_build_wire_packet(&req, wire, &wire_len));
+
+	k_mutex_lock(&mock_lora.lock, K_FOREVER);
+	before = mock_lora.send_count;
+	k_mutex_unlock(&mock_lora.lock);
+
+	inject_rx_frame(wire, wire_len, -60, 8);
+	k_msleep(1500); /* the reply and any ACK go out at once (unicast, no own delay) */
+
+	k_mutex_lock(&mock_lora.lock, K_FOREVER);
+	sent = mock_lora.send_count - before;
+	k_mutex_unlock(&mock_lora.lock);
+
+	zassert_true(sent >= 1U, "the traceroute request was not answered at all");
+	zassert_equal(sent, 1U,
+		      "one request, one answer: %u frames went back (the traceroute reply and the "
+		      "generic routing ACK); upstream sends the reply alone (ls39.5.5)",
+		      sent);
+}
