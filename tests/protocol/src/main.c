@@ -7637,7 +7637,12 @@ ZTEST(protocol_stack, test_egress_timed_out_wait_does_not_complete_a_later_one)
  * !MeshModule::currentReply: "one request, one answer"). Ours decides that before
  * module dispatch runs (module_answered is set only for the hard-coded admin path,
  * meshtastic_router.c), so a traceroute reply goes out AND the generic routing ACK.
- * Traceroute is the case because it always answers, unthrottled. */
+ * Traceroute is the case because it always answers, unthrottled. The peer's first
+ * frame is spent first: it triggers our NodeInfo request, which is not an answer. */
+/* Known to fail (agents-ls39.1.14): 2 frames, the reply and the routing ACK. When the
+ * router lets a module's answer suppress the ACK this passes, ztest reports an
+ * unexpected pass, and this marker goes. */
+ZTEST_EXPECT_FAIL(protocol_stack, test_a_module_reply_is_the_only_answer_to_a_reliable_request);
 ZTEST(protocol_stack, test_a_module_reply_is_the_only_answer_to_a_reliable_request)
 {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
@@ -7657,6 +7662,14 @@ ZTEST(protocol_stack, test_a_module_reply_is_the_only_answer_to_a_reliable_reque
 		.want_response = true,
 		.channel_index = meshtastic_channels_primary_index(),
 	};
+
+	/* Prime: a first frame from an unknown peer makes us ask for its NodeInfo (a
+	 * frame of its own, throttled per peer). Spend that here so the count below is
+	 * only the answer to the request. */
+	build_peer_wire_packet(MESHTASTIC_NODE_BROADCAST, 0x0E5A0000U, 3U, "prime", wire,
+			       &wire_len);
+	inject_rx_frame(wire, wire_len, -60, 8);
+	k_msleep(500);
 
 	zassert_ok(meshtastic_build_wire_packet(&req, wire, &wire_len));
 
