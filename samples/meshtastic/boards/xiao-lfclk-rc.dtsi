@@ -1,0 +1,26 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0
+ *
+ * XIAO nRF52840: the 32 kHz clock (LFCLK) from the internal RC oscillator, not the
+ * board's 32 kHz crystal. Included by the app's board overlays (plain and Sense) and by
+ * the MCUboot image's overlay (mcuboot-xiao/), which runs a system timer off the same
+ * clock.
+ *
+ * Why (2026-08-23): on one kit the crystal never starts, and Zephyr waits for it forever
+ * before main (SYSTEM_CLOCK_WAIT_FOR_STABILITY): no USB, no console, and no watchdog,
+ * since the WDT ticks off LFCLK too. A board that looks dead. An RC-clocked build of the
+ * same board booted. RC with periodic calibration (on by default for an RC source) is
+ * within what BLE accepts at 500 ppm.
+ *
+ * Why here (agents-xf7q): from Zephyr 4.5 the nRF LFCLK driver takes its source from this
+ * node's k32src, not from CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC (that Kconfig belongs to the
+ * deprecated CLOCK_CONTROL_NRF driver). The board conf kept the Kconfig lines, Kconfig
+ * warned and dropped them, and every XIAO ran on its crystal again. The BT controller
+ * reads its sleep-clock accuracy from k32src-accuracy-ppm on the same node.
+ * `meshtastic state` reports what runs ("lfclk"), and so does the boot report.
+ */
+
+&lfclk {
+	k32src = "rc";
+	k32src-accuracy-ppm = <500>;
+};

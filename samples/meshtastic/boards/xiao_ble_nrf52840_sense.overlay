@@ -1,0 +1,8 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0
+ *
+ * XIAO nRF52840: what the app needs on top of the board and the Wio-SX1262 shield.
+ */
+
+/* LFCLK from the internal RC oscillator (agents-xf7q): the file says why. */
+#include "xiao-lfclk-rc.dtsi"

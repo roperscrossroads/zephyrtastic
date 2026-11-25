@@ -6,6 +6,8 @@
  * restated here so the result does not depend on overlay ordering).
  */
 #include "partitions.dtsi"
+/* LFCLK from the RC oscillator, as the app (agents-xf7q). */
+#include "../boards/xiao-lfclk-rc.dtsi"
 
 / {
 	chosen {
