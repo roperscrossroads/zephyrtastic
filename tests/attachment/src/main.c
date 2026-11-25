@@ -1181,6 +1181,63 @@ ZTEST(attachment, test_hop_upgrade_through_a_head_is_not_relayed)
 	zassert_true(relayed_within(FAR_NODE_ID, 0x1F02U, 4000), "our upgrade relays");
 }
 
+/* agents-ls39.1.10: the hop-upgraded duplicate was relayed with no SNR, so its
+ * contention window was planned at 0 dB. The window grows with SNR, and a weak copy
+ * is meant to relay early. Three weak upgrades through a head: every relay must key up
+ * inside the -15 dB window. At 0 dB the window is far wider; the old code drew past
+ * it almost every time. */
+ZTEST(attachment, test_hop_upgrade_relay_is_planned_with_the_copys_snr)
+{
+	const uint8_t there = meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF);
+	const uint32_t slot = meshtastic_contention_effective_slot_ms(9U, 250000U, false);
+	uint32_t worst;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t len;
+
+	/* The suite runs with contention off (cw.max 0, attachment_before), which plans
+	 * every relay at 0 ms whatever the SNR. This case needs the real window. */
+	meshtastic_sched_defaults();
+	worst = meshtastic_contention_delay_relay_worst_ms(-15, slot);
+
+	for (uint32_t k = 0U; k < 3U; k++) {
+		struct meshtastic_attachment_msg msg;
+		uint32_t before;
+		bool got = false;
+
+		build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x4B00U + k, "weak", wire,
+			    &len);
+		((struct meshtastic_wire_header *)wire)->channel = there;
+		/* The first copy has no hops left: delivered, never relayed, so the only
+		 * relay of this frame can come from the upgrade. */
+		before = sent.count;
+		set_hop_limit(wire, 0U);
+		zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -118, -15, wire, len), "first copy");
+		zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "delivered");
+		k_msleep(300);
+		zassert_equal(sent.count, before, "a 0-hop copy was relayed");
+
+		set_hop_limit(wire, 3U);
+		zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -118, -15, wire, len), "upgrade");
+		for (int i = 0; i < 100 && !got; i++) {
+			for (uint32_t j = 0U; j < MIN(sent.count - before, sent_ring_count()); j++) {
+				if (sent_ring_get(j, &msg) && msg.type == MESHTASTIC_ATTACHMENT_TX_FRAME &&
+				    (msg.u.tx.flags & MESHTASTIC_ATTACHMENT_TXF_RELAY) != 0U &&
+				    msg.u.tx.relay_id == 0x4B00U + k) {
+					got = true;
+					break;
+				}
+			}
+			if (!got) {
+				k_msleep(10);
+			}
+		}
+		zassert_true(got, "upgrade %u was not relayed through the head", k);
+		zassert_true(msg.u.tx.not_before_ms <= worst,
+			     "upgrade %u planned past the -15 dB window (%u > %u ms): SNR lost", k,
+			     msg.u.tx.not_before_ms, worst);
+	}
+}
+
 /* B7 (review F2): a node on a custom modem (use_preset=false) hashes an unnamed
  * slot under "Custom"; its OWN radio's frames now carry a concrete preset tag,
  * and must still decode against the cached hash. */

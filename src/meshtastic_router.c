@@ -257,12 +257,13 @@ static void log_wire_rx(const uint8_t *pkt, int len, int16_t rssi, int8_t snr)
 #endif /* CONFIG_MESHTASTIC_PACKET_HEXDUMP */
 
 /* May a frame that arrived on @p bearer be flood-relayed on THIS board's radio?
- * Only a frame this radio heard: a relay goes back out on the air it came in
- * on, and until P3 gives the outbound path a target attachment, a head's frame
- * (on another preset, another radio) has nowhere to go here -- it is delivered
- * and counted, never relayed locally. Both relay sites (first copy and the
- * hop-upgraded duplicate) use this one predicate (review F1). The peer-link
- * bearer is not RF at all: the link-local rule (agents-xhli.2). */
+ * Only a frame this radio heard: a relay goes back out on the air it came in on.
+ * A head's frame (another preset, another radio) is never relayed on THIS radio;
+ * on a brain it is relayed through the head that heard it (P3: the relay sites
+ * check `meta->attach` beside this predicate and hand the frame to that head).
+ * Both relay sites (first copy and the hop-upgraded duplicate) use this one
+ * predicate (review F1). The peer-link bearer is not RF at all: the link-local
+ * rule (agents-xhli.2). */
 static bool relay_local_ok(enum meshtastic_bearer bearer)
 {
 	return bearer == MESHTASTIC_BEARER_LORA;
@@ -882,6 +883,11 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 			.to = sys_le32_to_cpu(hdr->dest),
 			.id = pkt_id,
 			.rx_attach = meta->attach,
+			/* The relay is planned from this copy's signal (its contention
+			 * window scales with SNR); without it, it was planned at 0 dB
+			 * (agents-ls39.1.10). */
+			.rssi = rssi,
+			.snr = snr,
 		};
 
 		if (rf) {
