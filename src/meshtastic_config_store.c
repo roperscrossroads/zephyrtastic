@@ -1581,7 +1581,10 @@ int meshtastic_config_store_merge_config(const meshtastic_Config *config,
 		 * now, or RX stays on the old modem and frequency until the next TX
 		 * (agents-ls39.1.12). A merged LoRa section is a STORED change, so it
 		 * retunes even over a live-only hop. No store or mt lock is held here;
-		 * apply_stored takes mt.lock and the radio semaphore itself. */
+		 * apply_stored takes mt.lock and the radio semaphore itself, and the
+		 * TX path holds that semaphore for a whole airtime: call this from the
+		 * reconcile work item, never the RX thread. Unreachable today: the
+		 * cluster reconciler holds a fleet LoRa section unapplied. */
 		(void)meshtastic_preset_apply_stored(NULL);
 	}
 	merged_section_applied(config->which_payload_variant);
