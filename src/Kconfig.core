@@ -179,6 +179,25 @@ config MESHTASTIC_TX_ENABLED_DEFAULT
 	  A stored config (shell `meshtastic lora tx on|off`, phone, admin)
 	  overrides this seed either way.
 
+config MESHTASTIC_TX_HOLD_UNPROVISIONED
+	bool "Hold transmit until the node's LoRa config was written once"
+	default n if ARCH_POSIX
+	default y
+	help
+	  A node nobody has configured yet stays receive-only, whatever
+	  TX_ENABLED_DEFAULT seeded (agents-xhli.21). "Configured" is the LoRa
+	  section's write-stamp: any shell, admin, phone or cluster write of
+	  config.lora stamps it (`meshtastic lora preset|power|tx`, set_config),
+	  and the hold releases at once, no reboot. Writes to other sections, the
+	  owner or the channels do not release it. A stored config from an
+	  earlier write keeps its stamp across reboots and reflashes of the app.
+
+	  Off by default on native_sim (ARCH_POSIX): the sim suites boot fresh nodes
+	  and expect them to transmit; tests/firstboot turns it on to prove the hold.
+
+	  Not applied to a keyless attachment head: it never originates, and its
+	  brain sets its preset without touching this section.
+
 config MESHTASTIC_DEFAULT_REBROADCAST_MODE
 	int "Rebroadcast mode seeded on a fresh node"
 	default 4

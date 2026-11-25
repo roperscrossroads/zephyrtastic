@@ -155,6 +155,10 @@ static struct {
 	 * "seed/position". 0 = never: the section may still hold the zeros a client
 	 * echoed back and stamped before this firmware read them (apply_core). */
 	uint8_t position_seed;
+	/* "seed/optin": 1 once the one-time move to opt-in position sharing has run
+	 * (reconcile_seeds_locked). 0 = this node's channels may still hold the 13
+	 * an older build seeded. */
+	uint8_t optin_seed;
 	/* EXT_RAM_BSS_ATTR goes AFTER the declarator (below) — after the anonymous struct '}'
 	 * it would bind to the TYPE and be ignored (stay in internal DRAM). */
 } store MESHTASTIC_EXT_RAM_BSS_ATTR; /* ~9.2 KB -> PSRAM on V4 (no-op on V3); records are
@@ -687,6 +691,59 @@ static void seed_position_once(void)
 	 * only the export (a save) may say so -- see reconcile_seeds_locked(). */
 }
 
+/* The one-time move to OPT-IN position sharing (upstream 2.8, NodeDB.cpp
+ * optInDisablePositionSharing; agents-j0ji.4 C2). Older builds seeded the default
+ * channel with position_precision 13 (~3 km), so a node that had a position shared
+ * it with strangers on the public channel. Only channels on a PUBLIC key are moved:
+ * a private key is a deliberate trusted group, and its precision, full precision
+ * included, is a choice. Keyed on the "seed/optin" marker, which only the export
+ * (a save) writes, so it runs once per node and a later explicit 13 survives. */
+#define OPTIN_SEED_VERSION 1U
+
+/* Upstream's channelFileUsesPublicKey on the store's records: no key, a one-byte
+ * alias, or the default PSK family (its last byte is free). A SECONDARY with no
+ * key follows the primary. Caller holds store_lock(). */
+static bool store_channel_public_key(uint8_t index, bool via_primary)
+{
+	const meshtastic_Channel *ch = &store.channels[index];
+
+	if (!ch->has_settings || ch->role == meshtastic_Channel_Role_DISABLED) {
+		return false;
+	}
+	if (ch->settings.psk.size == 0U) {
+		if (ch->role == meshtastic_Channel_Role_SECONDARY && !via_primary) {
+			for (uint8_t p = 0U; p < MESHTASTIC_MAX_CHANNELS; p++) {
+				if (store.channels[p].role == meshtastic_Channel_Role_PRIMARY) {
+					return store_channel_public_key(p, true);
+				}
+			}
+		}
+		return true;
+	}
+	if (ch->settings.psk.size == 1U) {
+		return true;
+	}
+	return ch->settings.psk.size == sizeof(meshtastic_default_psk) &&
+	       memcmp(ch->settings.psk.bytes, meshtastic_default_psk,
+		      sizeof(meshtastic_default_psk) - 1U) == 0;
+}
+
+static void optin_position_sharing_once(void)
+{
+	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
+		meshtastic_ChannelSettings *cs = &store.channels[i].settings;
+
+		if (!store_channel_public_key(i, false) ||
+		    !cs->has_module_settings || cs->module_settings.position_precision == 0U) {
+			continue;
+		}
+		LOG_INF("Channel %u: position sharing off (was precision %u)", (unsigned int)i,
+			(unsigned int)cs->module_settings.position_precision);
+		cs->module_settings.position_precision = 0U;
+	}
+	/* NOT store.optin_seed: like position_seed it means "the record is in NVS". */
+}
+
 /* The post-load reconcile. Runs from apply_core() AND from the settings
  * handler's commit callback, i.e. after EVERY load of the subtree -- because
  * meshtastic_ble_init() does a full settings_load() after meshtastic_init(),
@@ -727,6 +784,9 @@ static void reconcile_seeds_locked(void)
 	if (store.position_seed < POSITION_SEED_VERSION) {
 		seed_position_once();
 	}
+	if (store.optin_seed < OPTIN_SEED_VERSION) {
+		optin_position_sharing_once();
+	}
 }
 
 void meshtastic_config_store_reconcile_seeds(void)
@@ -740,10 +800,11 @@ static void seed_telemetry_flags(void)
 {
 	int idx = index_for_module_tag(meshtastic_ModuleConfig_telemetry_tag);
 
-	store.modules[idx].payload_variant.telemetry.device_telemetry_enabled =
-		IS_ENABLED(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND);
-	store.modules[idx].payload_variant.telemetry.environment_measurement_enabled =
-		IS_ENABLED(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS_AUTO_SEND);
+	/* Opt-in, as upstream 2.8 (NodeDB.cpp optInDisableTelemetryBroadcast, #10929):
+	 * a node nobody configured broadcasts no telemetry. The AUTO_SEND Kconfigs
+	 * say whether the build CAN; a layout or a client turns it on. */
+	store.modules[idx].payload_variant.telemetry.device_telemetry_enabled = false;
+	store.modules[idx].payload_variant.telemetry.environment_measurement_enabled = false;
 }
 
 static void seed_module_defaults(void)
@@ -905,6 +966,7 @@ int meshtastic_config_store_apply_core(void)
 	meshtastic_Channel channels[MESHTASTIC_MAX_CHANNELS];
 	int device_idx;
 	int lora_idx;
+	bool lora_provisioned;
 	int ret;
 
 	store_lock();
@@ -921,6 +983,7 @@ int meshtastic_config_store_apply_core(void)
 	lora_idx = index_for_config_tag(meshtastic_Config_lora_tag);
 	device = store.configs[device_idx].payload_variant.device;
 	lora = store.configs[lora_idx].payload_variant.lora;
+	lora_provisioned = !meshtastic_hlc_stamp_is_unset(&store.config_stamps[lora_idx]);
 
 	store_unlock();
 
@@ -1011,6 +1074,18 @@ int meshtastic_config_store_apply_core(void)
 
 	mt.rx_boosted_gain = lora.sx126x_rx_boosted_gain;
 	mt.tx_enabled = lora.tx_enabled;
+#if defined(CONFIG_MESHTASTIC_TX_HOLD_UNPROVISIONED) && !defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+	/* The provisioned hold (agents-xhli.21): a LoRa section nobody ever wrote
+	 * has no write-stamp, and its seeded tx_enabled is the build's guess, not a
+	 * choice. Stay receive-only until a real write stamps it, so a forgotten
+	 * overlay cannot put a fresh node on the public preset at full power. */
+	if (mt.tx_enabled && !lora_provisioned) {
+		mt.tx_enabled = false;
+		LOG_WRN("TX held: the LoRa config was never written (set preset/power, then tx on)");
+	}
+#else
+	ARG_UNUSED(lora_provisioned);
+#endif
 
 	/* config.lora.fem_lna_mode. Apply it where the front-end actually has a
 	 * switchable receive path; where it does not, say so rather than keep a
@@ -1834,6 +1909,16 @@ int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_l
 		return 1;
 	}
 
+	if (strcmp(key, "seed/optin") == 0) {
+		if (buf_len < 1U) {
+			return -ENOMEM;
+		}
+		store_lock();
+		((uint8_t *)buf)[0] = store.optin_seed;
+		store_unlock();
+		return 1;
+	}
+
 	if (strcmp(key, "canned") == 0) {
 		return setting_get_canned(buf, buf_len);
 	}
@@ -1931,6 +2016,13 @@ int meshtastic_config_store_setting_set(const char *key, const void *buf, size_t
 	if (strcmp(key, "seed/position") == 0) {
 		store_lock();
 		store.position_seed = (len >= 1U) ? ((const uint8_t *)buf)[0] : 0U;
+		store_unlock();
+		return 0;
+	}
+
+	if (strcmp(key, "seed/optin") == 0) {
+		store_lock();
+		store.optin_seed = (len >= 1U) ? ((const uint8_t *)buf)[0] : 0U;
 		store_unlock();
 		return 0;
 	}
@@ -2118,6 +2210,14 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 	store.position_seed = POSITION_SEED_VERSION;
 	store_unlock();
 	ret = export_one(export_func, "seed/position");
+	if (ret < 0) {
+		return ret;
+	}
+
+	store_lock();
+	store.optin_seed = OPTIN_SEED_VERSION;
+	store_unlock();
+	ret = export_one(export_func, "seed/optin");
 	if (ret < 0) {
 		return ret;
 	}

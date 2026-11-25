@@ -1,0 +1,15 @@
+# What a freshly flashed node does (agents-xhli.21, agents-j0ji.4 C2, agents-dn7w):
+# no transmit before the LoRa config was written once, no position sharing, no
+# telemetry broadcast, no MQTT uplink or downlink; and the one-time move of a node
+# that stored the old defaults.
+common:
+  tags:
+    - meshtastic
+    - firstboot
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.firstboot.native_sim: {}
