@@ -83,6 +83,13 @@ struct head_tx {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 };
 
+/* Lock order (agents-z7rg): head_lock is never held across a send to the brain.
+ * A send enters the bearer (its registry lock) and the BLE peer module (the peer
+ * lock, then a GATT write that can wait for controller buffers), and the BLE RX
+ * path delivers the brain's envelopes into this file, which takes head_lock: a
+ * send under head_lock closed an AB-BA with the BT RX thread (rzr5, 2026-11-24:
+ * "mutex deadlock", thread head_tx). Build the envelope under the lock, release
+ * it, then send. */
 static K_MUTEX_DEFINE(head_lock);
 K_MSGQ_DEFINE(head_q, sizeof(struct head_frame), CONFIG_MESHTASTIC_ATTACHMENT_HEAD_QUEUE_SIZE, 4);
 K_MSGQ_DEFINE(head_tx_q, sizeof(struct head_tx), CONFIG_MESHTASTIC_ATTACHMENT_HEAD_TX_QUEUE_SIZE, 4);
@@ -231,10 +238,14 @@ static void head_submit(struct k_work *work)
 #endif
 }
 
-/* One envelope scratch for both workers: they run on one queue. */
+/* The forwarding worker's envelope scratch (one worker, one queue). STATUS is
+ * small and built on the sender's stack, since it is sent from several threads. */
 static uint8_t env_buf[MESHTASTIC_ATTACHMENT_ENV_MAX];
 
-static int status_send_locked(uint32_t brain)
+#define STATUS_ENV_MAX MESHTASTIC_ATTACHMENT_STATUS_POS_LEN
+
+/* This head's STATUS for @p brain, into @p buf. Caller holds head_lock. */
+static int status_build_locked(uint32_t brain, uint8_t *buf, size_t size)
 {
 	struct meshtastic_attachment_status st = {
 		.preset = (uint8_t)mt.modem_preset,
@@ -261,11 +272,30 @@ static int status_send_locked(uint32_t brain)
 	if (mt.radio_held) {
 		st.flags |= MESHTASTIC_ATTACHMENT_ST_RADIO_HELD;
 	}
-	len = meshtastic_attachment_encode_status(&st, env_buf, sizeof(env_buf));
+	len = meshtastic_attachment_encode_status(&st, buf, size);
+	return len;
+}
+
+/* Build a STATUS under head_lock, send it without (see the lock order above). */
+static int status_send(uint32_t brain)
+{
+	uint8_t buf[STATUS_ENV_MAX];
+	int len;
+	int ret;
+
+	k_mutex_lock(&head_lock, K_FOREVER);
+	len = status_build_locked(brain, buf, sizeof(buf));
+	k_mutex_unlock(&head_lock);
 	if (len < 0) {
 		return len;
 	}
-	return meshtastic_attachment_head_send(brain, env_buf, (size_t)len);
+	ret = meshtastic_attachment_head_send(brain, buf, (size_t)len);
+	if (ret == 0) {
+		k_mutex_lock(&head_lock, K_FOREVER);
+		head.stats.status_sent++;
+		k_mutex_unlock(&head_lock);
+	}
+	return ret;
 }
 
 /* Transmit what the brain handed us: the one funnel every transmit takes
@@ -284,6 +314,8 @@ static void head_tx_thread_fn(void *p1, void *p2, void *p3)
 
 	for (;;) {
 		int ret;
+		int elen;
+		uint32_t result_to;
 
 		bool is_relay;
 		bool clamped = false;
@@ -445,6 +477,8 @@ static void head_tx_thread_fn(void *p1, void *p2, void *p3)
 		}
 
 report:
+		result_to = 0U;
+		elen = 0;
 		k_mutex_lock(&head_lock, K_FOREVER);
 		if (ret == 0) {
 			head.stats.tx_sent++;
@@ -462,15 +496,14 @@ report:
 				.lag_ms = is_relay ? (uint16_t)MIN(t.arrived_ms - t.orig_rx_ms, 0xFFFEU)
 						   : 0U,
 			};
-			int elen = meshtastic_attachment_encode_tx_result(&r, tx_env_buf,
-									  sizeof(tx_env_buf));
-
-			if (elen > 0) {
-				(void)meshtastic_attachment_head_send(head.brain, tx_env_buf,
-								      (size_t)elen);
-			}
+			elen = meshtastic_attachment_encode_tx_result(&r, tx_env_buf,
+								      sizeof(tx_env_buf));
+			result_to = head.brain;
 		}
 		k_mutex_unlock(&head_lock);
+		if (elen > 0) {
+			(void)meshtastic_attachment_head_send(result_to, tx_env_buf, (size_t)elen);
+		}
 		if (ret != 0) {
 			LOG_DBG("head: tx seq %u failed (%d)", t.tx_seq, ret);
 		}
@@ -496,8 +529,7 @@ static void head_work_fn(struct k_work *work)
 		uint32_t brain;
 		int ret;
 
-		k_mutex_lock(&head_lock, K_FOREVER);
-		brain = head.brain;
+		brain = meshtastic_attachment_head_get_brain();
 		if (brain == 0U) {
 			ret = -EHOSTUNREACH;
 		} else {
@@ -506,6 +538,7 @@ static void head_work_fn(struct k_work *work)
 				ret = meshtastic_attachment_head_send(brain, env_buf, (size_t)ret);
 			}
 		}
+		k_mutex_lock(&head_lock, K_FOREVER);
 		if (ret == 0) {
 			head.stats.forwarded++;
 		} else {
@@ -520,13 +553,13 @@ static void head_work_fn(struct k_work *work)
 
 static void head_status_fn(struct k_work *work)
 {
+	uint32_t brain = meshtastic_attachment_head_get_brain();
+
 	ARG_UNUSED(work);
 
-	k_mutex_lock(&head_lock, K_FOREVER);
-	if (head.brain != 0U && status_send_locked(head.brain) == 0) {
-		head.stats.status_sent++;
+	if (brain != 0U) {
+		(void)status_send(brain);
 	}
-	k_mutex_unlock(&head_lock);
 }
 
 /* Is the peer link up to @p brain? If it is up to someone else (a target the
@@ -619,6 +652,7 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 						uint32_t node, const uint8_t *env, size_t len)
 {
 	struct meshtastic_attachment_msg msg;
+	uint32_t status_to = 0U;
 	int ret;
 
 	if (node == 0U || env == NULL) {
@@ -662,10 +696,9 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 					       NULL);
 		if (ret == 0) {
 			head.stats.controls++;
-			/* The brain learns the outcome from STATUS, not from an ack. */
-			if (status_send_locked(node) == 0) {
-				head.stats.status_sent++;
-			}
+			/* The brain learns the outcome from STATUS, not from an ack;
+			 * sent once head_lock is released (the lock order above). */
+			status_to = node;
 		}
 		break;
 	}
@@ -794,9 +827,7 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 		}
 		if (ret == 0) {
 			head.stats.controls++;
-			if (status_send_locked(node) == 0) {
-				head.stats.status_sent++;
-			}
+			status_to = node;
 		}
 		break;
 	}
@@ -832,6 +863,9 @@ int meshtastic_attachment_head_on_envelope_from(const struct meshtastic_attach_b
 	}
 out:
 	k_mutex_unlock(&head_lock);
+	if (status_to != 0U) {
+		(void)status_send(status_to);
+	}
 	return ret;
 }
 
@@ -947,19 +981,9 @@ uint32_t meshtastic_attachment_head_get_brain(void)
 
 int meshtastic_attachment_head_status_send(void)
 {
-	int ret;
+	uint32_t brain = meshtastic_attachment_head_get_brain();
 
-	k_mutex_lock(&head_lock, K_FOREVER);
-	if (head.brain == 0U) {
-		ret = -EHOSTUNREACH;
-	} else {
-		ret = status_send_locked(head.brain);
-		if (ret == 0) {
-			head.stats.status_sent++;
-		}
-	}
-	k_mutex_unlock(&head_lock);
-	return ret;
+	return (brain == 0U) ? -EHOSTUNREACH : status_send(brain);
 }
 
 void meshtastic_attachment_head_stats_get(struct meshtastic_attachment_head_stats *out)

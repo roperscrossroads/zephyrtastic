@@ -51,14 +51,79 @@ static struct {
 	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
 	size_t len;
 	uint32_t count;
+	uint32_t under_lock; /* sends made while another thread could not take head_lock */
+	/* Every TX_RESULT sent, in order: a result and the forward of the copy that
+	 * cancelled it are sent by two threads and may reach the bearer in either
+	 * order, so the last envelope alone cannot answer "was seq N reported". */
+	struct {
+		uint16_t seq;
+		int8_t rc;
+	} results[8];
+	uint32_t n_results;
 } sent;
 
 static enum meshtastic_attach_auth test_auth = MESHTASTIC_ATTACH_AUTH_ENCRYPTED;
+
+/* agents-z7rg: a send to the brain enters the BLE peer module, whose RX thread
+ * delivers the brain's envelopes into the head under the head's lock. A send made
+ * holding head_lock is half of an AB-BA deadlock (rzr5, 2026-11-24). The probe
+ * asks another thread to take head_lock (through a public call that locks it)
+ * while the send is in progress; if it cannot within PROBE_MS, the sender holds
+ * it. Sequence numbers keep a probe that finishes late from answering the next. */
+#define PROBE_MS 100
+static K_SEM_DEFINE(probe_go, 0, 1);
+static atomic_t probe_req;
+static atomic_t probe_done;
+
+static void probe_fn(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+	for (;;) {
+		atomic_val_t seq;
+
+		k_sem_take(&probe_go, K_FOREVER);
+		seq = atomic_get(&probe_req);
+		(void)meshtastic_attachment_head_get_brain(); /* takes head_lock */
+		atomic_set(&probe_done, seq);
+	}
+}
+K_THREAD_DEFINE(head_lock_probe, 1024, probe_fn, NULL, NULL, NULL, K_PRIO_PREEMPT(2), 0, 0);
+
+static bool head_lock_free_for_others(void)
+{
+	atomic_val_t seq = atomic_inc(&probe_req) + 1;
+	int64_t end = k_uptime_get() + PROBE_MS;
+
+	k_sem_give(&probe_go);
+	while (atomic_get(&probe_done) != seq) {
+		if (k_uptime_get() >= end) {
+			return false;
+		}
+		k_msleep(1);
+	}
+	return true;
+}
 
 static int test_bearer_send(uint32_t brain, const uint8_t *env, size_t len)
 {
 	if (len > sizeof(sent.env)) {
 		return -EMSGSIZE;
+	}
+	if (!head_lock_free_for_others()) {
+		sent.under_lock++;
+	}
+	{
+		struct meshtastic_attachment_msg m;
+
+		if (meshtastic_attachment_decode(env, len, &m) >= 0 &&
+		    m.type == MESHTASTIC_ATTACHMENT_TX_RESULT) {
+			unsigned int i = sent.n_results++ % ARRAY_SIZE(sent.results);
+
+			sent.results[i].seq = m.u.result.tx_seq;
+			sent.results[i].rc = m.u.result.rc;
+		}
 	}
 	sent.to = brain;
 	memcpy(sent.env, env, len);
@@ -596,13 +661,14 @@ static int hand_relay(const uint8_t *wire, uint8_t len, uint32_t rx_ms, uint32_t
 
 static void expect_result(uint16_t seq, int rc)
 {
-	struct meshtastic_attachment_msg msg;
-
 	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(3)), "TX_RESULT");
-	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
-	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_RESULT, "type %u", msg.type);
-	zassert_equal(msg.u.result.tx_seq, seq);
-	zassert_equal(msg.u.result.rc, rc, "rc %d", msg.u.result.rc);
+	for (uint32_t k = 0U; k < MIN(sent.n_results, ARRAY_SIZE(sent.results)); k++) {
+		if (sent.results[k].seq == seq) {
+			zassert_equal(sent.results[k].rc, rc, "rc %d", sent.results[k].rc);
+			return;
+		}
+	}
+	zassert_unreachable("no TX_RESULT for seq %u", seq);
 }
 
 ZTEST(attachment_head, test_relay_keys_up_on_the_heads_clock)
@@ -866,4 +932,62 @@ ZTEST(attachment_head, test_zz_late_client_relay_applies_its_own_cancel_test)
 	expect_result_skipping_status(27U, 0);
 	meshtastic_attachment_head_stats_get(&st);
 	zassert_equal(st.tx_late_dropped, 1U, "not counted for a router");
+}
+
+/* agents-z7rg: no send to the brain is made holding head_lock -- the forward of a
+ * heard frame (the BLE worker), STATUS on demand (the shell's path), STATUS after
+ * a control (the BT RX thread, inside the brain's own envelope) and TX_RESULT
+ * (head_tx, the thread named in the rzr5 assert). Before the fix every one of
+ * them held it. */
+ZTEST(attachment_head, test_no_send_to_the_brain_holds_the_head_lock)
+{
+	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
+	uint8_t wire[40];
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_msg msg;
+	int len;
+
+	/* Forward. */
+	some_frame(wire, sizeof(wire), 0x61U);
+	zassert_ok(lora_sim_inject(lora_dev, wire, sizeof(wire), -70, 5));
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(2)), "forwarded");
+	zassert_equal(sent.under_lock, 0U, "RX_FRAME forwarded under head_lock");
+
+	/* STATUS on demand. */
+	zassert_ok(meshtastic_attachment_head_status_send());
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(1)));
+	zassert_equal(sent.under_lock, 0U, "STATUS on demand sent under head_lock");
+
+	/* STATUS after a control from the brain. */
+	len = meshtastic_attachment_encode_set_preset((uint8_t)PRESET_ST, env, sizeof(env));
+	zassert_true(len > 0);
+	zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len));
+	zassert_ok(k_sem_take(&sent.sem, K_SECONDS(1)), "STATUS follows the control");
+	zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_STATUS);
+	zassert_equal(sent.under_lock, 0U, "STATUS after a control sent under head_lock");
+
+	/* TX_RESULT from head_tx. */
+	wait_rx_armed();
+	some_frame(wire, sizeof(wire), 0x62U);
+	{
+		const struct meshtastic_attachment_tx_frame tx = {
+			.preset = (uint8_t)PRESET_ST, .flags = MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT,
+			.tx_seq = 21U, .wire = wire, .wire_len = sizeof(wire),
+		};
+		len = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
+		zassert_true(len > 0);
+		zassert_ok(meshtastic_attach_bearer_rx(&test_bearer, BRAIN_NODE, env, (size_t)len));
+	}
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_SECONDS(2)), "on the air");
+	/* The 5 s STATUS timer may land first: skip it. */
+	for (int i = 0; i < 3; i++) {
+		zassert_ok(k_sem_take(&sent.sem, K_SECONDS(1)), "TX_RESULT sent");
+		zassert_ok(meshtastic_attachment_decode(sent.env, sent.len, &msg));
+		if (msg.type == MESHTASTIC_ATTACHMENT_TX_RESULT) {
+			break;
+		}
+	}
+	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_RESULT);
+	zassert_equal(sent.under_lock, 0U, "TX_RESULT sent under head_lock");
 }
