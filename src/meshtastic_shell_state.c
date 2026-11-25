@@ -25,6 +25,7 @@
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/util.h>
 
+#include <zephyr/meshtastic/lfclk.h>
 #include <zephyr/meshtastic/meshtastic.h>
 
 #include "meshtastic_build.h"
@@ -299,6 +300,22 @@ static void st_pki(struct st *s)
 }
 #endif
 
+#if MESHTASTIC_LFCLK_AVAILABLE
+/* The nRF 32 kHz clock: the source the build asked for, the one the CLOCK peripheral
+ * says runs, and the RC calibrations done/skipped (-1: not counted). A XIAO must say
+ * want "rc", src "rc" and a growing cal (agents-xf7q, agents-mvwn). */
+static void st_lfclk(struct st *s)
+{
+	struct meshtastic_lfclk_info lf;
+
+	(void)meshtastic_lfclk_get(&lf);
+	/* Two pieces: st_out's buffer is 80 bytes. */
+	st_out(s, ",\"lfclk\":{\"want\":\"%s\",\"src\":\"%s\",\"ok\":%d", lf.want, lf.running,
+	       lf.as_asked ? 1 : 0);
+	st_out(s, ",\"cal\":%d,\"cal_skip\":%d}", lf.cal, lf.cal_skip);
+}
+#endif
+
 /* The health object, a key at a time (no piece outgrows st_out's buffer, and no table
  * of names and values sits on the shell thread's stack). */
 static void st_hgroup(struct st *s, const char *group)
@@ -444,6 +461,9 @@ int meshtastic_shell_state(const struct shell *sh)
 	st_rxq(&s);
 #if defined(CONFIG_MESHTASTIC_PKI)
 	st_pki(&s);
+#endif
+#if MESHTASTIC_LFCLK_AVAILABLE
+	st_lfclk(&s);
 #endif
 	st_health(&s);
 	st_out(&s, "}");

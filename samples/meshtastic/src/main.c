@@ -23,6 +23,7 @@
 #include <zephyr/drivers/hwinfo.h>
 
 #include <zephyr/meshtastic/bootlog.h>
+#include <zephyr/meshtastic/lfclk.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/net/net_event.h>
@@ -172,6 +173,19 @@ static void log_boot_reset_cause(void)
 	struct meshtastic_watchdog_crash_info wdt_crash;
 	struct meshtastic_hw_watchdog_crash_info hw_wdt_crash;
 	struct meshtastic_fatal_crash_info fatal_crash;
+	struct meshtastic_lfclk_info lfclk;
+
+	/* nRF: which oscillator the 32 kHz clock runs from, and whether that is what the
+	 * build asked for. Zephyr 4.5 quietly moved a XIAO back to its crystal once
+	 * (agents-xf7q); a mismatch here is the line that would have said so. */
+	if (meshtastic_lfclk_get(&lfclk)) {
+		if (lfclk.as_asked) {
+			LOG_INF("LFCLK: %s", lfclk.running);
+		} else {
+			LOG_WRN("LFCLK: running %s, the build asked for %s", lfclk.running,
+				lfclk.want);
+		}
+	}
 
 #if defined(CONFIG_MESHTASTIC_BOOTLOG)
 	/* First, and on every target: warm-vs-cold plus the boot counter. The
