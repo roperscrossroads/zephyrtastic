@@ -649,6 +649,9 @@ int meshtastic_mesh_pb_try_decode(meshtastic_MeshPacket *mesh)
 		mesh->decoded = data;
 		mesh->which_payload_variant = meshtastic_MeshPacket_decoded_tag;
 		mesh->channel = ch_index;
+		/* A channel key (AES-CTR, no authentication) never proves the sender: a flag
+		 * that arrived with the packet was not set by our own PKC decrypt above. */
+		mesh->pki_encrypted = false;
 	}
 
 	return 0;

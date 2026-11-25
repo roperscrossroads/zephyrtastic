@@ -12,3 +12,8 @@ common:
     - native_sim/native/64
 tests:
   meshtastic.mqtt_proxy.native_sim: {}
+  # Plaintext envelopes are accepted only with encryption off; that is the one path the
+  # channel decrypt never sees, so the ingest's own pki_encrypted clear is tested here.
+  meshtastic.mqtt_proxy.plain_envelopes.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_MQTT_ENCRYPTION_ENABLED=n

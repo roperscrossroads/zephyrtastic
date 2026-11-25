@@ -35,6 +35,7 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_core.h"
 #include "meshtastic_position.h"
+#include <zephyr/meshtastic/nodedb.h>
 #include "meshtastic_mqtt.h"
 #include "meshtastic_mqtt_config.h"
 #include "meshtastic_mqtt_internal.h"
@@ -702,8 +703,28 @@ void meshtastic_mqtt_core_downlink(const uint8_t *payload, size_t len, const cha
 		return;
 	}
 
+	/* Upstream shouldDropMqttDownlink() and the hop check of onReceiveProto()
+	 * (firmware/src/mqtt/MQTT.cpp): hop fields out of range, an ignored sender, a
+	 * broadcast source and ignore_mqtt are dropped before the packet enters the mesh. */
+	if (env.packet->hop_limit > MESHTASTIC_FLAGS_HOP_LIMIT_MASK || env.packet->hop_start > MESHTASTIC_FLAGS_HOP_LIMIT_MASK) {
+		LOG_DBG("MQTT downlink with invalid hop fields dropped");
+		pb_release(meshtastic_ServiceEnvelope_fields, &env);
+		return;
+	}
+	if (env.packet->from == MESHTASTIC_NODE_BROADCAST ||
+	    meshtastic_nodedb_is_ignored(env.packet->from) ||
+	    IS_ENABLED(CONFIG_MESHTASTIC_MQTT_IGNORE_MQTT)) {
+		LOG_DBG("MQTT downlink from 0x%08x dropped (broadcast source, ignored node or "
+			"ignore_mqtt)", env.packet->from);
+		pb_release(meshtastic_ServiceEnvelope_fields, &env);
+		return;
+	}
+
 	meshtastic_mesh_packet_copy(&inject, env.packet);
 	inject.via_mqtt = true;
+	/* Only a local AES-CCM decryption may establish PKI authentication (upstream
+	 * MQTT.cpp:160): the broker's copy of the flag is a claim, not a proof. */
+	inject.pki_encrypted = false;
 	inject.transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT;
 
 	if (inject.which_payload_variant == meshtastic_MeshPacket_decoded_tag) {

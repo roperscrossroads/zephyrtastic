@@ -28,6 +28,7 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_mqtt.h"
+#include <zephyr/meshtastic/nodedb.h>
 #include "meshtastic_mqtt_config.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_phoneapi.h"
@@ -145,6 +146,14 @@ static void expected_topic(char *buf, size_t len, const char *gateway)
 		 meshtastic_runtime_channel_name(), gateway);
 }
 
+/* What a hostile or broken broker peer can set in an envelope; reset before each test. */
+static struct {
+	bool pki;	      /* the envelope claims pki_encrypted */
+	bool decoded;	      /* plaintext envelope (the broker sends the Data, not ciphertext) */
+	uint32_t hop_limit;  /* 0xff: leave the frame's own */
+	uint32_t hop_start;  /* 0xff: leave the frame's own */
+} dl_forge;
+
 /* ---- suite ---------------------------------------------------------------------- */
 
 static void *suite_setup(void)
@@ -176,6 +185,10 @@ static void *suite_setup(void)
 static void suite_before(void *f)
 {
 	ARG_UNUSED(f);
+	dl_forge.pki = false;
+	dl_forge.decoded = false;
+	dl_forge.hop_limit = 0xffU;
+	dl_forge.hop_start = 0xffU;
 	k_sleep(K_MSEC(50));
 	drain();
 }
@@ -229,6 +242,9 @@ ZTEST(mqtt_proxy, test_uplink_reaches_the_client_as_a_proxy_message)
 	char gateway[12];
 	pb_istream_t is;
 
+	if (!IS_ENABLED(CONFIG_MESHTASTIC_MQTT_ENCRYPTION_ENABLED)) {
+		ztest_test_skip(); /* this test reads the encrypted envelope */
+	}
 	build_text_wire(PEER_ID, id, "hello broker", true, &pkt, wire, &wire_len);
 	meshtastic_mqtt_on_rx(&pkt, wire, wire_len, NULL);
 
@@ -293,9 +309,23 @@ static void send_proxy_downlink(uint32_t from, uint32_t id, const char *text)
 	mesh.hop_limit = wire[12] & 0x07U;
 	mesh.hop_start = (wire[12] >> 5) & 0x07U;
 	mesh.channel = wire[13];
-	mesh.which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
-	mesh.encrypted.size = (pb_size_t)(wire_len - 16U);
-	memcpy(mesh.encrypted.bytes, &wire[16], mesh.encrypted.size);
+	mesh.pki_encrypted = dl_forge.pki;
+	if (dl_forge.hop_limit != 0xffU) {
+		mesh.hop_limit = dl_forge.hop_limit;
+	}
+	if (dl_forge.hop_start != 0xffU) {
+		mesh.hop_start = dl_forge.hop_start;
+	}
+	if (dl_forge.decoded) {
+		mesh.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+		mesh.decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+		mesh.decoded.payload.size = (pb_size_t)strlen(text);
+		memcpy(mesh.decoded.payload.bytes, text, mesh.decoded.payload.size);
+	} else {
+		mesh.which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
+		mesh.encrypted.size = (pb_size_t)(wire_len - 16U);
+		memcpy(mesh.encrypted.bytes, &wire[16], mesh.encrypted.size);
+	}
 
 	snprintk(channel, sizeof(channel), "%s", meshtastic_runtime_channel_name());
 	env.packet = &mesh;
@@ -330,6 +360,92 @@ ZTEST(mqtt_proxy, test_downlink_from_the_client_reaches_the_mesh)
 		      "decrypted with the channel key");
 	zassert_equal(dec.packet.decoded.portnum, meshtastic_PortNum_TEXT_MESSAGE_APP, "");
 	zassert_mem_equal(dec.packet.decoded.payload.bytes, "hello mesh", 10, "");
+}
+
+/* dn7w: only our own PKC decrypt may mark a packet authenticated. The envelope's flag is the
+ * broker's claim; the frame decrypts under the channel key, which is no proof of the sender
+ * (upstream MQTT.cpp:160). Without the clear it would skip the signature policy. */
+ZTEST(mqtt_proxy, test_a_forged_pki_flag_from_the_broker_is_not_kept)
+{
+	uint32_t id = next_id++;
+
+	dl_forge.pki = true;
+	send_proxy_downlink(PEER2_ID, id, "claims pkc");
+
+	zassert_true(wait_for_packet(id, 500), "delivered like any channel frame");
+	zassert_false(dec.packet.pki_encrypted, "never authenticated by the broker's flag");
+}
+
+/* The same claim on a plaintext envelope, which never meets the channel decrypt: only the
+ * ingest clear stops it. */
+ZTEST(mqtt_proxy, test_a_forged_pki_flag_on_a_decoded_envelope_is_not_kept)
+{
+	uint32_t id = next_id++;
+
+	if (IS_ENABLED(CONFIG_MESHTASTIC_MQTT_ENCRYPTION_ENABLED)) {
+		ztest_test_skip(); /* a plaintext envelope is refused outright */
+	}
+	dl_forge.pki = true;
+	dl_forge.decoded = true;
+	send_proxy_downlink(PEER2_ID, id, "claims pkc, plain");
+
+	zassert_true(wait_for_packet(id, 500), "delivered");
+	zassert_false(dec.packet.pki_encrypted, "never authenticated by the broker's flag");
+}
+
+/* The decrypt itself: a channel-key decrypt never leaves the flag standing, whoever set it
+ * (the second layer behind the ingest clear). */
+ZTEST(mqtt_proxy, test_a_channel_decrypt_clears_a_claimed_pki_flag)
+{
+	static uint8_t wire[256];
+	static meshtastic_MeshPacket mesh;
+	struct meshtastic_packet pkt;
+	uint32_t wire_len = sizeof(wire);
+
+	build_text_wire(PEER2_ID, next_id++, "claims pkc", true, &pkt, wire, &wire_len);
+	mesh = (meshtastic_MeshPacket)meshtastic_MeshPacket_init_zero;
+	mesh.to = sys_get_le32(&wire[0]);
+	mesh.from = sys_get_le32(&wire[4]);
+	mesh.id = sys_get_le32(&wire[8]);
+	mesh.channel = wire[13];
+	mesh.pki_encrypted = true;
+	mesh.which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
+	mesh.encrypted.size = (pb_size_t)(wire_len - 16U);
+	memcpy(mesh.encrypted.bytes, &wire[16], mesh.encrypted.size);
+
+	zassert_ok(meshtastic_mesh_pb_try_decode(&mesh), "decrypts under the channel key");
+	zassert_equal(mesh.which_payload_variant, meshtastic_MeshPacket_decoded_tag, "");
+	zassert_false(mesh.pki_encrypted, "a channel key does not authenticate the sender");
+}
+
+/* Upstream's downlink drops (MQTT.cpp shouldDropMqttDownlink and the hop check). */
+ZTEST(mqtt_proxy, test_downlink_drops_follow_upstream)
+{
+	uint32_t id = next_id++;
+
+	dl_forge.hop_limit = 3U;
+	dl_forge.hop_start = 3U;
+	send_proxy_downlink(PEER2_ID, id, "control");
+	zassert_true(wait_for_packet(id, 500), "control: delivered");
+
+	/* hop fields beyond the 3-bit range */
+	id = next_id++;
+	dl_forge.hop_limit = 9U;
+	send_proxy_downlink(PEER2_ID, id, "hops");
+	zassert_false(wait_for_packet(id, 300), "hop_limit > 7 dropped");
+
+	/* a broadcast source */
+	id = next_id++;
+	dl_forge.hop_limit = 3U;
+	send_proxy_downlink(0xffffffffU, id, "bcast src");
+	zassert_false(wait_for_packet(id, 300), "broadcast source dropped");
+
+	/* an ignored sender */
+	id = next_id++;
+	zassert_ok(meshtastic_nodedb_set_ignored(PEER2_ID, true), "");
+	send_proxy_downlink(PEER2_ID, id, "ignored");
+	zassert_false(wait_for_packet(id, 300), "ignored node dropped");
+	zassert_ok(meshtastic_nodedb_set_ignored(PEER2_ID, false), "");
 }
 
 /* Reference PhoneAPI: a proxy message is ignored until the client is past the
