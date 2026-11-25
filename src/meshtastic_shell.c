@@ -6096,20 +6096,26 @@ static int cmd_crashinfo(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "hw watchdog  unsupported (CONFIG_MESHTASTIC_WATCHDOG=n on this build)");
 #endif
 
-	if (meshtastic_fatal_peek_last_crash(&fatal_crash)) {
-		shell_print(sh, "fatal        %s (%u), heap free=%u allocated=%u "
-				"max_allocated=%u, faulting thread \"%s\"",
-			    crashinfo_fatal_reason_name(fatal_crash.reason), fatal_crash.reason,
-			    fatal_crash.heap_free, fatal_crash.heap_allocated,
-			    fatal_crash.heap_max_allocated, fatal_crash.thread_name);
-		shell_print(sh, "             pc=0x%08x lr=0x%08x xpsr=0x%08x cfsr=0x%08x hfsr=0x%08x "
-				"mmfar=0x%08x bfar=0x%08x%s, %u nested",
-			    fatal_crash.pc, fatal_crash.lr, fatal_crash.xpsr, fatal_crash.cfsr,
-			    fatal_crash.hfsr, fatal_crash.mmfar, fatal_crash.bfar,
-			    fatal_crash.in_handler ? " (raised in handler mode)" : "",
-			    fatal_crash.nested);
-	} else {
-		shell_print(sh, "fatal        none pending");
+	{
+		/* Pending, or already taken by this boot's report (which consumes it so the
+		 * next boot does not report it again): either way, the last fatal error. */
+		bool pending = meshtastic_fatal_peek_last_crash(&fatal_crash);
+
+		if (pending || meshtastic_fatal_reported_at_boot(&fatal_crash)) {
+			shell_print(sh, "fatal        %s (%u), heap free=%u allocated=%u "
+					"max_allocated=%u, faulting thread \"%s\"%s",
+				    crashinfo_fatal_reason_name(fatal_crash.reason),
+				    fatal_crash.reason, fatal_crash.heap_free,
+				    fatal_crash.heap_allocated, fatal_crash.heap_max_allocated,
+				    fatal_crash.thread_name,
+				    pending ? "" : " (reported at this boot)");
+			shell_print(sh, "             pc=0x%08x lr=0x%08x xpsr=0x%08x%s, %u nested",
+				    fatal_crash.pc, fatal_crash.lr, fatal_crash.xpsr,
+				    fatal_crash.in_handler ? " (raised in handler mode)" : "",
+				    fatal_crash.nested);
+		} else {
+			shell_print(sh, "fatal        none pending");
+		}
 	}
 
 	shell_print(sh, "");

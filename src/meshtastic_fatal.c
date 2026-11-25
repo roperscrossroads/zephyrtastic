@@ -22,9 +22,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/arch/cpu.h>
 #include <zephyr/devicetree.h>
-#if defined(CONFIG_CPU_CORTEX_M)
-#include <cmsis_core.h>
-#endif
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/sys/reboot.h>
@@ -98,7 +95,7 @@ static void fatal_collect_heap_stats(struct meshtastic_fatal_crash_info *info)
 
 #define FATAL_CRASH_MAGIC 0x46415441U /* "FATA" */
 
-#define FATAL_CRASH_VERSION 2U /* 2: exception frame, fault status, nested count */
+#define FATAL_CRASH_VERSION 3U /* 2: frame, fault status, nested; 3: fault status dropped */
 
 /*
  * A coredump into a partition on the nRF QSPI NOR CANNOT work, and makes every
@@ -126,6 +123,11 @@ BUILD_ASSERT(!DT_NODE_HAS_COMPAT(DT_GPARENT(DT_NODELABEL(coredump_partition)), n
  * overwrite the record of the fault that started the chain. */
 static bool fatal_entered;
 
+/* What take() consumed this boot (plain RAM): the boot report takes the record so the
+ * next boot does not report it again, and `crashinfo`, run later, still shows it. */
+static struct meshtastic_fatal_crash_info reported;
+static bool reported_valid;
+
 /* Sealed (meshtastic_retained.h): a magic alone also passes over another image's bytes
  * after an update (agents-8h29). */
 static FATAL_CRASH_RTC_ATTR struct meshtastic_retained_seal rtc_fatal_seal;
@@ -146,7 +148,18 @@ bool meshtastic_fatal_take_last_crash(struct meshtastic_fatal_crash_info *out)
 	*out = rtc_fatal_info;
 	meshtastic_retained_void(&rtc_fatal_seal); /* one-shot: not re-reported on a later boot */
 	fatal_entered = false;                     /* a fault after this is a new chain */
+	reported = rtc_fatal_info;                 /* still shown by `crashinfo` this boot */
+	reported_valid = true;
 
+	return true;
+}
+
+bool meshtastic_fatal_reported_at_boot(struct meshtastic_fatal_crash_info *out)
+{
+	if (!reported_valid) {
+		return false;
+	}
+	*out = reported;
 	return true;
 }
 
@@ -161,17 +174,69 @@ bool meshtastic_fatal_peek_last_crash(struct meshtastic_fatal_crash_info *out)
 	return true;
 }
 
-/* Overrides the __weak default in kernel/fatal.c. Reproduces its exact
- * behavior (LOG_PANIC() + reset-or-halt per CONFIG_RESET_ON_FATAL_ERROR)
- * so nothing about the existing fatal-error path changes -- this only adds
- * the breadcrumb capture ahead of it. */
-/* The exception frame and fault status, where the architecture has them. Plain
+#if defined(CONFIG_RESET_ON_FATAL_ERROR)
+/* "<reason>: <thread>" for the reboot trace's 24-byte detail, from the record of the
+ * chain's first fault. A static buffer: this runs once, in the fatal path. */
+static const char *fatal_trace_detail(void)
+{
+	static char detail[24];
+	const char *why;
+
+	if (!fatal_record_valid()) {
+		return NULL;
+	}
+	switch (rtc_fatal_info.reason) {
+	case K_ERR_CPU_EXCEPTION:
+		why = "cpu exc";
+		break;
+	case K_ERR_SPURIOUS_IRQ:
+		why = "spurious irq";
+		break;
+	case K_ERR_STACK_CHK_FAIL:
+		why = "stack ovf";
+		break;
+	case K_ERR_KERNEL_OOPS:
+		why = "oops";
+		break;
+	case K_ERR_KERNEL_PANIC:
+		why = "panic";
+		break;
+	default:
+		why = "fatal";
+		break;
+	}
+	/* By hand, not snprintk(): the thread name is cut to what fits, on purpose. */
+	{
+		size_t n = 0U;
+
+		for (const char *p = why; *p != '\0' && n < sizeof(detail) - 1U; p++) {
+			detail[n++] = *p;
+		}
+		for (const char *p = ": "; *p != '\0' && n < sizeof(detail) - 1U; p++) {
+			detail[n++] = *p;
+		}
+		for (size_t i = 0U; i < sizeof(rtc_fatal_info.thread_name) &&
+				    rtc_fatal_info.thread_name[i] != '\0' && n < sizeof(detail) - 1U;
+		     i++) {
+			detail[n++] = rtc_fatal_info.thread_name[i];
+		}
+		detail[n] = '\0';
+	}
+	return detail;
+}
+#endif /* CONFIG_RESET_ON_FATAL_ERROR */
+
+/* The exception frame, where the architecture has one. Plain
  * loads: no driver, nothing that can block. */
 static void fatal_collect_frame(struct meshtastic_fatal_crash_info *info,
 				const struct arch_esf *esf)
 {
 #if defined(CONFIG_CPU_CORTEX_M)
-	if (esf != NULL) {
+	/* Not on a stack overflow: the CPU could not stack the frame there (MSTKERR),
+	 * and what Zephyr passes reads pc=0, lr=0xffffffff (rzr5, 2026-11-25). The
+	 * fault status registers are not read at all: Zephyr clears their sticky
+	 * bits after logging them, before this handler runs. */
+	if (esf != NULL && info->reason != K_ERR_STACK_CHK_FAIL) {
 		info->pc = esf->basic.pc;
 		info->lr = esf->basic.lr;
 		info->xpsr = esf->basic.xpsr;
@@ -179,18 +244,16 @@ static void fatal_collect_frame(struct meshtastic_fatal_crash_info *info,
 		 * fault was taken in handler mode ("Fault during interrupt handling"). */
 		info->in_handler = (esf->basic.xpsr & 0x1FFU) != 0U ? 1U : 0U;
 	}
-#if defined(CONFIG_ARMV7_M_ARMV8_M_MAINLINE)
-	info->cfsr = SCB->CFSR;
-	info->hfsr = SCB->HFSR;
-	info->mmfar = SCB->MMFAR;
-	info->bfar = SCB->BFAR;
-#endif
 #else
 	ARG_UNUSED(info);
 	ARG_UNUSED(esf);
 #endif
 }
 
+/* Overrides the __weak default in kernel/fatal.c. Reproduces its exact
+ * behavior (LOG_PANIC() + reset-or-halt per CONFIG_RESET_ON_FATAL_ERROR)
+ * so nothing about the existing fatal-error path changes -- this only adds
+ * the breadcrumb capture ahead of it. */
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
 	const char *tname;
@@ -245,7 +308,10 @@ finish:
 
 #if defined(CONFIG_RESET_ON_FATAL_ERROR)
 	LOG_ERR("Resetting system");
-	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_FATAL, NULL);
+	/* The trace records the thread that called sys_reboot(), which on this path is
+	 * the exception ("<isr>"); the detail carries what faulted and where, from the
+	 * record of the first fault (`meshtastic resets`: "fatal (stack ovf: shell_uart)"). */
+	meshtastic_reboot_trace_note(MESHTASTIC_REBOOT_FATAL, fatal_trace_detail());
 	sys_reboot(SYS_REBOOT_WARM);
 #else
 	LOG_ERR("Halting system");

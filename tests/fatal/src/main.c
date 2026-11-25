@@ -96,3 +96,21 @@ ZTEST(fatal, test_after_the_record_is_taken_a_new_fault_is_recorded)
 	zassert_equal(info.reason, K_ERR_KERNEL_OOPS);
 	zassert_equal(info.nested, 0U);
 }
+
+/* The boot report takes the record so a later boot does not report it again; until
+ * this case's fix `meshtastic crashinfo`, run after it, then found nothing (rzr5,
+ * 2026-11-25). What was taken stays readable for the rest of the boot. */
+ZTEST(fatal, test_the_record_taken_at_boot_is_still_readable)
+{
+	struct meshtastic_fatal_crash_info info;
+
+	k_thread_name_set(k_current_get(), "reported");
+	fault(K_ERR_STACK_CHK_FAIL);
+	zassert_true(meshtastic_fatal_take_last_crash(&info), "take");
+	zassert_false(meshtastic_fatal_peek_last_crash(&info), "taken: nothing pending");
+
+	memset(&info, 0, sizeof(info));
+	zassert_true(meshtastic_fatal_reported_at_boot(&info), "the taken record is gone");
+	zassert_equal(info.reason, K_ERR_STACK_CHK_FAIL);
+	zassert_str_equal(info.thread_name, "reported");
+}

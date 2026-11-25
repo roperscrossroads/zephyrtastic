@@ -193,20 +193,17 @@ struct meshtastic_fatal_crash_info {
 	uint32_t heap_max_allocated;
 	/** Name of the thread that faulted, best-effort. */
 	char thread_name[20];
-	/** The exception frame (agents-ninc): the faulting PC, LR and xPSR from
-	 * the frame Zephyr passed in. Zero where the architecture gives none
-	 * (native_sim, Xtensa). For an assert or k_panic() the PC is inside the
-	 * assert machinery and LR is the more telling of the two. */
+	/** The exception frame (agents-ninc): the PC, LR and xPSR from the frame
+	 * Zephyr passed in. Zero where the architecture gives none (native_sim,
+	 * Xtensa) and for a stack overflow, whose frame could not be stacked. For
+	 * an assert or k_panic() the PC is inside the assert machinery and LR is
+	 * the more telling of the two. The fault status registers (CFSR, MMFAR,
+	 * BFAR) are NOT here: Zephyr's fault handler clears their sticky bits
+	 * after logging them, before this handler runs (cortex_m/fault.c), so the
+	 * fault dump in `logring prev` is where they are. */
 	uint32_t pc;
 	uint32_t lr;
 	uint32_t xpsr;
-	/** Cortex-M fault status at the moment of the fault: CFSR (a stack
-	 * overflow into the MPU guard is MSTKERR/MMARVALID here), HFSR, and the
-	 * fault addresses. Zero on other architectures. */
-	uint32_t cfsr;
-	uint32_t hfsr;
-	uint32_t mmfar;
-	uint32_t bfar;
 	/** Faults that re-entered the fatal handler after this record was made.
 	 * The record always names the FIRST fault; a second one raised inside
 	 * the fatal path (a log flush, the reboot) only bumps this. */
@@ -233,6 +230,13 @@ struct meshtastic_fatal_crash_info {
  * @retval false No breadcrumb was present.
  */
 bool meshtastic_fatal_take_last_crash(struct meshtastic_fatal_crash_info *out);
+
+/**
+ * @brief The record meshtastic_fatal_take_last_crash() consumed during this
+ * boot, if it consumed one. The boot report takes the record so a later boot
+ * does not report it again; this lets `meshtastic crashinfo` still show it.
+ */
+bool meshtastic_fatal_reported_at_boot(struct meshtastic_fatal_crash_info *out);
 
 /**
  * @brief Peek at the fatal-error crash breadcrumb without consuming it.
