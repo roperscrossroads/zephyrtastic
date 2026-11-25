@@ -228,19 +228,8 @@ tests:
       - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
       - CONFIG_MESHTASTIC_FLEET_BUNDLE="r8-scanner"
   sample.meshtastic.fleet.xiao-node:
-    # Class 1, XIAO cluster member. Binds on the MCUboot app slot (733,034 B).
-    tags: [meshtastic, fleet]
-    platform_allow: [xiao_ble/nrf52840]
-    integration_platforms: [xiao_ble/nrf52840]
-    sysbuild: true
-    extra_args:
-      - SHIELD=wio_sx1262_xiao
-      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sig-required.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
-      - CONFIG_MESHTASTIC_FLEET_BUNDLE="xiao-node"
-  sample.meshtastic.fleet.xiao-node.terse_signed:
-    # Class 1 with terse asserts AND cluster + packet signing: the image agents-ooma.38 will
-    # prove on hardware. It only fits because Terse asserts free ~38 KB of flash (on Zephyr
-    # 4.5 that is ASSERT_MODULE_DEFAULT_LEVEL_TERSE; ASSERT_VERBOSE=n alone no longer does it).
+    # Class 1 (xiao-node): XIAO node; signs and verifies packets and synced config, requires signed config.
+    # From the rxrbench catalog (tooling tools/fleet_lane_check.py scenario).
     tags: [meshtastic, fleet]
     platform_allow: [xiao_ble/nrf52840]
     integration_platforms: [xiao_ble/nrf52840]
@@ -248,9 +237,8 @@ tests:
     extra_args:
       - SHIELD=wio_sx1262_xiao
       - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sig-required.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-quiet-first-boot.conf"
-    extra_configs:
+      - CONFIG_MESHTASTIC_FLEET_BUNDLE=xiao-node
       - CONFIG_ASSERT_MODULE_DEFAULT_LEVEL_TERSE=y
-      - CONFIG_MESHTASTIC_FLEET_BUNDLE="xiao-node"
   sample.meshtastic.fleet.xiao-worker:
     # Class 12, XIAO keyless radio head (ATTACHMENT-DESIGN S5): the peer link and OTA,
     # nothing that holds a key or speaks. The post-build keyless assert runs on this ELF.
@@ -293,19 +281,6 @@ tests:
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
       - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
       - CONFIG_MESHTASTIC_FLEET_BUNDLE="v4-scanner"
-  sample.meshtastic.fleet.xiao-node-sig-optional:
-    # Class 7 (xiao-member-unsigned-cluster): XIAO member that verifies but does not require cluster signatures.
-    # From the rxrbench catalog (tooling tools/fleet_lane_check.py scenario).
-    tags: [meshtastic, fleet]
-    platform_allow: [xiao_ble/nrf52840]
-    integration_platforms: [xiao_ble/nrf52840]
-    sysbuild: true
-    extra_args:
-      - SHIELD=wio_sx1262_xiao
-      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
-      - CONFIG_MESHTASTIC_FLEET_CLASS=7
-      - CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x07"
-      - CONFIG_MESHTASTIC_FLEET_BUNDLE="xiao-node-sig-optional"
   sample.meshtastic.fleet.xiao-node-bridge:
     # Class 10 (xiao-relay): XIAO cross-preset relay, receiving half.
     # From the rxrbench catalog (tooling tools/fleet_lane_check.py scenario).
