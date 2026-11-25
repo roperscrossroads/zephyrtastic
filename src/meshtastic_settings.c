@@ -367,13 +367,15 @@ int meshtastic_settings_wipe(bool preserve_security)
 	return ret;
 }
 
-#define WIPE_SUBTREE_MAX 16U
+/* Names collected per walk. Small on purpose: this is static RAM on every image with
+ * settings (a XIAO member runs at ~96 %), and a subtree with more records than this is
+ * simply walked again until it is empty. */
+#define WIPE_SUBTREE_BATCH 4U
 
 struct wipe_subtree_ctx {
 	const char *subtree;
-	char names[WIPE_SUBTREE_MAX][SETTINGS_FULL_NAME_LEN];
+	char names[WIPE_SUBTREE_BATCH][SETTINGS_FULL_NAME_LEN];
 	unsigned int count;
-	bool overflow;
 };
 
 static int wipe_subtree_collect(const char *key, size_t len, settings_read_cb read_cb,
@@ -385,9 +387,8 @@ static int wipe_subtree_collect(const char *key, size_t len, settings_read_cb re
 	ARG_UNUSED(len);
 	ARG_UNUSED(read_cb);
 	ARG_UNUSED(cb_arg);
-	if (c->count >= WIPE_SUBTREE_MAX) {
-		c->overflow = true;
-		return 0;
+	if (c->count >= WIPE_SUBTREE_BATCH) {
+		return 1; /* batch full: stop this walk, the caller walks again */
 	}
 	ret = snprintk(c->names[c->count], sizeof(c->names[0]), "%s%s%s", c->subtree,
 		       (key != NULL && key[0] != '\0') ? "/" : "", key != NULL ? key : "");
@@ -399,27 +400,36 @@ static int wipe_subtree_collect(const char *key, size_t len, settings_read_cb re
 
 int meshtastic_settings_wipe_subtree(const char *subtree)
 {
-	/* Static: 16 full settings names is too much for the admin or shell thread's stack.
-	 * Callers are the factory resets, one at a time. */
+	/* Static, not on the caller's stack (the admin or shell thread). Callers are
+	 * the factory resets, one at a time. */
 	static struct wipe_subtree_ctx c;
-	int ret;
+	int total = 0;
 
 	if (subtree == NULL || subtree[0] == '\0') {
 		return -EINVAL;
 	}
-	memset(&c, 0, sizeof(c));
-	c.subtree = subtree;
-	ret = settings_load_subtree_direct(subtree, wipe_subtree_collect, &c);
-	if (ret < 0) {
-		return ret;
-	}
-	for (unsigned int i = 0U; i < c.count; i++) {
-		ret = settings_delete(c.names[i]);
+	/* Bounded: a delete that does not take would otherwise walk forever. */
+	for (unsigned int pass = 0U; pass < 64U; pass++) {
+		int ret;
+
+		memset(&c, 0, sizeof(c));
+		c.subtree = subtree;
+		ret = settings_load_subtree_direct(subtree, wipe_subtree_collect, &c);
 		if (ret < 0) {
 			return ret;
 		}
+		if (c.count == 0U) {
+			return total;
+		}
+		for (unsigned int i = 0U; i < c.count; i++) {
+			ret = settings_delete(c.names[i]);
+			if (ret < 0) {
+				return ret;
+			}
+			total++;
+		}
 	}
-	return c.overflow ? -ENOSPC : (int)c.count;
+	return -ELOOP;
 }
 
 void meshtastic_settings_save_stats(uint32_t *written, uint32_t *unchanged)

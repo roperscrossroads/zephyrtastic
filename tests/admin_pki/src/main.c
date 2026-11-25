@@ -4689,9 +4689,14 @@ static void seed_outside_records(void)
 {
 	zassert_ok(settings_save_one("mtspb/broker", "broker.example", 14));
 	zassert_ok(settings_save_one("mtspb/pass", "hunter2", 7));
+	/* Six in all: more than one walk of the wiper collects (it takes four). */
+	zassert_ok(settings_save_one("mtspb/user", "bench", 5));
+	zassert_ok(settings_save_one("mtspb/group", "lab", 3));
+	zassert_ok(settings_save_one("mtspb/edge", "gw-1", 4));
+	zassert_ok(settings_save_one("mtspb/port", "\x5b\x07", 2));
 	zassert_ok(settings_save_one("mtled/mode", "\x01", 1));
 	zassert_ok(settings_save_one("mtid/id", "\x0a\x0b\x0c\x0d", 4));
-	zassert_equal(records_under("mtspb"), 2U, "seed mtspb");
+	zassert_equal(records_under("mtspb"), 6U, "seed mtspb");
 	zassert_equal(records_under("mtled"), 1U, "seed mtled");
 	zassert_equal(records_under("mtid"), 1U, "seed mtid");
 }

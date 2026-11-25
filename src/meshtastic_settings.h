@@ -49,11 +49,11 @@ int meshtastic_settings_wipe(bool preserve_security);
  * @brief Delete every record under @p subtree (e.g. "mtspb"), one by one.
  *
  * For the stores a module keeps in its own subtree, outside the config store
- * that meshtastic_settings_wipe() empties (agents-ls39.1.5). The names are
- * collected first and deleted after the walk, never from inside it.
+ * that meshtastic_settings_wipe() empties (agents-ls39.1.5). Names are
+ * collected a few at a time and deleted after each walk, never from inside it;
+ * the walk repeats until the subtree is empty.
  *
- * @return the number of records deleted, or a negative errno: -ENOSPC when the
- *         subtree holds more records than one call collects (call it again).
+ * @return the number of records deleted, or a negative errno.
  */
 int meshtastic_settings_wipe_subtree(const char *subtree);
 
