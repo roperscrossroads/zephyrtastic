@@ -285,8 +285,6 @@ int meshtastic_channels_init_from_config(const struct meshtastic_config *cfg)
 	channel_fixup(0);
 
 	mt.ch_hash = meshtastic_channels_primary_hash();
-	mt.psk_len = cfg->psk_len;
-	memcpy(mt.psk, cfg->psk, cfg->psk_len);
 	mt.channel_name = meshtastic_channels_primary_name();
 
 	return 0;
@@ -331,18 +329,11 @@ int meshtastic_channels_set_slot(uint8_t index, const meshtastic_Channel *channe
 	 * demoted or disabled the current primary. May move primary_index. */
 	enforce_primary_invariant();
 
-	/* Refresh the cached primary key/hash/name off the (possibly relocated)
-	 * primary so TX keeps using the right channel. */
-	{
-		struct meshtastic_channel_key key;
-
-		if (meshtastic_channels_primary_key(&key) == 0) {
-			mt.psk_len = key.len;
-			memcpy(mt.psk, key.bytes, key.len);
-		}
-		mt.ch_hash = meshtastic_channels_primary_hash();
-		mt.channel_name = meshtastic_channels_primary_name();
-	}
+	/* Refresh the cached primary hash/name off the (possibly relocated) primary so
+	 * TX keeps using the right channel. The key is not cached: every user reads
+	 * the slot (meshtastic_channels_get_key / _primary_key). */
+	mt.ch_hash = meshtastic_channels_primary_hash();
+	mt.channel_name = meshtastic_channels_primary_name();
 
 	return 0;
 }
@@ -624,8 +615,6 @@ uint8_t meshtastic_channels_resolve_send_index(uint32_t dest, uint8_t channel_in
 
 void meshtastic_channels_refresh_derived(void)
 {
-	struct meshtastic_channel_key key;
-
 	/* Every slot, not just the primary: any channel storing an empty name
 	 * resolves to the active preset's display name, so a preset change moves
 	 * all of their hashes at once. Missing a secondary here would leave the
@@ -634,10 +623,6 @@ void meshtastic_channels_refresh_derived(void)
 		channel_fixup(i);
 	}
 
-	if (meshtastic_channels_primary_key(&key) == 0) {
-		mt.psk_len = key.len;
-		memcpy(mt.psk, key.bytes, key.len);
-	}
 	mt.ch_hash = meshtastic_channels_primary_hash();
 	mt.channel_name = meshtastic_channels_primary_name();
 }

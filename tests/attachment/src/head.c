@@ -458,7 +458,7 @@ ZTEST(attachment_head, test_identity_in_flash_is_never_loaded_or_touched)
 	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		zassert_true(meshtastic_channels_get_key(i, &key) < 0, "slot %u holds a key", i);
 	}
-	zassert_equal(mt.psk_len, 0U, "no primary PSK in RAM");
+	zassert_true(meshtastic_channels_primary_key(&key) < 0, "no primary PSK in RAM");
 	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &sec));
 	zassert_equal(sec.payload_variant.security.private_key.size, 0U, "no private key in RAM");
 	zassert_equal(meshtastic_config_store_setting_get("channel/0", (void *)key.bytes,
