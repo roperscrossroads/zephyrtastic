@@ -26,10 +26,13 @@
 #include <string.h>
 
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/uuid.h>
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/ztest.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
@@ -343,4 +346,86 @@ ZTEST(ble_sim, test_10_dial_out_with_one_link_in)
 	/* The attempt fails: the advert must be restored for the free slot. */
 	(void)fake_hci_complete_create(BT_HCI_ERR_UNKNOWN_CONN_ID);
 	zassert_true(UNTIL(hci().adv_enabled, 3000), "advert not restored after the dial");
+}
+
+/* agents-z7rg: a frame completed on the peer frame channel is handed to its
+ * callback (the attachment head's or brain's ingest) with the peer lock
+ * RELEASED. The head's ingest takes the head's lock, and the head sends to its
+ * brain through this module, which takes the peer lock: delivering under the
+ * peer lock was one half of the AB-BA that crashed rzr5 (head_tx waiting for
+ * peer_lock, the BT RX thread holding it and waiting for head_lock). Here a
+ * central writes one frame chunk to our frame characteristic, and the callback
+ * asks another thread to take the peer lock -- as head_tx would -- and waits for
+ * it. Under the old contract it never could. */
+#define FRAME_CHAR_UUID                                                                            \
+	BT_UUID_128_ENCODE(0xf3f1a2c2, 0x8e5e, 0x4d8b, 0x9f2a, 0x6c1d3b7e5a10)
+
+static K_SEM_DEFINE(lockprobe_go, 0, 1);
+static K_SEM_DEFINE(lockprobe_done, 0, 1);
+static volatile bool frame_cb_called;
+static volatile bool frame_cb_lock_free;
+static uint8_t frame_cb_bytes[8];
+
+static void lockprobe_fn(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+	for (;;) {
+		k_sem_take(&lockprobe_go, K_FOREVER);
+		(void)peer_stats(); /* takes peer_lock */
+		k_sem_give(&lockprobe_done);
+	}
+}
+K_THREAD_DEFINE(ble_lockprobe, 2048, lockprobe_fn, NULL, NULL, NULL, K_PRIO_PREEMPT(2), 0, 0);
+
+static void probing_frame_cb(unsigned int index, const uint8_t *frame, size_t len, uint8_t kind)
+{
+	ARG_UNUSED(index);
+	ARG_UNUSED(kind);
+	memcpy(frame_cb_bytes, frame, MIN(len, sizeof(frame_cb_bytes)));
+	k_sem_reset(&lockprobe_done);
+	k_sem_give(&lockprobe_go);
+	frame_cb_lock_free = (k_sem_take(&lockprobe_done, K_MSEC(300)) == 0);
+	frame_cb_called = true;
+}
+
+ZTEST(ble_sim, test_11_frame_callback_runs_without_the_peer_lock)
+{
+	static const struct bt_uuid_128 frame_uuid = BT_UUID_INIT_128(FRAME_CHAR_UUID);
+	const uint8_t frame[] = {0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6};
+	struct meshtastic_ble_peer_chunker ck;
+	const struct bt_gatt_attr *chrc;
+	uint8_t pdu[3 + MESHTASTIC_BLE_PEER_CHUNK_MTU23];
+	uint16_t value_handle;
+	int handle;
+	int n;
+
+	/* The value attribute carries the characteristic's own UUID. */
+	chrc = bt_gatt_find_by_uuid(NULL, 0, &frame_uuid.uuid);
+	zassert_not_null(chrc, "frame characteristic not in the local GATT db");
+	value_handle = bt_gatt_attr_get_handle(chrc);
+	zassert_true(value_handle != 0U);
+
+	handle = fake_hci_incoming_conn(&peer_addr);
+	zassert_true(handle > 0);
+	zassert_true(UNTIL(hci().conns_active == 1U, 2000));
+
+	meshtastic_ble_peer_frame_rx_register(probing_frame_cb);
+	frame_cb_called = false;
+	frame_cb_lock_free = false;
+
+	zassert_ok(meshtastic_ble_peer_chunker_start_kind(&ck, frame, sizeof(frame),
+							  MESHTASTIC_BLE_PEER_KIND_WIRE));
+	n = meshtastic_ble_peer_chunker_next(&ck, &pdu[3], MESHTASTIC_BLE_PEER_CHUNK_MTU23);
+	zassert_true(n > 0 && n <= MESHTASTIC_BLE_PEER_CHUNK_MTU23, "one chunk (%d)", n);
+	pdu[0] = 0x52U; /* ATT Write Command */
+	sys_put_le16(value_handle, &pdu[1]);
+	fake_hci_remote_att((uint16_t)handle, pdu, (uint16_t)(3 + n));
+
+	zassert_true(UNTIL(frame_cb_called, 3000), "the frame never reached the callback");
+	meshtastic_ble_peer_frame_rx_register(NULL);
+	zassert_mem_equal(frame_cb_bytes, frame, sizeof(frame), "the frame as written");
+	zassert_true(frame_cb_lock_free,
+		     "another thread could not take the peer lock while the callback ran");
 }

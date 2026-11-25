@@ -1158,8 +1158,9 @@ uint32_t meshtastic_ble_adv_starts(void)
 /* Bearer ingest (agents-xhli.2): a wire frame completed by the peer frame
  * channel enters the same RX pipeline as an airframe, tagged with its bearer
  * so the router applies the link-local rule (delivered locally, never relayed
- * onto LoRa). Runs under the peer lock on the BT RX thread — the inject is a
- * non-blocking queue put, exactly what the M1 callback contract allows. */
+ * onto LoRa). Runs on the BT RX thread with the peer lock released
+ * (agents-z7rg): an attachment envelope takes the head's or brain's lock, and
+ * those send back through the peer module under it. */
 static void ble_peer_frame_ingest(unsigned int index, const uint8_t *frame, size_t len,
 				  uint8_t kind)
 {

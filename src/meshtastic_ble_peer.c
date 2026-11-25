@@ -223,27 +223,48 @@ static void frame_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 /* Shared RX tail for both directions of the frame channel: peripheral-side
  * chunk-writes and central-side notifications land here. Returns the
  * reassembler's verdict (1 frame complete, 0 accepted, <0 refused). */
+/* A completed frame is handed to the callback from here, with the peer lock
+ * RELEASED (agents-z7rg). The callback reaches the attachment head or brain,
+ * which take their own locks and, holding them, send through this module --
+ * which takes the peer lock. Delivering under the peer lock made that an
+ * AB-BA: the BT RX thread held peer_lock and waited for head_lock while
+ * head_tx held head_lock and waited for peer_lock (rzr5, 2026-11-24:
+ * "mutex deadlock", thread head_tx). The frame is copied out under the peer
+ * lock because the reassembler can be reset from another thread
+ * (meshtastic_ble_peer_conn_down() runs on the system workqueue); deliver_lock
+ * serialises the two RX paths (GATT writes, notifications) over the one copy
+ * and is taken by nothing else, so it cannot close a cycle. */
+static K_MUTEX_DEFINE(deliver_lock);
+static uint8_t deliver_buf[MESHTASTIC_BLE_PEER_REASM_MAX];
+
 static int frame_chunk_ingest(unsigned int index, const void *buf, uint16_t len)
 {
+	meshtastic_ble_peer_frame_cb_t cb = NULL;
 	size_t frame_len = 0U;
+	uint8_t kind = 0U;
 	int ret;
 
+	k_mutex_lock(&deliver_lock, K_FOREVER);
 	k_mutex_lock(&peer_lock, K_FOREVER);
 	ret = meshtastic_ble_peer_reasm_ingest(&peer.frame_rx[index], buf, len, &frame_len);
 	if (ret == 1) {
 		peer.stats.frame_rx_frames++;
 		LOG_DBG("BLE peer frame rx: %zu bytes (conn %u)", frame_len, index);
-		if (peer.frame_cb != NULL) {
-			/* Contract (meshtastic_ble_peer.h): cb runs here with
-			 * the peer lock held and must only copy/queue. */
-			peer.frame_cb(index, peer.frame_rx[index].frame, frame_len,
-				      peer.frame_rx[index].kind);
+		cb = peer.frame_cb;
+		if (cb != NULL) {
+			memcpy(deliver_buf, peer.frame_rx[index].frame, frame_len);
+			kind = peer.frame_rx[index].kind;
 		}
 	} else if (ret < 0) {
 		peer.stats.frame_rx_rejected++;
 		LOG_WRN("BLE peer frame chunk rejected (%d, len=%u, conn %u)", ret, len, index);
 	}
 	k_mutex_unlock(&peer_lock);
+
+	if (cb != NULL) {
+		cb(index, deliver_buf, frame_len, kind);
+	}
+	k_mutex_unlock(&deliver_lock);
 	return ret;
 }
 

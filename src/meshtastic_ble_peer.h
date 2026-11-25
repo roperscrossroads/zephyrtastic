@@ -68,9 +68,12 @@ bool meshtastic_ble_peer_frame_notify_ready(void);
 
 /* The M2 seam (bearer ingest): frames completed on the frame channel — peer
  * chunk-writes on the peripheral side, notifications on the central side —
- * land here. The callback runs on the BT RX thread WITH the peer lock held —
- * copy or queue the bytes and return; never call back into blepeer APIs from
- * it. NULL (the default) means completed frames are counted and dropped. */
+ * land here. The callback runs on the BT RX thread with the peer lock NOT held
+ * (agents-z7rg: holding it across the callback deadlocked a head), so it may
+ * take its own locks and call blepeer APIs. The frame is a copy, valid only
+ * for the duration of the call. Keep it short: the BT RX thread is blocked
+ * meanwhile. NULL (the default) means completed frames are counted and
+ * dropped. */
 typedef void (*meshtastic_ble_peer_frame_cb_t)(unsigned int index, const uint8_t *frame,
 					       size_t len, uint8_t kind);
 void meshtastic_ble_peer_frame_rx_register(meshtastic_ble_peer_frame_cb_t cb);

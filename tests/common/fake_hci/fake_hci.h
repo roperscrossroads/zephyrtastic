@@ -101,6 +101,11 @@ int fake_hci_complete_create(uint8_t status);
 int fake_hci_incoming_conn(const bt_addr_le_t *peer);
 
 /* The remote end drops link @p handle. */
+/* The remote side of link @p handle sends one ATT PDU (e.g. a Write Command,
+ * 0x52, to one of our characteristics). Delivered in order through the event
+ * thread, like everything else the controller sends unprompted. */
+void fake_hci_remote_att(uint16_t handle, const uint8_t *pdu, uint16_t len);
+
 void fake_hci_remote_disconnect(uint16_t handle, uint8_t reason);
 
 /* The remote end drops every link (test teardown). */

@@ -785,6 +785,11 @@ int fake_hci_incoming_conn(const bt_addr_le_t *peer)
 	return handle;
 }
 
+void fake_hci_remote_att(uint16_t handle, const uint8_t *pdu, uint16_t len)
+{
+	queue_acl(handle, ATT_CID, pdu, len);
+}
+
 void fake_hci_remote_disconnect(uint16_t handle, uint8_t reason)
 {
 	k_spinlock_key_t key = k_spin_lock(&lock);
