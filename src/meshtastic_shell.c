@@ -5647,8 +5647,16 @@ static void cmd_lora_show(const struct shell *sh)
 	/* The other two knobs a config tool can set that change what the radio
 	 * does. Shown because "stored but not doing anything" is exactly the
 	 * failure these two used to have. */
-	shell_print(sh, "tx enabled:   %s",
-		    cfg.payload_variant.lora.tx_enabled ? "yes" : "NO — receive only");
+	/* The stored flag is the build's seed until the section is written; what the
+	 * node does is mt.tx_enabled, which the first-boot hold keeps off meanwhile
+	 * (agents-xhli.21). Say which, not "yes" over a silent radio. */
+	if (cfg.payload_variant.lora.tx_enabled && !mt.tx_enabled) {
+		shell_print(sh, "tx enabled:   NO — held until the LoRa config is written "
+				"(stored: yes; `meshtastic lora tx on` releases it)");
+	} else {
+		shell_print(sh, "tx enabled:   %s",
+			    cfg.payload_variant.lora.tx_enabled ? "yes" : "NO — receive only");
+	}
 	switch (meshtastic_radio_chip_present()) {
 	case MESHTASTIC_RADIO_TRI_ON:
 		shell_print(sh, "radio chip:   answered at boot");

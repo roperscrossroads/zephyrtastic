@@ -382,6 +382,28 @@ ZTEST(meshtastic_shell, test_lora_tx_seed_follows_kconfig)
 		      "seeded tx_enabled should match MESHTASTIC_TX_ENABLED_DEFAULT");
 }
 
+/* Runs first (by name), before any test writes the LoRa section: with the hold
+ * on, the display must say the node is held, not "yes" (the stored seed). A
+ * write releases it and the line goes back to a plain yes. */
+ZTEST(meshtastic_shell, test_0_lora_show_says_held_until_the_section_is_written)
+{
+	const char *out;
+
+	if (!IS_ENABLED(CONFIG_MESHTASTIC_TX_HOLD_UNPROVISIONED) ||
+	    !IS_ENABLED(CONFIG_MESHTASTIC_TX_ENABLED_DEFAULT)) {
+		ztest_test_skip();
+		return;
+	}
+	zassert_false(mt.tx_enabled, "held on a node nobody configured");
+	zassert_ok(run_cmd("meshtastic lora", &out), "");
+	zassert_not_null(strstr(out, "held until"), "expected the held line, got: %s", out);
+
+	zassert_ok(run_cmd("meshtastic lora tx on", NULL), "");
+	zassert_ok(run_cmd("meshtastic lora", &out), "");
+	zassert_is_null(strstr(out, "held until"), "released after the write, got: %s", out);
+	zassert_not_null(strstr(out, "tx enabled:   yes"), "got: %s", out);
+}
+
 /* `lora power` sets this node's own transmit power from the console: stored,
  * shown, and 0 restores the region maximum. Before it, only the phone API
  * could, and the bench's brains sat at 14 dBm beside 2 dBm heads. */

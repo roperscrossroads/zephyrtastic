@@ -21,6 +21,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_ext_ram.h"
 #include "meshtastic_hlc.h"
+#include "meshtastic_position.h"
 #include "meshtastic_preset.h"
 #include "meshtastic_settings.h"
 #include <zephyr/meshtastic/fem.h>
@@ -1503,6 +1504,25 @@ int meshtastic_config_store_get_module_stamp(pb_size_t tag, struct meshtastic_hl
 	return 0;
 }
 
+/* What a write through admin does for a section after the store took it
+ * (meshtastic_admin.c, set_config), for a section that arrived by merge instead:
+ * the modules that consume it hear about it. Position (gps_mode reaches the
+ * receiver, the beacon re-arms) and power (the light-sleep policy) are live.
+ * Display and bluetooth are deliberately NOT here: admin applies them by
+ * rebooting, and a cluster document must not reboot a node (agents-ls39.1.7).
+ * Caller holds no lock. */
+static void merged_section_applied(pb_size_t tag)
+{
+	if (IS_ENABLED(CONFIG_PM) && tag == meshtastic_Config_power_tag) {
+		meshtastic_power_config_apply();
+	}
+#if defined(CONFIG_MESHTASTIC_POSITION)
+	if (tag == meshtastic_Config_position_tag) {
+		meshtastic_position_config_changed();
+	}
+#endif
+}
+
 int meshtastic_config_store_merge_config(const meshtastic_Config *config,
 					 const struct meshtastic_hlc_stamp *stamp)
 {
@@ -1538,6 +1558,7 @@ int meshtastic_config_store_merge_config(const meshtastic_Config *config,
 	}
 
 	(void)meshtastic_config_store_apply_core();
+	merged_section_applied(config->which_payload_variant);
 	store_schedule_save();
 
 	return 1;

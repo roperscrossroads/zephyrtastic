@@ -637,6 +637,25 @@ ZTEST(gnss, test_gps_mode_disabled_powers_off_and_stops_fixes)
 	zassert_ok(meshtastic_position_get_current(&pos), "and the module takes the fix");
 }
 
+/* agents-ls39.1.7, claim (a): a position section that arrives through the
+ * cluster merge must reach the receiver like a set_config does. */
+ZTEST(gnss, test_a_merged_position_section_reaches_the_receiver)
+{
+	meshtastic_Config c;
+	struct meshtastic_hlc_stamp newer = {.physical_ms = INT64_C(1) << 50, .node_id = 0x77U};
+	struct meshtastic_gnss_status st;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_position_tag, &c), "");
+	c.payload_variant.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_DISABLED;
+	board_power_calls = 0U;
+	zassert_equal(meshtastic_config_store_merge_config(&c, &newer), 1, "the merge applied");
+
+	zassert_equal(board_power_calls, 1U, "gps_mode reached the board's power line");
+	zassert_false(board_power_last, "the receiver is off");
+	zassert_ok(meshtastic_gnss_status_get(&st));
+	zassert_false(st.enabled, "and the status says so");
+}
+
 /* NOT_PRESENT is off too (the reference never starts the GPS thread for it). */
 ZTEST(gnss, test_gps_mode_not_present_is_off)
 {

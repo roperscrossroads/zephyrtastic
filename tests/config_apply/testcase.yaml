@@ -1,0 +1,13 @@
+# agents-ls39.1.7: what a config write reaches. A live-only preset (a head's
+# SET_PRESET, a hop, the scanner) must survive a write to another section.
+common:
+  tags:
+    - meshtastic
+    - config_apply
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  meshtastic.config_apply.native_sim: {}

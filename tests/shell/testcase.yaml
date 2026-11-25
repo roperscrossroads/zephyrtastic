@@ -142,3 +142,9 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_RELAY_EAR=y
       - CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY=n
+
+  # The first-boot hold (agents-xhli.21): a node nobody configured is receive-only
+  # whatever the seed says, and `meshtastic lora` must not say "yes" over it.
+  meshtastic.shell.tx_hold.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_TX_HOLD_UNPROVISIONED=y
