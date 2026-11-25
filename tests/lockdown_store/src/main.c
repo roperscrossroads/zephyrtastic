@@ -592,3 +592,45 @@ ZTEST(lockdown_store, test_storage_report_attributes_records_and_counts_seals)
 	zassert_true(recs->sealed >= 1U && recs->sealed == recs->records,
 		     "every node record sealed (%u of %u)", recs->sealed, recs->records);
 }
+
+/* agents-ls39.1.5: the Sparkplug broker login (mtspb) sat in flash in the clear on a
+ * provisioned device. It is a record-by-record subtree now, written through the
+ * lockdown wrapper: provisioning seals what is already there, and reading it back
+ * through the wrapper (as the module's loader does) gives the plaintext. */
+struct spb_read {
+	uint8_t buf[64];
+	ssize_t n;
+};
+
+static int spb_read_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		       void *param)
+{
+	struct spb_read *r = param;
+
+	ARG_UNUSED(key);
+	r->n = meshtastic_lockdown_read("mtspb/pass", len, read_cb, cb_arg, r->buf,
+					sizeof(r->buf));
+	return 1;
+}
+
+ZTEST(lockdown_store, test_provision_seals_the_sparkplug_login)
+{
+	struct raw r;
+	struct spb_read got = {0};
+
+	zassert_ok(meshtastic_lockdown_save_one("mtspb/pass", "hunter2", 7), "");
+	zassert_true(raw_read("mtspb/pass", &r), "");
+	zassert_false(meshtastic_lockdown_is_sealed(r.buf, r.len), "clear before lockdown");
+
+	flush_all();
+	zassert_ok(meshtastic_lockdown_provision(PP, PPLEN, 0U, 0U, 0U), "");
+	wait_idle(); /* the eager seal-all */
+
+	zassert_true(raw_read("mtspb/pass", &r), "");
+	zassert_true(meshtastic_lockdown_is_sealed(r.buf, r.len), "the login is sealed on flash");
+
+	(void)settings_load_subtree_direct("mtspb/pass", spb_read_cb, &got);
+	zassert_equal(got.n, 7, "read back through the wrapper (%d)", (int)got.n);
+	zassert_mem_equal(got.buf, "hunter2", 7);
+	(void)settings_delete("mtspb/pass");
+}

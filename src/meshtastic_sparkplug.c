@@ -14,7 +14,8 @@
  * Broker, port, group, edge id and the MQTT login are settings (`sparkplug set|unset`, subtree
  * mtspb), the Kconfig values their defaults; a change ends the session cleanly and reconnects
  * with the new values. The username is meant to be the edge id (one login per Edge Node, the
- * bench broker's ACL). The password is stored in the clear in settings, like the hawkBit token.
+ * bench broker's ACL). The subtree is sealed when lockdown is provisioned, the password with it
+ * (agents-ls39.1.5); without lockdown it is stored in the clear, like the hawkBit token.
  *
  * A planned reboot (admin, lockdown, `intents clear`) or `sparkplug stop` ends the session on
  * purpose first: the NDEATH (QoS 1, its PUBACK awaited briefly), then MQTT DISCONNECT, then no
@@ -41,6 +42,8 @@
 #include <zephyr/sys/sys_heap.h>
 #include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
+
+#include "meshtastic_lockdown.h"
 #include <zephyr/shell/shell.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
@@ -123,38 +126,49 @@ static void cfg_defaults(struct spb_cfg *c)
 }
 
 /* A setting's text value, NUL-terminated; a value that does not fit is ignored. */
-static void read_str(char *dst, size_t cap, size_t len, settings_read_cb read_cb, void *cb_arg)
+static void set_str(char *dst, size_t cap, const uint8_t *val, size_t n)
 {
-	char tmp[SPB_HOST_MAX];
-
-	if (len == 0 || len >= cap || len >= sizeof(tmp)) {
+	if (n == 0 || n >= cap) {
 		return;
 	}
-	if (read_cb(cb_arg, tmp, len) == (ssize_t)len) {
-		memcpy(dst, tmp, len);
-		dst[len] = '\0';
-	}
+	memcpy(dst, val, n);
+	dst[n] = '\0';
 }
 
+/* The subtree is sealed by lockdown (agents-ls39.1.5): read through it, which hands
+ * back the plaintext of a sealed record and passes a clear one (any record written
+ * before lockdown was provisioned) through. On a locked boot it refuses, and the
+ * build's defaults stand until the unlock. */
 static int spb_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
+	char name[24];
+	uint8_t val[SPB_HOST_MAX];
+	ssize_t n;
+
+	(void)snprintk(name, sizeof(name), "mtspb/%s", key);
+	n = meshtastic_lockdown_read(name, len, read_cb, cb_arg, val, sizeof(val));
+	if (n < 0) {
+		return 0;
+	}
 	k_mutex_lock(&cfg_lock, K_FOREVER);
-	if (strcmp(key, "bdseq") == 0 && len == 1 && read_cb(cb_arg, &bdseq_last, 1) == 1) {
+	if (strcmp(key, "bdseq") == 0 && n == 1) {
+		bdseq_last = val[0];
 		bdseq_known = true;
 	} else if (strcmp(key, "broker") == 0) {
-		read_str(cfg.broker, sizeof(cfg.broker), len, read_cb, cb_arg);
-	} else if (strcmp(key, "port") == 0 && len == sizeof(cfg.port)) {
-		(void)read_cb(cb_arg, &cfg.port, sizeof(cfg.port));
+		set_str(cfg.broker, sizeof(cfg.broker), val, (size_t)n);
+	} else if (strcmp(key, "port") == 0 && n == sizeof(cfg.port)) {
+		memcpy(&cfg.port, val, sizeof(cfg.port));
 	} else if (strcmp(key, "group") == 0) {
-		read_str(cfg.group, sizeof(cfg.group), len, read_cb, cb_arg);
+		set_str(cfg.group, sizeof(cfg.group), val, (size_t)n);
 	} else if (strcmp(key, "edge") == 0) {
-		read_str(cfg.edge, sizeof(cfg.edge), len, read_cb, cb_arg);
+		set_str(cfg.edge, sizeof(cfg.edge), val, (size_t)n);
 	} else if (strcmp(key, "user") == 0) {
-		read_str(cfg.user, sizeof(cfg.user), len, read_cb, cb_arg);
+		set_str(cfg.user, sizeof(cfg.user), val, (size_t)n);
 	} else if (strcmp(key, "pass") == 0) {
-		read_str(cfg.pass, sizeof(cfg.pass), len, read_cb, cb_arg);
+		set_str(cfg.pass, sizeof(cfg.pass), val, (size_t)n);
 	}
 	k_mutex_unlock(&cfg_lock);
+	memset(val, 0, sizeof(val)); /* the password passed through here */
 	return 0;
 }
 
@@ -166,7 +180,7 @@ static uint8_t bdseq_next(void)
 
 	bdseq_last = next;
 	bdseq_known = true;
-	(void)settings_save_one("mtspb/bdseq", &next, 1);   /* before the CONNECT that uses it */
+	(void)meshtastic_lockdown_save_one("mtspb/bdseq", &next, 1); /* before the CONNECT */
 	return next;
 }
 
@@ -751,7 +765,7 @@ static int cfg_apply(const struct shell *sh, int key, const char *value)
 			return -EINVAL;
 		}
 		cfg.port = (uint16_t)port;
-		rc = value ? settings_save_one(skey, &cfg.port, sizeof(cfg.port))
+		rc = value ? meshtastic_lockdown_save_one(skey, &cfg.port, sizeof(cfg.port))
 			   : settings_delete(skey);
 	} else {
 		const char *v = value;
@@ -767,7 +781,7 @@ static int cfg_apply(const struct shell *sh, int key, const char *value)
 		}
 		strncpy(dst, v, cap - 1);
 		dst[cap - 1] = '\0';
-		rc = value ? settings_save_one(skey, dst, strlen(dst)) : settings_delete(skey);
+		rc = value ? meshtastic_lockdown_save_one(skey, dst, strlen(dst)) : settings_delete(skey);
 	}
 	k_mutex_unlock(&cfg_lock);
 	if (rc != 0) {

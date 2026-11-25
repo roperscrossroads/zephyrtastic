@@ -1213,8 +1213,8 @@ static void reload_work_fn(struct k_work *work)
  * settings_save_subtree() rewrites them under the current sealing mode. */
 static const char *const export_subtrees[] = {"meshtastic", "mtnode", "mtrec"};
 /* Subtrees written record-by-record with settings_save_one(): rewritten here
- * name by name. */
-static const char *const direct_subtrees[] = {"mtclus", "mtbackup"};
+ * name by name. mtspb: the Sparkplug broker and its MQTT login (agents-ls39.1.5). */
+static const char *const direct_subtrees[] = {"mtclus", "mtbackup", "mtspb"};
 
 #define LD_REWRITE_NAME_LEN 32U
 static struct {
