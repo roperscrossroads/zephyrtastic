@@ -2110,19 +2110,29 @@ ZTEST(admin_pki, test_get_device_connection_status_returns_response)
  * flagged this as untested (the round-trip existed, the durability claim
  * didn't). Mirrors test_lora_config_survives_real_reboot's flush/reload
  * pattern exactly. */
-ZTEST(admin_pki, test_set_module_config_mqtt_roundtrips_and_survives_real_reboot)
+/* agents-gqhy: the round trip used to pass only because an earlier factory-reset
+ * case left config saves suppressed. With saves live, the coalesced save writes the
+ * "unflushed" edit to flash before the reload, and the case failed. It now holds the
+ * coalescer itself for the unflushed step and puts back the state it found, and it
+ * runs entered both ways, so no ordering of the suite can change its outcome. */
+static void mqtt_roundtrip_survives_real_reboot(bool enter_suppressed)
 {
 	uint8_t buf[128];
 	size_t len;
 	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
 	meshtastic_ModuleConfig got = meshtastic_ModuleConfig_init_zero;
+	const bool was = meshtastic_config_store_save_suppressed();
+
+	meshtastic_config_store_set_save_suppressed(enter_suppressed);
 
 	len = encode_admin_set_module_config_mqtt(true, "mqtt.example.org", buf, sizeof(buf));
 	zassert_false(send_local_admin_and_pop_reply(buf, len, &resp),
 		     "set_module_config emits no AdminMessage response, only a ROUTING ack");
 	zassert_ok(settings_save_subtree("meshtastic"), "mqtt flush failed");
 
-	/* Change it again, unflushed -- a real reboot must not see this either. */
+	/* Change it again, unflushed -- a real reboot must not see this either. Unflushed
+	 * means the coalesced save has not run: hold it, as a reboot before it fires would. */
+	meshtastic_config_store_set_save_suppressed(true);
 	len = encode_admin_set_module_config_mqtt(false, "unflushed.example.org", buf, sizeof(buf));
 	zassert_false(send_local_admin_and_pop_reply(buf, len, &resp), "unexpected response");
 
@@ -2144,6 +2154,19 @@ ZTEST(admin_pki, test_set_module_config_mqtt_roundtrips_and_survives_real_reboot
 		      "wrong response variant");
 	zassert_true(resp.payload_variant.get_module_config_response.payload_variant.mqtt.enabled,
 		     "get_module_config must reflect the persisted value");
+
+	meshtastic_config_store_set_save_suppressed(was);
+}
+
+ZTEST(admin_pki, test_set_module_config_mqtt_roundtrips_and_survives_real_reboot)
+{
+	mqtt_roundtrip_survives_real_reboot(true);
+}
+
+/* The same, entered with saves live: the state that broke the original case. */
+ZTEST(admin_pki, test_set_module_config_mqtt_roundtrip_holds_with_saves_live)
+{
+	mqtt_roundtrip_survives_real_reboot(false);
 }
 
 /* ---- agents-dnr4.8: ModuleConfig.mqtt is wired to the MQTT bridge -----------
