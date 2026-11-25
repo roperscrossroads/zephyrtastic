@@ -137,7 +137,9 @@ config XTENSA_ISR_NESTING_GUARD
 # series; carried patch 0016 opens it to the whole Espressif family -- the
 # implementation is chip-generic (windowed-ABI frame walk + esp_ptr checks).
 # Upstream's own `default y` would otherwise reach MCUboot once 0016 makes the
-# option available, hence the explicit `n if MCUBOOT` here.
+# option available, hence the `n if MCUBOOT` here. Since Zephyr 4.5 the SoC's
+# `imply` overrides this default, so samples/meshtastic/sysbuild/mcuboot.conf sets
+# it =n for the bootloader (agents-ls39.2.12); this line still documents intent.
 config XTENSA_ENABLE_BACKTRACE
 	default n if MCUBOOT
 	default y
