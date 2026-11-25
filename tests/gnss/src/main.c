@@ -194,6 +194,18 @@ static void *gnss_setup(void)
 	zassert_true(device_is_ready(gnss_dev), "gnss emul device not ready");
 	zassert_ok(meshtastic_init(&cfg), "meshtastic_init failed");
 
+	/* Position sharing is opt-in on a fresh node: share on the primary, so the
+	 * broadcast tests have a broadcast to watch. */
+	{
+		uint8_t pi = meshtastic_channels_primary_index();
+		meshtastic_Channel ch = *meshtastic_channels_get(pi);
+
+		ch.settings.has_module_settings = true;
+		ch.settings.module_settings.position_precision = 13U;
+		zassert_ok(meshtastic_config_store_set_channel(pi, &ch), "");
+		zassert_ok(meshtastic_channels_set_slot(pi, &ch), "");
+	}
+
 	/* Pin the contention window off: this suite times sends against a gate
 	 * measured in seconds, and a random pre-TX backoff only adds jitter to the
 	 * one number under test. (mesh_sim does the same, for the same reason.) */

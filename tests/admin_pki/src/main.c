@@ -775,6 +775,15 @@ ZTEST(admin_pki, test_directed_position_stays_on_channel)
 	const struct meshtastic_wire_header *hdr =
 		(const struct meshtastic_wire_header *)mock_lora.last_tx;
 
+	{
+		uint8_t pi = meshtastic_channels_primary_index();
+		meshtastic_Channel ch = *meshtastic_channels_get(pi);
+
+		/* Position sharing is opt-in on a fresh node. */
+		ch.settings.has_module_settings = true;
+		ch.settings.module_settings.position_precision = 13U;
+		zassert_ok(meshtastic_channels_set_slot(pi, &ch), "");
+	}
 	seed_peer_pubkey(peer_pubkey);
 
 	zassert_ok(meshtastic_send_data(PEER_NODE_ID, MESHTASTIC_PORT_POSITION, payload,

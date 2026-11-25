@@ -418,13 +418,12 @@ static void leave_the_default_channel(void)
 	zassert_ok(meshtastic_channels_set_slot(meshtastic_channels_primary_index(), &ch), "");
 }
 
-ZTEST(telemetry_cadence, test_seed_follows_the_build)
+ZTEST(telemetry_cadence, test_seed_is_opt_in)
 {
 	struct meshtastic_telemetry_settings s;
 
 	meshtastic_telemetry_settings(&s);
-	zassert_equal(s.device_enabled, IS_ENABLED(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND),
-		      "device flag seeded from AUTO_SEND");
+	zassert_false(s.device_enabled, "a fresh node broadcasts no telemetry (opt-in, agents-j0ji.4 C2)");
 	zassert_equal(s.device_interval_sec, CONFIG_MESHTASTIC_DEVICE_METRICS_INTERVAL_SEC,
 		      "zero interval coalesces to the Kconfig default");
 	zassert_false(s.environment_enabled, "no environment module in this build");

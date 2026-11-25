@@ -134,8 +134,7 @@ ZTEST(telemetry_cadence, test_0_unstamped_record_follows_the_seed_after_a_load)
 
 	zassert_ok(meshtastic_config_store_apply_core(), "post-load apply");
 	meshtastic_telemetry_settings(&s);
-	zassert_equal(s.device_enabled, IS_ENABLED(CONFIG_MESHTASTIC_DEVICE_METRICS_AUTO_SEND),
-		      "unstamped record: the build's seed rules");
+	zassert_false(s.device_enabled, "unstamped record: the seed rules, and it is opt-in");
 
 	/* An admin write stamps it; a disable then survives the same apply. */
 	store_telemetry(0U, false);

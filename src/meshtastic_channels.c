@@ -196,10 +196,15 @@ static void seed_default_primary(uint8_t index)
 	 * client apps recognise as the default (no lock on the channel). */
 	ch->settings.psk.bytes[0] = 1U;
 	ch->settings.psk.size = 1U;
-	ch->settings.uplink_enabled = true;
-	ch->settings.downlink_enabled = true;
+	/* Opt-in, all three, as the reference's initDefaultChannel seeds them
+	 * (Channels.cpp): a fresh node shares no position (precision 0) and neither
+	 * publishes to nor accepts frames from a broker until someone turns it on
+	 * (agents-j0ji.4 C2, agents-dn7w). A node that already stored 13 is moved
+	 * once by the opt-in migration in the config store. */
+	ch->settings.uplink_enabled = false;
+	ch->settings.downlink_enabled = false;
 	ch->settings.has_module_settings = true;
-	ch->settings.module_settings.position_precision = 13;
+	ch->settings.module_settings.position_precision = 0;
 
 	channel_fixup(index);
 }

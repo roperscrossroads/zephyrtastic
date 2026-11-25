@@ -6220,6 +6220,19 @@ static meshtastic_Position g1_decode_sent_position(void)
  * 13-bit precision, so the on-wire lat/lon must be truncated to 13 bits; raising a
  * public channel past the ceiling clamps to 15; precision 0 or no module settings
  * (sharing disabled / fail-closed, #10509) must emit no position at all. */
+/* A fresh node shares no position (precision 0, opt-in): tests of the masking
+ * path opt the primary in at the old default of 13 first. */
+static void primary_shares_position_at(uint32_t bits)
+{
+	uint8_t primary = meshtastic_channels_primary_index();
+	meshtastic_Channel ch = *meshtastic_channels_get(primary);
+
+	ch.has_settings = true;
+	ch.settings.has_module_settings = true;
+	ch.settings.module_settings.position_precision = bits;
+	zassert_ok(meshtastic_channels_set_slot(primary, &ch), "opt the primary in");
+}
+
 ZTEST(protocol_stack, test_position_precision_masked_before_broadcast)
 {
 	/* Coordinates with their low bits set so the truncation is observable. */
@@ -6231,6 +6244,7 @@ ZTEST(protocol_stack, test_position_precision_masked_before_broadcast)
 	uint8_t primary = meshtastic_channels_primary_index();
 	int ret;
 
+	primary_shares_position_at(13U);
 	/* Deterministic full-resolution source position; no fixed position in play. */
 	meshtastic_position_clear_fixed();
 	src.has_latitude_i = true;
@@ -6326,6 +6340,7 @@ ZTEST(protocol_stack, test_tx_hook_masks_originated_position)
 	uint8_t primary = meshtastic_channels_primary_index();
 	int ret;
 
+	primary_shares_position_at(13U);
 	/* A full-resolution position, exactly as a phone would inject it. */
 	src.has_latitude_i = true;
 	src.latitude_i = raw_lat;
