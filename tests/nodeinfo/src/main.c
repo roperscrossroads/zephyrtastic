@@ -500,6 +500,23 @@ ZTEST(nodeinfo, test_announce_waits_for_the_start_delay_then_repeats)
 
 	c = drain_nodeinfo_tx(K_SECONDS((CONFIG_MESHTASTIC_NODEINFO_INTERVAL_SEC / 2) + 2));
 	zassert_equal(c.count, 1U, "and exactly one once the interval has elapsed");
+
+	/* A rename is announced now, not at the next interval, as upstream's
+	 * set_owner does (agents-ls39.1.11); the same owner again costs nothing. */
+	{
+		meshtastic_User user = meshtastic_User_init_zero;
+
+		strcpy(user.long_name, "Renamed Node");
+		strcpy(user.short_name, "rnm1");
+		zassert_ok(meshtastic_config_store_set_owner(&user), "rename failed");
+		c = drain_nodeinfo_tx(K_MSEC(1500));
+		zassert_equal(c.count, 1U, "a rename must be announced at once");
+		zassert_equal(c.to, MESHTASTIC_NODE_BROADCAST, "to everyone");
+
+		zassert_ok(meshtastic_config_store_set_owner(&user), "same owner again");
+		c = drain_nodeinfo_tx(K_MSEC(1500));
+		zassert_equal(c.count, 0U, "an unchanged owner must cost no airtime");
+	}
 }
 
 #elif CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC == 3

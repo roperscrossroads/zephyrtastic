@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0
  */
 
+#include <ctype.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -27,6 +28,8 @@
 #include <zephyr/meshtastic/fem.h>
 
 #include "meshtastic_tx_power.h"
+#include "meshtastic_utf8.h"
+#include <zephyr/meshtastic/nodeinfo.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -1354,6 +1357,15 @@ int meshtastic_config_store_set_config(const meshtastic_Config *config)
 	if (!config_is_valid(config)) {
 		return -EINVAL;
 	}
+	/* Here, not in config_is_valid(): that also runs on the NVS load, where
+	 * refusing would drop the whole stored LoRa section; resolve() already
+	 * treats a stored nonsense figure as unset (agents-ls39.1.11). */
+	if ((config->which_payload_variant == meshtastic_Config_lora_tag) &&
+	    !meshtastic_tx_power_storable(config->payload_variant.lora.tx_power)) {
+		LOG_WRN("set_config: tx_power %d dBm refused (outside the sane band)",
+			(int)config->payload_variant.lora.tx_power);
+		return -EINVAL;
+	}
 
 	idx = index_for_config_tag(config->which_payload_variant);
 
@@ -1703,26 +1715,58 @@ int meshtastic_config_store_set_node_info_interval(uint32_t secs)
 	return 0;
 }
 
+/* True if @p name is non-empty and only whitespace. The reference refuses such
+ * a long or short name in AdminModule::handleRequest (set_owner); here it is
+ * the setter's rule, so the shell's `owner set` gets it too (agents-ls39.1.11). */
+static bool owner_name_blank(const char *name)
+{
+	const char *p = name;
+
+	while ((*p != '\0') && isspace((unsigned char)*p)) {
+		p++;
+	}
+	return (name[0] != '\0') && (*p == '\0');
+}
+
 int meshtastic_config_store_set_owner(const meshtastic_User *user)
 {
 	int8_t new_tx_power;
 	bool new_licensed;
+	bool changed;
 
 	if (user == NULL) {
 		return -EINVAL;
 	}
+	if (owner_name_blank(user->long_name) || owner_name_blank(user->short_name)) {
+		LOG_WRN("set_owner: a name that is only whitespace is refused");
+		return -EINVAL;
+	}
 
 	store_lock();
+	changed = (store.is_licensed != user->is_licensed) ||
+		  (store.is_unmessagable != (user->has_is_unmessagable &&
+					     user->is_unmessagable));
 	/* Match upstream AdminModule::handleSetOwner: only overwrite a name field
 	 * when the incoming value is non-empty. An empty long/short name means
 	 * "leave this one unchanged" — `--set-owner` sends only the long name and
 	 * must not wipe the short name, and `--set-owner-short` (empty long) must
 	 * not wipe the long name. */
 	if (user->long_name[0] != '\0') {
+		char was[sizeof(store.long_name)];
+
+		memcpy(was, store.long_name, sizeof(was));
 		copy_string(store.long_name, sizeof(store.long_name), user->long_name);
+		changed |= (strcmp(was, store.long_name) != 0);
 	}
 	if (user->short_name[0] != '\0') {
+		char was[sizeof(store.short_name)];
+
+		memcpy(was, store.short_name, sizeof(was));
 		copy_string(store.short_name, sizeof(store.short_name), user->short_name);
+		/* As upstream: the short name is drawn on other nodes' screens in
+		 * a 4-byte field, where a cut multi-byte character is garbage. */
+		(void)meshtastic_utf8_sanitize(store.short_name, sizeof(store.short_name));
+		changed |= (strcmp(was, store.short_name) != 0);
 	}
 	/* No presence flag exists for is_licensed in the proto (it is a plain
 	 * proto3 bool), so an unset field is indistinguishable from an explicit
@@ -1779,6 +1823,13 @@ int meshtastic_config_store_set_owner(const meshtastic_User *user)
 
 	/* mt.long_name / mt.short_name already point at store.* (apply_core). */
 	store_schedule_save();
+
+	/* Tell the mesh now, as upstream's reloadOwner() does, and only when
+	 * something changed: a client that re-sends the same owner costs no
+	 * airtime (agents-ls39.1.11). */
+	if (changed) {
+		meshtastic_nodeinfo_announce_soon();
+	}
 	return 0;
 }
 

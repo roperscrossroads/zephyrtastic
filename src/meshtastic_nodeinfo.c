@@ -16,6 +16,7 @@
 
 #include <zephyr/meshtastic/meshtastic.h>
 #include <zephyr/meshtastic/nodedb.h>
+#include <zephyr/meshtastic/nodeinfo.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -394,6 +395,15 @@ uint32_t meshtastic_nodeinfo_interval_secs(void)
 static K_THREAD_STACK_DEFINE(nodeinfo_stack, 3584);
 static struct k_thread nodeinfo_thread;
 
+/* Given by meshtastic_nodeinfo_announce_soon(): cuts the thread's wait short.
+ * A limit of 1 coalesces a burst of renames into one announce. */
+static K_SEM_DEFINE(nodeinfo_announce_now, 0, 1);
+
+void meshtastic_nodeinfo_announce_soon(void)
+{
+	k_sem_give(&nodeinfo_announce_now);
+}
+
 static void nodeinfo_thread_fn(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
@@ -404,7 +414,8 @@ static void nodeinfo_thread_fn(void *p1, void *p2, void *p3)
 	 * Delay the first announcement so the radio/network has time to
 	 * settle, mirroring the upstream NodeInfoModule start delay.
 	 */
-	k_sleep(K_SECONDS(CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC));
+	(void)k_sem_take(&nodeinfo_announce_now,
+			 K_SECONDS(CONFIG_MESHTASTIC_NODEINFO_START_DELAY_SEC));
 
 	while (true) {
 		(void)meshtastic_send_node_info(MESHTASTIC_NODE_BROADCAST);
@@ -412,7 +423,9 @@ static void nodeinfo_thread_fn(void *p1, void *p2, void *p3)
 		 * change (agents-t2hb.1) takes effect on the NEXT broadcast without
 		 * a reboot -- the same "why read it live" reasoning as the LoRa
 		 * preset fix (agents-k8oe). */
-		k_sleep(K_SECONDS(meshtastic_nodeinfo_interval_secs()));
+		/* ...or sooner, when the owner changes (announce_soon). */
+		(void)k_sem_take(&nodeinfo_announce_now,
+				 K_SECONDS(meshtastic_nodeinfo_interval_secs()));
 	}
 }
 #endif

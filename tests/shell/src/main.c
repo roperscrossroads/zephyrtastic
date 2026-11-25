@@ -435,6 +435,43 @@ ZTEST(meshtastic_shell, test_lora_power_sets_stores_and_reads_back)
 	zassert_ok(meshtastic_config_store_set_config(&cfg), "restore");
 }
 
+/* Every writer meets one range for tx_power (agents-ls39.1.11): the store's
+ * setter refuses a figure outside -30..40 dBm. Before, only `lora power`
+ * checked, and a phone's 99 was stored and then resolved as 0, the region
+ * maximum. (The field is int8_t, config.options int_size:8: nanopb refuses
+ * anything wider at decode.) */
+ZTEST(meshtastic_shell, test_set_config_refuses_an_impossible_tx_power)
+{
+	static const int8_t refused[] = {41, -31, 99, 127, -128};
+	static const int8_t accepted[] = {40, -30, 0, 7};
+	meshtastic_Config cfg;
+	int8_t before;
+
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg), "");
+	cfg.which_payload_variant = meshtastic_Config_lora_tag;
+	before = cfg.payload_variant.lora.tx_power;
+
+	for (size_t i = 0; i < ARRAY_SIZE(refused); i++) {
+		meshtastic_Config got;
+
+		cfg.payload_variant.lora.tx_power = refused[i];
+		zassert_equal(meshtastic_config_store_set_config(&cfg), -EINVAL,
+			      "tx_power %d must be refused", (int)refused[i]);
+		zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &got));
+		zassert_equal(got.payload_variant.lora.tx_power, before,
+			      "a refused write must store nothing (have %d after %d)",
+			      (int)got.payload_variant.lora.tx_power, (int)refused[i]);
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(accepted); i++) {
+		cfg.payload_variant.lora.tx_power = accepted[i];
+		zassert_ok(meshtastic_config_store_set_config(&cfg), "tx_power %d is legal",
+			   (int)accepted[i]);
+	}
+
+	cfg.payload_variant.lora.tx_power = before;
+	zassert_ok(meshtastic_config_store_set_config(&cfg), "restore");
+}
+
 /* `lora tx off` is the safety switch for a node with damaged RF hardware
  * (agents-a4it.8): it must persist to the stored LoRaConfig, apply live (no
  * reboot — set_config runs apply_core), and read back as receive-only. */
@@ -782,6 +819,56 @@ ZTEST(meshtastic_shell, test_owner_set_does_not_clear_the_licence)
 	 * must not inherit an elevated one. */
 	licensed_user.is_licensed = false;
 	zassert_ok(meshtastic_config_store_set_owner(&licensed_user), "owner restore failed");
+}
+
+/* A name that is only whitespace is refused by the store, long or short, as
+ * upstream's set_owner refuses it; the shell's `owner set` meets the same rule
+ * as the phone (agents-ls39.1.11). Before, only the admin path checked, and
+ * only the long name. */
+ZTEST(meshtastic_shell, test_owner_set_refuses_a_blank_name)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	const char *out = NULL;
+
+	zassert_ok(run_cmd("meshtastic owner set Kept kept", &out), "setup failed");
+
+	zassert_not_equal(run_cmd("meshtastic owner set \"   \"", &out), 0,
+			  "a blank long name must be refused");
+	zassert_not_null(strstr(out, "whitespace"), "say why, got: %s", out);
+	zassert_not_equal(run_cmd("meshtastic owner set Fine \" \t\"", &out), 0,
+			  "a blank short name must be refused");
+
+	strcpy(user.long_name, "Fine");
+	strcpy(user.short_name, " \t ");
+	zassert_equal(meshtastic_config_store_set_owner(&user), -EINVAL,
+		      "the setter itself refuses it (the phone's path)");
+
+	zassert_ok(run_cmd("meshtastic owner", &out), "owner show failed");
+	zassert_not_null(strstr(out, "long=\"Kept\""), "a refused write changes nothing: %s",
+			 out);
+	zassert_not_null(strstr(out, "short=\"kept\""), "nor the short name: %s", out);
+}
+
+/* The short name is UTF-8-sanitized as upstream does it: a multi-byte
+ * character cut by the 4-byte field becomes '?', not a stray lead byte on
+ * every other node's screen. A whole one is kept. */
+ZTEST(meshtastic_shell, test_owner_short_name_is_utf8_sanitized)
+{
+	meshtastic_User user = meshtastic_User_init_zero;
+	const char *out = NULL;
+
+	strcpy(user.long_name, "Utf");
+	strcpy(user.short_name, "ab\xc3");
+	zassert_ok(meshtastic_config_store_set_owner(&user), "owner write failed");
+	zassert_str_equal(meshtastic_config_store_short_name(), "ab?",
+			  "a cut sequence must become '?', got \"%s\"",
+			  meshtastic_config_store_short_name());
+
+	strcpy(user.short_name, "a\xc3\xa9");
+	zassert_ok(meshtastic_config_store_set_owner(&user), "owner write failed");
+	zassert_str_equal(meshtastic_config_store_short_name(), "a\xc3\xa9",
+			  "a whole character is kept");
+	zassert_ok(run_cmd("meshtastic owner set Shell sh01", &out), "restore");
 }
 
 /* `admin trust key:<prefix> off` names an entry by its bytes, for a key whose

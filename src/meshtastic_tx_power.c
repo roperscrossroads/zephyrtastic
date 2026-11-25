@@ -48,6 +48,11 @@ BUILD_ASSERT(CONFIG_MESHTASTIC_TX_POWER >= INT8_MIN && CONFIG_MESHTASTIC_TX_POWE
 #define TX_POWER_SANE_MIN (-30)
 #define TX_POWER_SANE_MAX (40)
 
+bool meshtastic_tx_power_storable(int32_t dbm)
+{
+	return (dbm >= TX_POWER_SANE_MIN) && (dbm <= TX_POWER_SANE_MAX);
+}
+
 int8_t meshtastic_tx_power_resolve(int8_t configured,
 				   meshtastic_Config_LoRaConfig_RegionCode region,
 				   bool licensed)

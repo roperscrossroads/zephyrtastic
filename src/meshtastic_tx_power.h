@@ -33,6 +33,20 @@ extern "C" {
 #endif
 
 /**
+ * @brief Whether a `LoRaConfig.tx_power` from a client may be stored at all.
+ *
+ * The band is the same sanity band meshtastic_tx_power_resolve() applies to a
+ * stored figure (-30..40 dBm; 0 = the region's maximum). The field is an
+ * int8_t (config.options int_size:8), so a phone's 99 arrives intact and
+ * would otherwise be stored and resolved as 0. The config store's setter refuses a value
+ * outside it, so every writer (phone, remote admin, shell, a brain's policy)
+ * gets the same answer (agents-ls39.1.11). The region limit is NOT checked
+ * here: an unlicensed figure above it is stored and clamped at resolve time,
+ * as upstream does.
+ */
+bool meshtastic_tx_power_storable(int32_t dbm);
+
+/**
  * @brief Resolve a configured tx_power into the desired radiated power.
  *
  * Mirrors the reference (`RadioInterface::applyModemConfig()`): 0 means "as

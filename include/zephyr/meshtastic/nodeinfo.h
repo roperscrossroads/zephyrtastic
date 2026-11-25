@@ -58,6 +58,28 @@ int meshtastic_send_node_info(uint32_t dest);
 uint32_t meshtastic_nodeinfo_interval_secs(void);
 
 /**
+ * @brief Announce our NodeInfo now, not at the next interval.
+ *
+ * Wakes the auto-send thread, which broadcasts at once and then restarts its
+ * interval. The reference does this from AdminModule::handleSetOwner (through
+ * MeshService::reloadOwner): a rename must reach peers now, not up to three
+ * hours later. Safe from any thread: it only gives a semaphore, so the caller
+ * (the RX thread for a phone or remote admin write, the shell for `owner set`)
+ * never builds a packet or waits for the radio. Several calls before the
+ * thread runs coalesce into one announce.
+ *
+ * A build without @kconfig{CONFIG_MESHTASTIC_NODEINFO_AUTO_SEND} announces
+ * nothing unprompted (fleet class 5), and this is a no-op there too.
+ */
+#if defined(CONFIG_MESHTASTIC_NODEINFO_AUTO_SEND)
+void meshtastic_nodeinfo_announce_soon(void);
+#else
+static inline void meshtastic_nodeinfo_announce_soon(void)
+{
+}
+#endif
+
+/**
  * @brief Ask one peer for its NodeInfo (a directed, want_response=true send).
  *
  * Throttled through the same per-peer request cooldown

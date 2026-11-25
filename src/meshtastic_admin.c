@@ -879,20 +879,6 @@ static bool handle_get_node_remote_hardware_pins(void)
 	return true;
 }
 
-/* True if name is non-empty but contains only whitespace (rejected for owner). */
-static bool owner_name_all_whitespace(const char *name)
-{
-	bool any = false;
-
-	for (const char *p = name; *p != '\0'; p++) {
-		if (*p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') {
-			return false;
-		}
-		any = true;
-	}
-	return any;
-}
-
 /* ------------------------------------------------------------------------- */
 /* Remote authorization (mesh path)                                           */
 /* ------------------------------------------------------------------------- */
@@ -1588,13 +1574,8 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 		}
 		break;
 	case meshtastic_AdminMessage_set_owner_tag:
-		/* Reject a non-empty long_name that is only whitespace (firmware
-		 * AdminModule::handleSetOwner does the same). */
-		if (owner_name_all_whitespace(admin_req.payload_variant.set_owner.long_name)) {
-			LOG_WRN("admin: set_owner rejected all-whitespace long_name");
-			ack_err = meshtastic_Routing_Error_BAD_REQUEST;
-			break;
-		}
+		/* The store refuses a name that is only whitespace (-EINVAL), long
+		 * or short, as upstream's handleRequest does; BAD_REQUEST below. */
 		ret = meshtastic_config_store_set_owner(&admin_req.payload_variant.set_owner);
 		if (ret < 0) {
 			LOG_WRN("admin: set_owner failed (%d)", ret);

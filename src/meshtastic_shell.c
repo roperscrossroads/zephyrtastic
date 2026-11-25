@@ -862,6 +862,11 @@ static int cmd_owner(const struct shell *sh, size_t argc, char **argv)
 		}
 
 		ret = meshtastic_config_store_set_owner(&user);
+		if (ret == -EINVAL) {
+			/* The store's rule, the same one a phone's set_owner meets. */
+			shell_error(sh, "owner set refused: a name may not be only whitespace");
+			return ret;
+		}
 		if (ret < 0) {
 			shell_error(sh, "owner set failed: %d", ret);
 			return ret;
