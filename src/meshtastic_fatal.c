@@ -31,6 +31,7 @@
 
 #include <zephyr/meshtastic/diagnostics.h>
 
+#include "meshtastic_ext_ram.h"
 #include "meshtastic_retained.h"
 
 #if defined(CONFIG_MESHTASTIC_DFU_ON_FATAL)
@@ -125,7 +126,7 @@ static bool fatal_entered;
 
 /* What take() consumed this boot (plain RAM): the boot report takes the record so the
  * next boot does not report it again, and `crashinfo`, run later, still shows it. */
-static struct meshtastic_fatal_crash_info reported;
+static struct meshtastic_fatal_crash_info reported MESHTASTIC_EXT_RAM_BSS_ATTR; /* never touched by the fatal path */
 static bool reported_valid;
 
 /* Sealed (meshtastic_retained.h): a magic alone also passes over another image's bytes

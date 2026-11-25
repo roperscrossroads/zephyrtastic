@@ -46,6 +46,7 @@
 #endif
 #include "meshtastic_backoff.h"
 #include "meshtastic_ble_peer.h"
+#include "meshtastic_ext_ram.h"
 #include "meshtastic_ble_registry.h"
 #include "meshtastic_build.h"
 #include "meshtastic_core.h"
@@ -235,7 +236,10 @@ static void frame_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
  * serialises the two RX paths (GATT writes, notifications) over the one copy
  * and is taken by nothing else, so it cannot close a cycle. */
 static K_MUTEX_DEFINE(deliver_lock);
-static uint8_t deliver_buf[MESHTASTIC_BLE_PEER_REASM_MAX];
+/* In PSRAM on boards that have it (agents-ls39.2.14: c2.brain overflowed dram0 by
+ * 112 B after this buffer and the settings wiper landed): CPU-only, written and read
+ * under deliver_lock, and no flash write reads it, as meshtastic_ext_ram.h requires. */
+static uint8_t deliver_buf[MESHTASTIC_BLE_PEER_REASM_MAX] MESHTASTIC_EXT_RAM_BSS_ATTR;
 
 static int frame_chunk_ingest(unsigned int index, const void *buf, uint16_t len)
 {

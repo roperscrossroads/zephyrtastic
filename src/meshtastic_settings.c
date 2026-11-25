@@ -401,8 +401,10 @@ static int wipe_subtree_collect(const char *key, size_t len, settings_read_cb re
 int meshtastic_settings_wipe_subtree(const char *subtree)
 {
 	/* Static, not on the caller's stack (the admin or shell thread). Callers are
-	 * the factory resets, one at a time. */
-	static struct wipe_subtree_ctx c;
+	 * the factory resets, one at a time. In PSRAM where there is one (agents-ls39.2.14):
+	 * CPU-only, and settings_delete() looks the name up and writes its own delete
+	 * record, so no flash write reads this buffer. */
+	static struct wipe_subtree_ctx c MESHTASTIC_EXT_RAM_BSS_ATTR;
 	int total = 0;
 
 	if (subtree == NULL || subtree[0] == '\0') {
