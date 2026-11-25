@@ -7,7 +7,7 @@ menuconfig MESHTASTIC_STATUSMESSAGE
 	help
 	  The reference StatusMessageModule: an away-message for a node. The
 	  string in ModuleConfig.statusmessage.node_status (set from a Meshtastic
-	  client over the admin channel, or `meshtastic status set` on the
+	  client over the admin channel, or `meshtastic statusmsg set` on the
 	  shell) is broadcast on NODE_STATUS_APP (port 36) so peers and their
 	  apps can show it next to the node; statuses heard from peers are kept
 	  in a small RAM cache. Changing the status takes effect live -- the
@@ -55,7 +55,7 @@ config MESHTASTIC_STATUSMESSAGE_CACHE_SIZE
 	help
 	  Number of peers whose most recent status is kept in RAM (80 bytes of
 	  text each, plus bookkeeping). The least recently heard peer is evicted
-	  when full. Read by the shell (`meshtastic status peers`) and by
+	  when full. Read by the shell (`meshtastic statusmsg peers`) and by
 	  applications through meshtastic_statusmessage_peer_get(); the phone
 	  app decodes port 36 itself from the forwarded packet and needs
 	  nothing from this cache.

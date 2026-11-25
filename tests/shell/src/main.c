@@ -2277,3 +2277,34 @@ ZTEST(meshtastic_shell, test_text_inbox_lists_newest_first_and_clears)
 	zassert_not_null(strstr(out, "inbox: 0 kept of"), "%s", out);
 }
 #endif /* CONFIG_MESHTASTIC_TEXT_INBOX */
+
+#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE) && defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+#include "meshtastic_statusmessage.h"
+
+/* agents-ls39.1.4: the status message's commands were registered as a second
+ * `status` under `meshtastic`, after the node status. Zephyr takes the first
+ * match, so `meshtastic status set` ran the node status and set nothing. They are
+ * `meshtastic statusmsg` now; `meshtastic status` stays the node status the bench
+ * reads. */
+ZTEST(meshtastic_shell, test_statusmsg_set_and_clear_reach_the_status_message)
+{
+	char stored[80];
+	const char *out = "";
+
+	set_managed(false);
+	zassert_ok(run_cmd("meshtastic statusmsg set gone fishing", &out), "%s", out);
+	(void)meshtastic_statusmessage_get(stored, sizeof(stored));
+	zassert_str_equal(stored, "gone fishing", "stored \"%s\"", stored);
+
+	zassert_ok(run_cmd("meshtastic statusmsg", &out), "%s", out);
+	zassert_not_null(strstr(out, "gone fishing"), "show: %s", out);
+
+	/* The node status is still `status`, and is not the status message. */
+	zassert_ok(run_cmd("meshtastic status", &out), "%s", out);
+	zassert_is_null(strstr(out, "gone fishing"), "node status printed the message: %s", out);
+
+	zassert_ok(run_cmd("meshtastic statusmsg clear", &out), "%s", out);
+	(void)meshtastic_statusmessage_get(stored, sizeof(stored));
+	zassert_str_equal(stored, "", "cleared, still \"%s\"", stored);
+}
+#endif

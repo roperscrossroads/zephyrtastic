@@ -442,7 +442,7 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 		case SHELL_WORK_SEND_STATUS:
 			ret = meshtastic_statusmessage_send();
 			if (ret == -ENODATA) {
-				shell_error(item.sh, "no status set (meshtastic status set <text>)");
+				shell_error(item.sh, "no status set (meshtastic statusmsg set <text>)");
 			} else if (ret == 0) {
 				shell_print(item.sh, "status broadcast sent");
 			}
@@ -3640,7 +3640,7 @@ static int cmd_status_set(const struct shell *sh, size_t argc, char **argv)
 	size_t len = 0U;
 
 	if (argc < 2U) {
-		shell_error(sh, "usage: meshtastic status set <text...>");
+		shell_error(sh, "usage: meshtastic statusmsg set <text...>");
 		return -EINVAL;
 	}
 
@@ -8210,7 +8210,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		  cmd_relay_show),
 #endif
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
-	SHELL_CMD(status, &meshtastic_status_cmds,
+	/* `statusmsg`, not `status` (agents-ls39.1.4): `status` above is the node's own
+	 * status, which the bench tools read, and Zephyr takes the first match, so a
+	 * second `status` here was never reachable. */
+	SHELL_CMD(statusmsg, &meshtastic_status_cmds,
 		  SHELL_HELP("Node status message (away-message): show, set, clear, send, "
 			     "peers.",
 			     NULL),
