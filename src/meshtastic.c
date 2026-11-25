@@ -1068,16 +1068,21 @@ static int send_packet_complete(const struct meshtastic_packet *local,
 		return tx_ret;
 	}
 
-	if (!emit_done) {
-		return 0;
-	}
-
-	LOG_INF("TX to 0x%08x port=%u len=%u", local->to, (unsigned int)local->portnum,
-		(unsigned int)pkt_len);
-	meshtastic_emit_event(MESHTASTIC_EVENT_TX_DONE, 0, local);
+	/* The MQTT uplink is for every frame we originate, once the send engine took it
+	 * (upstream Router::send uplinks after iface->send(), whoever called and whether or
+	 * not it waited): beacons, telemetry, module replies and ACKs are all K_NO_WAIT. It
+	 * only queues, so an ACK sent from the RX thread still never waits for the air. */
 #if defined(CONFIG_MESHTASTIC_MQTT)
 	meshtastic_mqtt_on_tx(local, wire, pkt_len, mesh);
 #endif
+
+	/* TX_DONE is the blocking caller's "sent" (documented in meshtastic.h): a
+	 * fire-and-forget send has nobody waiting and no completion to report. */
+	if (emit_done) {
+		LOG_INF("TX to 0x%08x port=%u len=%u", local->to, (unsigned int)local->portnum,
+			(unsigned int)pkt_len);
+		meshtastic_emit_event(MESHTASTIC_EVENT_TX_DONE, 0, local);
+	}
 
 	return 0;
 }
@@ -1225,7 +1230,14 @@ static int send_wire_tail(const struct meshtastic_packet *local,
 			 * head, belong to this radio. */
 			meshtastic_reliable_on_tx(local, wire, pkt_len, mesh, attach);
 		}
-		return ret;
+		/* "Done" for a head send is the hand-over: queued at the head (a blocking
+		 * caller waited for exactly that), as ours is queued at the radio. The
+		 * head's own TX_RESULT comes later and is the brain's, not this event's. */
+		if (ret < 0) {
+			return ret; /* a refused head send stays a debug line, as before */
+		}
+		return send_packet_complete(local, mesh, wire, pkt_len, ret,
+					    K_TIMEOUT_EQ(wait, K_FOREVER));
 	}
 
 #if defined(CONFIG_MESHTASTIC_AIRTIME)

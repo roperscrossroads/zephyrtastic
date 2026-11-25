@@ -286,6 +286,32 @@ ZTEST(mqtt_proxy, test_uplink_through_the_proxy_still_honours_consent)
 		      "no consent, no uplink");
 }
 
+/* agents-ls39.1.9: every frame we originate is uplinked, not only blocking sends. Upstream
+ * (Router::send) uplinks after the interface took the packet; beacons, telemetry, replies
+ * and ACKs are all K_NO_WAIT and used to be skipped by the TX tail. */
+ZTEST(mqtt_proxy, test_a_fire_and_forget_send_is_uplinked)
+{
+	struct meshtastic_packet pkt = {
+		.from = 0U, /* filled by the stack */
+		.to = MESHTASTIC_NODE_BROADCAST,
+		.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+		.payload = (const uint8_t *)"no wait",
+		.payload_len = 7U,
+		.hop_limit = 3U,
+		.hop_start = 3U,
+		.channel_index = meshtastic_channels_primary_index(),
+		.has_bitfield = true,
+		.bitfield = MESHTASTIC_BITFIELD_OK_TO_MQTT_MASK,
+	};
+
+	if (!IS_ENABLED(CONFIG_MESHTASTIC_MQTT_ENCRYPTION_ENABLED)) {
+		ztest_test_skip();
+	}
+	zassert_ok(meshtastic_send_packet(&pkt, K_NO_WAIT), "send");
+	zassert_true(wait_for(meshtastic_FromRadio_mqttClientProxyMessage_tag, 500),
+		     "a K_NO_WAIT origination reached the broker");
+}
+
 static void send_proxy_downlink(uint32_t from, uint32_t id, const char *text)
 {
 	static uint8_t wire[256];
