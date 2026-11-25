@@ -749,6 +749,44 @@ ZTEST(admin_pki, test_pki_init_rederives_public_key_from_private)
 	}
 }
 
+/* agents-0lzm.10: an identity is minted only with the entropy source live. With none stored and
+ * the RF down, pki_init refuses (-EAGAIN) and persists nothing; a stored key still loads; once the
+ * radio is up the mint goes through. The ordering is all native_sim can judge: it cannot say
+ * whether the DRBG is actually fed. */
+ZTEST(admin_pki, test_no_mint_while_the_entropy_source_is_down)
+{
+	meshtastic_Config saved = meshtastic_Config_init_zero;
+	meshtastic_Config blank = meshtastic_Config_init_zero;
+	meshtastic_Config now = meshtastic_Config_init_zero;
+	bool had_saved;
+
+	had_saved = (meshtastic_config_store_get_config(meshtastic_Config_security_tag, &saved) == 0);
+
+	/* No stored private key. */
+	blank.which_payload_variant = meshtastic_Config_security_tag;
+	zassert_ok(meshtastic_config_store_set_config(&blank), "blank security cfg");
+
+	meshtastic_pki_set_entropy_ready(false);
+	zassert_equal(meshtastic_pki_init(), -EAGAIN, "refuses to mint with no entropy");
+	zassert_ok(meshtastic_config_store_get_config(meshtastic_Config_security_tag, &now), "");
+	zassert_equal(now.payload_variant.security.private_key.size, 0, "and none was persisted");
+
+	meshtastic_pki_set_entropy_ready(true);
+	zassert_ok(meshtastic_pki_init(), "the radio is up: mint");
+	zassert_true(meshtastic_pki_have_key(), "key now exists");
+
+	/* A stored key loads even while the source is down. */
+	meshtastic_pki_set_entropy_ready(false);
+	zassert_ok(meshtastic_pki_init(), "a stored key still loads");
+	zassert_true(meshtastic_pki_have_key(), "");
+	meshtastic_pki_set_entropy_ready(true);
+
+	if (had_saved) {
+		zassert_ok(meshtastic_config_store_set_config(&saved), "restore sec");
+		zassert_ok(meshtastic_pki_init(), "re-init restore");
+	}
+}
+
 /* A DM to a peer whose public key we DO hold is PKC-encrypted: dest is the peer,
  * and the wire channel-hash byte is the 0x00 PKC marker (not a channel hash). */
 ZTEST(admin_pki, test_pkc_dm_uses_zero_wire_marker)

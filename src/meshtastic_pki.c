@@ -168,6 +168,13 @@ static int pki_derive_public(const uint8_t priv[PKI_KEY_LEN], uint8_t pub[PKI_KE
 	return 0;
 }
 
+static bool entropy_ready = true;
+
+void meshtastic_pki_set_entropy_ready(bool ready)
+{
+	entropy_ready = ready;
+}
+
 int meshtastic_pki_init(void)
 {
 	meshtastic_Config cfg = meshtastic_Config_init_zero;
@@ -215,7 +222,13 @@ int meshtastic_pki_init(void)
 		return 0;
 	}
 
-	/* None stored — generate one, persist it, and only then advertise. */
+	/* None stored — generate one, persist it, and only then advertise. Not before the
+	 * entropy source is live: the key is for life (agents-0lzm.10). No key means PKC is
+	 * off until a boot where the radio came up; PSK channels are unaffected. */
+	if (!entropy_ready) {
+		LOG_ERR("PKI: no stored key and no RF entropy source up; NOT minting an identity");
+		return -EAGAIN;
+	}
 	if (pki_generate(g_priv, g_pub) != 0) {
 		return -EIO;
 	}

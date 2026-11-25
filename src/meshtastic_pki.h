@@ -45,6 +45,15 @@ int meshtastic_pki_identity_from(const uint8_t rnd[MESHTASTIC_PKI_KEY_LEN],
 int meshtastic_pki_init(void);
 
 /**
+ * Tell the PKI layer whether the hardware entropy source is live (agents-0lzm.10).
+ * On an ESP32 the RNG gets true entropy only while WiFi or BT runs; meshtastic_init()
+ * sets this from whether one of them is up. When false, meshtastic_pki_init() still
+ * LOADS a stored key but REFUSES to mint a new one (-EAGAIN): a lifelong identity is
+ * not made from an unseeded DRBG. Default true (nRF has a hardware RNG; tests).
+ */
+void meshtastic_pki_set_entropy_ready(bool ready);
+
+/**
  * @brief A peer public key learned mid-handshake but not yet trusted (reference
  *        CryptoEngine::setPendingPublicKey). One slot; consulted by the encrypt/
  *        decrypt peer-key lookup AFTER the NodeDB, so a key-verification

@@ -506,6 +506,10 @@ static void lockdown_reload(void)
 int meshtastic_init(const struct meshtastic_config *cfg)
 {
 	psa_status_t psa_st;
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
+	bool rf_entropy_up = false;
+	bool rf_in_build = false; /* BT or WiFi is compiled in, so there is something to check */
+#endif
 	int ret;
 
 	/* Banner: the build id (git describe + "-dirty") + build time, so a boot-log
@@ -628,11 +632,39 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	 * just bt_enable(), and it is idempotent (bt_is_ready() guarded) so that later
 	 * call is a no-op. ESP32-only: the nRF52840 XIAOs have a true hardware RNG,
 	 * independent of any radio, and do not need this. */
+	rf_in_build = true;
 	if (meshtastic_ble_radio_enable() == 0) {
 		LOG_INF("BT radio warmed up ahead of PKI init (agents-0lzm.10)");
+		rf_entropy_up = true;
 	} else {
-		LOG_WRN("BT radio warm-up failed ahead of PKI init; entropy quality unimproved");
+		LOG_WRN("BT radio warm-up failed ahead of PKI init");
 	}
+#endif
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32) && defined(CONFIG_WIFI) && \
+	DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(wifi))
+	/* A WiFi build needs no warm-up of ours: the Espressif driver starts the radio
+	 * in its own device init ("Start Wi-Fi early", esp32_wifi_dev_init, POST_KERNEL),
+	 * long before this. What can be asked is whether it did: a device that is not
+	 * ready did not start the radio, and the RNG is then not fed. */
+	rf_in_build = true;
+	if (device_is_ready(DEVICE_DT_GET(DT_NODELABEL(wifi)))) {
+		rf_entropy_up = true;
+	} else {
+		LOG_WRN("WiFi device not ready ahead of PKI init");
+	}
+#endif
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32) && defined(CONFIG_MESHTASTIC_PKI)
+	/* A radio is in the build but did not come up: do not mint an identity from that (a stored
+	 * key still loads). Other families have an RNG that needs no radio. */
+	if (rf_in_build) {
+		meshtastic_pki_set_entropy_ready(rf_entropy_up);
+	} else {
+		LOG_WRN("No RF in this ESP32 build: the identity key comes from an unfed RNG");
+	}
+#endif
+#if defined(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
+	ARG_UNUSED(rf_entropy_up);
+	ARG_UNUSED(rf_in_build);
 #endif
 
 	psa_st = psa_crypto_init();
