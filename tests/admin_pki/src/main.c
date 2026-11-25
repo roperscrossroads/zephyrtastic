@@ -4663,3 +4663,72 @@ ZTEST(admin_pki, test_x25519_refuses_small_order_points)
 	u[0] = 1U;
 	zassert_not_equal(meshtastic_pki_x25519(k, u, out), 0, "u = 1 refused");
 }
+
+/* --- agents-ls39.1.5: what a factory reset clears outside the config store --- */
+
+static int count_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+		    void *param)
+{
+	ARG_UNUSED(key);
+	ARG_UNUSED(len);
+	ARG_UNUSED(read_cb);
+	ARG_UNUSED(cb_arg);
+	(*(unsigned int *)param)++;
+	return 0;
+}
+
+static unsigned int records_under(const char *subtree)
+{
+	unsigned int n = 0U;
+
+	(void)settings_load_subtree_direct(subtree, count_cb, &n);
+	return n;
+}
+
+static void seed_outside_records(void)
+{
+	zassert_ok(settings_save_one("mtspb/broker", "broker.example", 14));
+	zassert_ok(settings_save_one("mtspb/pass", "hunter2", 7));
+	zassert_ok(settings_save_one("mtled/mode", "\x01", 1));
+	zassert_ok(settings_save_one("mtid/id", "\x0a\x0b\x0c\x0d", 4));
+	zassert_equal(records_under("mtspb"), 2U, "seed mtspb");
+	zassert_equal(records_under("mtled"), 1U, "seed mtled");
+	zassert_equal(records_under("mtid"), 1U, "seed mtid");
+}
+
+static void factory_reset(bool device)
+{
+	uint8_t buf[32];
+	size_t len;
+	meshtastic_AdminMessage resp = meshtastic_AdminMessage_init_zero;
+
+	len = device ? encode_admin_factory_reset_device(buf, sizeof(buf))
+		     : encode_admin_factory_reset_config(NULL, 0U, buf, sizeof(buf));
+	(void)send_local_admin_and_pop_reply(buf, len, &resp);
+	k_sleep(K_MSEC(50));
+	meshtastic_admin_cancel_reboot(); /* don't actually reboot the test binary */
+	/* Saves stay suppressed, as after the other reset cases here: later cases
+	 * (the MQTT flushed-vs-unflushed round trip) are written against that. */
+}
+
+/* The Sparkplug broker and its login, and the bench LED, were left in flash by
+ * both resets; a full reset also left the stored node id. A config reset keeps
+ * the id (the identity is kept), a device reset drops it. */
+ZTEST(admin_pki, test_factory_resets_clear_what_lives_outside_the_config_store)
+{
+	seed_outside_records();
+	factory_reset(false);
+	zassert_equal(records_under("mtspb"), 0U, "config reset left the Sparkplug login");
+	zassert_equal(records_under("mtled"), 0U, "config reset left the LED mode");
+	zassert_equal(records_under("mtid"), 1U, "config reset keeps the identity's id");
+
+	seed_outside_records();
+	factory_reset(true);
+	zassert_equal(records_under("mtspb"), 0U, "device reset left the Sparkplug login");
+	zassert_equal(records_under("mtled"), 0U, "device reset left the LED mode");
+	zassert_equal(records_under("mtid"), 0U, "device reset left the stored node id");
+
+	/* The device reset dropped PEER's pinned key with the NodeDB; later cases
+	 * need it (as test_factory_reset_device_also_clears_the_nodedb restores it). */
+	seed_peer_pubkey(peer_pubkey);
+}

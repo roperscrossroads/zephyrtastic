@@ -367,6 +367,61 @@ int meshtastic_settings_wipe(bool preserve_security)
 	return ret;
 }
 
+#define WIPE_SUBTREE_MAX 16U
+
+struct wipe_subtree_ctx {
+	const char *subtree;
+	char names[WIPE_SUBTREE_MAX][SETTINGS_FULL_NAME_LEN];
+	unsigned int count;
+	bool overflow;
+};
+
+static int wipe_subtree_collect(const char *key, size_t len, settings_read_cb read_cb,
+				void *cb_arg, void *param)
+{
+	struct wipe_subtree_ctx *c = param;
+	int ret;
+
+	ARG_UNUSED(len);
+	ARG_UNUSED(read_cb);
+	ARG_UNUSED(cb_arg);
+	if (c->count >= WIPE_SUBTREE_MAX) {
+		c->overflow = true;
+		return 0;
+	}
+	ret = snprintk(c->names[c->count], sizeof(c->names[0]), "%s%s%s", c->subtree,
+		       (key != NULL && key[0] != '\0') ? "/" : "", key != NULL ? key : "");
+	if (ret > 0 && ret < (int)sizeof(c->names[0])) {
+		c->count++;
+	}
+	return 0;
+}
+
+int meshtastic_settings_wipe_subtree(const char *subtree)
+{
+	/* Static: 16 full settings names is too much for the admin or shell thread's stack.
+	 * Callers are the factory resets, one at a time. */
+	static struct wipe_subtree_ctx c;
+	int ret;
+
+	if (subtree == NULL || subtree[0] == '\0') {
+		return -EINVAL;
+	}
+	memset(&c, 0, sizeof(c));
+	c.subtree = subtree;
+	ret = settings_load_subtree_direct(subtree, wipe_subtree_collect, &c);
+	if (ret < 0) {
+		return ret;
+	}
+	for (unsigned int i = 0U; i < c.count; i++) {
+		ret = settings_delete(c.names[i]);
+		if (ret < 0) {
+			return ret;
+		}
+	}
+	return c.overflow ? -ENOSPC : (int)c.count;
+}
+
 void meshtastic_settings_save_stats(uint32_t *written, uint32_t *unchanged)
 {
 	if (written != NULL) {

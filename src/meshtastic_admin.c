@@ -80,7 +80,9 @@
 #include "meshtastic_settings.h"
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 #include "meshtastic_backup.h"
+#include "meshtastic_node_identity.h"
 #endif
+#include <zephyr/meshtastic/intents.h>
 
 #include "meshtastic/admin.pb.h"
 
@@ -202,6 +204,45 @@ static void admin_reboot_work_fn(struct k_work *work)
  * has already deleted the persisted config keys; flushing here would re-export the
  * still-populated in-RAM store and resurrect everything just wiped. The next boot
  * finds an empty store and re-seeds defaults. */
+
+/* What lives outside the config store, which meshtastic_settings_wipe() empties
+ * (agents-ls39.1.5). A factory reset clears it too: the roles this node remembers
+ * (the intents registry: peer target, brain, heads, ear, courier, relay, pinned
+ * presets, cluster), the Sparkplug broker and its login (mtspb), the bench LED
+ * (mtled); a full device reset also the stored node id (mtid), which a new key
+ * re-derives. One list, so agents-ls39.4.3's persistence registry can take it over.
+ * Best-effort: the reboot follows whatever fails, and the next reset retries. */
+static void factory_reset_extras(bool device)
+{
+	int ret = meshtastic_intents_clear();
+
+	if (ret < 0) {
+		LOG_WRN("admin: factory reset: intents clear failed (%d)", ret);
+	}
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+	{
+		static const char *const subtrees[] = {"mtspb", "mtled"};
+
+		for (size_t i = 0U; i < ARRAY_SIZE(subtrees); i++) {
+			ret = meshtastic_settings_wipe_subtree(subtrees[i]);
+			if (ret < 0) {
+				LOG_WRN("admin: factory reset: %s not cleared (%d)", subtrees[i],
+					ret);
+			}
+		}
+		if (device) {
+			ret = meshtastic_settings_wipe_subtree(MESHTASTIC_NODE_ID_SUBTREE);
+			if (ret < 0) {
+				LOG_WRN("admin: factory reset: %s not cleared (%d)",
+					MESHTASTIC_NODE_ID_SUBTREE, ret);
+			}
+		}
+	}
+#else
+	ARG_UNUSED(device);
+#endif
+}
+
 static void admin_reset_reboot_work_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(admin_reset_reboot_work, admin_reset_reboot_work_fn);
 
@@ -1718,6 +1759,7 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 		(void)meshtastic_settings_wipe(true); /* keep config/security */
 #endif
+		factory_reset_extras(false);
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
 		/* The replicated document lives in its own settings subtree, so the
 		 * config-store wipe above never touched it — a "factory reset" used to
@@ -1737,6 +1779,7 @@ static bool admin_dispatch(struct admin_ctx ctx, const uint8_t *payload, size_t 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 		(void)meshtastic_settings_wipe(false); /* wipe everything incl. identity */
 #endif
+		factory_reset_extras(true);
 #if defined(CONFIG_MESHTASTIC_BOOTLOG_DURABLE)
 		/* The reference's full reset erases NVS and its rebootCounter with it,
 		 * so the next boot reports reboot_count 1 (agents-dnr4.28). Only the
