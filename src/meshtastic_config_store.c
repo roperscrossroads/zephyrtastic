@@ -967,6 +967,11 @@ int meshtastic_config_store_apply_core(void)
 	int device_idx;
 	int lora_idx;
 	bool lora_provisioned;
+	bool licensed;
+	struct meshtastic_modem_params modem;
+	int8_t tx_power;
+	bool tx_enabled;
+	uint32_t frequency;
 	int ret;
 
 	store_lock();
@@ -984,15 +989,33 @@ int meshtastic_config_store_apply_core(void)
 	device = store.configs[device_idx].payload_variant.device;
 	lora = store.configs[lora_idx].payload_variant.lora;
 	lora_provisioned = !meshtastic_hlc_stamp_is_unset(&store.config_stamps[lora_idx]);
+	licensed = store.is_licensed;
 
 	store_unlock();
+
+	/* The radio's parameters (mt.modem, mt.tx_power, mt.licensed, mt.frequency,
+	 * mt.tx_enabled, mt.rx_boosted_gain) are read by the transmit path and by
+	 * every retune under mt.lock, and preset.c / radio.c write them under it.
+	 * This function used to write them bare, one by one, at runtime after every
+	 * set_config and merge_config, so the radio thread could configure the chip
+	 * from a half-updated set: a new spreading factor on the old frequency, or a
+	 * new power under the old licence flag (agents-ls39.1.3). They are now
+	 * resolved into locals and published together, under mt.lock, at the end.
+	 * The structural fix -- one owner for the radio config -- is ls39.3.3. */
 
 	/* Must precede the channel loop: an unnamed channel takes the active
 	 * preset's display name, and set_slot hashes that name as it stores each
 	 * slot. Applying the preset afterwards would hash every channel against
 	 * the previous preset. */
+	k_mutex_lock(&mt.lock, K_FOREVER);
 	mt.modem_preset = lora.modem_preset;
 	mt.use_preset = lora.use_preset;
+	/* What stays in force where nothing below resolves a new value: a
+	 * failed preset lookup keeps the radio's modem, no plan keeps its
+	 * frequency. */
+	modem = mt.modem;
+	frequency = mt.frequency;
+	k_mutex_unlock(&mt.lock);
 	mt.config_ok_to_mqtt = lora.config_ok_to_mqtt;
 	meshtastic_duty_set_override(lora.override_duty_cycle);
 
@@ -1028,17 +1051,16 @@ int meshtastic_config_store_apply_core(void)
 	 */
 	{
 		int8_t resolved = meshtastic_tx_power_resolve(lora.tx_power, lora.region,
-							      store.is_licensed);
+							      licensed);
 
 		if ((lora.tx_power != 0) && (resolved != lora.tx_power)) {
 			LOG_WRN("TX power %d dBm exceeds region %d limit; clamping to %d",
 				lora.tx_power, (int)lora.region, resolved);
 		}
-		mt.tx_power = resolved;
-		/* Cache the licence flag alongside the power it helped resolve. The
-		 * transmit path needs it per frame and must not take the store mutex
-		 * there; this is the one place both are known together. */
-		mt.licensed = store.is_licensed;
+		/* Published with the licence flag below: the transmit path needs
+		 * both per frame and must not take the store mutex there; this is
+		 * the one place both are known together. */
+		tx_power = resolved;
 	}
 
 	/* Resolve the modem preset. wide_lora is hardcoded false: it is a
@@ -1047,7 +1069,7 @@ int meshtastic_config_store_apply_core(void)
 	 * the region table lands (parity: radio D3).
 	 */
 	if (lora.use_preset) {
-		(void)meshtastic_preset_to_params(lora.modem_preset, false, &mt.modem);
+		(void)meshtastic_preset_to_params(lora.modem_preset, false, &modem);
 	} else {
 		/* Custom SF/BW/CR. bandwidth is a Meshtastic "special" code (see
 		 * lora_bw_code_to_hz); spread_factor is 5..12; coding_rate is 5..8
@@ -1058,9 +1080,9 @@ int meshtastic_config_store_apply_core(void)
 
 		if (bw_hz > 0 && lora.spread_factor >= 5U && lora.spread_factor <= 12U &&
 		    lora.coding_rate >= 5U && lora.coding_rate <= 8U) {
-			mt.modem.bandwidth_hz = (uint32_t)bw_hz;
-			mt.modem.spread_factor = (uint8_t)lora.spread_factor;
-			mt.modem.coding_rate = (uint8_t)lora.coding_rate;
+			modem.bandwidth_hz = (uint32_t)bw_hz;
+			modem.spread_factor = (uint8_t)lora.spread_factor;
+			modem.coding_rate = (uint8_t)lora.coding_rate;
 			LOG_INF("LoRa custom modem: BW=%u Hz SF=%u CR=4/%u",
 				(unsigned int)bw_hz, (unsigned int)lora.spread_factor,
 				(unsigned int)lora.coding_rate);
@@ -1068,19 +1090,18 @@ int meshtastic_config_store_apply_core(void)
 			LOG_WRN("Invalid custom LoRa (bw=%u sf=%u cr=%u); using preset %d",
 				(unsigned int)lora.bandwidth, (unsigned int)lora.spread_factor,
 				(unsigned int)lora.coding_rate, (int)lora.modem_preset);
-			(void)meshtastic_preset_to_params(lora.modem_preset, false, &mt.modem);
+			(void)meshtastic_preset_to_params(lora.modem_preset, false, &modem);
 		}
 	}
 
-	mt.rx_boosted_gain = lora.sx126x_rx_boosted_gain;
-	mt.tx_enabled = lora.tx_enabled;
+	tx_enabled = lora.tx_enabled;
 #if defined(CONFIG_MESHTASTIC_TX_HOLD_UNPROVISIONED) && !defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
 	/* The provisioned hold (agents-xhli.21): a LoRa section nobody ever wrote
 	 * has no write-stamp, and its seeded tx_enabled is the build's guess, not a
 	 * choice. Stay receive-only until a real write stamps it, so a forgotten
 	 * overlay cannot put a fresh node on the public preset at full power. */
-	if (mt.tx_enabled && !lora_provisioned) {
-		mt.tx_enabled = false;
+	if (tx_enabled && !lora_provisioned) {
+		tx_enabled = false;
 		LOG_WRN("TX held: the LoRa config was never written (set preset/power, then tx on)");
 	}
 #else
@@ -1103,8 +1124,10 @@ int meshtastic_config_store_apply_core(void)
 
 		lora.fem_lna_mode = meshtastic_Config_LoRaConfig_FEM_LNA_Mode_NOT_PRESENT;
 		if (lora_idx >= 0) {
+			store_lock();
 			store.configs[lora_idx].payload_variant.lora.fem_lna_mode =
 				meshtastic_Config_LoRaConfig_FEM_LNA_Mode_NOT_PRESENT;
+			store_unlock();
 		}
 	}
 
@@ -1114,7 +1137,7 @@ int meshtastic_config_store_apply_core(void)
 		/* Defense in depth (US-only firmware): ignore an out-of-band override
 		 * even if one reached here without config_is_valid gating it. */
 		if (hz >= 902000000U && hz <= 928000000U) {
-			mt.frequency = hz;
+			frequency = hz;
 		}
 	} else {
 		struct meshtastic_freq_plan plan;
@@ -1132,11 +1155,11 @@ int meshtastic_config_store_apply_core(void)
 		 * "MyMesh" on slot djb2("MyMesh") % 104, not on LongFast's slot, so a
 		 * renamed channel could not hear stock radios at all.
 		 */
-		ret = meshtastic_region_freq_plan(region, mt.modem_preset,
+		ret = meshtastic_region_freq_plan(region, lora.modem_preset,
 						  meshtastic_channels_primary_name(),
-						  mt.use_preset, &plan);
+						  lora.use_preset, &plan);
 		if (ret == 0) {
-			mt.frequency = plan.frequency_hz;
+			frequency = plan.frequency_hz;
 			/* The ceiling is now enforced, not just logged (DUTY). It has to
 			 * be latched here because this is the only place a plan is
 			 * resolved -- and it must be latched even when the ceiling is
@@ -1151,9 +1174,21 @@ int meshtastic_config_store_apply_core(void)
 			 * unknown). Keep the previous frequency rather than invent one;
 			 * transmitting on a guess is worse than not moving. */
 			LOG_WRN("no frequency plan for region %d (%d); keeping %u Hz",
-				(int)region, ret, mt.frequency);
+				(int)region, ret, frequency);
 		}
 	}
+
+	/* One critical section: the radio sees the old set or the new one, never a
+	 * mix. Nothing here calls out, so the lock order (radio sem, then mt.lock)
+	 * is untouched. */
+	k_mutex_lock(&mt.lock, K_FOREVER);
+	mt.modem = modem;
+	mt.tx_power = tx_power;
+	mt.licensed = licensed;
+	mt.frequency = frequency;
+	mt.tx_enabled = tx_enabled;
+	mt.rx_boosted_gain = lora.sx126x_rx_boosted_gain;
+	k_mutex_unlock(&mt.lock);
 
 	return 0;
 }

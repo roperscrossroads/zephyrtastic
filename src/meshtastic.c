@@ -260,7 +260,7 @@ static int seed_packet_id(void)
 		return -EIO;
 	}
 
-	mt.next_pkt_id = seed;
+	atomic_set(&mt.next_pkt_id, (atomic_val_t)seed);
 	return 0;
 }
 
@@ -270,17 +270,18 @@ uint32_t meshtastic_allocate_packet_id(void)
 
 	do {
 		uint32_t high = 0U;
-
-		mt.next_pkt_id++;
+		/* One atomic step per id: two threads can no longer read the
+		 * same counter value (atomic_inc returns the value before). */
+		uint32_t ctr = (uint32_t)atomic_inc(&mt.next_pkt_id) + 1U;
 
 		if (psa_generate_random((uint8_t *)&high, sizeof(high)) != PSA_SUCCESS) {
 			/* Degrade to the counter alone. Still safe for the property
 			 * that matters here: the counter was seeded randomly at
 			 * boot, so ids do not repeat across a restart. */
-			high = mt.next_pkt_id >> PKT_ID_COUNTER_BITS;
+			high = ctr >> PKT_ID_COUNTER_BITS;
 		}
 
-		id = (mt.next_pkt_id & PKT_ID_COUNTER_MASK) | (high << PKT_ID_COUNTER_BITS);
+		id = (ctr & PKT_ID_COUNTER_MASK) | (high << PKT_ID_COUNTER_BITS);
 	} while (id == 0U); /* id 0 is reserved (see the id==0 broadcast guard) */
 
 	return id;
@@ -288,10 +289,12 @@ uint32_t meshtastic_allocate_packet_id(void)
 
 uint32_t meshtastic_next_fromradio_id(void)
 {
-	uint32_t id = mt.next_fromradio_id++;
+	/* The low 32 bits of an atomic counter: wraps like the uint32_t it was,
+	 * and skips NONE the same way, without a lost update between threads. */
+	uint32_t id = (uint32_t)atomic_inc(&mt.next_fromradio_id);
 
 	if (id == MESHTASTIC_FROMRADIO_NONE) {
-		id = mt.next_fromradio_id++;
+		id = (uint32_t)atomic_inc(&mt.next_fromradio_id);
 	}
 
 	return id;
@@ -613,8 +616,8 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 		(cfg->short_name != NULL) ? cfg->short_name : CONFIG_MESHTASTIC_NODE_SHORT_NAME;
 	/* Seeded from the CSPRNG once PSA is up (below) — a fixed start would make
 	 * the AES-CTR nonce repeat after every reboot. */
-	mt.next_pkt_id = 1U;
-	mt.next_fromradio_id = 1U;
+	atomic_set(&mt.next_pkt_id, 1);
+	atomic_set(&mt.next_fromradio_id, 1);
 	mt.dup_head = 0U;
 	mt.radio_rx_armed = false;
 	memset(mt.dup_cache, 0, sizeof(mt.dup_cache));

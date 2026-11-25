@@ -12,6 +12,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/iterable_sections.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/meshtastic/meshtastic.h>
@@ -147,8 +148,12 @@ struct meshtastic_context {
 	meshtastic_recv_cb_t recv_cb;
 	meshtastic_event_cb_t event_cb;
 	void *event_user_data;
-	uint32_t next_pkt_id;
-	uint32_t next_fromradio_id;
+	/* Atomic because they are taken from several threads at once (the app
+	 * senders, the module threads, the RX thread's ACKs, the PhoneAPI
+	 * transports): a plain ++ lost updates and could hand two frames one id
+	 * (agents-ls39.1.3). Only the low 32 bits are used, on every target. */
+	atomic_t next_pkt_id;
+	atomic_t next_fromradio_id;
 	struct meshtastic_dup_entry dup_cache[CONFIG_MESHTASTIC_DUP_CACHE_SIZE];
 	uint8_t dup_head;
 	struct k_mutex lock;
