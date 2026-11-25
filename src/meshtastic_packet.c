@@ -1156,17 +1156,12 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 		 * decoded-path PKI branch in meshtastic_build_wire_packet. */
 		hdr->channel = 0x00U;
 	} else if (mesh->channel < MESHTASTIC_MAX_CHANNELS) {
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-		/* Leaving by a radio head: an unnamed slot is named after the preset
-		 * it is used on, so hash it under the HEAD's preset (S2, P3 slice 2).
-		 * The nonce is (id, from): the ciphertext does not change. */
-		hdr->channel = (mt_ws.tx_attach != 0U)
-				       ? meshtastic_attachment_tx_hash(mt_ws.tx_attach,
-								       (uint8_t)mesh->channel)
-				       : meshtastic_channels_get_hash((uint8_t)mesh->channel);
-#else
+		/* Our own radio's hash. This pre-encrypted path always leaves by this
+		 * board's radio: mt_ws.tx_attach is set only around the encode path
+		 * (mt_ws_build_wire_locked), never here, so the head-preset hash that
+		 * used to sit in a branch here could not be reached (agents-ls39.1.10).
+		 * A head is chosen for a send on the encode path, which hashes for it. */
 		hdr->channel = meshtastic_channels_get_hash((uint8_t)mesh->channel);
-#endif
 	} else {
 		hdr->channel = (mesh->channel != 0U) ? (uint8_t)mesh->channel : mt.ch_hash;
 	}
@@ -1188,6 +1183,9 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 
 		memcpy(wire, mt_ws.wire, wire_len);
 		k_mutex_unlock(&mt_ws.lock);
+		/* From here on mt_ws.wire is another sender's: read the header from our
+		 * copy (agents-ls39.1.10). */
+		hdr = (struct meshtastic_wire_header *)wire;
 
 		ret = meshtastic_radio_send_wire_wait(wire, wire_len, K_FOREVER);
 
