@@ -719,7 +719,9 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 	const struct meshtastic_wire_header *hdr;
 	uint32_t src;
 	uint32_t pkt_id;
-	struct meshtastic_packet packet;
+	/* Zeroed: the decode fills it from the header but reads fields it does not set
+	 * (rx_attach, agents-ls39.1.1). */
+	struct meshtastic_packet packet = {0};
 	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	/* C3 Phase 2: try_decode fills this with the fully decoded MeshPacket (emoji,
 	 * rx_time) so the phone gets the frame verbatim. ~430 B on the RX-thread stack --
@@ -903,10 +905,12 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 
 	dup_add(src, pkt_id, rx_hop_limit, meta->attach, hdr->relay_node, meta->rx_ms);
 
+	/* Before the decode, which reads it: a PKC frame from an unknown key asks for
+	 * the sender's NodeInfo by the radio it came in on (agents-ls39.1.1). */
+	packet.rx_attach = meta->attach;
 	ret = meshtastic_try_decode_wire_packet_on(buf, len, rssi, snr, meta->preset, &packet,
 						   payload, sizeof(payload), &decoded, &fail_reason,
 						   &rx_mesh);
-	packet.rx_attach = meta->attach;
 	packet.rx_heard_on = (rf && meta->preset != MESHTASTIC_PRESET_UNKNOWN)
 				     ? (uint8_t)(meta->preset + 1U)
 				     : 0U;

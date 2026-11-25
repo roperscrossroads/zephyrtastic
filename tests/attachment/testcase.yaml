@@ -30,6 +30,27 @@ tests:
       - CONFIG_FLASH_MAP=y
       - CONFIG_NVS=y
       - CONFIG_SETTINGS_NVS=y
+  # The brain with PKI (agents-ls39.1.1): a PKC DM from a sender whose key it does
+  # not hold, heard through a head, must have its NodeInfo request answered
+  # through that head. PKI needs settings, so this is brain_settings plus PKI.
+  meshtastic.attachment.brain_pki.native_sim:
+    extra_conf_files:
+      - prj.conf
+      - ../common/pki-psa.conf
+    extra_configs:
+      - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=y
+      - CONFIG_MESHTASTIC_ATTACHMENT_MAX=2
+      - CONFIG_MESHTASTIC_ATTACHMENT_EVICT_SEC=2
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS_NVS=y
+      - CONFIG_MESHTASTIC_PKI=y
+      # Only the attachment_pki suite runs here; the main suite is skipped by its
+      # predicate, which this check would otherwise count as a failure.
+      - CONFIG_ZTEST_VERIFY_RUN_ALL=n
   # The head (S5): the real stack as a keyless radio head on the sim radio. What
   # it hears is captured at the send seam as RX_FRAME envelopes; controls come
   # in through on_envelope as the BLE glue would deliver them. The build itself

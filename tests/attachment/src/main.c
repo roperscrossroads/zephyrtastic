@@ -18,6 +18,10 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/ztest.h>
+#if defined(CONFIG_MESHTASTIC_PKI)
+#include <psa/crypto.h>
+#include "meshtastic_pki.h"
+#endif
 
 #include <zephyr/meshtastic/meshtastic.h>
 #include <meshtastic/lora_sim.h>
@@ -272,6 +276,10 @@ static void *attachment_setup(void)
 
 	k_sem_init(&rx.sem, 0, 16);
 	zassert_true(device_is_ready(lora_dev), "sim lora device not ready");
+#if defined(CONFIG_MESHTASTIC_PKI)
+	/* As admin_pki does: PSA up before meshtastic_init(), which mints our key. */
+	zassert_equal(psa_crypto_init(), PSA_SUCCESS, "psa_crypto_init");
+#endif
 	zassert_ok(meshtastic_init(&cfg), "meshtastic_init");
 	meshtastic_set_recv_cb(on_recv);
 	zassert_ok(meshtastic_attach_bearer_register(&test_bearer), "test bearer");
@@ -323,7 +331,19 @@ static void attachment_before(void *fixture)
 	mt.dup_head = 0U;
 }
 
-ZTEST_SUITE(attachment, NULL, attachment_setup, attachment_before, NULL, NULL);
+/* The brain_pki scenario runs only the attachment_pki suite: with PKI on, a DM to a
+ * peer whose key we do not hold is refused, which the cases here do not expect. It
+ * skips this suite, so it turns off ZTEST_VERIFY_RUN_ALL (testcase.yaml). */
+static bool without_pki(const void *state)
+{
+	ARG_UNUSED(state);
+	return !IS_ENABLED(CONFIG_MESHTASTIC_PKI);
+}
+
+ZTEST_SUITE(attachment, without_pki, attachment_setup, attachment_before, NULL, NULL);
+#if defined(CONFIG_MESHTASTIC_PKI)
+ZTEST_SUITE(attachment_pki, NULL, attachment_setup, attachment_before, NULL, NULL);
+#endif
 
 /* T0: the table starts with the local radio and nothing else. */
 ZTEST(attachment, test_0_table_starts_with_the_local_radio)
@@ -1748,6 +1768,77 @@ ZTEST(attachment, test_reply_leaves_by_the_radio_the_request_came_in_on)
 	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(100)), 0,
 			  "and none on our own radio either");
 }
+
+#if defined(CONFIG_MESHTASTIC_PKI)
+/* agents-ls39.1.1: a PKC DM to us from a sender whose key we do not hold makes the
+ * decode ask for that sender's NodeInfo, and the request must leave by the radio
+ * the DM came in on. The decode read packet.rx_attach from an uninitialised stack
+ * struct, set only after the decode returned: what it saw was whatever the
+ * previous frame left in that slot. So the frame before the DM arrives on our own
+ * radio (leaving 0 there), and the DM through head 1 must still be answered
+ * through head 1, not on our own radio. */
+ZTEST(attachment_pki, test_unknown_key_nodeinfo_request_leaves_by_the_head_that_heard_it)
+{
+	const uint32_t stranger = 0x5A11E7EDU;
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint8_t pkc[MESHTASTIC_HDR_LEN + 32U];
+	struct meshtastic_wire_header *hdr = (struct meshtastic_wire_header *)pkc;
+	uint32_t len;
+	struct lora_sim_frame f;
+	struct meshtastic_attachment_msg msg;
+	const uint8_t there = meshtastic_channels_hash_for_preset(0U, (uint8_t)PRESET_MF);
+	uint32_t before;
+	bool found = false;
+
+	zassert_true(meshtastic_pki_have_key(), "the brain holds no key: PKC is never tried");
+
+	/* Admit head 1 on MediumFast. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x3A00U, "admit", wire, &len);
+	((struct meshtastic_wire_header *)wire)->channel = there;
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -80, 6, wire, len));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)));
+
+	/* The frame before: on our own radio. */
+	build_frame(FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, 0x3A01U, "local", wire, &len);
+	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)len, -70, 8));
+	zassert_ok(k_sem_take(&rx.sem, K_SECONDS(2)), "the local frame is delivered");
+	k_msleep(100);
+	drain_radio();
+	before = sent.count;
+
+	/* The DM: PKC marker, junk ciphertext long enough to reach the key lookup,
+	 * from a sender we hold no key for, heard by head 1. */
+	memset(pkc, 0, sizeof(pkc));
+	memset(pkc + MESHTASTIC_HDR_LEN, 0xA5, 32U);
+	hdr->dest = sys_cpu_to_le32(TEST_NODE_ID);
+	hdr->src = sys_cpu_to_le32(stranger);
+	hdr->id = sys_cpu_to_le32(0x3A02U);
+	hdr->flags = 3U | (3U << MESHTASTIC_FLAGS_HOP_START_SHIFT);
+	hdr->channel = 0x00U; /* the PKC marker */
+	zassert_ok(head_hears(HEAD1_NODE, PRESET_MF, -80, 6, pkc, sizeof(pkc)));
+
+	/* The NodeInfo request to the stranger: through head 1. Every envelope since
+	 * `before` went to head 1 (it is the only head); look for the request. */
+	for (int i = 0; i < 100 && !found; i++) {
+		uint32_t n = MIN(sent.count - before, sent_ring_count());
+
+		for (uint32_t k = 0U; k < n && !found; k++) {
+			if (sent_ring_get(k, &msg) && msg.type == MESHTASTIC_ATTACHMENT_TX_FRAME &&
+			    sys_le32_to_cpu(((const struct meshtastic_wire_header *)msg.u.tx.wire)
+						    ->dest) == stranger) {
+				found = true;
+			}
+		}
+		if (!found) {
+			k_msleep(10);
+		}
+	}
+	zassert_true(found, "no NodeInfo request to the stranger reached head 1");
+	zassert_equal(sent.node, HEAD1_NODE);
+	zassert_not_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(300)), 0,
+			  "the request went out on our own radio too");
+}
+#endif /* CONFIG_MESHTASTIC_PKI */
 
 /* P3 slice 3: a flood heard through a head is relayed THROUGH that head -- never
  * on our own radio -- as a TX_FRAME{RELAY}: the relay as we built it (one hop
