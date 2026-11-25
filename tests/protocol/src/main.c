@@ -7570,3 +7570,62 @@ ZTEST(protocol_stack, test_mesh_time_from_remote_position)
 	zassert_true(now >= 1760000000U && now < 1760000000U + 5U,
 		      "clock must stay on the NTP timeline, got %u", now);
 }
+
+/* agents-ls39.1.10: a blocking send that times out left the queued item's done/result
+ * pointing at its own (dead) stack frame. When the worker finished that frame it gave
+ * a semaphore and wrote a result in memory the next call had reused: a second blocking
+ * send from the same call depth found its own `done` given by the FIRST frame and
+ * returned before its own frame went out. */
+static void __noinline egress_release_all_fn(struct k_work *w)
+{
+	ARG_UNUSED(w);
+	egress_gate_enable(false);
+	for (int i = 0; i < (int)ARRAY_SIZE(mock_lora.tx_ids); i++) {
+		k_sem_give(&mock_lora.gate);
+	}
+}
+static K_WORK_DELAYABLE_DEFINE(egress_release_all, egress_release_all_fn);
+
+static int __noinline egress_send_wait(uint32_t id, k_timeout_t wait)
+{
+	uint8_t wire[MESHTASTIC_PKT_MAX];
+	uint32_t wire_len = 0U;
+	static const uint8_t body[] = {0xBEU, 0xEFU};
+
+	build_wire_packet(TEST_NODE_ID, MESHTASTIC_NODE_BROADCAST, id, EGRESS_HOP,
+			  MESHTASTIC_PORT_TEXT_MESSAGE, body, sizeof(body), wire, &wire_len);
+	return meshtastic_radio_send_wire_wait_prio(wire, wire_len, MT_SCHED_TIER_NORMAL, wait);
+}
+
+ZTEST(protocol_stack, test_egress_timed_out_wait_does_not_complete_a_later_one)
+{
+	bool c_sent = false;
+
+	meshtastic_sched_defaults();
+	egress_begin();
+
+	/* A occupies the worker inside send(). */
+	zassert_ok(egress_send(0x2000U, MT_SCHED_TIER_NORMAL));
+	egress_wait_parked();
+
+	/* B waits 50 ms and gives up while still queued. */
+	zassert_equal(egress_send_wait(0x2001U, K_MSEC(50)), -EAGAIN, "B should time out");
+
+	/* Release the radio shortly, then wait for C, from the same call depth as B. */
+	(void)k_work_schedule(&egress_release_all, K_MSEC(100));
+	zassert_ok(egress_send_wait(0x2002U, K_FOREVER), "C");
+
+	/* C's wait ends when C is done, not when B is. */
+	k_mutex_lock(&mock_lora.lock, K_FOREVER);
+	for (unsigned int i = 0U; i < mock_lora.tx_ids_count; i++) {
+		if (mock_lora.tx_ids[i] == 0x2002U) {
+			c_sent = true;
+		}
+	}
+	k_mutex_unlock(&mock_lora.lock);
+	zassert_true(c_sent, "the wait for C returned before C was transmitted (%u sent)",
+		     mock_lora.tx_ids_count);
+
+	k_msleep(50);
+	egress_end();
+}

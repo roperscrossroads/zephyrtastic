@@ -494,12 +494,34 @@ static int outbound_enqueue(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier, 
 		return 0;
 	}
 
-	if (k_sem_take(&done, wait) == -EAGAIN) {
-		/* Timed out waiting for completion. Callers that need a hard result
-		 * use K_FOREVER, so this path is not exercised in practice. */
-		return -EAGAIN;
+	for (;;) {
+		bool withdrawn = false;
+
+		if (k_sem_take(&done, wait) == 0) {
+			return result;
+		}
+		/* Timed out (agents-ls39.1.10). `done` and `result` live in this stack
+		 * frame: returning while the item still points at them let the worker
+		 * later give a dead semaphore and write a dead int, which the next call
+		 * from the same depth had reused (its own wait ended with the earlier
+		 * frame's completion). Still queued: stop pointing at this frame; the
+		 * frame stays queued and is sent, as before. Already with the radio:
+		 * wait for that one frame, which its airtime and the defer cap bound. */
+		k_mutex_lock(&ob_lock, K_FOREVER);
+		for (uint32_t i = 0U; i < ob_count; i++) {
+			if (ob_items[i].done == &done) {
+				ob_items[i].done = NULL;
+				ob_items[i].result = NULL;
+				withdrawn = true;
+				break;
+			}
+		}
+		k_mutex_unlock(&ob_lock);
+		if (withdrawn) {
+			return -EAGAIN;
+		}
+		wait = K_FOREVER;
 	}
-	return result;
 }
 
 int meshtastic_radio_send_wire_prio(uint8_t *pkt, uint32_t pkt_len, uint8_t tier)
