@@ -113,15 +113,17 @@ configdefault RESET_ON_FATAL_ERROR
 # Coredump on a fatal error: registers + all RAM data/bss/noinit (keep
 # DEBUG_COREDUMP_MEMORY_DUMP_LINKER_RAM; it is what lets a post-mortem see driver
 # statics). Backend SET ELSEWHERE (a choice): LOGGING ("#CD:" log lines, rebuild
-# with zephyr/scripts/coredump/coredump_serial_log_parser.py + gdbserver) from
-# prj.conf, or FLASH_PARTITION from overlay-coredump-flash.conf (class images).
+# with zephyr/scripts/coredump/coredump_serial_log_parser.py + gdbserver), the
+# choice's own default, or FLASH_PARTITION from overlay-coredump-flash.conf.
 # XIAO: OFF by default -- the plain (non-sysbuild) XIAO build has no coredump
 # partition, and the LOGGING backend spun ~9 s on a dead console until the
 # watchdog fired (sometimes landing in the UF2 bootloader). The --sysbuild
-# (MCUboot) XIAO image turns it back on in mcuboot-xiao/app.conf, where the
-# partition exists. The T114 is the same case: a legacy single image booted by the
-# Adafruit bootloader, with no coredump partition in its layout.
-# Cost: -1.2 KB dram0 on V4 (flash backend) | XIAO: partition on QSPI.
+# (MCUboot) XIAO image keeps it off too (agents-ninc): its partition is on the
+# QSPI NOR, whose driver blocks, so a dump from a fault asserted in it and the
+# fault was never named; meshtastic_fatal.c refuses that layout at build time.
+# The T114 is the same case: a legacy single image booted by the Adafruit
+# bootloader, with no coredump partition in its layout.
+# Cost: -1.2 KB dram0 on V4 (flash backend).
 configdefault DEBUG_COREDUMP
 	default n if BOARD_XIAO_BLE || BOARD_HELTEC_T114_V2
 	default y
