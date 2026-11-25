@@ -236,6 +236,9 @@ void meshtastic_ble_adv_resume(void);
  */
 const char *meshtastic_ble_adv_name(void);
 uint32_t meshtastic_ble_adv_starts(void);
+/* Incoming non-peer links dropped for idleness (MESHTASTIC_BLE_IDLE_DROP,
+ * agents-0inv); 0 on a build without it. */
+uint32_t meshtastic_ble_idle_drops(void);
 
 #else /* !CONFIG_MESHTASTIC_BLE_PEER */
 

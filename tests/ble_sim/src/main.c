@@ -429,3 +429,46 @@ ZTEST(ble_sim, test_11_frame_callback_runs_without_the_peer_lock)
 	zassert_true(frame_cb_lock_free,
 		     "another thread could not take the peer lock while the callback ran");
 }
+
+#if defined(CONFIG_MESHTASTIC_BLE_IDLE_DROP)
+/* agents-0inv: on a keyless head (two slots, one its brain link) a host that
+ * connected and went silent kept the other slot, and advertising stayed off: rzr5
+ * showed "2/2 slots, advertising NO" and every later connect found no peripheral.
+ * An incoming link that is not a peer is dropped after MESHTASTIC_BLE_IDLE_DROP_SEC
+ * without activity; PhoneAPI access (here, reads of FromNum) is activity. */
+#define FROMNUM_UUID BT_UUID_128_ENCODE(0xed9da18c, 0xa800, 0x4f66, 0xa670, 0xaa7547e34453)
+#define IDLE_MS      (CONFIG_MESHTASTIC_BLE_IDLE_DROP_SEC * 1000)
+
+ZTEST(ble_sim, test_12_an_idle_incoming_non_peer_link_is_dropped)
+{
+	static const struct bt_uuid_128 fromnum_uuid = BT_UUID_INIT_128(FROMNUM_UUID);
+	const struct bt_gatt_attr *attr = bt_gatt_find_by_uuid(NULL, 0, &fromnum_uuid.uuid);
+	uint32_t drops = meshtastic_ble_idle_drops();
+	uint32_t disc;
+	uint8_t pdu[3];
+	int handle;
+
+	zassert_not_null(attr, "FromNum not in the local GATT db");
+	handle = fake_hci_incoming_conn(&phone_addr);
+	zassert_true(handle > 0);
+	zassert_true(UNTIL(hci().conns_active == 1U, 2000));
+	disc = hci().disconnect_cmds;
+
+	/* Active for longer than the limit: kept. */
+	pdu[0] = 0x0AU; /* ATT Read Request */
+	sys_put_le16(bt_gatt_attr_get_handle(attr), &pdu[1]);
+	for (int64_t end = k_uptime_get() + IDLE_MS + IDLE_MS / 2; k_uptime_get() < end;) {
+		fake_hci_remote_att((uint16_t)handle, pdu, sizeof(pdu));
+		k_msleep(500);
+	}
+	zassert_equal(hci().conns_active, 1U, "an active link was dropped");
+	zassert_equal(hci().disconnect_cmds, disc, "an active link was disconnected");
+
+	/* Silent: dropped, once, and the advert comes back for the next central. */
+	zassert_true(UNTIL(hci().disconnect_cmds > disc, IDLE_MS + 2000),
+		     "an idle non-peer link was kept");
+	zassert_true(UNTIL(hci().conns_active == 0U && hci().adv_enabled, 3000),
+		     "the slot was not freed / advertising not re-armed");
+	zassert_equal(meshtastic_ble_idle_drops(), drops + 1U);
+}
+#endif

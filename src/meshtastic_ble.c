@@ -37,6 +37,9 @@
 
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
+#if defined(CONFIG_MESHTASTIC_BLE_IDLE_DROP) && defined(CONFIG_MCUMGR_SMP_COMMAND_STATUS_HOOKS)
+#include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
+#endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -98,6 +101,11 @@ static struct {
 	 * connect) can still reach the conn object. */
 	struct bt_conn *conns[MESHTASTIC_BLE_REG_SLOTS];
 	int64_t conn_ms[MESHTASTIC_BLE_REG_SLOTS]; /* connect time, for the classify window */
+	/* Last PhoneAPI access or SMP command on each slot, and whether the far end
+	 * connected to us; for the idle drop (MESHTASTIC_BLE_IDLE_DROP, agents-0inv). */
+	int64_t active_ms[MESHTASTIC_BLE_REG_SLOTS];
+	bool inbound[MESHTASTIC_BLE_REG_SLOTS];
+	uint32_t idle_drops;
 } ble;
 
 /* Statically reserved. NB: this stack must NOT be heap-allocated at bring-up: the
@@ -156,6 +164,7 @@ enum {
 static void notify_fromnum(void);
 static void schedule_fromradio_prepare(void);
 static void ble_note_phone_traffic(struct bt_conn *conn);
+static void ble_note_activity(unsigned int index);
 
 static void ble_invalidate_delivery(struct meshtastic_phoneapi *api)
 {
@@ -470,6 +479,115 @@ static void adv_restart_now(void)
 	(void)k_work_reschedule_for_queue(&ble.work_q, &adv_restart_work, K_NO_WAIT);
 }
 
+/* Activity on a slot: the idle drop's clock restarts (agents-0inv). */
+static void ble_note_activity(unsigned int index)
+{
+	if (index >= MESHTASTIC_BLE_REG_SLOTS) {
+		return;
+	}
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	ble.active_ms[index] = k_uptime_get();
+	k_mutex_unlock(&ble.lock);
+}
+
+#if defined(CONFIG_MESHTASTIC_BLE_IDLE_DROP)
+/*
+ * The idle drop (agents-0inv): an incoming link that is not a peer and has shown no
+ * activity for MESHTASTIC_BLE_IDLE_DROP_SEC is disconnected. On a keyless head the
+ * second of its two slots otherwise stayed with a host that had connected and gone
+ * silent (rzr5, 2026-11-25: "2/2 slots, advertising NO" after bleprobe gave up, and
+ * every later connect found no peripheral). On the system workqueue, never from a BT
+ * callback; the disconnected callback frees the slot and re-arms advertising.
+ */
+#define IDLE_DROP_MS ((int64_t)CONFIG_MESHTASTIC_BLE_IDLE_DROP_SEC * MSEC_PER_SEC)
+
+static void idle_sweep_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(idle_sweep_work, idle_sweep_fn);
+
+static void idle_sweep_fn(struct k_work *work)
+{
+	int64_t now = k_uptime_get();
+	int64_t next = -1;
+
+	ARG_UNUSED(work);
+
+	for (unsigned int i = 0U; i < MESHTASTIC_BLE_REG_SLOTS; i++) {
+		struct bt_conn *conn = NULL;
+		int64_t idle_s = 0;
+
+		k_mutex_lock(&ble.lock, K_FOREVER);
+		if (ble.conns[i] != NULL && ble.inbound[i] &&
+		    meshtastic_ble_reg_kind(i) != MESHTASTIC_BLE_CONN_PEER) {
+			int64_t deadline = ble.active_ms[i] + IDLE_DROP_MS;
+
+			if (now >= deadline) {
+				conn = bt_conn_ref(ble.conns[i]);
+				idle_s = (now - ble.active_ms[i]) / MSEC_PER_SEC;
+				ble.active_ms[i] = now; /* one disconnect per period, not a storm */
+				ble.idle_drops++;
+			} else if (next < 0 || deadline < next) {
+				next = deadline;
+			}
+		}
+		k_mutex_unlock(&ble.lock);
+
+		if (conn != NULL) {
+			LOG_INF("BLE conn %u: not a peer and idle %lld s: disconnecting", i,
+				(long long)idle_s);
+			(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+			bt_conn_unref(conn);
+			if (next < 0 || now + IDLE_DROP_MS < next) {
+				next = now + IDLE_DROP_MS; /* look again if it is still there */
+			}
+		}
+	}
+
+	if (next >= 0) {
+		(void)k_work_reschedule(&idle_sweep_work, K_MSEC(MAX(next - now, 1)));
+	}
+}
+
+#if defined(CONFIG_MCUMGR_SMP_COMMAND_STATUS_HOOKS)
+/* An SMP command is activity. The hook does not say which link carried it, so
+ * every incoming non-peer link counts as active: an update over BLE is never cut. */
+static enum mgmt_cb_return idle_smp_cb(uint32_t event, enum mgmt_cb_return prev_status,
+				       int32_t *rc, uint16_t *group, bool *abort_more,
+				       void *data, size_t data_size)
+{
+	int64_t now = k_uptime_get();
+
+	ARG_UNUSED(event);
+	ARG_UNUSED(prev_status);
+	ARG_UNUSED(rc);
+	ARG_UNUSED(group);
+	ARG_UNUSED(abort_more);
+	ARG_UNUSED(data);
+	ARG_UNUSED(data_size);
+
+	k_mutex_lock(&ble.lock, K_FOREVER);
+	for (unsigned int i = 0U; i < MESHTASTIC_BLE_REG_SLOTS; i++) {
+		if (ble.inbound[i]) {
+			ble.active_ms[i] = now;
+		}
+	}
+	k_mutex_unlock(&ble.lock);
+	return MGMT_CB_OK;
+}
+
+static struct mgmt_callback idle_smp_callback = {
+	.callback = idle_smp_cb,
+	.event_id = MGMT_EVT_OP_CMD_RECV,
+};
+#endif
+#endif /* CONFIG_MESHTASTIC_BLE_IDLE_DROP */
+
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+uint32_t meshtastic_ble_idle_drops(void)
+{
+	return ble.idle_drops;
+}
+#endif
+
 /*
  * Classification (a4it.5): whether the phone PM inhibitor was charged is
  * recorded per-connection in the registry, and the disconnect path keys off
@@ -515,6 +633,7 @@ static void ble_note_phone_traffic(struct bt_conn *conn)
 		return;
 	}
 	index = bt_conn_index(conn);
+	ble_note_activity(index);
 	if (meshtastic_ble_reg_kind(index) != MESHTASTIC_BLE_CONN_UNCLASSIFIED) {
 		return;
 	}
@@ -687,8 +806,16 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	if (ret == 0) {
 		ble.conns[index] = bt_conn_ref(conn);
 		ble.conn_ms[index] = k_uptime_get();
+		ble.active_ms[index] = ble.conn_ms[index];
+		ble.inbound[index] = !outbound;
 	}
 	k_mutex_unlock(&ble.lock);
+#if defined(CONFIG_MESHTASTIC_BLE_IDLE_DROP)
+	if (ret == 0 && !outbound) {
+		/* schedule, not reschedule: an earlier deadline is not pushed out. */
+		(void)k_work_schedule(&idle_sweep_work, K_MSEC(IDLE_DROP_MS));
+	}
+#endif
 
 	if (ret < 0) {
 		/* A live conn's index cannot collide; refuse rather than let a
@@ -766,6 +893,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		bt_conn_unref(ble.conns[index]);
 		ble.conns[index] = NULL;
 	}
+	ble.inbound[index] = false;
 	k_mutex_unlock(&ble.lock);
 
 	/* Drop any peer-beat accounting for this slot before the index can be
@@ -1235,6 +1363,9 @@ int meshtastic_ble_init(void)
 	int ret;
 
 	k_mutex_init(&ble.lock);
+#if defined(CONFIG_MESHTASTIC_BLE_IDLE_DROP) && defined(CONFIG_MCUMGR_SMP_COMMAND_STATUS_HOOKS)
+	mgmt_callback_register(&idle_smp_callback);
+#endif
 
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 	meshtastic_ble_peer_frame_rx_register(ble_peer_frame_ingest);

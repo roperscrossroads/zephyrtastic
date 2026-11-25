@@ -132,6 +132,29 @@ config MESHTASTIC_BLE_PEER_CLASSIFY_WINDOW_MS
 	  to the phone. Phones normally produce traffic within a second of
 	  connecting, so the default only decides genuinely idle links.
 
+config MESHTASTIC_BLE_IDLE_DROP
+	bool "Drop an idle incoming link that is not a peer"
+	default y if MESHTASTIC_ATTACHMENT_HEAD
+	select MCUMGR_MGMT_NOTIFICATION_HOOKS if MCUMGR_TRANSPORT_BT
+	select MCUMGR_SMP_COMMAND_STATUS_HOOKS if MCUMGR_TRANSPORT_BT
+	help
+	  An incoming connection that is not a peer and shows no activity
+	  (PhoneAPI access, an SMP command) for MESHTASTIC_BLE_IDLE_DROP_SEC
+	  is disconnected, which frees its slot and re-arms advertising.
+
+	  For a role with no use for a phone, a keyless head above all, which
+	  has two slots: one is its brain link, so a host that connected and
+	  then went silent (bleprobe from a bench host, agents-0inv) left it
+	  full and invisible until the host dropped the link. SMP commands
+	  count as activity, so an MCUmgr update over BLE is not cut. Off on
+	  other roles, where a connected phone may legitimately sit idle.
+
+config MESHTASTIC_BLE_IDLE_DROP_SEC
+	int "Idle time before an incoming non-peer link is dropped (s)"
+	depends on MESHTASTIC_BLE_IDLE_DROP
+	range 5 3600
+	default 60
+
 config MESHTASTIC_BLE_PEER_BEAT_PERIOD_MS
 	int "Heartbeat period (ms)"
 	default 1000
