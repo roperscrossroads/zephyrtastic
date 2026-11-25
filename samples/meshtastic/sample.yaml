@@ -108,26 +108,32 @@ tests:
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    sysbuild: true
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
   sample.meshtastic.fleet.c4.brain:
     # Class 4 as a brain (rig B): the V4 member plus overlay-attachment-brain.conf.
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    sysbuild: true
     extra_args:
-      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-attachment-brain.conf;overlay-quiet-first-boot.conf"
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf;overlay-attachment-brain.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
   sample.meshtastic.fleet.c4.no_reboot_trace:
     # MESHTASTIC_REBOOT_TRACE=n: the admin, fatal and watchdog paths called the note
     # function unguarded, and native_sim compiles none of them.
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    sysbuild: true
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
     extra_configs:
       - CONFIG_MESHTASTIC_REBOOT_TRACE=n
   sample.meshtastic.fleet.c4.no_display:
@@ -136,9 +142,11 @@ tests:
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    sysbuild: true
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
     extra_configs:
       - CONFIG_MESHTASTIC_DISPLAY=n
   sample.meshtastic.fleet.c4.no_gnss:
@@ -148,9 +156,11 @@ tests:
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    sysbuild: true
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
     extra_configs:
       - CONFIG_MESHTASTIC_GNSS=n
   sample.meshtastic.fleet.c4.terse_asserts:
@@ -159,9 +169,11 @@ tests:
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    sysbuild: true
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
     extra_configs:
       - CONFIG_ASSERT_MODULE_DEFAULT_LEVEL_TERSE=y
   sample.meshtastic.fleet.c2:
@@ -169,34 +181,42 @@ tests:
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    sysbuild: true
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-ota-shell.conf;overlay-smp-central.conf;overlay-depot.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
       - "EXTRA_DTC_OVERLAY_FILE=depot.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
   sample.meshtastic.fleet.c2.brain:
     # Class 2 as a brain (rig A): the courier plus overlay-attachment-brain.conf. The image
     # that overflowed dram0 by 560 B on 2026-10-01 with no lane scenario to catch it (agents-pcs2.7).
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    sysbuild: true
     extra_args:
-      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-ota-shell.conf;overlay-smp-central.conf;overlay-depot.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-attachment-brain.conf;overlay-quiet-first-boot.conf"
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-ota-shell.conf;overlay-smp-central.conf;overlay-depot.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf;overlay-attachment-brain.conf"
       - "EXTRA_DTC_OVERLAY_FILE=depot.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
   sample.meshtastic.fleet.c6:
     # Class 6, V4-R8 cluster member.
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    sysbuild: true
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-cluster.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-v4r8-member.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-cluster-sign.conf;overlay-xeddsa-sign.conf;overlay-cluster-sig-required.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
   sample.meshtastic.fleet.c8:
     # Class 8, V4-R8 RF listener (preset scanner, transmit refused).
     tags: [meshtastic, fleet]
     platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
     integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    sysbuild: true
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-scanner.conf;overlay-listener.conf;overlay-v4r8-listener.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
       - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
   sample.meshtastic.fleet.c1:
     # Class 1, XIAO cluster member. Binds on the MCUboot app slot (733,034 B).
     tags: [meshtastic, fleet]
@@ -243,9 +263,69 @@ tests:
     sysbuild: true
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-ble-peer.conf;overlay-rf.conf;overlay-bench.conf;overlay-led-status.conf;overlay-attachment-head.conf;overlay-quiet-first-boot.conf"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
     extra_configs:
       - CONFIG_MESHTASTIC_FLEET_CLASS=13
       - CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x0d"
+  sample.meshtastic.fleet.c5:
+    # Class 5 (v4-listener): Heltec V4 RF listener; scanner autostart, no cluster.
+    # From the rxrbench catalog (tooling tools/fleet_lane_check.py scenario).
+    tags: [meshtastic, fleet]
+    platform_allow: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4/esp32s3/procpu]
+    sysbuild: true
+    extra_args:
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-scanner.conf;overlay-v4-member.conf;overlay-v4-listener.conf;overlay-health.conf;overlay-coredump-flash.conf;overlay-battery.conf;overlay-rf.conf;overlay-bench.conf"
+      - "EXTRA_DTC_OVERLAY_FILE=coredump-big.overlay"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
+  sample.meshtastic.fleet.c7:
+    # Class 7 (xiao-member-unsigned-cluster): XIAO member that verifies but does not require cluster signatures.
+    # From the rxrbench catalog (tooling tools/fleet_lane_check.py scenario).
+    tags: [meshtastic, fleet]
+    platform_allow: [xiao_ble/nrf52840]
+    integration_platforms: [xiao_ble/nrf52840]
+    sysbuild: true
+    extra_args:
+      - SHIELD=wio_sx1262_xiao
+      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
+      - CONFIG_MESHTASTIC_FLEET_CLASS=7
+      - CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x07"
+  sample.meshtastic.fleet.c10:
+    # Class 10 (xiao-relay): XIAO cross-preset relay, receiving half.
+    # From the rxrbench catalog (tooling tools/fleet_lane_check.py scenario).
+    tags: [meshtastic, fleet]
+    platform_allow: [xiao_ble/nrf52840]
+    integration_platforms: [xiao_ble/nrf52840]
+    sysbuild: true
+    extra_args:
+      - SHIELD=wio_sx1262_xiao
+      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-relay.conf"
+      - CONFIG_MESHTASTIC_FLEET_CLASS=10
+      - CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x0a"
+  sample.meshtastic.fleet.c11:
+    # Class 11 (xiao-ear): XIAO cross-preset relay ear; transmit compiled out.
+    # From the rxrbench catalog (tooling tools/fleet_lane_check.py scenario).
+    tags: [meshtastic, fleet]
+    platform_allow: [xiao_ble/nrf52840]
+    integration_platforms: [xiao_ble/nrf52840]
+    sysbuild: true
+    extra_args:
+      - SHIELD=wio_sx1262_xiao
+      - "EXTRA_CONF_FILE=overlay-ota-shell.conf;overlay-ota-ble.conf;overlay-ota-ble-secure.conf;overlay-health.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-xeddsa.conf;overlay-ble-peer.conf;overlay-led-status.conf;overlay-relay-ear.conf"
+      - CONFIG_MESHTASTIC_FLEET_CLASS=11
+      - CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x0b"
+  sample.meshtastic.fleet.c15:
+    # Class 15 (r8-gateway): Heltec V4-R8 WiFi gateway, a Sparkplug B Edge Node over verified TLS.
+    # From the rxrbench catalog (tooling tools/fleet_lane_check.py scenario).
+    tags: [meshtastic, fleet]
+    platform_allow: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    integration_platforms: [heltec_wifi_lora32_v4_r8/esp32s3/procpu]
+    sysbuild: true
+    extra_args:
+      - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nobt.conf;overlay-pm-off.conf;overlay-mqtt.conf;overlay-sparkplug.conf;overlay-sparkplug-tls.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-led-status.conf"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
+      - CONFIG_MESHTASTIC_FLEET_CLASS=15
+      - CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x0f"
   sample.meshtastic.fleet.c9:
     # Class 9, XIAO RF listener.
     tags: [meshtastic, fleet]
@@ -296,17 +376,22 @@ tests:
     integration_platforms: [heltec_wifi_lora32_v3/esp32s3/procpu]
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nobt.conf;overlay-gnss.conf;overlay-pm-off.conf;overlay-nomqtt.conf"
-  sample.meshtastic.fleet.e290_ble:
+  sample.meshtastic.fleet.c14:
     # The Heltec Vision Master E290 (ESP32-S3R8, bare SX1262, e-ink, no GNSS) as a plain LoRa+BLE
-    # node: the bring-up image (bench class 14). Its board file states flash and PSRAM itself and
+    # node: class 14. Its board file states flash and PSRAM itself and
     # enables the octal PSRAM; this builds the screen UI over the e-ink driver, which no other
     # fleet image carries. Key-derived node id, RF reporting, the status LED, and a receive-only
     # first boot, as every bench Heltec. Mirrors the class recipe in the bench catalog.
-    tags: [meshtastic, fleet, ble]
+    # From the rxrbench catalog (tooling tools/fleet_lane_check.py scenario).
+    tags: [meshtastic, fleet]
     platform_allow: [heltec_vision_master_e290/esp32s3/procpu]
     integration_platforms: [heltec_vision_master_e290/esp32s3/procpu]
+    sysbuild: true
     extra_args:
       - "EXTRA_CONF_FILE=overlay-v4-unified.conf;overlay-nonet.conf;overlay-pm-off.conf;overlay-nomqtt.conf;overlay-rf.conf;overlay-bench.conf;overlay-node-id-from-key.conf;overlay-led-status.conf;overlay-quiet-first-boot.conf"
+      - SB_CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256=y
+      - CONFIG_MESHTASTIC_FLEET_CLASS=14
+      - CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--custom-tlv 0x00A0 0x0e"
   sample.meshtastic.fleet.t114_ble:
     # The Heltec Mesh Node T114 v2 (nRF52840, bare SX1262, ST7789 TFT, L76K GNSS) as a plain
     # LoRa+BLE node: the bring-up image. The second nRF52840 target, on the UPSTREAM Zephyr board
