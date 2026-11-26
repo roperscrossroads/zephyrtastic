@@ -10,6 +10,8 @@
 #ifndef ZEPHYR_INCLUDE_MESHTASTIC_NODEINFO_H_
 #define ZEPHYR_INCLUDE_MESHTASTIC_NODEINFO_H_
 
+#include <errno.h>
+
 #include <zephyr/meshtastic/meshtastic.h>
 
 #ifdef __cplusplus
@@ -36,7 +38,15 @@ extern "C" {
  * @retval -EIO     Crypto or radio transmission failed.
  * @retval -ENOTSUP NodeInfo support is not compiled in.
  */
+#if defined(CONFIG_MESHTASTIC_NODEINFO)
 int meshtastic_send_node_info(uint32_t dest);
+#else
+static inline int meshtastic_send_node_info(uint32_t dest)
+{
+	(void)dest;
+	return -ENOTSUP;
+}
+#endif
 
 /**
  * @brief The interval between automatic NodeInfo broadcasts, in effect right now.

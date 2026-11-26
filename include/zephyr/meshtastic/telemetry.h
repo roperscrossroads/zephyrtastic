@@ -10,6 +10,8 @@
 #ifndef ZEPHYR_INCLUDE_MESHTASTIC_TELEMETRY_H_
 #define ZEPHYR_INCLUDE_MESHTASTIC_TELEMETRY_H_
 
+#include <errno.h>
+
 #include <zephyr/meshtastic/meshtastic.h>
 
 #ifdef __cplusplus
@@ -33,7 +35,16 @@ extern "C" {
  * @retval -ENOMSG  TX queue full (@p wait is @c K_NO_WAIT).
  * @retval -ENOTSUP Device metrics support is not compiled in.
  */
+#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
 int meshtastic_send_device_metrics(uint32_t dest, k_timeout_t wait);
+#else
+static inline int meshtastic_send_device_metrics(uint32_t dest, k_timeout_t wait)
+{
+	(void)dest;
+	(void)wait;
+	return -ENOTSUP;
+}
+#endif
 
 /**
  * @brief Collect environment sensors and send EnvironmentMetrics telemetry.
@@ -54,7 +65,16 @@ int meshtastic_send_device_metrics(uint32_t dest, k_timeout_t wait);
  * @retval -ENOMSG  TX queue full (@p wait is @c K_NO_WAIT).
  * @retval -ENOTSUP Environment metrics support is not compiled in.
  */
+#if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS)
 int meshtastic_send_environment(uint32_t dest, k_timeout_t wait);
+#else
+static inline int meshtastic_send_environment(uint32_t dest, k_timeout_t wait)
+{
+	(void)dest;
+	(void)wait;
+	return -ENOTSUP;
+}
+#endif
 
 /**
  * @brief Hand LocalStats to every attached phone transport. Costs no airtime.

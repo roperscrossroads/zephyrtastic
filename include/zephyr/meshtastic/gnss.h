@@ -10,6 +10,8 @@
 #ifndef ZEPHYR_INCLUDE_MESHTASTIC_GNSS_H_
 #define ZEPHYR_INCLUDE_MESHTASTIC_GNSS_H_
 
+#include <errno.h>
+
 #include <zephyr/meshtastic/meshtastic.h>
 
 #ifdef __cplusplus
@@ -61,7 +63,15 @@ int meshtastic_gnss_status_get(struct meshtastic_gnss_status *out);
  * @retval -ENOMEM  Protobuf encoding failed.
  * @retval -EIO     Crypto or radio transmission failed.
  */
+#if defined(CONFIG_MESHTASTIC_POSITION)
 int meshtastic_send_position(uint32_t dest);
+#else
+static inline int meshtastic_send_position(uint32_t dest)
+{
+	(void)dest;
+	return -ENOTSUP;
+}
+#endif
 
 /**
  * @brief Board hook: switch the GNSS receiver's power (agents-t2hb.2).
@@ -86,7 +96,14 @@ int meshtastic_gnss_board_power(bool on);
  * @retval -ENODATA No GNSS fix / position is available yet.
  * @retval <0       Encode or transmit failure.
  */
+#if defined(CONFIG_MESHTASTIC_POSITION)
 int meshtastic_send_position_periodic(void);
+#else
+static inline int meshtastic_send_position_periodic(void)
+{
+	return -ENOTSUP;
+}
+#endif
 
 #ifdef __cplusplus
 }

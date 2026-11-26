@@ -10,6 +10,7 @@
 #ifndef ZEPHYR_INCLUDE_MESHTASTIC_NODEDB_H_
 #define ZEPHYR_INCLUDE_MESHTASTIC_NODEDB_H_
 
+#include <errno.h>
 #include <stddef.h>
 #include <math.h>
 #include <stdint.h>
@@ -78,6 +79,10 @@ struct meshtastic_nodedb_node {
 	uint8_t position_location_source;
 	uint32_t position_precision_bits;
 };
+
+struct _meshtastic_User;
+
+#if defined(CONFIG_MESHTASTIC_NODEDB)
 
 /**
  * @brief Return the number of entries currently stored in the in-RAM NodeDB.
@@ -284,8 +289,6 @@ bool meshtastic_nodedb_is_from_or_to_favorite(uint32_t from, uint32_t to);
  */
 int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored);
 
-struct _meshtastic_User;
-
 /**
  * @brief Add or update a contact the phone shares (admin add_contact).
  *
@@ -353,9 +356,164 @@ int meshtastic_nodedb_forget(uint32_t node_num);
  * always cleared — warm entries are never favorites. The store is persisted
  * synchronously, so the caller may reboot without flushing the peer-key subtree.
  *
- * No-op when NodeDB support is not enabled (weak stub).
+ * No-op when NodeDB support is not enabled.
  */
 void meshtastic_nodedb_reset(bool keep_favorites);
+
+#else /* !CONFIG_MESHTASTIC_NODEDB */
+
+/*
+ * No NodeDB: the queries answer "nobody known" and the writes -ENOTSUP, so a
+ * caller needs no #if of its own. The functions without a fallback here are
+ * declared only so a call compiles; nothing may reach one in a NODEDB=n image
+ * (it would not link).
+ */
+static inline size_t meshtastic_nodedb_count(void)
+{
+	return 0U;
+}
+
+static inline int meshtastic_nodedb_get(uint32_t node_num, struct meshtastic_nodedb_node *out)
+{
+	(void)node_num;
+	(void)out;
+	return -ENOTSUP;
+}
+
+static inline int meshtastic_nodedb_get_by_index(size_t index, struct meshtastic_nodedb_node *out)
+{
+	(void)index;
+	(void)out;
+	return -ENOTSUP;
+}
+
+static inline int meshtastic_nodedb_get_next_after(uint32_t after_num,
+						   struct meshtastic_nodedb_node *out)
+{
+	(void)after_num;
+	(void)out;
+	return -ENOTSUP;
+}
+
+static inline int meshtastic_nodedb_copy_pubkey(uint32_t node_num,
+						uint8_t out[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN])
+{
+	(void)node_num;
+	(void)out;
+	return -ENOTSUP;
+}
+
+static inline size_t meshtastic_nodedb_warm_count(void)
+{
+	return 0U;
+}
+
+static inline int meshtastic_nodedb_warm_get(size_t index, uint32_t *num, uint32_t *last_seen)
+{
+	(void)index;
+	(void)num;
+	(void)last_seen;
+	return -ENOTSUP;
+}
+
+static inline uint32_t meshtastic_nodedb_resolve_unique_last_byte(uint8_t last_byte)
+{
+	(void)last_byte;
+	return 0U;
+}
+
+static inline uint8_t meshtastic_nodedb_get_next_hop(uint32_t dest)
+{
+	(void)dest;
+	return 0U;
+}
+
+static inline int meshtastic_nodedb_set_next_hop(uint32_t dest, uint8_t next_hop)
+{
+	(void)dest;
+	(void)next_hop;
+	return -ENOTSUP;
+}
+
+static inline void meshtastic_nodedb_note_route_failure(uint32_t dest)
+{
+	(void)dest;
+}
+
+static inline void meshtastic_nodedb_note_route_success(uint32_t dest)
+{
+	(void)dest;
+}
+
+static inline int meshtastic_nodedb_set_favorite(uint32_t node_num, bool favorite)
+{
+	(void)node_num;
+	(void)favorite;
+	return -ENOTSUP;
+}
+
+/* No NodeDB means no favourites, so a CLIENT_BASE node has nothing to treat as
+ * router-like and falls through to the client behaviour (cancel the dupe relay).
+ * The variant sweep found this one missing when NODEDB=n failed to link
+ * meshtastic_router.c's relay_dupe_action() (agents-zo3o.4). */
+static inline bool meshtastic_nodedb_is_from_or_to_favorite(uint32_t from, uint32_t to)
+{
+	(void)from;
+	(void)to;
+	return false;
+}
+
+static inline int meshtastic_nodedb_set_ignored(uint32_t node_num, bool ignored)
+{
+	(void)node_num;
+	(void)ignored;
+	return -ENOTSUP;
+}
+
+static inline int meshtastic_nodedb_add_contact(uint32_t node_num,
+						const struct _meshtastic_User *user,
+						bool manually_verified, bool should_ignore)
+{
+	(void)node_num;
+	(void)user;
+	(void)manually_verified;
+	(void)should_ignore;
+	return -ENOTSUP;
+}
+
+static inline int meshtastic_nodedb_toggle_muted(uint32_t node_num)
+{
+	(void)node_num;
+	return -ENOTSUP;
+}
+
+static inline bool meshtastic_nodedb_is_ignored(uint32_t node_num)
+{
+	(void)node_num;
+	return false;
+}
+
+static inline int meshtastic_nodedb_remove(uint32_t node_num)
+{
+	(void)node_num;
+	return -ENOTSUP;
+}
+
+static inline void meshtastic_nodedb_reset(bool keep_favorites)
+{
+	(void)keep_favorites;
+}
+
+int meshtastic_nodedb_set_key_verified(uint32_t node_num, bool verified);
+int meshtastic_nodedb_commit_pubkey(uint32_t node_num,
+				    const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
+int meshtastic_nodedb_commit_admin_pubkey(uint32_t node_num,
+					  const uint8_t key[MESHTASTIC_NODEDB_PUBLIC_KEY_MAX_LEN]);
+void meshtastic_nodedb_note_xeddsa_signer(uint32_t node_num);
+bool meshtastic_nodedb_is_xeddsa_signer(uint32_t node_num);
+int meshtastic_nodedb_forget(uint32_t node_num);
+
+#endif /* CONFIG_MESHTASTIC_NODEDB */
 
 /**
  * @brief Encode an SNR in dB as the Q4 integer used on the wire and on disk.
