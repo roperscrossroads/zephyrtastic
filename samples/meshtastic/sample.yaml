@@ -79,7 +79,11 @@ tests:
       - xiao_ble/nrf52840
     extra_args:
       - SHIELD=wio_sx1262_xiao
-      - "EXTRA_CONF_FILE=overlay-ota-ble.conf;overlay-xeddsa.conf;overlay-standalone-phone.conf;overlay-web-serial.conf"
+      # No overlay-ota-ble.conf: its OTA and MCUmgr options need an MCUboot (sysbuild)
+      # build, and 15 of them dropped from y to n without one; with sysbuild they no
+      # longer fit the XIAO's RAM. The node is updated over USB (UF2), and the BLE
+      # buffer sizes it took from that overlay are in overlay-standalone-phone.conf.
+      - "EXTRA_CONF_FILE=overlay-xeddsa.conf;overlay-standalone-phone.conf;overlay-web-serial.conf"
       - EXTRA_DTC_OVERLAY_FILE=phone-cdc.overlay
 
   # ---- Fleet images and their arms on the REAL boards (agents-zo3o.7) --------------------
