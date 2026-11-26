@@ -180,6 +180,7 @@ if(CONFIG_MESHTASTIC)
   # module, and adds its commands to `meshtastic` itself (SHELL_SUBCMD_ADD).
   if(CONFIG_MESHTASTIC_SHELL)
     zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_LOCKDOWN meshtastic_lockdown_shell.c)
+    zephyr_library_sources_ifdef(CONFIG_NETWORKING meshtastic_net_shell.c)
     zephyr_library_sources_ifdef(CONFIG_PM meshtastic_power_shell.c)
     if(CONFIG_MESHTASTIC_RF_PATH_REPORT OR CONFIG_MESHTASTIC_RF_HIST)
       zephyr_library_sources(meshtastic_rf_shell.c)
