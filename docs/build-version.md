@@ -4,7 +4,7 @@ A short, developer-facing **build identity** baked into every image so you can t
 *which build a bench node is running* — the recurring "is this the old or new
 firmware?" question. It is deliberately **separate** from the phone-protocol
 `firmware_version` string (`"2.7.4.zephyr"`, set in
-[`src/meshtastic.c`](../src/meshtastic.c) `meshtastic_fill_device_metadata()`), which
+[`src/meshtastic_identity.c`](../src/meshtastic_identity.c) `meshtastic_fill_device_metadata()`), which
 the phone app negotiates against and should stay stable.
 
 ## What it is

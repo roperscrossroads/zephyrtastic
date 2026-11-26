@@ -36,7 +36,7 @@ runtime heap go live — the two never contend for the ESP32 radio, and no BT/Wi
 coexistence layer is needed. Switching is a config write + reboot.
 
 Boot-time selection lives in **`meshtastic_transport_prefer_wifi()`**
-(`src/meshtastic.c`):
+(`src/meshtastic_state.c`):
 
 - Unified image (both `CONFIG_MESHTASTIC_BLE` and `CONFIG_MESHTASTIC_TCP`
   compiled): returns persisted `network.wifi_enabled` (default **false = BLE**
