@@ -7997,275 +7997,299 @@ static int cmd_intents(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-SHELL_STATIC_SUBCMD_SET_CREATE(
-	meshtastic_cmds,
-	SHELL_CMD(status, NULL, SHELL_HELP("Show Meshtastic status.", NULL), cmd_status),
-	SHELL_CMD(version, NULL, SHELL_HELP("Show build id / firmware version.", NULL),
-		  cmd_version),
-	SHELL_CMD_ARG(intents, NULL,
-		      SHELL_HELP("The roles this node remembers across reboots (peer target, brain, "
-				 "heads, ear, courier arm, relay, pinned presets, cluster document); "
-				 "`clear` forgets them all and reboots. Identity, radio, channels and "
-				 "owner are untouched.",
-				 "[clear]"),
-		      cmd_intents, 1, 1),
-	SHELL_CMD(state, NULL,
-		  SHELL_HELP("This node's state as one machine-readable line, for tools: "
-			     "~S{json}*crc16.", NULL),
-		  cmd_state),
+/* The root, `meshtastic`, is a section-backed set (agents-ls39.4.4.1): each command
+ * adds itself with SHELL_SUBCMD_ADD((meshtastic), ...), so a command file needs no
+ * line in a central table. `meshtastic help` lists them in name order. */
+SHELL_SUBCMD_SET_CREATE(meshtastic_cmds, (meshtastic));
+
+SHELL_SUBCMD_ADD((meshtastic), status, NULL,
+		 SHELL_HELP("Show Meshtastic status.", NULL),
+		 cmd_status, 0, 0);
+SHELL_SUBCMD_ADD((meshtastic), version, NULL,
+		 SHELL_HELP("Show build id / firmware version.", NULL),
+		 cmd_version, 0, 0);
+SHELL_SUBCMD_ADD((meshtastic), intents, NULL,
+		 SHELL_HELP("The roles this node remembers across reboots (peer target, brain, "
+		 "heads, ear, courier arm, relay, pinned presets, cluster document); "
+		 "`clear` forgets them all and reboots. Identity, radio, channels and "
+		 "owner are untouched.",
+		 "[clear]"),
+		 cmd_intents, 1, 1);
+SHELL_SUBCMD_ADD((meshtastic), state, NULL,
+		 SHELL_HELP("This node's state as one machine-readable line, for tools: "
+		 "~S{json}*crc16.", NULL),
+		 cmd_state, 0, 0);
 #if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
-	SHELL_CMD(api, NULL,
-		  SHELL_HELP("The phone API as text, for tools: ToRadio in, ~P<FromRadio> lines out.",
-			     "[[+] <base64> [<crc16>]]"),
-		  meshtastic_shell_api_cmd),
+SHELL_SUBCMD_ADD((meshtastic), api, NULL,
+		 SHELL_HELP("The phone API as text, for tools: ToRadio in, ~P<FromRadio> lines out.",
+		 "[[+] <base64> [<crc16>]]"),
+		 meshtastic_shell_api_cmd, 0, 0);
 #endif
-	SHELL_CMD(time, NULL,
-		  SHELL_HELP("Show or set the wall clock.", "[set <unix-epoch-seconds>]"),
-		  cmd_time),
-	SHELL_CMD(owner, NULL,
-		  SHELL_HELP("Show or set this node's owner names.",
-			     "[set <long> [short]]"),
-		  cmd_owner),
+SHELL_SUBCMD_ADD((meshtastic), time, NULL,
+		 SHELL_HELP("Show or set the wall clock.", "[set <unix-epoch-seconds>]"),
+		 cmd_time, 0, 0);
+SHELL_SUBCMD_ADD((meshtastic), owner, NULL,
+		 SHELL_HELP("Show or set this node's owner names.",
+		 "[set <long> [short]]"),
+		 cmd_owner, 0, 0);
 #if defined(CONFIG_MESHTASTIC_SHELL_CRASHTEST)
-	SHELL_CMD(crashtest, NULL,
-		  SHELL_HELP("Crash on purpose, to prove the coredump pipeline works "
-			     "before a real fault needs it.", "<panic|stack|dblexc>"),
-		  cmd_crashtest),
+SHELL_SUBCMD_ADD((meshtastic), crashtest, NULL,
+		 SHELL_HELP("Crash on purpose, to prove the coredump pipeline works "
+		 "before a real fault needs it.", "<panic|stack|dblexc>"),
+		 cmd_crashtest, 0, 0);
 #endif
 #if defined(CONFIG_NETWORKING)
-	SHELL_CMD(netpause, NULL,
-		  SHELL_HELP("Take the network down for N seconds, then restore it. "
-			     "Lets PM residency be measured without network traffic waking "
-			     "the SoC.", "<secs>"),
-		  cmd_net_pause),
+SHELL_SUBCMD_ADD((meshtastic), netpause, NULL,
+		 SHELL_HELP("Take the network down for N seconds, then restore it. "
+		 "Lets PM residency be measured without network traffic waking "
+		 "the SoC.", "<secs>"),
+		 cmd_net_pause, 0, 0);
 #endif
 #if defined(CONFIG_PM)
-	SHELL_CMD(power, NULL,
-		  SHELL_HELP("Show or set the light-sleep power-saving policy.", "[on|off]"),
-		  cmd_power),
-	SHELL_CMD(pm, NULL,
-		  SHELL_HELP("Volatile bench hold: pin the node awake (off) or release (on). "
-			     "Not persisted; distinct from `power`.",
-			     "[on|off]"),
-		  cmd_pm),
+SHELL_SUBCMD_ADD((meshtastic), power, NULL,
+		 SHELL_HELP("Show or set the light-sleep power-saving policy.", "[on|off]"),
+		 cmd_power, 0, 0);
+SHELL_SUBCMD_ADD((meshtastic), pm, NULL,
+		 SHELL_HELP("Volatile bench hold: pin the node awake (off) or release (on). "
+		 "Not persisted; distinct from `power`.",
+		 "[on|off]"),
+		 cmd_pm, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_BLE) && defined(CONFIG_MESHTASTIC_TCP)
-	SHELL_CMD(transport, NULL,
-		  SHELL_HELP("Show or set the phone transport, reboot to apply (unified image).",
-			     "[ble|wifi]"),
-		  cmd_transport),
+SHELL_SUBCMD_ADD((meshtastic), transport, NULL,
+		 SHELL_HELP("Show or set the phone transport, reboot to apply (unified image).",
+		 "[ble|wifi]"),
+		 cmd_transport, 0, 0);
 #endif
-	SHELL_CMD(sched, &meshtastic_sched_cmds,
-		  SHELL_HELP("Scheduler / QoS policy commands.", NULL), cmd_sched_show),
-	SHELL_CMD(channel, &meshtastic_channel_cmds, SHELL_HELP("Channel table commands.", NULL),
-		  NULL),
-	SHELL_CMD(device, &meshtastic_device_cmds,
-		  SHELL_HELP("Device role and rebroadcast commands.", NULL), NULL),
+SHELL_SUBCMD_ADD((meshtastic), sched, &meshtastic_sched_cmds,
+		 SHELL_HELP("Scheduler / QoS policy commands.", NULL),
+		 cmd_sched_show, 0, 0);
+SHELL_SUBCMD_ADD((meshtastic), channel, &meshtastic_channel_cmds,
+		 SHELL_HELP("Channel table commands.", NULL),
+		 NULL, 0, 0);
+SHELL_SUBCMD_ADD((meshtastic), device, &meshtastic_device_cmds,
+		 SHELL_HELP("Device role and rebroadcast commands.", NULL),
+		 NULL, 0, 0);
 #if defined(CONFIG_MESHTASTIC_ADMIN)
-	SHELL_CMD(admin, &meshtastic_admin_cmds,
-		  SHELL_HELP("Remote-admin trust and client commands.", NULL), NULL),
+SHELL_SUBCMD_ADD((meshtastic), admin, &meshtastic_admin_cmds,
+		 SHELL_HELP("Remote-admin trust and client commands.", NULL),
+		 NULL, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
-	SHELL_CMD(cluster, &meshtastic_cluster_cmds,
-		  SHELL_HELP("Fleet config convergence.", NULL), cmd_cluster_status),
+SHELL_SUBCMD_ADD((meshtastic), cluster, &meshtastic_cluster_cmds,
+		 SHELL_HELP("Fleet config convergence.", NULL),
+		 cmd_cluster_status, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_FLEET)
-	SHELL_CMD(fleet, &meshtastic_fleet_cmds,
-		  SHELL_HELP("Fleet firmware intent (what each class should run).", NULL),
-		  cmd_fleet_status),
+SHELL_SUBCMD_ADD((meshtastic), fleet, &meshtastic_fleet_cmds,
+		 SHELL_HELP("Fleet firmware intent (what each class should run).", NULL),
+		 cmd_fleet_status, 0, 0);
 #endif
-	SHELL_CMD(lora, NULL,
-		  SHELL_HELP("Show or set the LoRa modem preset (reboot to apply), "
-			     "the TX-enable switch or the TX power (both apply live).",
-			     "[preset <name>] [tx on|off] [power <dBm>]"),
-		  cmd_lora),
+SHELL_SUBCMD_ADD((meshtastic), lora, NULL,
+		 SHELL_HELP("Show or set the LoRa modem preset (reboot to apply), "
+		 "the TX-enable switch or the TX power (both apply live).",
+		 "[preset <name>] [tx on|off] [power <dBm>]"),
+		 cmd_lora, 0, 0);
 #if defined(CONFIG_MESHTASTIC_BOOTLOG)
-	SHELL_CMD(resets, NULL,
-		  SHELL_HELP("Why this node last rebooted, and the boot history. "
-			     "`durable` reads the FLASH ring, which survives power loss.",
-			     "[durable]"),
-		  cmd_resets),
+SHELL_SUBCMD_ADD((meshtastic), resets, NULL,
+		 SHELL_HELP("Why this node last rebooted, and the boot history. "
+		 "`durable` reads the FLASH ring, which survives power loss.",
+		 "[durable]"),
+		 cmd_resets, 0, 0);
 #endif
-	SHELL_CMD(crashinfo, NULL,
-		  SHELL_HELP("Durable crash breadcrumbs: watchdog, hw-watchdog and "
-			     "fatal-error info from the last abnormal reset.",
-			     NULL),
-		  cmd_crashinfo),
-	SHELL_CMD(preset, NULL,
-		  SHELL_HELP("Live preset switching: what would hold a scheduled hop off, "
-			     "and the counters for the ones that were.",
-			     "[hop <name> | reset]"),
-		  cmd_preset),
+SHELL_SUBCMD_ADD((meshtastic), crashinfo, NULL,
+		 SHELL_HELP("Durable crash breadcrumbs: watchdog, hw-watchdog and "
+		 "fatal-error info from the last abnormal reset.",
+		 NULL),
+		 cmd_crashinfo, 0, 0);
+SHELL_SUBCMD_ADD((meshtastic), preset, NULL,
+		 SHELL_HELP("Live preset switching: what would hold a scheduled hop off, "
+		 "and the counters for the ones that were.",
+		 "[hop <name> | reset]"),
+		 cmd_preset, 0, 0);
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
-	SHELL_CMD(text, &meshtastic_text_cmds, SHELL_HELP("Text message commands.", NULL), NULL),
+SHELL_SUBCMD_ADD((meshtastic), text, &meshtastic_text_cmds,
+		 SHELL_HELP("Text message commands.", NULL),
+		 NULL, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_NODEDB)
-	SHELL_CMD(nodedb, &meshtastic_nodedb_cmds, SHELL_HELP("NodeDB commands.", NULL), NULL),
+SHELL_SUBCMD_ADD((meshtastic), nodedb, &meshtastic_nodedb_cmds,
+		 SHELL_HELP("NodeDB commands.", NULL),
+		 NULL, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_POSITION)
-	SHELL_CMD(position, &meshtastic_position_cmds,
-		  SHELL_HELP("Position: gps_mode, broadcast interval.", NULL), cmd_position_root),
+SHELL_SUBCMD_ADD((meshtastic), position, &meshtastic_position_cmds,
+		 SHELL_HELP("Position: gps_mode, broadcast interval.", NULL),
+		 cmd_position_root, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_GNSS)
-	SHELL_CMD(gnss, &meshtastic_gnss_cmds, SHELL_HELP("GNSS commands.", NULL), NULL),
+SHELL_SUBCMD_ADD((meshtastic), gnss, &meshtastic_gnss_cmds,
+		 SHELL_HELP("GNSS commands.", NULL),
+		 NULL, 0, 0);
 #endif
-	/* Not a GNSS command: it used to sit inside that guard, so a GNSS=n build
-	 * lost it and left cmd_netlog an unused static under -Werror. */
+/* Not a GNSS command: it used to sit inside that guard, so a GNSS=n build
+ * lost it and left cmd_netlog an unused static under -Werror. */
 #if defined(CONFIG_LOG_BACKEND_NET) && !defined(CONFIG_LOG_BACKEND_NET_AUTOSTART)
-	SHELL_CMD(netlog, NULL,
-		  SHELL_HELP("Start the remote syslog backend for this boot.",
-			     "netlog on"),
-		  cmd_netlog),
+SHELL_SUBCMD_ADD((meshtastic), netlog, NULL,
+		 SHELL_HELP("Start the remote syslog backend for this boot.",
+		 "netlog on"),
+		 cmd_netlog, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
-	SHELL_CMD(airtime, NULL,
-		  SHELL_HELP("Channel utilization per preset, and band-wide TX duty.", NULL),
-		  cmd_airtime),
+SHELL_SUBCMD_ADD((meshtastic), airtime, NULL,
+		 SHELL_HELP("Channel utilization per preset, and band-wide TX duty.", NULL),
+		 cmd_airtime, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_DUTY_CYCLE)
-	SHELL_CMD(duty, NULL,
-		  SHELL_HELP("Regulatory duty cycle: ceiling, hour used, refusals.",
-			     "[reset]"),
-		  cmd_duty),
+SHELL_SUBCMD_ADD((meshtastic), duty, NULL,
+		 SHELL_HELP("Regulatory duty cycle: ceiling, hour used, refusals.",
+		 "[reset]"),
+		 cmd_duty, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_PHONELOG)
-	SHELL_CMD(phonelog, NULL,
-		  SHELL_HELP("Log forwarding to the phone: state + counters, or set the "
-			     "severity ceiling.",
-			     "[off|err|wrn|inf|dbg|reset]"),
-		  cmd_phonelog),
+SHELL_SUBCMD_ADD((meshtastic), phonelog, NULL,
+		 SHELL_HELP("Log forwarding to the phone: state + counters, or set the "
+		 "severity ceiling.",
+		 "[off|err|wrn|inf|dbg|reset]"),
+		 cmd_phonelog, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
-	SHELL_CMD(metrics, &meshtastic_metrics_cmds, SHELL_HELP("Device metrics commands.", NULL),
-		  NULL),
+SHELL_SUBCMD_ADD((meshtastic), metrics, &meshtastic_metrics_cmds,
+		 SHELL_HELP("Device metrics commands.", NULL),
+		 NULL, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS)
-	SHELL_CMD(environment, &meshtastic_environment_cmds,
-		  SHELL_HELP("Environment telemetry commands.", NULL), NULL),
+SHELL_SUBCMD_ADD((meshtastic), environment, &meshtastic_environment_cmds,
+		 SHELL_HELP("Environment telemetry commands.", NULL),
+		 NULL, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_NODEINFO)
-	SHELL_CMD(nodeinfo, &meshtastic_nodeinfo_cmds, SHELL_HELP("NodeInfo commands.", NULL),
-		  NULL),
+SHELL_SUBCMD_ADD((meshtastic), nodeinfo, &meshtastic_nodeinfo_cmds,
+		 SHELL_HELP("NodeInfo commands.", NULL),
+		 NULL, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_KEYVERIFY)
 #if defined(CONFIG_MESHTASTIC_XEDDSA)
-	SHELL_CMD(xeddsa, &meshtastic_xeddsa_cmds,
-		  SHELL_HELP("Packet signature verification: counters, reset.", NULL),
-		  cmd_xeddsa_show),
+SHELL_SUBCMD_ADD((meshtastic), xeddsa, &meshtastic_xeddsa_cmds,
+		 SHELL_HELP("Packet signature verification: counters, reset.", NULL),
+		 cmd_xeddsa_show, 0, 0);
 #endif
-	SHELL_CMD(keyverify, &meshtastic_keyverify_cmds,
-		  SHELL_HELP("Manual key verification (security-number handshake): status, "
-			     "start, number, accept, reject.",
-			     NULL),
-		  cmd_keyverify_show),
+SHELL_SUBCMD_ADD((meshtastic), keyverify, &meshtastic_keyverify_cmds,
+		 SHELL_HELP("Manual key verification (security-number handshake): status, "
+		 "start, number, accept, reject.",
+		 NULL),
+		 cmd_keyverify_show, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
-	SHELL_CMD(notify, &meshtastic_notify_cmds,
-		  SHELL_HELP("External notification (board LED): show, enable/disable, test, "
-			     "stop.",
-			     NULL),
-		  cmd_notify_show),
+SHELL_SUBCMD_ADD((meshtastic), notify, &meshtastic_notify_cmds,
+		 SHELL_HELP("External notification (board LED): show, enable/disable, test, "
+		 "stop.",
+		 NULL),
+		 cmd_notify_show, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
-	SHELL_CMD(traffic, &meshtastic_traffic_cmds,
-		  SHELL_HELP("Traffic management: position dedup, rate limit, unknown filter; "
-			     "counters.",
-			     NULL),
-		  cmd_traffic_show),
+SHELL_SUBCMD_ADD((meshtastic), traffic, &meshtastic_traffic_cmds,
+		 SHELL_HELP("Traffic management: position dedup, rate limit, unknown filter; "
+		 "counters.",
+		 NULL),
+		 cmd_traffic_show, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_MESHBEACON)
-	SHELL_CMD(beacon, &meshtastic_beacon_cmds,
-		  SHELL_HELP("Mesh beacon (join-my-mesh announcement): show, flag, text, "
-			     "interval, send, forget.",
-			     NULL),
-		  cmd_beacon_show),
+SHELL_SUBCMD_ADD((meshtastic), beacon, &meshtastic_beacon_cmds,
+		 SHELL_HELP("Mesh beacon (join-my-mesh announcement): show, flag, text, "
+		 "interval, send, forget.",
+		 NULL),
+		 cmd_beacon_show, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
-	SHELL_CMD(neighbors, &meshtastic_neighbors_cmds,
-		  SHELL_HELP("Directly-heard neighbors + the NeighborInfo broadcast: show, "
-			     "enable/disable, interval, lora, send.",
-			     NULL),
-		  cmd_neighbors_show),
+SHELL_SUBCMD_ADD((meshtastic), neighbors, &meshtastic_neighbors_cmds,
+		 SHELL_HELP("Directly-heard neighbors + the NeighborInfo broadcast: show, "
+		 "enable/disable, interval, lora, send.",
+		 NULL),
+		 cmd_neighbors_show, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY_EAR)
-	SHELL_CMD(ear, &meshtastic_ear_cmds,
-		  SHELL_HELP("Cross-preset relay ear: show, peer.", NULL), cmd_ear_show),
+SHELL_SUBCMD_ADD((meshtastic), ear, &meshtastic_ear_cmds,
+		 SHELL_HELP("Cross-preset relay ear: show, peer.", NULL),
+		 cmd_ear_show, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-	SHELL_CMD(attach, &meshtastic_attach_cmds,
-		  SHELL_HELP("Radio heads: list, status, preset, forget.", NULL), cmd_attach_list),
+SHELL_SUBCMD_ADD((meshtastic), attach, &meshtastic_attach_cmds,
+		 SHELL_HELP("Radio heads: list, status, preset, forget.", NULL),
+		 cmd_attach_list, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-	SHELL_CMD(attach, &meshtastic_attach_head_cmds,
-		  SHELL_HELP("This keyless radio head: show, brain, status.", NULL),
-		  cmd_attach_head_show),
+SHELL_SUBCMD_ADD((meshtastic), attach, &meshtastic_attach_head_cmds,
+		 SHELL_HELP("This keyless radio head: show, brain, status.", NULL),
+		 cmd_attach_head_show, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_LED_STATUS)
-	SHELL_CMD(led, &meshtastic_led_cmds,
-		  SHELL_HELP("Bench LED: show, mode, color, locate.", NULL), cmd_led_show),
+SHELL_SUBCMD_ADD((meshtastic), led, &meshtastic_led_cmds,
+		 SHELL_HELP("Bench LED: show, mode, color, locate.", NULL),
+		 cmd_led_show, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY)
-	SHELL_CMD(relay, &meshtastic_relay_cmds,
-		  SHELL_HELP("Cross-preset text relay: show, dir, ignore, reset.", NULL),
-		  cmd_relay_show),
+SHELL_SUBCMD_ADD((meshtastic), relay, &meshtastic_relay_cmds,
+		 SHELL_HELP("Cross-preset text relay: show, dir, ignore, reset.", NULL),
+		 cmd_relay_show, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
-	/* `statusmsg`, not `status` (agents-ls39.1.4): `status` above is the node's own
-	 * status, which the bench tools read, and Zephyr takes the first match, so a
-	 * second `status` here was never reachable. */
-	SHELL_CMD(statusmsg, &meshtastic_status_cmds,
-		  SHELL_HELP("Node status message (away-message): show, set, clear, send, "
-			     "peers.",
-			     NULL),
-		  cmd_status_show),
+/* `statusmsg`, not `status` (agents-ls39.1.4): `status` is the node's own status,
+ * which the bench tools read; a second `status` was never reachable. */
+SHELL_SUBCMD_ADD((meshtastic), statusmsg, &meshtastic_status_cmds,
+		 SHELL_HELP("Node status message (away-message): show, set, clear, send, "
+		 "peers.",
+		 NULL),
+		 cmd_status_show, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_SCANNER)
-	SHELL_CMD(scan, &meshtastic_scan_cmds,
-		  SHELL_HELP("Multi-preset survey. Leaves the mesh while running.", NULL), NULL),
+SHELL_SUBCMD_ADD((meshtastic), scan, &meshtastic_scan_cmds,
+		 SHELL_HELP("Multi-preset survey. Leaves the mesh while running.", NULL),
+		 NULL, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
-	SHELL_CMD(blepeer, &meshtastic_blepeer_cmds,
-		  SHELL_HELP("Node-to-node BLE peer link.", NULL), cmd_blepeer_status),
+SHELL_SUBCMD_ADD((meshtastic), blepeer, &meshtastic_blepeer_cmds,
+		 SHELL_HELP("Node-to-node BLE peer link.", NULL),
+		 cmd_blepeer_status, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
-	SHELL_CMD(dfu, NULL,
-		  SHELL_HELP("Reboot into the bootloader for reflashing.", "[serial]"),
-		  cmd_dfu),
+SHELL_SUBCMD_ADD((meshtastic), dfu, NULL,
+		 SHELL_HELP("Reboot into the bootloader for reflashing.", "[serial]"),
+		 cmd_dfu, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_LOCKDOWN)
-	SHELL_CMD(lockdown, &meshtastic_lockdown_cmds,
-		  SHELL_HELP("Lockdown mode: status, provision, unlock, lock, disable.", NULL),
-		  cmd_lockdown_status),
+SHELL_SUBCMD_ADD((meshtastic), lockdown, &meshtastic_lockdown_cmds,
+		 SHELL_HELP("Lockdown mode: status, provision, unlock, lock, disable.", NULL),
+		 cmd_lockdown_status, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
-	SHELL_CMD(storage, NULL,
-		  SHELL_HELP("Settings store: free space, per-subtree use, boot restore time.",
-			     NULL),
-		  meshtastic_storage_shell_cmd),
+SHELL_SUBCMD_ADD((meshtastic), storage, NULL,
+		 SHELL_HELP("Settings store: free space, per-subtree use, boot restore time.",
+		 NULL),
+		 meshtastic_storage_shell_cmd, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
-	SHELL_CMD(backup, NULL,
-		  SHELL_HELP("Preferences backup in flash: show, save, restore (then reboot), "
-			     "remove.", "[save|restore|remove]"),
-		  cmd_backup),
+SHELL_SUBCMD_ADD((meshtastic), backup, NULL,
+		 SHELL_HELP("Preferences backup in flash: show, save, restore (then reboot), "
+		 "remove.", "[save|restore|remove]"),
+		 cmd_backup, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_RF_PATH_REPORT) && defined(CONFIG_MESHTASTIC_RF_HIST)
-	/* Bare `meshtastic rf` runs the gain-path report; the subcommands cover
-	 * measurement. Both halves are independently configurable, hence three
-	 * cases rather than one. */
-	SHELL_CMD(rf, &meshtastic_rf_cmds,
-		  SHELL_HELP("Gain path in signal order, plus signal measurement.", NULL),
-		  cmd_rf_path),
+/* Bare `meshtastic rf` runs the gain-path report; the subcommands cover
+ * measurement. Both halves are independently configurable, hence three
+ * cases rather than one. */
+SHELL_SUBCMD_ADD((meshtastic), rf, &meshtastic_rf_cmds,
+		 SHELL_HELP("Gain path in signal order, plus signal measurement.", NULL),
+		 cmd_rf_path, 0, 0);
 #elif defined(CONFIG_MESHTASTIC_RF_PATH_REPORT)
-	SHELL_CMD(rf, NULL,
-		  SHELL_HELP("Gain path in signal order: what the radio is REALLY doing.", NULL),
-		  cmd_rf_path),
+SHELL_SUBCMD_ADD((meshtastic), rf, NULL,
+		 SHELL_HELP("Gain path in signal order: what the radio is REALLY doing.", NULL),
+		 cmd_rf_path, 0, 0);
 #elif defined(CONFIG_MESHTASTIC_RF_HIST)
-	SHELL_CMD(rf, &meshtastic_rf_cmds,
-		  SHELL_HELP("Signal measurement: distributions and per-peer rates.", NULL),
-		  NULL),
+SHELL_SUBCMD_ADD((meshtastic), rf, &meshtastic_rf_cmds,
+		 SHELL_HELP("Signal measurement: distributions and per-peer rates.", NULL),
+		 NULL, 0, 0);
 #endif
-	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(meshtastic, &meshtastic_cmds,
 		   SHELL_HELP("Meshtastic mesh radio commands.", NULL), NULL);
