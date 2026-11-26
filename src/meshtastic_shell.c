@@ -4,138 +4,24 @@
 
 #include <errno.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
-#include <zephyr/meshtastic/bootlog.h>
-#include <zephyr/meshtastic/reboot_trace.h>
-#include <zephyr/meshtastic/sparkplug.h>
-#include <zephyr/meshtastic/intents.h>
-#include <zephyr/sys/reboot.h>
-#include <zephyr/meshtastic/diagnostics.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
-#include <zephyr/version.h>
-#if defined(CONFIG_PM)
-#include <zephyr/pm/pm.h>
-#include <zephyr/pm/policy.h>
-#endif
-#if defined(CONFIG_NETWORKING)
-#include <zephyr/net/net_if.h>
-#endif
-
-#include <zephyr/meshtastic/gnss.h>
-#include <zephyr/meshtastic/gnss_pps.h>
-#include <zephyr/drivers/gnss.h>
 #include <zephyr/meshtastic/meshtastic.h>
-#include <zephyr/meshtastic/nodedb.h>
-#include <zephyr/meshtastic/nodeinfo.h>
-#include <zephyr/meshtastic/telemetry.h>
 
-#include "meshtastic_storage.h" /* declarations only; safe unconditionally */
-#if defined(CONFIG_MESHTASTIC_PKI)
-#include "meshtastic_pki.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_ADMIN)
-#include "meshtastic_admin.h"
-#include "meshtastic_admin_client.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_BATTERY)
-#include "meshtastic_battery.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_BLE_PEER)
-#include <zephyr/bluetooth/addr.h>
-
-#include "meshtastic_ble_peer.h"
-#include "meshtastic_ble_registry.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
-#include "meshtastic_dfu_trigger.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_CLUSTER)
-#include "meshtastic_cluster.h"
-#include "meshtastic_cluster_doc.h"
-#if defined(CONFIG_MESHTASTIC_FLEET)
-#include "meshtastic_fleet.h"
-#if defined(CONFIG_MESHTASTIC_DEPOT)
-#include "meshtastic_smp_central.h"
-#endif
-#endif
-#endif
-#include "meshtastic_build.h"
-#include "meshtastic_channels.h"
-#include "meshtastic_clock.h"
-#include "meshtastic_clock_persist.h"
-#include "meshtastic_hlc.h"
-#include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
 #include "meshtastic_shell_internal.h"
-#include "meshtastic_shell_state.h"
-#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
-#include "meshtastic_shell_api.h"
+#include "meshtastic_storage.h" /* declarations only; safe unconditionally */
+#if defined(CONFIG_MESHTASTIC_ADMIN)
+#include "meshtastic_admin.h"
 #endif
-#if defined(CONFIG_MESHTASTIC_POSITION)
-#include "meshtastic_position.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_XEDDSA)
-#include "meshtastic_xeddsa.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
-#include "meshtastic_statusmessage.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
-#include "meshtastic_text_inbox.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
-#include "meshtastic_relay.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-#include "meshtastic_attachment.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_LED_STATUS)
-#include "meshtastic_led_status.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-#include "meshtastic_attachment_head.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
-#include "meshtastic_neighborinfo.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_MESHBEACON)
-#include "meshtastic_meshbeacon.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_TRAFFIC)
-#include "meshtastic_traffic.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
-#include "meshtastic_extnotify.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
-#include "meshtastic_keyverify.h"
+#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
 #include "meshtastic_lockdown.h"
 #endif
-#include "meshtastic_preset.h"
-#include "meshtastic_region_presets.h"
-#include "meshtastic_powermon.h"
-#include <zephyr/meshtastic/fem.h>
-
-#include "meshtastic_tx_power.h"
-#include "meshtastic_sched.h"
-#include "meshtastic_airtime.h"
-#include "meshtastic_duty.h"
-#include "meshtastic_phonelog.h"
-#include "meshtastic_settings.h"
-#if defined(CONFIG_MESHTASTIC_SETTINGS)
-#include "meshtastic_backup.h"
-#endif
-#if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
-#include "meshtastic_telemetry_internal.h"
-#endif
-
-#if defined(CONFIG_LOG_BACKEND_NET) && !defined(CONFIG_LOG_BACKEND_NET_AUTOSTART)
-#include <zephyr/logging/log_backend_net.h>
+#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
+#include "meshtastic_shell_api.h"
 #endif
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
@@ -374,7 +260,6 @@ uint32_t mtsh_work_dest(const void *arg, size_t len)
 	return dest;
 }
 
-
 /* Shared by the position / metrics / environment / nodeinfo "send" commands. */
 int mtsh_deferred_send(const struct shell *sh, size_t argc, char **argv, mtsh_work_fn run)
 {
@@ -388,7 +273,6 @@ int mtsh_deferred_send(const struct shell *sh, size_t argc, char **argv, mtsh_wo
 
 	return mtsh_enqueue(sh, run, &dest, sizeof(dest));
 }
-
 
 #if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
 /* Prints nothing on the work thread: the shell thread is waiting for this step and
@@ -413,20 +297,6 @@ int meshtastic_shell_api_submit(void)
 	return mtsh_work_submit(w, 0U);
 }
 #endif
-
-
-/* Parsers used only by the config-write commands below. */
-
-
-/* Parsers used only by the config-write commands below. */
-
-
-/* Parsers used only by the config-write commands below. */
-
-
-/* Parsers used only by the config-write commands below. */
-
-/* Parsers used only by the config-write commands below. */
 
 /* Refuse a config read or write while lockdown holds the store: locked, or
  * unlocked but not yet reloaded (agents-ls39.1.8). RAM then holds the seed's
@@ -482,22 +352,6 @@ bool mtsh_config_write_refused(const struct shell *sh)
 }
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
-/* Parsers used only by the config-write commands below. */
-
-/* The RF commands read the radio, not the NodeDB: they must exist on an image
- * without one (the keyless head is the first). */
-
-
-
-/* The cluster and fleet commands are NOT admin features: MESHTASTIC_CLUSTER does
- * not depend on MESHTASTIC_ADMIN, and their registrations below are guarded by
- * CLUSTER/FLEET alone. They used to sit inside the ADMIN block, so SHELL=y +
- * CLUSTER=y + PHONEAPI=n (which forces ADMIN=n) failed to compile -- found by
- * meshtastic.variants.shell_settings (agents-68g8). */
-
-/* ---- intents: the roles this node remembers ------------------------------------ */
-
-
 /* The root, `meshtastic`, is a section-backed set (agents-ls39.4.4.1): each command
  * adds itself with SHELL_SUBCMD_ADD((meshtastic), ...), so a command file needs no
  * line in a central table. `meshtastic help` lists them in name order. */
@@ -509,8 +363,6 @@ SHELL_SUBCMD_ADD((meshtastic), api, NULL,
 		 "[[+] <base64> [<crc16>]]"),
 		 meshtastic_shell_api_cmd, 0, 0);
 #endif
-/* Not a GNSS command: it used to sit inside that guard, so a GNSS=n build
- * lost it and left cmd_netlog an unused static under -Werror. */
 #if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
 MTSH_DEFINE_ON_WORK(meshtastic_storage_shell_cmd)
 SHELL_SUBCMD_ADD((meshtastic), storage, NULL,
