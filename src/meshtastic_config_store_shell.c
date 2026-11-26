@@ -16,6 +16,7 @@
 
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_settings.h"
 #include "meshtastic_shell_internal.h"
 
 /* Wall-clock bench surface. A BLE-only node has no SNTP and an indoor bench
