@@ -5840,25 +5840,6 @@ static int cmd_backup(const struct shell *sh, size_t argc, char **argv)
 MTSH_DEFINE_ON_WORK(cmd_backup)
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
 
-#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
-static int cmd_dfu(const struct shell *sh, size_t argc, char **argv)
-{
-	bool serial_only = (argc >= 2) && (strcmp(argv[1], "serial") == 0);
-
-	if (argc >= 2 && !serial_only) {
-		shell_error(sh, "usage: dfu [serial]  (default: UF2 mode, drive + serial DFU)");
-		return -EINVAL;
-	}
-
-	shell_print(sh, "rebooting into the bootloader (%s mode) — this console goes away now",
-		    serial_only ? "serial-DFU" : "UF2");
-	/* Give the shell a beat to push the line out the CDC pipe. */
-	k_sleep(K_MSEC(100));
-	meshtastic_dfu_enter(serial_only);
-	return 0; /* unreachable */
-}
-#endif /* CONFIG_MESHTASTIC_DFU_TRIGGER */
-
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 /* meshtastic admin trust [<node> [off]] — manage SecurityConfig.admin_key by
  * NodeDB lookup: "trust that node as my remote admin". The headless-bench
@@ -7464,11 +7445,6 @@ SHELL_SUBCMD_ADD((meshtastic), statusmsg, &meshtastic_status_cmds,
 		 "peers.",
 		 NULL),
 		 cmd_status_show_on_work, 0, 0);
-#endif
-#if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
-SHELL_SUBCMD_ADD((meshtastic), dfu, NULL,
-		 SHELL_HELP("Reboot into the bootloader for reflashing.", "[serial]"),
-		 cmd_dfu, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
 MTSH_DEFINE_ON_WORK(meshtastic_storage_shell_cmd)
