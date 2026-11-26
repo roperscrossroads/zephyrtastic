@@ -25,10 +25,9 @@
 /* --- LoRa modem preset ------------------------------------------------------
  * Gives the shell parity with the phone app / Python CLI for changing the modem
  * preset. `meshtastic lora` shows the current preset/region/primary hash;
- * `meshtastic lora preset <name>` sets it. The write persists through the same
- * config_store path, but the SX1262 is only (re)configured at radio init, so the
- * change takes effect on the next boot (F-1) -- the app/CLI admin path reboots
- * automatically; the shell prints the hint, matching `transport`. */
+ * `meshtastic lora preset <name>` sets it. The write goes through the same
+ * config_store path as the app's, which retunes the live radio as it stores the
+ * preset (agents-k8oe): no reboot. */
 static void cmd_lora_show(const struct shell *sh)
 {
 	meshtastic_Config cfg;
@@ -233,8 +232,8 @@ static int cmd_lora_tx_set(const struct shell *sh, const char *arg)
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 /* `meshtastic preset` — the interlock surface (docs/MULTI-PRESET-OPERATION.md
- * §4.4). Distinct from `meshtastic lora preset`, which PERSISTS a preset and
- * needs a reboot: this one is about the live radio and the conditions that
+ * §4.4). Distinct from `meshtastic lora preset`, which PERSISTS a preset (and
+ * applies it at once): this one is about the live radio and the conditions that
  * govern moving it on a schedule.
  *
  * The counters are the point of the bare command. A slicing node that quietly
@@ -394,8 +393,8 @@ static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 MTSH_DEFINE_ON_WORK(cmd_lora)
 
 SHELL_SUBCMD_ADD((meshtastic), lora, NULL,
-		 SHELL_HELP("Show or set the LoRa modem preset (reboot to apply), "
-		 "the TX-enable switch or the TX power (both apply live).",
+		 SHELL_HELP("Show or set the LoRa modem preset, the TX-enable switch or "
+		 "the TX power (all three apply live).",
 		 "[preset <name>] [tx on|off] [power <dBm>]"),
 		 cmd_lora_on_work, 0, 0);
 SHELL_SUBCMD_ADD((meshtastic), preset, NULL,
