@@ -157,64 +157,24 @@ BUILD_ASSERT(!DT_SAME_NODE(MT_LOG_UART_NODE, DT_CHOSEN(zephyr_shell_uart)),
 	     "already prints the logs there; drop CONFIG_LOG_BACKEND_UART");
 #endif
 
-enum shell_work_op {
-	SHELL_WORK_SEND_TEXT,
-	SHELL_WORK_SEND_POSITION,
-	SHELL_WORK_SEND_METRICS,
-	SHELL_WORK_SEND_ENVIRONMENT,
-	SHELL_WORK_SEND_NODEINFO,
-	/* The send path again (protobuf encode, wire build, PKC encrypt): not on the shell
-	 * thread's 2048-byte XIAO stack. Bench 2026-10-09: `nodeinfo request` ran inline and
-	 * rebooted kit1 every time (agents-yhdm). */
-#if defined(CONFIG_MESHTASTIC_NODEINFO)
-	SHELL_WORK_REQUEST_NODEINFO,
-#endif
-	/* The other one-shot senders, same reason: `neighbors send` rebooted kit1 inline
-	 * (bench 2026-10-10, agents-yhdm). */
-#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
-	SHELL_WORK_SEND_STATUS,
-#endif
-#if defined(CONFIG_MESHTASTIC_ADMIN) && defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
-	/* `admin remote`: payload[0] is an enum admin_remote_op, the rest its argument.
-	 * Run inline it reset kit1 from the shell thread's stack (bench 2026-10-10). */
-	SHELL_WORK_ADMIN_REMOTE,
-#endif
-#if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
-	SHELL_WORK_SEND_NEIGHBORINFO,
-#endif
-#if defined(CONFIG_MESHTASTIC_MESHBEACON)
-	SHELL_WORK_SEND_BEACON,
-#endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-	SHELL_WORK_SEND_HEAD_STATUS,
-#endif
-#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
-	/* Both run the send path (PSA RNG, protobuf encode, wire build with the
-	 * PKC encrypt) which the shell thread's own stack cannot carry: on the
-	 * XIAO (CONFIG_SHELL_STACK_SIZE=2048) `keyverify start` locked the CPU
-	 * up -- reset cause 0x100, no fatal record, because the overflow lands in
-	 * the MPU guard and the exception entry cannot stack. Bench 2026-09-09. */
-	SHELL_WORK_KEYVERIFY_START,
-	SHELL_WORK_KEYVERIFY_NUMBER,
-	SHELL_WORK_KEYVERIFY_ACCEPT, /* ends with a NodeInfo send: same path */
-#endif
-#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
-	/* PBKDF2 (~1 s on an M4) plus NVS writes: never on the shell thread. */
-	SHELL_WORK_LOCKDOWN_PROVISION,
-	SHELL_WORK_LOCKDOWN_UNLOCK,
-	SHELL_WORK_LOCKDOWN_DISABLE,
-#endif
-#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
-	/* One step of `meshtastic api`; what to do is in meshtastic_shell_api.c. */
-	SHELL_WORK_API,
-#endif
-#if defined(CONFIG_MESHTASTIC_FLEET)
-	/* `fleet desire` / `pin` / `unpin`: payload is a struct shell_fleet_work. The
-	 * publish copies an entry, encodes the intent, signs the cluster entry and stores it;
-	 * on the XIAO's 2048-byte shell stack `fleet desire` overflowed it every time
-	 * (bench 2026-11-24, rzr7, agents-vnfu). */
-	SHELL_WORK_FLEET,
-#endif
+/* The shell work thread (agents-ls39.4.4.1). A command that must not run on the shell
+ * thread's own stack (the send path, PBKDF2, a cluster publish: each overflowed the
+ * XIAO's 2048-byte shell stack once, see the run functions' comments) parses its
+ * arguments there, and queues a run function with them. The thread knows no command:
+ * it calls the function, then prints the result line ("done" or "failed: ..."). Each
+ * command owns its argument layout; the arguments live in a pool item, not on the
+ * shell stack. */
+typedef int (*mtsh_work_fn)(const struct shell *sh, const void *arg, size_t len);
+
+/* Room for the largest argument: a text message and its address. */
+#define MTSH_WORK_ARG_MAX (MESHTASTIC_MAX_TEXT_LEN + 1U + 8U)
+
+struct mtsh_work {
+	const struct shell *sh;
+	mtsh_work_fn run;
+	bool quiet; /* no result line: the caller waits and prints itself */
+	size_t len;
+	uint8_t arg[MTSH_WORK_ARG_MAX] __aligned(4);
 };
 
 #if defined(CONFIG_MESHTASTIC_FLEET)
@@ -243,16 +203,6 @@ enum admin_remote_op {
 	ADMIN_REMOTE_GET_CONFIG,
 	ADMIN_REMOTE_SET_TIME,
 	ADMIN_REMOTE_SET_OWNER,
-};
-
-struct shell_work_item {
-	const struct shell *sh;
-	enum shell_work_op op;
-	uint32_t dest;
-	uint32_t portnum;
-	uint8_t channel_index;
-	size_t payload_len;
-	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 };
 
 static const char *shell_err_msg(int ret)
@@ -293,10 +243,16 @@ static void shell_report_result(const struct shell *sh, int ret)
 }
 
 #if defined(CONFIG_MESHTASTIC_FLEET)
-static int shell_fleet_work_run(const struct shell *sh, const struct shell_fleet_work *fw)
+/* `fleet desire` / `pin` / `unpin`. The publish copies an entry, encodes the intent,
+ * signs the cluster entry and stores it; on the XIAO's 2048-byte shell stack `fleet
+ * desire` overflowed it every time (bench 2026-11-24, rzr7, agents-vnfu). */
+static int shell_fleet_work_run(const struct shell *sh, const void *arg, size_t len)
 {
+	const struct shell_fleet_work *fw = arg;
 	const uint8_t *hash = fw->has_hash ? fw->hash : NULL;
 	int ret;
+
+	ARG_UNUSED(len);
 
 	switch (fw->verb) {
 	case SHELL_FLEET_DESIRE:
@@ -328,18 +284,23 @@ static int shell_fleet_work_run(const struct shell *sh, const struct shell_fleet
 	}
 }
 
-BUILD_ASSERT(sizeof(struct shell_fleet_work) <= MESHTASTIC_MAX_PAYLOAD_LEN,
-	     "the fleet verb's arguments ride in a shell work item's payload");
+BUILD_ASSERT(sizeof(struct shell_fleet_work) <= MTSH_WORK_ARG_MAX,
+	     "the fleet verb's arguments ride in a shell work item");
 #endif
 
-K_MSGQ_DEFINE(shell_work_msgq, sizeof(struct shell_work_item), CONFIG_MESHTASTIC_SHELL_QUEUE_SIZE,
-	      4);
+/* The pool holds the queued items' arguments; the queue carries pointers into it. An
+ * item goes back to the pool as the thread takes it, so the depth is what it was when
+ * the queue carried whole items: CONFIG_MESHTASTIC_SHELL_QUEUE_SIZE waiting, one running. */
+K_MEM_SLAB_DEFINE_STATIC(shell_work_slab, sizeof(struct mtsh_work), CONFIG_MESHTASTIC_SHELL_QUEUE_SIZE,
+			 4);
+K_MSGQ_DEFINE(shell_work_msgq, sizeof(struct mtsh_work *), CONFIG_MESHTASTIC_SHELL_QUEUE_SIZE, 4);
 K_THREAD_STACK_DEFINE(shell_work_stack, CONFIG_MESHTASTIC_SHELL_WORK_STACK_SIZE);
 static struct k_thread shell_work_thread;
 
 static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 {
-	struct shell_work_item item;
+	struct mtsh_work *queued;
+	struct mtsh_work item;
 	int ret;
 
 	ARG_UNUSED(p1);
@@ -347,254 +308,90 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	while (true) {
-		k_msgq_get(&shell_work_msgq, &item, K_FOREVER);
+		k_msgq_get(&shell_work_msgq, &queued, K_FOREVER);
+		memcpy(&item, queued, sizeof(item));
+		memset(queued, 0, sizeof(*queued)); /* a passphrase may have been here */
+		k_mem_slab_free(&shell_work_slab, queued);
 
-#if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
-		if (item.op == SHELL_WORK_API) {
-			/* Prints nothing here: the shell thread is waiting for this step
-			 * and does the printing. */
-			meshtastic_shell_api_work();
-			continue;
+		ret = item.run(item.sh, item.arg, item.len);
+		if (!item.quiet) {
+			shell_report_result(item.sh, ret);
 		}
-#endif
-
-		switch (item.op) {
-		case SHELL_WORK_SEND_TEXT:
-			if (item.channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID) {
-				struct meshtastic_packet packet = {
-					.to = item.dest,
-					.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
-					.payload = item.payload,
-					.payload_len = item.payload_len,
-					.channel_index = item.channel_index,
-				};
-
-				ret = meshtastic_send_packet(&packet, K_FOREVER);
-			} else {
-				ret = meshtastic_send_text(item.dest, (const char *)item.payload);
-			}
-			break;
-		case SHELL_WORK_SEND_POSITION:
-			ret = meshtastic_send_position(item.dest);
-			break;
-		case SHELL_WORK_SEND_METRICS:
-			ret = meshtastic_send_device_metrics(item.dest, K_FOREVER);
-			break;
-		case SHELL_WORK_SEND_ENVIRONMENT:
-			ret = meshtastic_send_environment(item.dest, K_FOREVER);
-			break;
-		case SHELL_WORK_SEND_NODEINFO:
-			ret = meshtastic_send_node_info(item.dest);
-			break;
-#if defined(CONFIG_MESHTASTIC_NODEINFO)
-		case SHELL_WORK_REQUEST_NODEINFO:
-			ret = meshtastic_nodeinfo_request(item.dest);
-			if (ret == -EAGAIN) {
-				shell_print(item.sh, "suppressed: already requested 0x%08x within "
-					    "the last %d s (CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC)",
-					    item.dest, CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC);
-				ret = 0;
-			} else if (ret == 0) {
-				shell_print(item.sh, "requested -- watch for a NodeInfo reply from "
-					    "0x%08x", item.dest);
-			}
-			break;
-#endif
-#if defined(CONFIG_MESHTASTIC_ADMIN) && defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
-		case SHELL_WORK_ADMIN_REMOTE: {
-			uint32_t arg;
-
-			switch (item.payload[0]) {
-			case ADMIN_REMOTE_GET_OWNER:
-				ret = meshtastic_admin_client_get_owner(item.dest);
-				break;
-			case ADMIN_REMOTE_GET_CONFIG:
-				ret = meshtastic_admin_client_get_config(item.dest, item.payload[1]);
-				break;
-			case ADMIN_REMOTE_SET_TIME:
-				memcpy(&arg, &item.payload[1], sizeof(arg));
-				ret = meshtastic_admin_client_set_time(item.dest, arg);
-				break;
-			case ADMIN_REMOTE_SET_OWNER: {
-				const char *long_name = (const char *)&item.payload[2];
-				const char *short_name =
-					item.payload[1] != 0U ? long_name + strlen(long_name) + 1 : NULL;
-
-				ret = meshtastic_admin_client_set_owner(item.dest, long_name,
-									short_name);
-				break;
-			}
-			default:
-				ret = -EINVAL;
-				break;
-			}
-			if (ret == -EACCES) {
-				shell_error(item.sh, "request failed (%d) -- no public key / passkey",
-					    ret);
-			} else if (ret == 0) {
-				shell_print(item.sh,
-					    "request sent -- watch for `admin client:` log lines");
-			}
-			break;
-		}
-#endif
-#if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
-		case SHELL_WORK_SEND_STATUS:
-			ret = meshtastic_statusmessage_send();
-			if (ret == -ENODATA) {
-				shell_error(item.sh, "no status set (meshtastic statusmsg set <text>)");
-			} else if (ret == 0) {
-				shell_print(item.sh, "status broadcast sent");
-			}
-			break;
-#endif
-#if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
-		case SHELL_WORK_SEND_NEIGHBORINFO:
-			ret = meshtastic_neighborinfo_send();
-			if (ret == -ENODATA) {
-				shell_error(item.sh,
-					    "no direct neighbors heard yet; nothing to send");
-			} else if (ret == 0) {
-				shell_print(item.sh, "neighbor info sent");
-			}
-			break;
-#endif
-#if defined(CONFIG_MESHTASTIC_MESHBEACON)
-		case SHELL_WORK_SEND_BEACON:
-			ret = meshtastic_meshbeacon_send();
-			switch (ret) {
-			case 0:
-				shell_print(item.sh, "beacon sent");
-				break;
-			case -ENODATA:
-				shell_error(item.sh, "nothing to beacon: no text and no offer configured");
-				break;
-			case -ENOENT:
-				shell_error(item.sh, "every target was skipped (see `meshtastic beacon`)");
-				break;
-			case -EPERM:
-				shell_error(item.sh, "a CLIENT_HIDDEN node never beacons");
-				break;
-			default:
-				break;
-			}
-			break;
-#endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-		case SHELL_WORK_SEND_HEAD_STATUS:
-			ret = meshtastic_attachment_head_status_send();
-			if (ret == 0) {
-				shell_print(item.sh, "status sent");
-			}
-			break;
-#endif
-#if defined(CONFIG_MESHTASTIC_KEYVERIFY)
-		case SHELL_WORK_KEYVERIFY_START:
-			ret = meshtastic_keyverify_start(item.dest);
-			if (ret == -EBUSY) {
-				shell_error(item.sh, "a session is already open (keyverify reject "
-					    "to drop it)");
-			} else if (ret == 0) {
-				shell_print(item.sh, "request sent; ask the peer for the security "
-					    "number it shows, then `meshtastic keyverify number <n>`");
-			}
-			break;
-		case SHELL_WORK_KEYVERIFY_NUMBER: {
-			struct meshtastic_keyverify_status st;
-
-			meshtastic_keyverify_status(&st);
-			ret = meshtastic_keyverify_provide_number(st.nonce, item.dest);
-			if (ret == -EACCES) {
-				shell_error(item.sh, "that number does not match the peer's reply: "
-					    "retype it, or suspect a man in the middle");
-			} else if (ret < 0) {
-				shell_error(item.sh, "not expecting a number now (%d)", ret);
-			} else {
-				meshtastic_keyverify_status(&st);
-				shell_print(item.sh, "verification code: %s -- if the peer shows "
-					    "the same, `meshtastic keyverify accept`", st.code);
-			}
-			break;
-		}
-		case SHELL_WORK_KEYVERIFY_ACCEPT: {
-			struct meshtastic_keyverify_status st;
-
-			meshtastic_keyverify_status(&st);
-			ret = meshtastic_keyverify_accept(st.nonce);
-			if (ret < 0) {
-				shell_error(item.sh, "nothing to accept (%d)", ret);
-			} else {
-				shell_print(item.sh, "peer 0x%08x marked key-verified",
-					    st.remote_node);
-			}
-			break;
-		}
-#endif
-#if defined(CONFIG_MESHTASTIC_LOCKDOWN)
-		case SHELL_WORK_LOCKDOWN_PROVISION:
-			ret = meshtastic_lockdown_provision(item.payload, item.payload_len,
-							    (uint8_t)item.dest, 0U, 0U);
-			if (ret == 0) {
-				shell_print(item.sh, "provisioned: sealing the store now; "
-					    "%u boots on the token",
-					    meshtastic_lockdown_boots_remaining());
-			} else if (ret == -EALREADY) {
-				shell_error(item.sh, "already provisioned (lockdown disable first)");
-			}
-			break;
-		case SHELL_WORK_LOCKDOWN_UNLOCK:
-			ret = meshtastic_lockdown_unlock(item.payload, item.payload_len,
-							 (uint8_t)item.dest, 0U, 0U);
-			if (ret == 0) {
-				shell_print(item.sh, "unlocked; the store reloads on the workqueue "
-					    "and the radio follows");
-			} else if (ret == -EACCES) {
-				shell_error(item.sh, "wrong passphrase (next attempt after a "
-					    "reboot and ~%u s)",
-					    meshtastic_lockdown_backoff_remaining());
-			} else if (ret == -EAGAIN) {
-				shell_error(item.sh, "backoff: ~%u s (and a reboot) still to wait",
-					    meshtastic_lockdown_backoff_remaining());
-			}
-			break;
-		case SHELL_WORK_LOCKDOWN_DISABLE:
-			ret = meshtastic_lockdown_disable(item.payload, item.payload_len);
-			if (ret == 0) {
-				shell_print(item.sh, "disabling: the store is rewritten in the clear "
-					    "on the workqueue; reboot when `lockdown` says inactive");
-			} else if (ret == -EACCES) {
-				shell_error(item.sh, "wrong passphrase");
-			}
-			break;
-#endif
-#if defined(CONFIG_MESHTASTIC_FLEET)
-		case SHELL_WORK_FLEET:
-			ret = shell_fleet_work_run(item.sh, (const struct shell_fleet_work *)item.payload);
-			break;
-#endif
-		default:
-			ret = -EINVAL;
-			break;
-		}
-
-		shell_report_result(item.sh, ret);
-		memset(item.payload, 0, sizeof(item.payload)); /* a passphrase may have been here */
+		memset(item.arg, 0, sizeof(item.arg));
 	}
 }
 
-static int enqueue_shell_work(const struct shell *sh, struct shell_work_item *item)
+/* An empty item for @p run, from the pool. NULL when the queue is full (said on @p sh). */
+static struct mtsh_work *mtsh_work_alloc(const struct shell *sh, mtsh_work_fn run)
 {
+	struct mtsh_work *w;
+
+	if (k_mem_slab_alloc(&shell_work_slab, (void **)&w, K_NO_WAIT) != 0) {
+		if (sh != NULL) {
+			shell_error(sh, "Meshtastic shell queue is full");
+		}
+		return NULL;
+	}
+	memset(w, 0, sizeof(*w));
+	w->sh = sh;
+	w->run = run;
+	return w;
+}
+
+/* Give an item back unqueued: its command refused its arguments after all. */
+static void mtsh_work_cancel(struct mtsh_work *w)
+{
+	memset(w, 0, sizeof(*w));
+	k_mem_slab_free(&shell_work_slab, w);
+}
+
+/* Queue a filled item (@p len bytes of argument) and say "queued". */
+static int mtsh_work_submit(struct mtsh_work *w, size_t len)
+{
+	const struct shell *sh = w->sh;
 	int ret;
 
-	item->sh = sh;
-	ret = k_msgq_put(&shell_work_msgq, item, K_NO_WAIT);
+	w->len = len;
+	ret = k_msgq_put(&shell_work_msgq, &w, K_NO_WAIT);
 	if (ret < 0) {
-		shell_error(sh, "Meshtastic shell queue is full");
+		/* Not reached: the queue has a slot for every pool item. */
+		mtsh_work_cancel(w);
+		if (sh != NULL) {
+			shell_error(sh, "Meshtastic shell queue is full");
+		}
 		return ret;
 	}
-
-	shell_print(sh, "queued");
+	if (sh != NULL && !w->quiet) {
+		shell_print(sh, "queued");
+	}
 	return 0;
+}
+
+/* Queue @p run with a copy of @p len bytes at @p arg. */
+static int mtsh_enqueue(const struct shell *sh, mtsh_work_fn run, const void *arg, size_t len)
+{
+	struct mtsh_work *w;
+
+	__ASSERT_NO_MSG(len <= sizeof(w->arg));
+	w = mtsh_work_alloc(sh, run);
+	if (w == NULL) {
+		return -ENOMSG;
+	}
+	if (len > 0U) {
+		memcpy(w->arg, arg, len);
+	}
+	return mtsh_work_submit(w, len);
+}
+
+/* The common argument: one node id. */
+static __unused uint32_t mtsh_work_dest(const void *arg, size_t len)
+{
+	uint32_t dest;
+
+	__ASSERT_NO_MSG(len == sizeof(dest));
+	ARG_UNUSED(len);
+	memcpy(&dest, arg, sizeof(dest));
+	return dest;
 }
 
 static int parse_u32(const struct shell *sh, const char *arg, uint32_t *value)
@@ -637,19 +434,17 @@ static int parse_optional_dest(const struct shell *sh, size_t argc, char **argv,
  * helper is __unused there rather than guarded by a list of callers that would rot
  * (found by the lane 2026-09-29). */
 static __unused int cmd_deferred_send(const struct shell *sh, size_t argc, char **argv,
-				      enum shell_work_op op)
+				      mtsh_work_fn run)
 {
-	struct shell_work_item item = {
-		.op = op,
-	};
+	uint32_t dest;
 	int ret;
 
-	ret = parse_optional_dest(sh, argc, argv, &item.dest);
+	ret = parse_optional_dest(sh, argc, argv, &dest);
 	if (ret < 0) {
 		return ret;
 	}
 
-	return enqueue_shell_work(sh, &item);
+	return mtsh_enqueue(sh, run, &dest, sizeof(dest));
 }
 
 static __unused int append_message_from_argv(uint8_t *buf, size_t buf_max, size_t argc, char **argv,
@@ -755,11 +550,26 @@ static int cmd_state(const struct shell *sh, size_t argc, char **argv)
 }
 
 #if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
+/* Prints nothing on the work thread: the shell thread is waiting for this step and
+ * does the printing. */
+static int shell_api_run(const struct shell *sh, const void *arg, size_t len)
+{
+	ARG_UNUSED(sh);
+	ARG_UNUSED(arg);
+	ARG_UNUSED(len);
+	meshtastic_shell_api_work();
+	return 0;
+}
+
 int meshtastic_shell_api_submit(void)
 {
-	struct shell_work_item item = {.op = SHELL_WORK_API};
+	struct mtsh_work *w = mtsh_work_alloc(NULL, shell_api_run);
 
-	return k_msgq_put(&shell_work_msgq, &item, K_NO_WAIT);
+	if (w == NULL) {
+		return -ENOMSG;
+	}
+	w->quiet = true;
+	return mtsh_work_submit(w, 0U);
 }
 #endif
 
@@ -2873,13 +2683,42 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodedb_cmds,
 #endif /* CONFIG_MESHTASTIC_NODEDB */
 
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
+struct shell_text_work {
+	uint32_t dest;
+	uint8_t channel_index; /* MESHTASTIC_CHANNEL_INDEX_INVALID: the default channel */
+	uint8_t text[MESHTASTIC_MAX_TEXT_LEN + 1U]; /* NUL-terminated */
+};
+
+BUILD_ASSERT(sizeof(struct shell_text_work) <= MTSH_WORK_ARG_MAX,
+	     "a text message rides in a shell work item");
+
+static int shell_text_run(const struct shell *sh, const void *arg, size_t len)
+{
+	const struct shell_text_work *tw = arg;
+
+	ARG_UNUSED(sh);
+	if (tw->channel_index != MESHTASTIC_CHANNEL_INDEX_INVALID) {
+		struct meshtastic_packet packet = {
+			.to = tw->dest,
+			.portnum = MESHTASTIC_PORT_TEXT_MESSAGE,
+			.payload = tw->text,
+			.payload_len = len - offsetof(struct shell_text_work, text),
+			.channel_index = tw->channel_index,
+		};
+
+		return meshtastic_send_packet(&packet, K_FOREVER);
+	}
+	return meshtastic_send_text(tw->dest, (const char *)tw->text);
+}
+
 static int cmd_text_send(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {
-		.op = SHELL_WORK_SEND_TEXT,
-		.channel_index = MESHTASTIC_CHANNEL_INDEX_INVALID,
-	};
+	uint8_t channel_index = MESHTASTIC_CHANNEL_INDEX_INVALID;
+	uint32_t dest = MESHTASTIC_NODE_BROADCAST;
+	struct shell_text_work *tw;
+	struct mtsh_work *w;
 	size_t msg_arg = 1U;
+	size_t first;
 	int ret;
 	int len;
 
@@ -2895,7 +2734,7 @@ static int cmd_text_send(const struct shell *sh, size_t argc, char **argv)
 					"<message>");
 			return -EINVAL;
 		}
-		ret = shell_parse_channel_index(sh, argv[2], &item.channel_index);
+		ret = shell_parse_channel_index(sh, argv[2], &channel_index);
 		if (ret < 0) {
 			return ret;
 		}
@@ -2903,36 +2742,43 @@ static int cmd_text_send(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	if (argc == (msg_arg + 1U)) {
-		item.dest = MESHTASTIC_NODE_BROADCAST;
-		len = append_message_from_argv(item.payload, sizeof(item.payload), argc, argv,
-					       msg_arg);
+		first = msg_arg;
 	} else if (argc >= (msg_arg + 2U)) {
-		ret = parse_u32(sh, argv[msg_arg], &item.dest);
+		ret = parse_u32(sh, argv[msg_arg], &dest);
 		if (ret < 0) {
 			return ret;
 		}
-
-		len = append_message_from_argv(item.payload, sizeof(item.payload), argc, argv,
-					       msg_arg + 1U);
+		first = msg_arg + 1U;
 	} else {
 		shell_error(sh, "message required");
 		return -EINVAL;
 	}
 
+	/* The message is built in the queued item itself, not on this stack. */
+	w = mtsh_work_alloc(sh, shell_text_run);
+	if (w == NULL) {
+		return -ENOMSG;
+	}
+	tw = (struct shell_text_work *)w->arg;
+	tw->dest = dest;
+	tw->channel_index = channel_index;
+	len = append_message_from_argv(tw->text, MESHTASTIC_MAX_TEXT_LEN, argc, argv, first);
+
 	if (len < 0) {
+		mtsh_work_cancel(w);
 		shell_error(sh, "message too long (max %u)", MESHTASTIC_MAX_TEXT_LEN);
 		return len;
 	}
 
 	if (len == 0) {
+		mtsh_work_cancel(w);
 		shell_error(sh, "message must not be empty");
 		return -EINVAL;
 	}
 
-	item.payload_len = (size_t)len;
-	item.payload[len] = '\0';
+	tw->text[len] = '\0';
 
-	return enqueue_shell_work(sh, &item);
+	return mtsh_work_submit(w, offsetof(struct shell_text_work, text) + (size_t)len);
 }
 
 #if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
@@ -3012,9 +2858,17 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_text_cmds,
 #endif /* CONFIG_MESHTASTIC_MESSAGE */
 
 #if defined(CONFIG_MESHTASTIC_GNSS)
+static int shell_position_send_run(const struct shell *sh, const void *arg, size_t len)
+{
+	uint32_t dest = mtsh_work_dest(arg, len);
+
+	ARG_UNUSED(sh);
+	return meshtastic_send_position(dest);
+}
+
 static int cmd_gnss_send(const struct shell *sh, size_t argc, char **argv)
 {
-	return cmd_deferred_send(sh, argc, argv, SHELL_WORK_SEND_POSITION);
+	return cmd_deferred_send(sh, argc, argv, shell_position_send_run);
 }
 
 static const char *gnss_fix_status_name(uint8_t s)
@@ -3440,9 +3294,17 @@ static int cmd_phonelog(const struct shell *sh, size_t argc, char **argv)
 #endif /* CONFIG_MESHTASTIC_PHONELOG */
 
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
+static int shell_metrics_send_run(const struct shell *sh, const void *arg, size_t len)
+{
+	uint32_t dest = mtsh_work_dest(arg, len);
+
+	ARG_UNUSED(sh);
+	return meshtastic_send_device_metrics(dest, K_FOREVER);
+}
+
 static int cmd_metrics_send(const struct shell *sh, size_t argc, char **argv)
 {
-	return cmd_deferred_send(sh, argc, argv, SHELL_WORK_SEND_METRICS);
+	return cmd_deferred_send(sh, argc, argv, shell_metrics_send_run);
 }
 
 #if defined(CONFIG_MESHTASTIC_LOCAL_STATS)
@@ -3531,9 +3393,17 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_metrics_cmds,
 #endif /* CONFIG_MESHTASTIC_DEVICE_METRICS */
 
 #if defined(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS)
+static int shell_environment_send_run(const struct shell *sh, const void *arg, size_t len)
+{
+	uint32_t dest = mtsh_work_dest(arg, len);
+
+	ARG_UNUSED(sh);
+	return meshtastic_send_environment(dest, K_FOREVER);
+}
+
 static int cmd_environment_send(const struct shell *sh, size_t argc, char **argv)
 {
-	return cmd_deferred_send(sh, argc, argv, SHELL_WORK_SEND_ENVIRONMENT);
+	return cmd_deferred_send(sh, argc, argv, shell_environment_send_run);
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
@@ -3544,9 +3414,17 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #endif /* CONFIG_MESHTASTIC_ENVIRONMENT_METRICS */
 
 #if defined(CONFIG_MESHTASTIC_NODEINFO)
+static int shell_nodeinfo_send_run(const struct shell *sh, const void *arg, size_t len)
+{
+	uint32_t dest = mtsh_work_dest(arg, len);
+
+	ARG_UNUSED(sh);
+	return meshtastic_send_node_info(dest);
+}
+
 static int cmd_nodeinfo_send(const struct shell *sh, size_t argc, char **argv)
 {
-	return cmd_deferred_send(sh, argc, argv, SHELL_WORK_SEND_NODEINFO);
+	return cmd_deferred_send(sh, argc, argv, shell_nodeinfo_send_run);
 }
 
 /* Unlike `send`, this actually asks: want_response=true, so a compliant peer
@@ -3554,21 +3432,39 @@ static int cmd_nodeinfo_send(const struct shell *sh, size_t argc, char **argv)
  * request runs the whole send path, which the shell thread's stack cannot carry on
  * a XIAO (CONFIG_SHELL_STACK_SIZE=2048; run inline it reset the board every time).
  * The per-peer cooldown and the K_NO_WAIT send live in meshtastic_nodeinfo_request(). */
+/* Bench 2026-10-09: run inline, `nodeinfo request` rebooted kit1 every time
+ * (agents-yhdm). */
+static int shell_nodeinfo_request_run(const struct shell *sh, const void *arg, size_t len)
+{
+	uint32_t dest = mtsh_work_dest(arg, len);
+	int ret;
+
+	ret = meshtastic_nodeinfo_request(dest);
+	if (ret == -EAGAIN) {
+		shell_print(sh, "suppressed: already requested 0x%08x within "
+			    "the last %d s (CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC)",
+			    dest, CONFIG_MESHTASTIC_NODEINFO_UNKNOWN_SUPPRESS_SEC);
+		ret = 0;
+	} else if (ret == 0) {
+		shell_print(sh, "requested -- watch for a NodeInfo reply from "
+			    "0x%08x", dest);
+	}
+	return ret;
+}
+
 static int cmd_nodeinfo_request(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {
-		.op = SHELL_WORK_REQUEST_NODEINFO,
-	};
+	uint32_t dest;
 	int ret;
 
 	ARG_UNUSED(argc);
 
-	ret = parse_u32(sh, argv[1], &item.dest);
+	ret = parse_u32(sh, argv[1], &dest);
 	if (ret < 0) {
 		return ret;
 	}
 
-	return enqueue_shell_work(sh, &item);
+	return mtsh_enqueue(sh, shell_nodeinfo_request_run, &dest, sizeof(dest));
 }
 
 /* Get/set device.node_info_broadcast_secs (agents-t2hb.1). Same shape as
@@ -3735,15 +3631,28 @@ static int cmd_status_clear(const struct shell *sh, size_t argc, char **argv)
 	return cmd_status_write(sh, "");
 }
 
+static int shell_status_send_run(const struct shell *sh, const void *arg, size_t len)
+{
+	int ret;
+
+	ARG_UNUSED(arg);
+	ARG_UNUSED(len);
+	ret = meshtastic_statusmessage_send();
+	if (ret == -ENODATA) {
+		shell_error(sh, "no status set (meshtastic statusmsg set <text>)");
+	} else if (ret == 0) {
+		shell_print(sh, "status broadcast sent");
+	}
+	return ret;
+}
+
 static int cmd_status_send(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {.op = SHELL_WORK_SEND_STATUS};
-
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
 	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
-	return enqueue_shell_work(sh, &item);
+	return mtsh_enqueue(sh, shell_status_send_run, NULL, 0U);
 }
 
 static int cmd_status_peers(const struct shell *sh, size_t argc, char **argv)
@@ -4314,15 +4223,26 @@ static int cmd_attach_head_brain(const struct shell *sh, size_t argc, char **arg
 	return 0;
 }
 
+static int shell_head_status_run(const struct shell *sh, const void *arg, size_t len)
+{
+	int ret;
+
+	ARG_UNUSED(arg);
+	ARG_UNUSED(len);
+	ret = meshtastic_attachment_head_status_send();
+	if (ret == 0) {
+		shell_print(sh, "status sent");
+	}
+	return ret;
+}
+
 static int cmd_attach_head_status(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {.op = SHELL_WORK_SEND_HEAD_STATUS};
-
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
 	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
-	return enqueue_shell_work(sh, &item);
+	return mtsh_enqueue(sh, shell_head_status_run, NULL, 0U);
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
@@ -4461,15 +4381,30 @@ static int cmd_neighbors_lora(const struct shell *sh, size_t argc, char **argv)
 	return cmd_neighbors_write(sh, enabled, interval, strcmp(argv[1], "on") == 0);
 }
 
+/* Bench 2026-10-10: run inline, `neighbors send` rebooted kit1 (agents-yhdm). */
+static int shell_neighbors_send_run(const struct shell *sh, const void *arg, size_t len)
+{
+	int ret;
+
+	ARG_UNUSED(arg);
+	ARG_UNUSED(len);
+	ret = meshtastic_neighborinfo_send();
+	if (ret == -ENODATA) {
+		shell_error(sh,
+			    "no direct neighbors heard yet; nothing to send");
+	} else if (ret == 0) {
+		shell_print(sh, "neighbor info sent");
+	}
+	return ret;
+}
+
 static int cmd_neighbors_send(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {.op = SHELL_WORK_SEND_NEIGHBORINFO};
-
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
 	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
-	return enqueue_shell_work(sh, &item);
+	return mtsh_enqueue(sh, shell_neighbors_send_run, NULL, 0U);
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_neighbors_cmds,
@@ -4633,15 +4568,39 @@ static int cmd_beacon_interval(const struct shell *sh, size_t argc, char **argv)
 	return beacon_write(sh, &cfg);
 }
 
+static int shell_beacon_send_run(const struct shell *sh, const void *arg, size_t len)
+{
+	int ret;
+
+	ARG_UNUSED(arg);
+	ARG_UNUSED(len);
+	ret = meshtastic_meshbeacon_send();
+	switch (ret) {
+	case 0:
+		shell_print(sh, "beacon sent");
+		break;
+	case -ENODATA:
+		shell_error(sh, "nothing to beacon: no text and no offer configured");
+		break;
+	case -ENOENT:
+		shell_error(sh, "every target was skipped (see `meshtastic beacon`)");
+		break;
+	case -EPERM:
+		shell_error(sh, "a CLIENT_HIDDEN node never beacons");
+		break;
+	default:
+		break;
+	}
+	return ret;
+}
+
 static int cmd_beacon_send(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {.op = SHELL_WORK_SEND_BEACON};
-
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
 	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
-	return enqueue_shell_work(sh, &item);
+	return mtsh_enqueue(sh, shell_beacon_send_run, NULL, 0U);
 }
 
 static int cmd_beacon_forget(const struct shell *sh, size_t argc, char **argv)
@@ -4963,9 +4922,66 @@ static int cmd_keyverify_show(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* PSA RNG, protobuf encode, wire build with the PKC encrypt: the shell thread's own
+ * stack cannot carry it. On the XIAO (CONFIG_SHELL_STACK_SIZE=2048) `keyverify start`
+ * locked the CPU up -- reset cause 0x100, no fatal record, because the overflow lands
+ * in the MPU guard and the exception entry cannot stack. Bench 2026-09-09. */
+static int shell_keyverify_start_run(const struct shell *sh, const void *arg, size_t len)
+{
+	int ret = meshtastic_keyverify_start(mtsh_work_dest(arg, len));
+
+	if (ret == -EBUSY) {
+		shell_error(sh, "a session is already open (keyverify reject "
+			    "to drop it)");
+	} else if (ret == 0) {
+		shell_print(sh, "request sent; ask the peer for the security "
+			    "number it shows, then `meshtastic keyverify number <n>`");
+	}
+	return ret;
+}
+
+static int shell_keyverify_number_run(const struct shell *sh, const void *arg, size_t len)
+{
+	struct meshtastic_keyverify_status st;
+	int ret;
+
+	meshtastic_keyverify_status(&st);
+	ret = meshtastic_keyverify_provide_number(st.nonce, mtsh_work_dest(arg, len));
+	if (ret == -EACCES) {
+		shell_error(sh, "that number does not match the peer's reply: "
+			    "retype it, or suspect a man in the middle");
+	} else if (ret < 0) {
+		shell_error(sh, "not expecting a number now (%d)", ret);
+	} else {
+		meshtastic_keyverify_status(&st);
+		shell_print(sh, "verification code: %s -- if the peer shows "
+			    "the same, `meshtastic keyverify accept`", st.code);
+	}
+	return ret;
+}
+
+/* Ends with a NodeInfo send: the same path as `start`. */
+static int shell_keyverify_accept_run(const struct shell *sh, const void *arg, size_t len)
+{
+	struct meshtastic_keyverify_status st;
+	int ret;
+
+	ARG_UNUSED(arg);
+	ARG_UNUSED(len);
+	meshtastic_keyverify_status(&st);
+	ret = meshtastic_keyverify_accept(st.nonce);
+	if (ret < 0) {
+		shell_error(sh, "nothing to accept (%d)", ret);
+	} else {
+		shell_print(sh, "peer 0x%08x marked key-verified",
+			    st.remote_node);
+	}
+	return ret;
+}
+
 static int cmd_keyverify_start(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {0};
+	uint32_t dest;
 	unsigned long node;
 	char *end;
 	int ret;
@@ -4980,16 +4996,15 @@ static int cmd_keyverify_start(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 	/* Deferred to the shell work thread: the send path does not fit the shell
-	 * thread's stack (see SHELL_WORK_KEYVERIFY_START). */
-	item.op = SHELL_WORK_KEYVERIFY_START;
-	item.dest = (uint32_t)node;
-	ret = enqueue_shell_work(sh, &item);
+	 * thread's stack (see shell_keyverify_start_run). */
+	dest = (uint32_t)node;
+	ret = mtsh_enqueue(sh, shell_keyverify_start_run, &dest, sizeof(dest));
 	return ret;
 }
 
 static int cmd_keyverify_number(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {0};
+	uint32_t number;
 	unsigned long n;
 	char *end;
 
@@ -5003,22 +5018,18 @@ static int cmd_keyverify_number(const struct shell *sh, size_t argc, char **argv
 		return -EINVAL;
 	}
 	/* Deferred like `start`: this sends M3 and hashes on the way. */
-	item.op = SHELL_WORK_KEYVERIFY_NUMBER;
-	item.dest = (uint32_t)n;
-	return enqueue_shell_work(sh, &item);
+	number = (uint32_t)n;
+	return mtsh_enqueue(sh, shell_keyverify_number_run, &number, sizeof(number));
 }
 
 static int cmd_keyverify_accept(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {0};
-
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
 	/* Deferred: accept ends by sending our NodeInfo to the peer (the send
 	 * path again). Bench 2026-09-09: inline, it locked kit2 up like `start`. */
-	item.op = SHELL_WORK_KEYVERIFY_ACCEPT;
-	return enqueue_shell_work(sh, &item);
+	return mtsh_enqueue(sh, shell_keyverify_accept_run, NULL, 0U);
 }
 
 static int cmd_keyverify_reject(const struct shell *sh, size_t argc, char **argv)
@@ -6329,10 +6340,75 @@ static int cmd_lockdown_status(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-static int lockdown_enqueue(const struct shell *sh, enum shell_work_op op, const uint8_t *pass,
+/* What a lockdown verb's run function gets: the passphrase, and the token's boot count. */
+struct shell_lockdown_work {
+	uint8_t boots; /* 0: the default */
+	uint8_t pass_len;
+	uint8_t pass[MESHTASTIC_LOCKDOWN_PASSPHRASE_MAX];
+};
+
+BUILD_ASSERT(sizeof(struct shell_lockdown_work) <= MTSH_WORK_ARG_MAX,
+	     "a passphrase rides in a shell work item");
+
+/* PBKDF2 (~1 s on an M4) plus NVS writes: never on the shell thread. */
+static int shell_lockdown_provision_run(const struct shell *sh, const void *arg, size_t len)
+{
+	const struct shell_lockdown_work *lw = arg;
+	int ret;
+
+	ARG_UNUSED(len);
+	ret = meshtastic_lockdown_provision(lw->pass, lw->pass_len, lw->boots, 0U, 0U);
+	if (ret == 0) {
+		shell_print(sh, "provisioned: sealing the store now; "
+			    "%u boots on the token",
+			    meshtastic_lockdown_boots_remaining());
+	} else if (ret == -EALREADY) {
+		shell_error(sh, "already provisioned (lockdown disable first)");
+	}
+	return ret;
+}
+
+static int shell_lockdown_unlock_run(const struct shell *sh, const void *arg, size_t len)
+{
+	const struct shell_lockdown_work *lw = arg;
+	int ret;
+
+	ARG_UNUSED(len);
+	ret = meshtastic_lockdown_unlock(lw->pass, lw->pass_len, lw->boots, 0U, 0U);
+	if (ret == 0) {
+		shell_print(sh, "unlocked; the store reloads on the workqueue "
+			    "and the radio follows");
+	} else if (ret == -EACCES) {
+		shell_error(sh, "wrong passphrase (next attempt after a "
+			    "reboot and ~%u s)",
+			    meshtastic_lockdown_backoff_remaining());
+	} else if (ret == -EAGAIN) {
+		shell_error(sh, "backoff: ~%u s (and a reboot) still to wait",
+			    meshtastic_lockdown_backoff_remaining());
+	}
+	return ret;
+}
+
+static int shell_lockdown_disable_run(const struct shell *sh, const void *arg, size_t len)
+{
+	const struct shell_lockdown_work *lw = arg;
+	int ret;
+
+	ARG_UNUSED(len);
+	ret = meshtastic_lockdown_disable(lw->pass, lw->pass_len);
+	if (ret == 0) {
+		shell_print(sh, "disabling: the store is rewritten in the clear "
+			    "on the workqueue; reboot when `lockdown` says inactive");
+	} else if (ret == -EACCES) {
+		shell_error(sh, "wrong passphrase");
+	}
+	return ret;
+}
+
+static int lockdown_enqueue(const struct shell *sh, mtsh_work_fn run, const uint8_t *pass,
 			    size_t pass_len, const char *boots_arg)
 {
-	struct shell_work_item item = {0};
+	struct shell_lockdown_work lw = {0};
 	int ret;
 
 	if (pass_len == 0U || pass_len > MESHTASTIC_LOCKDOWN_PASSPHRASE_MAX) {
@@ -6347,13 +6423,12 @@ static int lockdown_enqueue(const struct shell *sh, enum shell_work_op op, const
 			shell_error(sh, "boots must be 0-255 (0 = default)");
 			return -EINVAL;
 		}
-		item.dest = boots;
+		lw.boots = (uint8_t)boots;
 	}
-	item.op = op;
-	memcpy(item.payload, pass, pass_len);
-	item.payload_len = pass_len;
-	ret = enqueue_shell_work(sh, &item);
-	memset(item.payload, 0, sizeof(item.payload));
+	memcpy(lw.pass, pass, pass_len);
+	lw.pass_len = (uint8_t)pass_len;
+	ret = mtsh_enqueue(sh, run, &lw, sizeof(lw));
+	memset(&lw, 0, sizeof(lw));
 	return ret;
 }
 
@@ -6389,7 +6464,7 @@ static int read_passphrase(const struct shell *sh, uint8_t *buf, size_t cap)
 /* Gather the passphrase from argv[1] (inline, visible) or an obscured prompt,
  * then enqueue @p op. `pass_argc` is the index the passphrase would sit at. */
 static int lockdown_pass_cmd(const struct shell *sh, size_t argc, char **argv,
-			     enum shell_work_op op, const char *boots_arg)
+			     mtsh_work_fn run, const char *boots_arg)
 {
 	uint8_t pass[MESHTASTIC_LOCKDOWN_PASSPHRASE_MAX + 1];
 	int ret;
@@ -6397,32 +6472,32 @@ static int lockdown_pass_cmd(const struct shell *sh, size_t argc, char **argv,
 	if (argc >= 2) {
 		shell_warn(sh, "the inline passphrase is echoed to the console and its log; "
 			       "run with no argument for an obscured prompt");
-		return lockdown_enqueue(sh, op, (const uint8_t *)argv[1], strlen(argv[1]), boots_arg);
+		return lockdown_enqueue(sh, run, (const uint8_t *)argv[1], strlen(argv[1]), boots_arg);
 	}
 	ret = read_passphrase(sh, pass, sizeof(pass));
 	if (ret < 0) {
 		return ret;
 	}
-	ret = lockdown_enqueue(sh, op, pass, (size_t)ret, NULL);
+	ret = lockdown_enqueue(sh, run, pass, (size_t)ret, NULL);
 	memset(pass, 0, sizeof(pass));
 	return ret;
 }
 
 static int cmd_lockdown_provision(const struct shell *sh, size_t argc, char **argv)
 {
-	return lockdown_pass_cmd(sh, argc, argv, SHELL_WORK_LOCKDOWN_PROVISION,
+	return lockdown_pass_cmd(sh, argc, argv, shell_lockdown_provision_run,
 				 argc > 2 ? argv[2] : NULL);
 }
 
 static int cmd_lockdown_unlock(const struct shell *sh, size_t argc, char **argv)
 {
-	return lockdown_pass_cmd(sh, argc, argv, SHELL_WORK_LOCKDOWN_UNLOCK,
+	return lockdown_pass_cmd(sh, argc, argv, shell_lockdown_unlock_run,
 				 argc > 2 ? argv[2] : NULL);
 }
 
 static int cmd_lockdown_disable(const struct shell *sh, size_t argc, char **argv)
 {
-	return lockdown_pass_cmd(sh, argc, argv, SHELL_WORK_LOCKDOWN_DISABLE, NULL);
+	return lockdown_pass_cmd(sh, argc, argv, shell_lockdown_disable_run, NULL);
 }
 
 static int cmd_lockdown_lock(const struct shell *sh, size_t argc, char **argv)
@@ -6953,37 +7028,97 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
  * Responses arrive asynchronously on the RX path and print as `admin client:`
  * log lines; a getter also caches the target's session passkey for the
  * mutating op that follows. */
+/* `admin remote`: payload[0] is an enum admin_remote_op, the rest its argument. */
+struct shell_admin_remote_work {
+	uint32_t dest;
+	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
+};
+
+BUILD_ASSERT(sizeof(struct shell_admin_remote_work) <= MTSH_WORK_ARG_MAX,
+	     "an admin request rides in a shell work item");
+
+/* Run inline it reset kit1 from the shell thread's stack (bench 2026-10-10). */
+static int shell_admin_remote_run(const struct shell *sh, const void *arg, size_t len)
+{
+	const struct shell_admin_remote_work *aw = arg;
+	uint32_t epoch;
+	int ret;
+
+	ARG_UNUSED(len);
+	switch (aw->payload[0]) {
+	case ADMIN_REMOTE_GET_OWNER:
+		ret = meshtastic_admin_client_get_owner(aw->dest);
+		break;
+	case ADMIN_REMOTE_GET_CONFIG:
+		ret = meshtastic_admin_client_get_config(aw->dest, aw->payload[1]);
+		break;
+	case ADMIN_REMOTE_SET_TIME:
+		memcpy(&epoch, &aw->payload[1], sizeof(epoch));
+		ret = meshtastic_admin_client_set_time(aw->dest, epoch);
+		break;
+	case ADMIN_REMOTE_SET_OWNER: {
+		const char *long_name = (const char *)&aw->payload[2];
+		const char *short_name =
+			aw->payload[1] != 0U ? long_name + strlen(long_name) + 1 : NULL;
+
+		ret = meshtastic_admin_client_set_owner(aw->dest, long_name, short_name);
+		break;
+	}
+	default:
+		ret = -EINVAL;
+		break;
+	}
+	if (ret == -EACCES) {
+		shell_error(sh, "request failed (%d) -- no public key / passkey", ret);
+	} else if (ret == 0) {
+		shell_print(sh, "request sent -- watch for `admin client:` log lines");
+	}
+	return ret;
+}
+
 static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {.op = SHELL_WORK_ADMIN_REMOTE};
+	struct shell_admin_remote_work *aw;
+	struct mtsh_work *w;
+	uint32_t dest;
 	int ret;
 
 	if (argc < 3U) {
 		goto usage;
 	}
-	ret = parse_u32(sh, argv[1], &item.dest);
+	ret = parse_u32(sh, argv[1], &dest);
 	if (ret < 0) {
 		return ret;
 	}
+	/* The request is built in the queued item itself, not on this stack. */
+	w = mtsh_work_alloc(sh, shell_admin_remote_run);
+	if (w == NULL) {
+		return -ENOMSG;
+	}
+	aw = (struct shell_admin_remote_work *)w->arg;
+	aw->dest = dest;
 
 	/* Everything below only parses and checks. The send itself runs on the work queue:
 	 * it is the whole send path, which the XIAO shell stack cannot carry. */
 	if (strcmp(argv[2], "get") == 0 && argc >= 4U) {
 		if (strcmp(argv[3], "owner") == 0) {
-			item.payload[0] = ADMIN_REMOTE_GET_OWNER;
+			aw->payload[0] = ADMIN_REMOTE_GET_OWNER;
 		} else if (strcmp(argv[3], "config") == 0 && argc >= 5U) {
 			uint32_t type;
 
 			ret = parse_u32(sh, argv[4], &type);
 			if (ret < 0) {
+				mtsh_work_cancel(w);
 				return ret;
 			}
-			item.payload[0] = ADMIN_REMOTE_GET_CONFIG;
-			item.payload[1] = (uint8_t)type;
+			aw->payload[0] = ADMIN_REMOTE_GET_CONFIG;
+			aw->payload[1] = (uint8_t)type;
 			if (type > UINT8_MAX) {
+				mtsh_work_cancel(w);
 				goto usage;
 			}
 		} else {
+			mtsh_work_cancel(w);
 			goto usage;
 		}
 	} else if (strcmp(argv[2], "set-time") == 0) {
@@ -7002,6 +7137,7 @@ static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 		if (argc >= 4U) {
 			ret = parse_u32(sh, argv[3], &epoch);
 			if (ret < 0) {
+				mtsh_work_cancel(w);
 				return ret;
 			}
 		} else {
@@ -7010,43 +7146,48 @@ static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 				shell_error(sh, "refused: this node's own clock is unset, so "
 						"it cannot be a time source (set it first, or "
 						"pass an explicit epoch)");
+				mtsh_work_cancel(w);
 				return -EAGAIN;
 			}
 		}
 
-		if (!meshtastic_admin_client_have_passkey(item.dest)) {
+		if (!meshtastic_admin_client_have_passkey(aw->dest)) {
 			shell_error(sh, "no fresh session passkey for 0x%08x -- run "
 				    "`meshtastic admin remote 0x%08x get owner` first",
-				    item.dest, item.dest);
+				    aw->dest, aw->dest);
+			mtsh_work_cancel(w);
 			return -EACCES;
 		}
-		item.payload[0] = ADMIN_REMOTE_SET_TIME;
-		memcpy(&item.payload[1], &epoch, sizeof(epoch));
+		aw->payload[0] = ADMIN_REMOTE_SET_TIME;
+		memcpy(&aw->payload[1], &epoch, sizeof(epoch));
 	} else if (strcmp(argv[2], "set-owner") == 0 && argc >= 4U) {
 		size_t long_len = strlen(argv[3]);
 		size_t short_len = argc >= 5U ? strlen(argv[4]) : 0U;
 
-		if (!meshtastic_admin_client_have_passkey(item.dest)) {
+		if (!meshtastic_admin_client_have_passkey(aw->dest)) {
 			shell_error(sh, "no fresh session passkey for 0x%08x -- run "
 				    "`meshtastic admin remote 0x%08x get owner` first",
-				    item.dest, item.dest);
+				    aw->dest, aw->dest);
+			mtsh_work_cancel(w);
 			return -EACCES;
 		}
-		if (2U + long_len + 1U + short_len + 1U > sizeof(item.payload)) {
+		if (2U + long_len + 1U + short_len + 1U > sizeof(aw->payload)) {
 			shell_error(sh, "name too long");
+			mtsh_work_cancel(w);
 			return -EINVAL;
 		}
-		item.payload[0] = ADMIN_REMOTE_SET_OWNER;
-		item.payload[1] = argc >= 5U ? 1U : 0U;
-		memcpy(&item.payload[2], argv[3], long_len + 1U);
+		aw->payload[0] = ADMIN_REMOTE_SET_OWNER;
+		aw->payload[1] = argc >= 5U ? 1U : 0U;
+		memcpy(&aw->payload[2], argv[3], long_len + 1U);
 		if (argc >= 5U) {
-			memcpy(&item.payload[2U + long_len + 1U], argv[4], short_len + 1U);
+			memcpy(&aw->payload[2U + long_len + 1U], argv[4], short_len + 1U);
 		}
 	} else {
+		mtsh_work_cancel(w);
 		goto usage;
 	}
 
-	return enqueue_shell_work(sh, &item);
+	return mtsh_work_submit(w, sizeof(*aw));
 
 usage:
 	shell_error(sh, "usage: meshtastic admin remote <node> get owner\n"
@@ -7892,8 +8033,8 @@ static void fleet_version_copy(struct shell_fleet_work *fw, const char *v)
  * runs on the work thread (agents-vnfu: it overflowed the XIAO's shell stack). */
 static int cmd_fleet_desire(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {.op = SHELL_WORK_FLEET};
-	struct shell_fleet_work *fw = (struct shell_fleet_work *)item.payload;
+	struct shell_fleet_work work = {0};
+	struct shell_fleet_work *fw = &work;
 	unsigned long cls;
 
 	if (argc < 3U) {
@@ -7928,14 +8069,13 @@ static int cmd_fleet_desire(const struct shell *sh, size_t argc, char **argv)
 			return -EINVAL;
 		}
 	}
-	item.payload_len = sizeof(*fw);
-	return enqueue_shell_work(sh, &item);
+	return mtsh_enqueue(sh, shell_fleet_work_run, fw, sizeof(*fw));
 }
 
 static int cmd_fleet_pin(const struct shell *sh, size_t argc, char **argv)
 {
-	struct shell_work_item item = {.op = SHELL_WORK_FLEET};
-	struct shell_fleet_work *fw = (struct shell_fleet_work *)item.payload;
+	struct shell_fleet_work work = {0};
+	struct shell_fleet_work *fw = &work;
 	bool withdraw = (strcmp(argv[0], "unpin") == 0);
 
 	if (argc < (withdraw ? 2U : 3U)) {
@@ -7966,8 +8106,7 @@ static int cmd_fleet_pin(const struct shell *sh, size_t argc, char **argv)
 			}
 		}
 	}
-	item.payload_len = sizeof(*fw);
-	return enqueue_shell_work(sh, &item);
+	return mtsh_enqueue(sh, shell_fleet_work_run, fw, sizeof(*fw));
 }
 
 #if defined(CONFIG_MESHTASTIC_DEPOT)
