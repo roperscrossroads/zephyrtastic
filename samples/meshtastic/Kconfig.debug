@@ -16,11 +16,17 @@
 #     entry says where it is set.
 #   - Debug-only overlays (turn things ON for one build):
 #       overlay-threadanalyzer.conf  (already on everywhere; kept for old recipes)
-#       overlay-tracing.conf         CTF tracing into an 8 KB RAM buffer
-#       overlay-gnsstime.conf        GNSS/1PPS timing lines + bigger log ring
-#       overlay-gnssdump.conf        per-satellite NMEA/SNR dump
-#       overlay-fault-test.conf      OTA fault-injection timer
 #       overlay-coredump-flash.conf  coredump to a flash partition (+ crashtest)
+#     Four more had their own overlay until agents-ls39.2.4 (no class, lane
+#     scenario, knob or test used them); pass their lines as -D or in EXTRAS:
+#       CTF tracing, 8 KB RAM buffer: TRACING=y TRACING_CTF=y TRACING_BACKEND_RAM=y
+#                                      RAM_TRACING_BUFFER_SIZE=8192
+#       GNSS/1PPS timing lines:       GNSS=y MESHTASTIC_GNSS=y MESHTASTIC_GNSS_TIME_DEBUG=y
+#                                      MESHTASTIC_GNSS_PPS_LOG_EDGES=y MESHTASTIC_LOGRING_SIZE=6912
+#       per-satellite NMEA/SNR dump:  GNSS=y MESHTASTIC_GNSS=y GNSS_DUMP_TO_LOG=y
+#                                      GNSS_SATELLITES=y GNSS_DUMP_TO_LOG_BUF_SIZE=256
+#                                      MODEM_MODULES_LOG_LEVEL_DBG=y
+#       OTA fault-injection timer:    MESHTASTIC_OTA_FAULT_TEST_SEC=45
 #     Class overlays that switch diagnostics on per fleet class:
 #       overlay-health.conf (health report), overlay-rf.conf (rf histograms +
 #       path report), overlay-coredump-flash.conf.
@@ -202,7 +208,8 @@ configdefault MESHTASTIC_WATCHDOG
 configdefault MESHTASTIC_SHELL_CRASHTEST
 	default n
 
-# OTA fault-injection timer (seconds; 0 = off): overlay-fault-test.conf sets 45.
+# OTA fault-injection timer (seconds; 0 = off): set MESHTASTIC_OTA_FAULT_TEST_SEC=45
+# on a test image (the old overlay-fault-test.conf; see the header).
 
 # ---------------------------------------------------------------------------
 # 2. Stacks, threads, heap, CPU
@@ -251,7 +258,7 @@ configdefault MESHTASTIC_HEAP_TRACE
 configdefault MESHTASTIC_POWERMON
 	default n
 
-# Kernel tracing (CTF into a RAM buffer): overlay-tracing.conf. Off.
+# Kernel tracing (CTF into a RAM buffer): the TRACING lines in the header. Off.
 # Cost to turn on: +14.0 KB dram0 (+1.9 KB iram) on V4 | +19.3 KB XIAO flash,
 # +12.3 KB RAM [S4]. Would not fit class 4's 16 KB headroom with much to spare.
 #
@@ -354,11 +361,11 @@ configdefault MESHTASTIC_PACKET_HEXDUMP
 	default n
 
 # GNSS timing: `gnsst` lines per NMEA callback (cycle/uptime/UTC/fix) and one
-# per 1PPS edge. overlay-gnsstime.conf turns both on (and a 7 KB log ring).
-# WARNING: overlay-gnsstime.conf does NOT fit class 4 -- its 7 KB log ring
-# overflows the RTC slow segment by 44 B [S4]; use it on a lighter image.
-# overlay-gnssdump.conf (per-satellite dump): +1.3 KB dram0, +1.2 KB flash on
-# class 4 [S4]. (GNSS images only.)
+# per 1PPS edge. The GNSS timing lines in the header turn both on (and a 7 KB log ring).
+# WARNING: that 7 KB log ring does NOT fit class 4 -- it overflows the RTC slow
+# segment by 44 B [S4]; use it on a lighter image.
+# The per-satellite dump (header): +1.3 KB dram0, +1.2 KB flash on class 4 [S4].
+# (GNSS images only.)
 configdefault MESHTASTIC_GNSS_TIME_DEBUG
 	default n
 configdefault MESHTASTIC_GNSS_PPS_LOG_EDGES
