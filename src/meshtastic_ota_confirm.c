@@ -126,7 +126,7 @@ static struct mgmt_callback dfu_hold_callback = {
 #endif /* CONFIG_MESHTASTIC_OTA_HOLD_DURING_DFU */
 
 #if CONFIG_MESHTASTIC_OTA_FAULT_TEST_SEC > 0
-/* TEST ONLY (overlay-fault-test.conf): a deliberately bad image. It comes up,
+/* TEST ONLY (MESHTASTIC_OTA_FAULT_TEST_SEC): a deliberately bad image. It comes up,
  * beats — so a courier sees it running the delivered version — and then
  * faults inside the confirm window. RESET_ON_FATAL reboots it, MCUboot finds
  * the image unconfirmed and swaps back, and the courier watching the beats

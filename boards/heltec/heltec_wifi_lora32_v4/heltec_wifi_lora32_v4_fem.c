@@ -878,7 +878,7 @@ static int cmd_gps_pps(const struct shell *sh, size_t argc, char **argv)
 		shell_warn(sh, "no interval yet — need >=2 edges");
 		shell_print(sh, "0 edges is inconclusive without a fix: most receivers only");
 		shell_print(sh, "drive PPS once they have one. The `gnsst` log line carries");
-		shell_print(sh, "fix= and sats=; overlay-gnssdump.conf adds per-satellite SNR.");
+		shell_print(sh, "fix= and sats=; CONFIG_GNSS_DUMP_TO_LOG adds per-satellite SNR.");
 		return 0;
 	}
 

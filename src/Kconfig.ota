@@ -80,7 +80,7 @@ config MESHTASTIC_OTA_FAULT_TEST_SEC
 	  Builds a deliberately bad image: it boots, beats, then faults before
 	  the auto-confirm window closes, so MCUboot reverts it on the reset and
 	  a courier can be watched calling the round REVERTED. Never set this in
-	  an image meant to run. samples/meshtastic/overlay-fault-test.conf.
+	  an image meant to run (a test image sets 45).
 
 endif # MESHTASTIC_OTA
 

@@ -192,17 +192,6 @@ config MESHTASTIC_MQTT_PUBLISH_QUEUE_SIZE
 	  is queued, so the queue only ever holds one in flight; a proxy-only build
 	  therefore defaults to the minimum.
 
-config MESHTASTIC_MQTT_UPLINK_QUEUE_SIZE
-	int "Deferred MQTT uplink encode queue depth"
-	default 16
-	range 4 64
-	depends on MESHTASTIC_MQTT_UPLINK_ENABLED
-	help
-	  Packets to uplink are queued here and processed on the MQTT thread so
-	  LoRa TX/RX and shell commands are not blocked on broker I/O. When
-	  full, the newest packet is dropped before any protobuf or broker work
-	  is attempted.
-
 # Broker reconnects back off on a fixed ladder (1 s, 8 s, 32 s, 64 s, then
 # 4-8 min with jitter — see mqtt_backoff_ladder_s in meshtastic_mqtt.c), so
 # there is no reconnect-interval knob: a long outage costs a handful of
