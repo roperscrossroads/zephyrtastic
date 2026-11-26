@@ -200,6 +200,15 @@ extern struct meshtastic_workspace mt_ws;
 
 uint32_t meshtastic_allocate_packet_id(void);
 uint32_t meshtastic_next_fromradio_id(void);
+/* Boot only (meshtastic_init): seed the packet-id counter from the PSA DRBG, so ids
+ * (and with them the AES-CTR nonces) do not repeat across a reboot. -EIO, and the node
+ * must not start, if the DRBG cannot seed it. Call after psa_crypto_init(). */
+int meshtastic_seed_packet_id(void);
+#if IS_ENABLED(CONFIG_MESHTASTIC_NODE_ID_HWINFO)
+/* Boot only: the node id from the hardware id's low 4 bytes (bytes 2..5 of a 6-byte
+ * id, the Meshtastic MAC rule). -ENODEV without a hardware id, -EINVAL for id 0. */
+int meshtastic_node_id_from_hwinfo(uint32_t *node_id);
+#endif
 /* AES-CTR channel nonce byte-packing -- pure, no crypto. Exposed for the
  * upstream-layout pin test (test_channel_nonce_matches_reference_layout). */
 void meshtastic_channel_nonce_build(uint8_t out[16], uint32_t id, uint32_t from);

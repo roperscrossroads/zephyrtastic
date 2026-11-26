@@ -9,9 +9,6 @@
 #include <string.h>
 
 #include <zephyr/device.h>
-#if IS_ENABLED(CONFIG_MESHTASTIC_NODE_ID_HWINFO)
-#include <zephyr/drivers/hwinfo.h>
-#endif
 #include <zephyr/kernel.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
@@ -124,45 +121,6 @@ int meshtastic_nodeinfo_init(void);
 int meshtastic_display_init(void);
 #endif
 
-#if defined(CONFIG_BOARD_TWATCH_S3)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_T_WATCH_S3
-#elif defined(CONFIG_BOARD_TTGO_TBEAM)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_TBEAM
-#elif defined(CONFIG_BOARD_TTGO_LORA32)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_TLORA_V2_1_1P8
-/* V4_R8 before V4: they are independent boards today (the R8 carries octal PSRAM
- * and is not a revision of the plain V4), so the order is not load-bearing — but
- * keeping the more specific symbol first means this stays correct if the R8 is
- * ever folded in as a variant that also defines the base symbol. */
-#elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V4_R8)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V4_R8
-#elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V4)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V4
-#elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V2)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V2_1
-#elif defined(CONFIG_BOARD_HELTEC_WIRELESS_TRACKER)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_WIRELESS_TRACKER
-#elif defined(CONFIG_BOARD_HELTEC_WIRELESS_STICK_LITE_V3)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_WSL_V3
-#elif defined(CONFIG_BOARD_HELTEC_T114_V2)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_MESH_NODE_T114
-#elif defined(CONFIG_BOARD_RAK4631)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_RAK4631
-/* Seeed XIAO nRF52840 (+ Wio-SX1262 shield) — upstream's enum for exactly this
- * pairing. Covers the plain and the Sense variant (one BOARD symbol). Before
- * this case existed the kits fell through to PRIVATE_HW, so a peer's NodeDB
- * could not tell a XIAO from unknown hardware — which matters once an image
- * class is checked against hw_model before a firmware push. */
-#elif defined(CONFIG_BOARD_XIAO_BLE)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_XIAO_NRF52_KIT
-#else
-/* An unmapped board advertises PRIVATE_HW to every peer and to the phone app.
- * That is the honest answer for hardware upstream has no enum for, but it is the
- * wrong answer for a board that does have one — add the case above rather than
- * letting a supported board fall through here. */
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_PRIVATE_HW
-#endif
-
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
@@ -173,240 +131,6 @@ const uint8_t meshtastic_default_psk[16] = {
 
 struct meshtastic_context mt;
 struct meshtastic_workspace mt_ws;
-
-#if IS_ENABLED(CONFIG_MESHTASTIC_NODE_ID_HWINFO)
-/* Last 4 bytes big-endian; for len>=6 uses bytes [2..5] (Meshtastic MAC rule). */
-static uint32_t node_id_from_bytes(const uint8_t *data, size_t len)
-{
-	uint8_t buf[4] = {0};
-
-	if (len >= 6) {
-		return sys_get_be32(&data[2]);
-	}
-
-	if (len >= 4) {
-		return sys_get_be32(&data[len - 4]);
-	}
-
-	if (len == 0) {
-		return 0;
-	}
-
-	memcpy(&buf[4 - len], data, len);
-	return sys_get_be32(buf);
-}
-
-static int node_id_from_hwinfo(uint32_t *node_id)
-{
-	uint8_t hwid[16];
-	ssize_t hwlen;
-
-	hwlen = hwinfo_get_device_id(hwid, sizeof(hwid));
-	if (hwlen <= 0) {
-		return -ENODEV;
-	}
-
-	*node_id = node_id_from_bytes(hwid, (size_t)hwlen);
-	if (*node_id == 0U) {
-		return -EINVAL;
-	}
-
-	if (*node_id <= 3U) {
-		LOG_WRN("Derived node ID 0x%08x is reserved (1-3)", *node_id);
-	}
-
-	return 0;
-}
-#endif /* CONFIG_MESHTASTIC_NODE_ID_HWINFO */
-
-/*
- * Packet-id generation.
- *
- * The AES-CTR channel nonce is built from (packet id, source node id) and
- * nothing else. The source id is fixed for the life of the node, so the id is
- * the only thing keeping the (key, nonce) pair unique — and a counter that
- * restarts at a fixed value every boot re-emits packets under nonces already
- * used before the reboot. Two ciphertexts under one keystream leak their
- * plaintexts' XOR, which on a secret-PSK channel is a real confidentiality
- * break for anyone logging across an induced restart.
- *
- * So: the counter is seeded from the CSPRNG at boot, and each id carries fresh
- * random high bits on top of it. The low bits stay a rolling counter, which
- * keeps consecutive ids distinct even if the RNG were to repeat itself.
- *
- * Wire format is unchanged — the id is still an opaque 32-bit value.
- *
- * MESHTASTIC_PKT_ID_COUNTER_BITS (meshtastic_core.h) mirrors upstream
- * Router.cpp generatePacketId()'s split exactly: a 10-bit rolling counter in
- * the low bits, 22 fresh random bits refreshed on every call in the high bits
- * ("rollingPacketId &= ID_COUNTER_MASK; id = rollingPacketId | random() << 10").
- */
-#define PKT_ID_COUNTER_BITS MESHTASTIC_PKT_ID_COUNTER_BITS
-#define PKT_ID_COUNTER_MASK BIT_MASK(PKT_ID_COUNTER_BITS)
-
-static int seed_packet_id(void)
-{
-	uint32_t seed = 0U;
-	psa_status_t st = psa_generate_random((uint8_t *)&seed, sizeof(seed));
-
-	if (st != PSA_SUCCESS) {
-		/* Refuse rather than silently fall back to a predictable counter:
-		 * a node that cannot seed this cannot encrypt safely, and the
-		 * failure would otherwise be invisible until someone captured
-		 * traffic across a reboot. */
-		LOG_ERR("packet-id seed failed (%d) — refusing to start with a "
-			"predictable AES-CTR nonce",
-			(int)st);
-		return -EIO;
-	}
-
-	atomic_set(&mt.next_pkt_id, (atomic_val_t)seed);
-	return 0;
-}
-
-uint32_t meshtastic_allocate_packet_id(void)
-{
-	uint32_t id;
-
-	do {
-		uint32_t high = 0U;
-		/* One atomic step per id: two threads can no longer read the
-		 * same counter value (atomic_inc returns the value before). */
-		uint32_t ctr = (uint32_t)atomic_inc(&mt.next_pkt_id) + 1U;
-
-		if (psa_generate_random((uint8_t *)&high, sizeof(high)) != PSA_SUCCESS) {
-			/* Degrade to the counter alone. Still safe for the property
-			 * that matters here: the counter was seeded randomly at
-			 * boot, so ids do not repeat across a restart. */
-			high = ctr >> PKT_ID_COUNTER_BITS;
-		}
-
-		id = (ctr & PKT_ID_COUNTER_MASK) | (high << PKT_ID_COUNTER_BITS);
-	} while (id == 0U); /* id 0 is reserved (see the id==0 broadcast guard) */
-
-	return id;
-}
-
-uint32_t meshtastic_next_fromradio_id(void)
-{
-	/* The low 32 bits of an atomic counter: wraps like the uint32_t it was,
-	 * and skips NONE the same way, without a lost update between threads. */
-	uint32_t id = (uint32_t)atomic_inc(&mt.next_fromradio_id);
-
-	if (id == MESHTASTIC_FROMRADIO_NONE) {
-		id = (uint32_t)atomic_inc(&mt.next_fromradio_id);
-	}
-
-	return id;
-}
-
-const char *meshtastic_long_name(void)
-{
-	return mt.long_name;
-}
-
-const char *meshtastic_short_name(void)
-{
-	return mt.short_name;
-}
-
-meshtastic_HardwareModel meshtastic_hw_model(void)
-{
-	return MESHTASTIC_BOARD_HW_MODEL;
-}
-
-void meshtastic_fill_user(meshtastic_User *user)
-{
-	uint32_t node = mt.node_id;
-
-	*user = (meshtastic_User)meshtastic_User_init_zero;
-	snprintk(user->id, sizeof(user->id), "!%08x", node);
-	strncpy(user->long_name, mt.long_name, sizeof(user->long_name) - 1U);
-	strncpy(user->short_name, mt.short_name, sizeof(user->short_name) - 1U);
-
-	/* Meshtastic derives the node number from the low 4 bytes of macaddr. */
-	user->macaddr[0] = 0x02U;
-	user->macaddr[1] = 0x00U;
-	user->macaddr[2] = (uint8_t)(node >> 24);
-	user->macaddr[3] = (uint8_t)(node >> 16);
-	user->macaddr[4] = (uint8_t)(node >> 8);
-	user->macaddr[5] = (uint8_t)node;
-
-	user->hw_model = meshtastic_hw_model();
-	user->role = meshtastic_device_role();
-
-	meshtastic_config_store_get_owner_flags(&user->is_licensed, &user->is_unmessagable);
-	user->has_is_unmessagable = true;
-
-#if defined(CONFIG_MESHTASTIC_PKI)
-	{
-		uint8_t pub[MESHTASTIC_PKI_KEY_LEN];
-
-		if (meshtastic_pki_get_public_key(pub) == MESHTASTIC_PKI_KEY_LEN) {
-			memcpy(user->public_key.bytes, pub, MESHTASTIC_PKI_KEY_LEN);
-			user->public_key.size = MESHTASTIC_PKI_KEY_LEN;
-		}
-	}
-#endif
-}
-
-void meshtastic_fill_device_metadata(meshtastic_DeviceMetadata *md)
-{
-	*md = (meshtastic_DeviceMetadata)meshtastic_DeviceMetadata_init_zero;
-	strncpy(md->firmware_version, MESHTASTIC_FIRMWARE_VERSION,
-		sizeof(md->firmware_version) - 1U);
-	md->hasBluetooth = IS_ENABLED(CONFIG_MESHTASTIC_BLE);
-	md->hasWifi = IS_ENABLED(CONFIG_WIFI);
-	md->hasEthernet = IS_ENABLED(CONFIG_NET_L2_ETHERNET);
-	md->canShutdown = IS_ENABLED(CONFIG_POWEROFF); /* sys_poweroff() -> deep sleep */
-	md->hasRemoteHardware = false; /* no RemoteHardware module */
-#if defined(CONFIG_MESHTASTIC_PKI)
-	md->hasPKC = meshtastic_pki_have_key();
-#else
-	md->hasPKC = false;            /* no ECDH/PKC key agreement */
-#endif
-	md->role = meshtastic_device_role();
-	md->hw_model = meshtastic_hw_model();
-
-	/*
-	 * Tell the app which module config editors to hide. Unlike the reference
-	 * firmware (which only excludes its platform-absent set), we report this
-	 * port's TRUE module availability: modules with no handler here are marked
-	 * excluded so the app doesn't offer no-op config screens for them. Gate the
-	 * ones the port can build; exclude the rest unconditionally.
-	 */
-	md->excluded_modules =
-		(IS_ENABLED(CONFIG_MESHTASTIC_MQTT) ? 0U
-						    : meshtastic_ExcludedModules_MQTT_CONFIG) |
-		((IS_ENABLED(CONFIG_MESHTASTIC_DEVICE_METRICS) ||
-		  IS_ENABLED(CONFIG_MESHTASTIC_ENVIRONMENT_METRICS))
-			 ? 0U
-			 : meshtastic_ExcludedModules_TELEMETRY_CONFIG) |
-		(IS_ENABLED(CONFIG_MESHTASTIC_BLE) ? 0U
-						   : meshtastic_ExcludedModules_BLUETOOTH_CONFIG) |
-		((IS_ENABLED(CONFIG_WIFI) || IS_ENABLED(CONFIG_NET_L2_ETHERNET))
-			 ? 0U
-			 : meshtastic_ExcludedModules_NETWORK_CONFIG) |
-		(IS_ENABLED(CONFIG_MESHTASTIC_EXTNOTIFY) ? 0U
-							: meshtastic_ExcludedModules_EXTNOTIF_CONFIG) |
-		(IS_ENABLED(CONFIG_MESHTASTIC_NEIGHBORINFO)
-			 ? 0U
-			 : meshtastic_ExcludedModules_NEIGHBORINFO_CONFIG) |
-		/* No handler in the port — always excluded. Building one of these
-		 * means moving its bit up into the gated group above; the protocol
-		 * suite's test_excluded_modules_track_the_build holds both lists.
-		 * Note MESHTASTIC_SERIAL is the PhoneAPI transport, not the on-mesh
-		 * Serial module. */
-		meshtastic_ExcludedModules_SERIAL_CONFIG |
-		meshtastic_ExcludedModules_STOREFORWARD_CONFIG |
-		meshtastic_ExcludedModules_RANGETEST_CONFIG |
-		meshtastic_ExcludedModules_CANNEDMSG_CONFIG |
-		meshtastic_ExcludedModules_AUDIO_CONFIG |
-		meshtastic_ExcludedModules_REMOTEHARDWARE_CONFIG |
-		meshtastic_ExcludedModules_AMBIENTLIGHTING_CONFIG |
-		meshtastic_ExcludedModules_DETECTIONSENSOR_CONFIG |
-		meshtastic_ExcludedModules_PAXCOUNTER_CONFIG;
-}
 
 void meshtastic_set_ble_connected(bool connected)
 {
@@ -558,7 +282,7 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 		mt.node_id = CONFIG_MESHTASTIC_NODE_ID_DEFAULT;
 	}
 #else /* CONFIG_MESHTASTIC_NODE_ID_HWINFO */
-	ret = node_id_from_hwinfo(&mt.node_id);
+	ret = meshtastic_node_id_from_hwinfo(&mt.node_id);
 	if (ret < 0) {
 		return ret;
 	}
@@ -677,7 +401,7 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	}
 
 	/* Must follow psa_crypto_init(): the seed comes from the PSA DRBG. */
-	ret = seed_packet_id();
+	ret = meshtastic_seed_packet_id();
 	if (ret < 0) {
 		return ret;
 	}
