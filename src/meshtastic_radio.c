@@ -984,7 +984,10 @@ static void mt_thread_fn(void *p1, void *p2, void *p3)
  * PM_STATE_STANDBY. Two app-side pieces make that correct and useful; see
  * docs/light-sleep-governor.md and the board-DT dio1 note.
  */
-static const struct gpio_dt_spec mt_dio1 = GPIO_DT_SPEC_GET(DT_NODELABEL(lora0), dio1_gpios);
+/* Empty (port NULL) on a board whose radio node has no dio1-gpios, e.g. an SX1262
+ * shield on the Arduino GIGA: there is no DIO1 wake to arm or disarm there. */
+static const struct gpio_dt_spec mt_dio1 =
+	GPIO_DT_SPEC_GET_OR(DT_NODELABEL(lora0), dio1_gpios, {0});
 
 /* Carried in zephyr/patches/0002-*: submit the driver's DIO1 work if DIO1 is asserted.
  * Takes the radio device because the native sx126x driver builds for two compatibles. */
@@ -1246,7 +1249,9 @@ static void mt_agc_reset_work_fn(struct k_work *work)
  */
 void meshtastic_radio_disarm_dio1_wake(void)
 {
-	(void)gpio_pin_configure_dt(&mt_dio1, GPIO_INPUT);
+	if (mt_dio1.port != NULL) {
+		(void)gpio_pin_configure_dt(&mt_dio1, GPIO_INPUT);
+	}
 }
 
 #if defined(CONFIG_PM)
