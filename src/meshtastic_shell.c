@@ -414,6 +414,29 @@ int mtsh_run_on_work(const struct shell *sh, shell_cmd_handler handler, size_t a
 	return call.rc;
 }
 
+/* The commands that stay on the shell thread. Every other `meshtastic` command runs on
+ * the work thread through mtsh_run_on_work() (agents-ls39.4.4.1), and tests/shell
+ * walks the registered tree to check that each command is one or the other. A path is
+ * the words after `meshtastic`. */
+const struct mtsh_shell_thread_cmd mtsh_shell_thread_cmds[] = {
+	{"api", "waits on the work thread for each step: there it would wait on itself"},
+	{"crashtest", "`stack` overflows the shell thread's own stack on purpose"},
+	{"dfu", "reboots into the bootloader at once: nothing to protect"},
+	{"netpause", "sleeps for N s by design: on the work thread it would hold queued sends"},
+	{"lockdown provision", "prompts for the passphrase (shell_readline); its work is queued"},
+	{"lockdown unlock", "prompts for the passphrase (shell_readline); its work is queued"},
+	{"lockdown disable", "prompts for the passphrase (shell_readline); its work is queued"},
+};
+
+const size_t mtsh_shell_thread_cmds_len = ARRAY_SIZE(mtsh_shell_thread_cmds);
+
+#if defined(CONFIG_ZTEST)
+k_tid_t mtsh_test_work_thread(void)
+{
+	return &shell_work_thread;
+}
+#endif
+
 /* The common argument: one node id. */
 uint32_t mtsh_work_dest(const void *arg, size_t len)
 {
@@ -483,6 +506,7 @@ static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_version)
 
 static int cmd_state(const struct shell *sh, size_t argc, char **argv)
 {
@@ -490,6 +514,7 @@ static int cmd_state(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 	return meshtastic_shell_state(sh);
 }
+MTSH_DEFINE_ON_WORK(cmd_state)
 
 #if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
 /* Prints nothing on the work thread: the shell thread is waiting for this step and
@@ -618,6 +643,7 @@ static int cmd_owner(const struct shell *sh, size_t argc, char **argv)
 	}
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 }
+MTSH_DEFINE_ON_WORK(cmd_owner)
 
 #if defined(CONFIG_MESHTASTIC_SHELL_CRASHTEST)
 /*
@@ -811,6 +837,7 @@ static int cmd_time(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 #endif
 }
+MTSH_DEFINE_ON_WORK(cmd_time)
 
 static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 {
@@ -864,6 +891,7 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_status)
 
 static const char *shell_channel_role_name(meshtastic_Channel_Role role)
 {
@@ -1174,6 +1202,7 @@ static int cmd_channel_list(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_channel_list)
 
 static int cmd_channel_show(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1216,6 +1245,7 @@ static int cmd_channel_show(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_channel_show)
 
 /* Parsers used only by the config-write commands below. */
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
@@ -1375,6 +1405,7 @@ static int cmd_channel_set(const struct shell *sh, size_t argc, char **argv)
 		    meshtastic_channels_get_hash(index));
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_channel_set)
 
 static int cmd_channel_disable(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1417,19 +1448,20 @@ static int cmd_channel_disable(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "channel %u disabled", (unsigned int)index);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_channel_disable)
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_channel_cmds,
-	SHELL_CMD(list, NULL, SHELL_HELP("List channel slots.", NULL), cmd_channel_list),
-	SHELL_CMD(show, NULL, SHELL_HELP("Show one channel slot.", "<index>"), cmd_channel_show),
+	SHELL_CMD(list, NULL, SHELL_HELP("List channel slots.", NULL), cmd_channel_list_on_work),
+	SHELL_CMD(show, NULL, SHELL_HELP("Show one channel slot.", "<index>"), cmd_channel_show_on_work),
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 	SHELL_CMD(set, NULL,
 		  SHELL_HELP("Update a channel slot.",
 			     "<index> [name|role|psk|uplink|downlink]..."),
-		  cmd_channel_set),
+		  cmd_channel_set_on_work),
 	SHELL_CMD(disable, NULL, SHELL_HELP("Disable a channel slot.", "<index>"),
-		  cmd_channel_disable),
+		  cmd_channel_disable_on_work),
 #endif
 	SHELL_SUBCMD_SET_END);
 
@@ -1478,6 +1510,7 @@ static int cmd_device_role(const struct shell *sh, size_t argc, char **argv)
 	}
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 }
+MTSH_DEFINE_ON_WORK(cmd_device_role)
 
 static int cmd_device_rebroadcast(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1523,13 +1556,14 @@ static int cmd_device_rebroadcast(const struct shell *sh, size_t argc, char **ar
 	}
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 }
+MTSH_DEFINE_ON_WORK(cmd_device_rebroadcast)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_device_cmds,
 			       SHELL_CMD(role, NULL, SHELL_HELP("Get/set device role.", "[name]"),
-					 cmd_device_role),
+					 cmd_device_role_on_work),
 			       SHELL_CMD(rebroadcast, NULL,
 					 SHELL_HELP("Get/set rebroadcast mode.", "[mode]"),
-					 cmd_device_rebroadcast),
+					 cmd_device_rebroadcast_on_work),
 			       SHELL_SUBCMD_SET_END);
 
 #if defined(CONFIG_MESHTASTIC_NODEDB)
@@ -1600,6 +1634,7 @@ static int cmd_nodedb_list(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_nodedb_list)
 
 static int cmd_nodedb_warm(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1630,6 +1665,7 @@ static int cmd_nodedb_warm(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_nodedb_warm)
 
 static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1719,6 +1755,7 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_nodedb_show)
 
 /* `node forget <id>`: drop a peer from the NodeDB — the only way past key
  * pinning for a peer that legitimately re-keyed (a re-flashed kit): its next
@@ -1741,6 +1778,7 @@ static int cmd_node_forget(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "0x%08x forgotten — its next NodeInfo re-learns it (and its key)", node_num);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_node_forget)
 
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
@@ -1786,6 +1824,7 @@ static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "node 0x%08x favorite %s", node_num, favorite ? "on" : "off");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_nodedb_favorite)
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 #if defined(CONFIG_MESHTASTIC_SCANNER)
@@ -1813,6 +1852,7 @@ static int cmd_scan_start(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "run 'meshtastic scan stop' to rejoin the mesh");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_scan_start)
 
 static int cmd_scan_stop(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1835,6 +1875,7 @@ static int cmd_scan_stop(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "rejoined: back on the operating preset, TX re-enabled");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_scan_stop)
 
 static int cmd_scan_status(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1900,6 +1941,7 @@ static int cmd_scan_status(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_scan_status)
 
 static int cmd_scan_dump(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1964,6 +2006,7 @@ static int cmd_scan_dump(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_scan_dump)
 
 static int cmd_scan_presets(const struct shell *sh, size_t argc, char **argv)
 {
@@ -2020,6 +2063,7 @@ static int cmd_scan_presets(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_scan_presets)
 
 static int cmd_scan_reset(const struct shell *sh, size_t argc, char **argv)
 {
@@ -2030,22 +2074,23 @@ static int cmd_scan_reset(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "scan records and stats cleared");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_scan_reset)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_scan_cmds,
 	SHELL_CMD(start, NULL,
 		  SHELL_HELP("Begin sweeping presets. Leaves the mesh; TX is refused.", NULL),
-		  cmd_scan_start),
+		  cmd_scan_start_on_work),
 	SHELL_CMD(stop, NULL, SHELL_HELP("Stop sweeping and rejoin the mesh.", NULL),
-		  cmd_scan_stop),
-	SHELL_CMD(status, NULL, SHELL_HELP("Per-preset capture counts.", NULL), cmd_scan_status),
-	SHELL_CMD(dump, NULL, SHELL_HELP("Print captured headers.", "[count]"), cmd_scan_dump),
+		  cmd_scan_stop_on_work),
+	SHELL_CMD(status, NULL, SHELL_HELP("Per-preset capture counts.", NULL), cmd_scan_status_on_work),
+	SHELL_CMD(dump, NULL, SHELL_HELP("Print captured headers.", "[count]"), cmd_scan_dump_on_work),
 	SHELL_CMD(presets, NULL,
 		  SHELL_HELP("Show or limit which presets are swept.",
 			     "[all | <name> ...]  e.g. scan presets LongFast ShortTurbo"),
-		  cmd_scan_presets),
+		  cmd_scan_presets_on_work),
 	SHELL_CMD(reset, NULL, SHELL_HELP("Clear captured records and stats.", NULL),
-		  cmd_scan_reset),
+		  cmd_scan_reset_on_work),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_SCANNER */
 #endif /* CONFIG_MESHTASTIC_NODEDB */
@@ -2296,6 +2341,7 @@ static int cmd_rf_path(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_rf_path)
 #endif /* CONFIG_MESHTASTIC_RF_PATH_REPORT */
 
 #if defined(CONFIG_MESHTASTIC_RF_HIST)
@@ -2437,6 +2483,7 @@ static int cmd_rf_hist(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_rf_hist)
 
 static int cmd_rf_peers(const struct shell *sh, size_t argc, char **argv)
 {
@@ -2490,6 +2537,7 @@ static int cmd_rf_peers(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_rf_peers)
 
 static int cmd_rf_reset(const struct shell *sh, size_t argc, char **argv)
 {
@@ -2500,40 +2548,41 @@ static int cmd_rf_reset(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "measurement window restarted (lifetime count kept)");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_rf_reset)
 #endif /* CONFIG_MESHTASTIC_RF_HIST */
 
 #if defined(CONFIG_MESHTASTIC_RF_HIST)
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_rf_cmds,
 	SHELL_CMD(hist, NULL, SHELL_HELP("RSSI/SNR distribution for this window.", NULL),
-		  cmd_rf_hist),
+		  cmd_rf_hist_on_work),
 	SHELL_CMD(peers, NULL, SHELL_HELP("Per-peer frame counts and link quality.", NULL),
-		  cmd_rf_peers),
+		  cmd_rf_peers_on_work),
 	SHELL_CMD(reset, NULL, SHELL_HELP("Start a new measurement window.", NULL),
-		  cmd_rf_reset),
+		  cmd_rf_reset_on_work),
 	SHELL_SUBCMD_SET_END);
 #endif
 
 #if defined(CONFIG_MESHTASTIC_NODEDB)
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodedb_cmds,
 			       SHELL_CMD(list, NULL, SHELL_HELP("List NodeDB entries.", NULL),
-					 cmd_nodedb_list),
+					 cmd_nodedb_list_on_work),
 			       SHELL_CMD(show, NULL,
 					 SHELL_HELP("Show one NodeDB entry.", "<node|0xnode>"),
-					 cmd_nodedb_show),
+					 cmd_nodedb_show_on_work),
 			       SHELL_CMD(warm, NULL,
 					 SHELL_HELP("List warm key-tier entries (num + LRU recency).",
 						    NULL),
-					 cmd_nodedb_warm),
+					 cmd_nodedb_warm_on_work),
 			       SHELL_CMD_ARG(forget, NULL,
 					     SHELL_HELP("Drop a peer from the NodeDB (past key pinning for a re-keyed peer).",
 							"<node-hex>"),
-					     cmd_node_forget, 2, 0),
+					     cmd_node_forget_on_work, 2, 0),
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 			       SHELL_CMD(favorite, NULL,
 					 SHELL_HELP("Mark a node favorite / not.",
 						    "<node|0xnode> [on|off]"),
-					 cmd_nodedb_favorite),
+					 cmd_nodedb_favorite_on_work),
 #endif
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_NODEDB */
@@ -2636,6 +2685,7 @@ static int cmd_text_send(const struct shell *sh, size_t argc, char **argv)
 
 	return mtsh_work_submit(w, offsetof(struct shell_text_work, text) + (size_t)len);
 }
+MTSH_DEFINE_ON_WORK(cmd_text_send)
 
 #if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
 /* One kept message as one line: what a test matches and a person reads. The text
@@ -2697,18 +2747,19 @@ static int cmd_text_inbox(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_text_inbox)
 #endif /* CONFIG_MESHTASTIC_TEXT_INBOX */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_text_cmds,
 			       SHELL_CMD(send, NULL,
 					 SHELL_HELP("Send text message.",
 						    "[-c <index>] [dest|broadcast] <message>"),
-					 cmd_text_send),
+					 cmd_text_send_on_work),
 #if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
 			       SHELL_CMD_ARG(inbox, NULL,
 					     SHELL_HELP("The last text messages received, newest first.",
 							"[<count>|clear]"),
-					     cmd_text_inbox, 1, 1),
+					     cmd_text_inbox_on_work, 1, 1),
 #endif
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_MESSAGE */
@@ -2726,6 +2777,7 @@ static int cmd_gnss_send(const struct shell *sh, size_t argc, char **argv)
 {
 	return cmd_deferred_send(sh, argc, argv, shell_position_send_run);
 }
+MTSH_DEFINE_ON_WORK(cmd_gnss_send)
 
 static const char *gnss_fix_status_name(uint8_t s)
 {
@@ -2808,15 +2860,16 @@ static int cmd_gnss_status(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_gnss_status)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_gnss_cmds,
 			       SHELL_CMD(send, NULL,
 					 SHELL_HELP("Send GNSS position.", "[dest|broadcast]"),
-					 cmd_gnss_send),
+					 cmd_gnss_send_on_work),
 			       SHELL_CMD(status, NULL,
 					 SHELL_HELP("Receiver, tracking, fix, 1PPS and clock — read-only.",
 						    NULL),
-					 cmd_gnss_status),
+					 cmd_gnss_status_on_work),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_GNSS */
 
@@ -2917,6 +2970,7 @@ static int cmd_position_show(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_position_show)
 
 /* Bare `meshtastic position` shows. Anything else reaching here is a subcommand
  * this build does not have -- the write forms, when config writes are compiled
@@ -2929,6 +2983,7 @@ static int cmd_position_root(const struct shell *sh, size_t argc, char **argv)
 	}
 	return cmd_position_show(sh, argc, argv);
 }
+MTSH_DEFINE_ON_WORK(cmd_position_root)
 
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int cmd_position_interval(const struct shell *sh, size_t argc, char **argv)
@@ -2958,6 +3013,7 @@ static int cmd_position_interval(const struct shell *sh, size_t argc, char **arg
 		    (secs == 0UL) ? " (compiled default)" : "");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_position_interval)
 
 static int cmd_position_gps_mode(const struct shell *sh, size_t argc, char **argv)
 {
@@ -2985,21 +3041,22 @@ static int cmd_position_gps_mode(const struct shell *sh, size_t argc, char **arg
 	shell_error(sh, "usage: meshtastic position gps_mode [enabled|disabled|not_present]");
 	return -EINVAL;
 }
+MTSH_DEFINE_ON_WORK(cmd_position_gps_mode)
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_position_cmds,
 	SHELL_CMD(show, NULL, SHELL_HELP("gps_mode, broadcast interval, current position.", NULL),
-		  cmd_position_show),
+		  cmd_position_show_on_work),
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 	SHELL_CMD_ARG(interval, NULL,
 		      SHELL_HELP("Show/set position_broadcast_secs (0 = compiled default).",
 				 "[secs]"),
-		      cmd_position_interval, 1, 1),
+		      cmd_position_interval_on_work, 1, 1),
 	SHELL_CMD_ARG(gps_mode, NULL,
 		      SHELL_HELP("Show/set PositionConfig.gps_mode.",
 				 "[enabled|disabled|not_present]"),
-		      cmd_position_gps_mode, 1, 1),
+		      cmd_position_gps_mode_on_work, 1, 1),
 #endif
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_POSITION */
@@ -3051,6 +3108,7 @@ static int cmd_airtime(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_airtime)
 #endif /* CONFIG_MESHTASTIC_AIRTIME */
 
 #if defined(CONFIG_MESHTASTIC_DUTY_CYCLE)
@@ -3092,6 +3150,7 @@ static int cmd_duty(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_duty)
 #endif /* CONFIG_MESHTASTIC_DUTY_CYCLE */
 
 #if defined(CONFIG_MESHTASTIC_PHONELOG)
@@ -3147,6 +3206,7 @@ static int cmd_phonelog(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_phonelog)
 #endif /* CONFIG_MESHTASTIC_PHONELOG */
 
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
@@ -3162,6 +3222,7 @@ static int cmd_metrics_send(const struct shell *sh, size_t argc, char **argv)
 {
 	return cmd_deferred_send(sh, argc, argv, shell_metrics_send_run);
 }
+MTSH_DEFINE_ON_WORK(cmd_metrics_send)
 
 #if defined(CONFIG_MESHTASTIC_LOCAL_STATS)
 /* Print LocalStats as the node would report them, and optionally push one to
@@ -3210,6 +3271,7 @@ static int cmd_metrics_localstats(const struct shell *sh, size_t argc, char **ar
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_metrics_localstats)
 #endif /* CONFIG_MESHTASTIC_LOCAL_STATS */
 
 /* The resolved broadcast cadence: what ModuleConfig.telemetry, the role, the
@@ -3229,21 +3291,22 @@ static int cmd_metrics_cadence(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "scaled by   : %u online nodes", s.online_nodes);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_metrics_cadence)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_metrics_cmds,
 			       SHELL_CMD(send, NULL,
 					 SHELL_HELP("Send device metrics.", "[dest|broadcast]"),
-					 cmd_metrics_send),
+					 cmd_metrics_send_on_work),
 			       SHELL_CMD(cadence, NULL,
 					 SHELL_HELP("Show the resolved telemetry broadcast "
 						    "cadence (ModuleConfig.telemetry).", NULL),
-					 cmd_metrics_cadence),
+					 cmd_metrics_cadence_on_work),
 #if defined(CONFIG_MESHTASTIC_LOCAL_STATS)
 			       SHELL_CMD(localstats, NULL,
 					 SHELL_HELP("Show LocalStats (mesh counters). "
 						    "`push` also sends one to the phone.",
 						    "[push]"),
-					 cmd_metrics_localstats),
+					 cmd_metrics_localstats_on_work),
 #endif
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_DEVICE_METRICS */
@@ -3261,11 +3324,12 @@ static int cmd_environment_send(const struct shell *sh, size_t argc, char **argv
 {
 	return cmd_deferred_send(sh, argc, argv, shell_environment_send_run);
 }
+MTSH_DEFINE_ON_WORK(cmd_environment_send)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_environment_cmds,
 	SHELL_CMD(send, NULL, SHELL_HELP("Send environment telemetry.", "[dest|broadcast]"),
-		  cmd_environment_send),
+		  cmd_environment_send_on_work),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_ENVIRONMENT_METRICS */
 
@@ -3282,6 +3346,7 @@ static int cmd_nodeinfo_send(const struct shell *sh, size_t argc, char **argv)
 {
 	return cmd_deferred_send(sh, argc, argv, shell_nodeinfo_send_run);
 }
+MTSH_DEFINE_ON_WORK(cmd_nodeinfo_send)
 
 /* Unlike `send`, this actually asks: want_response=true, so a compliant peer
  * replies with ITS NodeInfo. It goes through the same work queue `send` does: the
@@ -3322,6 +3387,7 @@ static int cmd_nodeinfo_request(const struct shell *sh, size_t argc, char **argv
 
 	return mtsh_enqueue(sh, shell_nodeinfo_request_run, &dest, sizeof(dest));
 }
+MTSH_DEFINE_ON_WORK(cmd_nodeinfo_request)
 
 /* Get/set device.node_info_broadcast_secs (agents-t2hb.1). Same shape as
  * `meshtastic device role`/`rebroadcast`: read always available, write gated
@@ -3377,21 +3443,22 @@ static int cmd_nodeinfo_interval(const struct shell *sh, size_t argc, char **arg
 	}
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 }
+MTSH_DEFINE_ON_WORK(cmd_nodeinfo_interval)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_nodeinfo_cmds,
 			       SHELL_CMD(send, NULL,
 					 SHELL_HELP("Send node information.", "[dest|broadcast]"),
-					 cmd_nodeinfo_send),
+					 cmd_nodeinfo_send_on_work),
 			       SHELL_CMD_ARG(request, NULL,
 					     SHELL_HELP("Ask a peer for ITS NodeInfo "
 							"(want_response=true).",
 							"<dest>"),
-					     cmd_nodeinfo_request, 2, 0),
+					     cmd_nodeinfo_request_on_work, 2, 0),
 			       SHELL_CMD(interval, NULL,
 					 SHELL_HELP("Get/set the auto-broadcast interval "
 						    "(0 = compiled default).",
 						    "[secs]"),
-					 cmd_nodeinfo_interval),
+					 cmd_nodeinfo_interval_on_work),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_NODEINFO */
 
@@ -3420,6 +3487,7 @@ static int cmd_status_show(const struct shell *sh, size_t argc, char **argv)
 #endif
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_status_show)
 
 static int cmd_status_write(const struct shell *sh, const char *text)
 {
@@ -3478,6 +3546,7 @@ static int cmd_status_set(const struct shell *sh, size_t argc, char **argv)
 
 	return cmd_status_write(sh, text);
 }
+MTSH_DEFINE_ON_WORK(cmd_status_set)
 
 static int cmd_status_clear(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3486,6 +3555,7 @@ static int cmd_status_clear(const struct shell *sh, size_t argc, char **argv)
 
 	return cmd_status_write(sh, "");
 }
+MTSH_DEFINE_ON_WORK(cmd_status_clear)
 
 static int shell_status_send_run(const struct shell *sh, const void *arg, size_t len)
 {
@@ -3510,6 +3580,7 @@ static int cmd_status_send(const struct shell *sh, size_t argc, char **argv)
 	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
 	return mtsh_enqueue(sh, shell_status_send_run, NULL, 0U);
 }
+MTSH_DEFINE_ON_WORK(cmd_status_send)
 
 static int cmd_status_peers(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3534,23 +3605,24 @@ static int cmd_status_peers(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_status_peers)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_status_cmds,
 			       SHELL_CMD(set, NULL,
 					 SHELL_HELP("Set and persist the status; re-arms the "
 						    "announce, no reboot.",
 						    "<text...>"),
-					 cmd_status_set),
+					 cmd_status_set_on_work),
 			       SHELL_CMD(clear, NULL,
 					 SHELL_HELP("Clear the status and cancel the announce.",
 						    NULL),
-					 cmd_status_clear),
+					 cmd_status_clear_on_work),
 			       SHELL_CMD(send, NULL,
 					 SHELL_HELP("Broadcast the status now.", NULL),
-					 cmd_status_send),
+					 cmd_status_send_on_work),
 			       SHELL_CMD(peers, NULL,
 					 SHELL_HELP("Last status heard from each peer.", NULL),
-					 cmd_status_peers),
+					 cmd_status_peers_on_work),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_STATUSMESSAGE */
 
@@ -3587,6 +3659,7 @@ static int cmd_relay_show(const struct shell *sh, size_t argc, char **argv)
 		    CONFIG_MESHTASTIC_RELAY_SEEN_TTL_SEC);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_relay_show)
 
 static int cmd_relay_dir(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3610,6 +3683,7 @@ static int cmd_relay_dir(const struct shell *sh, size_t argc, char **argv)
 	shell_error(sh, "usage: meshtastic relay dir <off|in|out|both>");
 	return -EINVAL;
 }
+MTSH_DEFINE_ON_WORK(cmd_relay_dir)
 
 static int cmd_relay_ignore(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3635,6 +3709,7 @@ static int cmd_relay_ignore(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "never relaying 0x%08x", node);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_relay_ignore)
 
 static int cmd_relay_reset(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3644,19 +3719,20 @@ static int cmd_relay_reset(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "relay reset: boot direction, caches, counters, ignore list; saved settings forgotten");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_relay_reset)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_relay_cmds,
-	SHELL_CMD(show, NULL, SHELL_HELP("Direction and counters.", NULL), cmd_relay_show),
+	SHELL_CMD(show, NULL, SHELL_HELP("Direction and counters.", NULL), cmd_relay_show_on_work),
 	SHELL_CMD_ARG(dir, NULL,
 		      SHELL_HELP("Set the direction (v1: off or in).", "<off|in|out|both>"),
-		      cmd_relay_dir, 2, 0),
+		      cmd_relay_dir_on_work, 2, 0),
 	SHELL_CMD_ARG(ignore, NULL,
 		      SHELL_HELP("Never relay a node (another relay), or clear the list.",
 				 "<hex node id>|clear"),
-		      cmd_relay_ignore, 2, 0),
+		      cmd_relay_ignore_on_work, 2, 0),
 	SHELL_CMD(reset, NULL, SHELL_HELP("Back to boot state; forgets the saved settings.", NULL),
-		  cmd_relay_reset),
+		  cmd_relay_reset_on_work),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_RELAY */
 
@@ -3682,6 +3758,7 @@ static int cmd_ear_show(const struct shell *sh, size_t argc, char **argv)
 		    IS_ENABLED(CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY) ? "compiled out" : "possible");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_ear_show)
 
 static int cmd_ear_peer(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3692,14 +3769,15 @@ static int cmd_ear_peer(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "peer: 0x%08x%s", node, node == 0U ? " (forwarding stopped)" : "");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_ear_peer)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_ear_cmds,
-	SHELL_CMD(show, NULL, SHELL_HELP("Peer and counters.", NULL), cmd_ear_show),
+	SHELL_CMD(show, NULL, SHELL_HELP("Peer and counters.", NULL), cmd_ear_show_on_work),
 	SHELL_CMD_ARG(peer, NULL,
 		      SHELL_HELP("The receiving half's node id (0 stops forwarding).",
 				 "<hex node id>"),
-		      cmd_ear_peer, 2, 0),
+		      cmd_ear_peer_on_work, 2, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_RELAY_EAR */
 
@@ -3771,6 +3849,7 @@ static int cmd_attach_allow(const struct shell *sh, size_t argc, char **argv)
 		    st.not_admitted_malformed, st.evicted);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_attach_allow)
 
 static int cmd_attach_list(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3790,6 +3869,7 @@ static int cmd_attach_list(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_attach_list)
 
 static int cmd_attach_status(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3832,6 +3912,7 @@ static int cmd_attach_status(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_attach_status)
 
 /* A preset as a name (ShortFast), its number (6), or "none". Anything else is refused: a
  * name used to parse as the number 0, which is LongFast, and put the head there. */
@@ -3894,6 +3975,7 @@ static int cmd_attach_preset(const struct shell *sh, size_t argc, char **argv)
 			     : "the link is down, it is asked when it next speaks");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_attach_preset)
 
 static int cmd_attach_power(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3915,6 +3997,7 @@ static int cmd_attach_power(const struct shell *sh, size_t argc, char **argv)
 		    dbm);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_attach_power)
 
 static int cmd_attach_forget(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3930,26 +4013,27 @@ static int cmd_attach_forget(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "attachment %lu forgotten", id);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_attach_forget)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_attach_cmds,
 	SHELL_CMD(list, NULL, SHELL_HELP("Every radio this brain hears through.", NULL),
-		  cmd_attach_list),
+		  cmd_attach_list_on_work),
 	SHELL_CMD_ARG(status, NULL, SHELL_HELP("One attachment in detail.", "<id>"),
-		      cmd_attach_status, 2, 0),
+		      cmd_attach_status_on_work, 2, 0),
 	SHELL_CMD_ARG(power, NULL, SHELL_HELP("Set a head's transmit power.", "<id> <dBm>"),
-		      cmd_attach_power, 3, 0),
+		      cmd_attach_power_on_work, 3, 0),
 	SHELL_CMD_ARG(preset, NULL,
 		      SHELL_HELP("Put a head on a preset and keep it there (stored; re-sent "
 				 "when the head comes back on another).",
 				 "<id> <name|number|none>"),
-		      cmd_attach_preset, 3, 0),
+		      cmd_attach_preset_on_work, 3, 0),
 	SHELL_CMD_ARG(allow, NULL,
 		      SHELL_HELP("Heads admitted on an untrusted link: show, add, clear.",
 				 "[<hex node id>|clear]"),
-		      cmd_attach_allow, 1, 1),
+		      cmd_attach_allow_on_work, 1, 1),
 	SHELL_CMD_ARG(forget, NULL, SHELL_HELP("Drop a head from the table.", "<id>"),
-		      cmd_attach_forget, 2, 0),
+		      cmd_attach_forget_on_work, 2, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_ATTACHMENT_BRAIN */
 
@@ -3977,6 +4061,7 @@ static int cmd_led_show(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_led_show)
 
 static int cmd_led_mode(const struct shell *sh, size_t argc, char **argv)
 {
@@ -3997,6 +4082,7 @@ static int cmd_led_mode(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "mode: %s (saved)", meshtastic_led_mode_name(m));
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_led_mode)
 
 static int cmd_led_color(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4011,6 +4097,7 @@ static int cmd_led_color(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "color: %s (saved)", meshtastic_led_color_name(c));
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_led_color)
 
 static int cmd_led_locate(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4025,17 +4112,18 @@ static int cmd_led_locate(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_led_locate)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_led_cmds,
 	SHELL_CMD_ARG(mode, NULL, SHELL_HELP("Set and save the mode.", "<idle|in-use|off>"),
-		      cmd_led_mode, 2, 0),
+		      cmd_led_mode_on_work, 2, 0),
 	SHELL_CMD_ARG(locate, NULL, SHELL_HELP("Blink \"here I am\"; 0 stops.", "[seconds]"),
-		      cmd_led_locate, 1, 1),
+		      cmd_led_locate_on_work, 1, 1),
 	SHELL_CMD_ARG(color, NULL,
 		      SHELL_HELP("Set and save what the board is for, as a color (RGB boards).",
 				 "<default|red|green|blue|yellow|cyan|magenta>"),
-		      cmd_led_color, 2, 0),
+		      cmd_led_color_on_work, 2, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_LED_STATUS */
 
@@ -4064,6 +4152,7 @@ static int cmd_attach_head_show(const struct shell *sh, size_t argc, char **argv
 		    st.tx_late, st.tx_late_dropped, st.tx_duty_blocked);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_attach_head_show)
 
 static int cmd_attach_head_brain(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4074,6 +4163,7 @@ static int cmd_attach_head_brain(const struct shell *sh, size_t argc, char **arg
 	shell_print(sh, "brain: 0x%08x%s", node, node == 0U ? " (forwarding stopped)" : "");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_attach_head_brain)
 
 static int shell_head_status_run(const struct shell *sh, const void *arg, size_t len)
 {
@@ -4096,15 +4186,16 @@ static int cmd_attach_head_status(const struct shell *sh, size_t argc, char **ar
 	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
 	return mtsh_enqueue(sh, shell_head_status_run, NULL, 0U);
 }
+MTSH_DEFINE_ON_WORK(cmd_attach_head_status)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_attach_head_cmds,
-	SHELL_CMD(show, NULL, SHELL_HELP("Brain and counters.", NULL), cmd_attach_head_show),
+	SHELL_CMD(show, NULL, SHELL_HELP("Brain and counters.", NULL), cmd_attach_head_show_on_work),
 	SHELL_CMD_ARG(brain, NULL,
 		      SHELL_HELP("The brain's node number (0 stops forwarding).", "<hex node id>"),
-		      cmd_attach_head_brain, 2, 0),
+		      cmd_attach_head_brain_on_work, 2, 0),
 	SHELL_CMD(status, NULL, SHELL_HELP("Send a STATUS to the brain now.", NULL),
-		  cmd_attach_head_status),
+		  cmd_attach_head_status_on_work),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_ATTACHMENT_HEAD */
 
@@ -4146,6 +4237,7 @@ static int cmd_neighbors_show(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "%zu direct neighbor%s", shown, shown == 1U ? "" : "s");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_neighbors_show)
 
 static int cmd_neighbors_write(const struct shell *sh, bool enabled, uint32_t interval_secs,
 			       bool transmit_over_lora)
@@ -4194,6 +4286,7 @@ static int cmd_neighbors_enable(const struct shell *sh, size_t argc, char **argv
 	neighbors_stored(&enabled, &interval, &lora);
 	return cmd_neighbors_write(sh, strcmp(argv[0], "enable") == 0, interval, lora);
 }
+MTSH_DEFINE_ON_WORK(cmd_neighbors_enable)
 
 static int cmd_neighbors_interval(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4219,6 +4312,7 @@ static int cmd_neighbors_interval(const struct shell *sh, size_t argc, char **ar
 	neighbors_stored(&enabled, &interval, &lora);
 	return cmd_neighbors_write(sh, enabled, (uint32_t)secs, lora);
 }
+MTSH_DEFINE_ON_WORK(cmd_neighbors_interval)
 
 static int cmd_neighbors_lora(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4232,6 +4326,7 @@ static int cmd_neighbors_lora(const struct shell *sh, size_t argc, char **argv)
 	neighbors_stored(&enabled, &interval, &lora);
 	return cmd_neighbors_write(sh, enabled, interval, strcmp(argv[1], "on") == 0);
 }
+MTSH_DEFINE_ON_WORK(cmd_neighbors_lora)
 
 /* Bench 2026-10-10: run inline, `neighbors send` rebooted kit1 (agents-yhdm). */
 static int shell_neighbors_send_run(const struct shell *sh, const void *arg, size_t len)
@@ -4258,22 +4353,23 @@ static int cmd_neighbors_send(const struct shell *sh, size_t argc, char **argv)
 	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
 	return mtsh_enqueue(sh, shell_neighbors_send_run, NULL, 0U);
 }
+MTSH_DEFINE_ON_WORK(cmd_neighbors_send)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_neighbors_cmds,
 			       SHELL_CMD(enable, NULL, SHELL_HELP("Enable the periodic broadcast.", NULL),
-					 cmd_neighbors_enable),
+					 cmd_neighbors_enable_on_work),
 			       SHELL_CMD(disable, NULL, SHELL_HELP("Disable it.", NULL),
-					 cmd_neighbors_enable),
+					 cmd_neighbors_enable_on_work),
 			       SHELL_CMD_ARG(interval, NULL,
 					     SHELL_HELP("Set the broadcast interval (0 = default).",
 							"<secs>"),
-					     cmd_neighbors_interval, 2, 0),
+					     cmd_neighbors_interval_on_work, 2, 0),
 			       SHELL_CMD_ARG(lora, NULL,
 					     SHELL_HELP("Transmit over LoRa, or phone-only.",
 							"on|off"),
-					     cmd_neighbors_lora, 2, 0),
+					     cmd_neighbors_lora_on_work, 2, 0),
 			       SHELL_CMD(send, NULL, SHELL_HELP("Broadcast the table now.", NULL),
-					 cmd_neighbors_send),
+					 cmd_neighbors_send_on_work),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_NEIGHBORINFO */
 
@@ -4327,6 +4423,7 @@ static int cmd_beacon_show(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_beacon_show)
 
 static int beacon_write(const struct shell *sh, const meshtastic_ModuleConfig_MeshBeaconConfig *cfg)
 {
@@ -4379,6 +4476,7 @@ static int cmd_beacon_flag(const struct shell *sh, size_t argc, char **argv)
 	}
 	return beacon_write(sh, &cfg);
 }
+MTSH_DEFINE_ON_WORK(cmd_beacon_flag)
 
 static int cmd_beacon_text(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4399,6 +4497,7 @@ static int cmd_beacon_text(const struct shell *sh, size_t argc, char **argv)
 	}
 	return beacon_write(sh, &cfg);
 }
+MTSH_DEFINE_ON_WORK(cmd_beacon_text)
 
 static int cmd_beacon_interval(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4419,6 +4518,7 @@ static int cmd_beacon_interval(const struct shell *sh, size_t argc, char **argv)
 	cfg.broadcast_interval_secs = (uint32_t)secs;
 	return beacon_write(sh, &cfg);
 }
+MTSH_DEFINE_ON_WORK(cmd_beacon_interval)
 
 static int shell_beacon_send_run(const struct shell *sh, const void *arg, size_t len)
 {
@@ -4454,6 +4554,7 @@ static int cmd_beacon_send(const struct shell *sh, size_t argc, char **argv)
 	/* On the work queue: the send path does not fit the shell thread's XIAO stack. */
 	return mtsh_enqueue(sh, shell_beacon_send_run, NULL, 0U);
 }
+MTSH_DEFINE_ON_WORK(cmd_beacon_send)
 
 static int cmd_beacon_forget(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4464,25 +4565,26 @@ static int cmd_beacon_forget(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "cached offer forgotten");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_beacon_forget)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_beacon_cmds,
 			       SHELL_CMD_ARG(flag, NULL,
 					     SHELL_HELP("Set a flag.",
 							"<listen|broadcast|legacy> on|off"),
-					     cmd_beacon_flag, 3, 0),
+					     cmd_beacon_flag_on_work, 3, 0),
 			       SHELL_CMD(text, NULL,
 					 SHELL_HELP("Set (or with no words, clear) the beacon text.",
 						    "[text...]"),
-					 cmd_beacon_text),
+					 cmd_beacon_text_on_work),
 			       SHELL_CMD_ARG(interval, NULL,
 					     SHELL_HELP("Set the broadcast interval (0 = minimum).",
 							"<secs>"),
-					     cmd_beacon_interval, 2, 0),
+					     cmd_beacon_interval_on_work, 2, 0),
 			       SHELL_CMD(send, NULL, SHELL_HELP("Beacon now.", NULL),
-					 cmd_beacon_send),
+					 cmd_beacon_send_on_work),
 			       SHELL_CMD(forget, NULL,
 					 SHELL_HELP("Forget the cached offer.", NULL),
-					 cmd_beacon_forget),
+					 cmd_beacon_forget_on_work),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_MESHBEACON */
 
@@ -4512,6 +4614,7 @@ static int cmd_traffic_show(const struct shell *sh, size_t argc, char **argv)
 			"enabling it is refused)");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_traffic_show)
 
 static void traffic_stored(meshtastic_ModuleConfig_TrafficManagementConfig *cfg)
 {
@@ -4573,6 +4676,7 @@ static int cmd_traffic_set(const struct shell *sh, size_t argc, char **argv)
 	}
 #endif
 }
+MTSH_DEFINE_ON_WORK(cmd_traffic_set)
 
 static int cmd_traffic_reset(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4583,16 +4687,17 @@ static int cmd_traffic_reset(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "traffic state and counters cleared");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_traffic_reset)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_traffic_cmds,
 			       SHELL_CMD_ARG(set, NULL,
 					     SHELL_HELP("Set one knob (0 disables it).",
 							"<dedup|window|max|unknown> <n>"),
-					     cmd_traffic_set, 3, 0),
+					     cmd_traffic_set_on_work, 3, 0),
 			       SHELL_CMD(reset, NULL,
 					 SHELL_HELP("Forget every node's state; zero counters.",
 						    NULL),
-					 cmd_traffic_reset),
+					 cmd_traffic_reset_on_work),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_TRAFFIC */
 
@@ -4619,6 +4724,7 @@ static int cmd_notify_show(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "  buzzer / vibra / ringtone: not on this port (such a config is refused)");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_notify_show)
 
 static int cmd_notify_test(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4639,6 +4745,7 @@ static int cmd_notify_test(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "nag cycle started");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_notify_test)
 
 static int cmd_notify_stop(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4649,6 +4756,7 @@ static int cmd_notify_stop(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "stopped");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_notify_stop)
 
 static int cmd_notify_enable(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4681,16 +4789,17 @@ static int cmd_notify_enable(const struct shell *sh, size_t argc, char **argv)
 	}
 #endif
 }
+MTSH_DEFINE_ON_WORK(cmd_notify_enable)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_notify_cmds,
 			       SHELL_CMD(enable, NULL, SHELL_HELP("Enable the LED notifier.", NULL),
-					 cmd_notify_enable),
+					 cmd_notify_enable_on_work),
 			       SHELL_CMD(disable, NULL, SHELL_HELP("Disable it.", NULL),
-					 cmd_notify_enable),
+					 cmd_notify_enable_on_work),
 			       SHELL_CMD(test, NULL, SHELL_HELP("Start a nag cycle now.", NULL),
-					 cmd_notify_test),
+					 cmd_notify_test_on_work),
 			       SHELL_CMD(stop, NULL, SHELL_HELP("End the cycle, LED off.", NULL),
-					 cmd_notify_stop),
+					 cmd_notify_stop_on_work),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_EXTNOTIFY */
 
@@ -4735,6 +4844,7 @@ static int cmd_xeddsa_show(const struct shell *sh, size_t argc, char **argv)
 		    st.sign_skipped);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_xeddsa_show)
 
 static int cmd_xeddsa_reset(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4745,10 +4855,11 @@ static int cmd_xeddsa_reset(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "xeddsa counters cleared");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_xeddsa_reset)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_xeddsa_cmds,
 			       SHELL_CMD(reset, NULL, SHELL_HELP("Zero the counters.", NULL),
-					 cmd_xeddsa_reset),
+					 cmd_xeddsa_reset_on_work),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_XEDDSA */
 
@@ -4773,6 +4884,7 @@ static int cmd_keyverify_show(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_keyverify_show)
 
 /* PSA RNG, protobuf encode, wire build with the PKC encrypt: the shell thread's own
  * stack cannot carry it. On the XIAO (CONFIG_SHELL_STACK_SIZE=2048) `keyverify start`
@@ -4853,6 +4965,7 @@ static int cmd_keyverify_start(const struct shell *sh, size_t argc, char **argv)
 	ret = mtsh_enqueue(sh, shell_keyverify_start_run, &dest, sizeof(dest));
 	return ret;
 }
+MTSH_DEFINE_ON_WORK(cmd_keyverify_start)
 
 static int cmd_keyverify_number(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4873,6 +4986,7 @@ static int cmd_keyverify_number(const struct shell *sh, size_t argc, char **argv
 	number = (uint32_t)n;
 	return mtsh_enqueue(sh, shell_keyverify_number_run, &number, sizeof(number));
 }
+MTSH_DEFINE_ON_WORK(cmd_keyverify_number)
 
 static int cmd_keyverify_accept(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4883,6 +4997,7 @@ static int cmd_keyverify_accept(const struct shell *sh, size_t argc, char **argv
 	 * path again). Bench 2026-09-09: inline, it locked kit2 up like `start`. */
 	return mtsh_enqueue(sh, shell_keyverify_accept_run, NULL, 0U);
 }
+MTSH_DEFINE_ON_WORK(cmd_keyverify_accept)
 
 static int cmd_keyverify_reject(const struct shell *sh, size_t argc, char **argv)
 {
@@ -4893,22 +5008,23 @@ static int cmd_keyverify_reject(const struct shell *sh, size_t argc, char **argv
 	shell_print(sh, "session dropped; nothing learned was kept");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_keyverify_reject)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_keyverify_cmds,
 			       SHELL_CMD_ARG(start, NULL,
 					     SHELL_HELP("Start verifying a peer's key.",
 							"<node-hex>"),
-					     cmd_keyverify_start, 2, 0),
+					     cmd_keyverify_start_on_work, 2, 0),
 			       SHELL_CMD_ARG(number, NULL,
 					     SHELL_HELP("Enter the security number the peer shows.",
 							"<6 digits>"),
-					     cmd_keyverify_number, 2, 0),
+					     cmd_keyverify_number_on_work, 2, 0),
 			       SHELL_CMD(accept, NULL,
 					 SHELL_HELP("The codes match: commit the key as verified.",
 						    NULL),
-					 cmd_keyverify_accept),
+					 cmd_keyverify_accept_on_work),
 			       SHELL_CMD(reject, NULL, SHELL_HELP("Drop the session.", NULL),
-					 cmd_keyverify_reject),
+					 cmd_keyverify_reject_on_work),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_KEYVERIFY */
 
@@ -4981,6 +5097,7 @@ static int cmd_sched_show(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_sched_show)
 
 static int cmd_sched_policy(const struct shell *sh, size_t argc, char **argv)
 {
@@ -5000,6 +5117,7 @@ static int cmd_sched_policy(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "policy '%s' applied (stats reset)", argv[1]);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_sched_policy)
 
 static int cmd_sched_set(const struct shell *sh, size_t argc, char **argv)
 {
@@ -5023,6 +5141,7 @@ static int cmd_sched_set(const struct shell *sh, size_t argc, char **argv)
 	}
 	return ret;
 }
+MTSH_DEFINE_ON_WORK(cmd_sched_set)
 
 static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 {
@@ -5120,6 +5239,7 @@ static int cmd_sched_stats(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_sched_stats)
 
 static int cmd_sched_defaults(const struct shell *sh, size_t argc, char **argv)
 {
@@ -5130,17 +5250,18 @@ static int cmd_sched_defaults(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "sched reverted to compiled defaults");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_sched_defaults)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_sched_cmds,
-	SHELL_CMD(show, NULL, SHELL_HELP("Show scheduler policy and knobs.", NULL), cmd_sched_show),
+	SHELL_CMD(show, NULL, SHELL_HELP("Show scheduler policy and knobs.", NULL), cmd_sched_show_on_work),
 	SHELL_CMD(policy, NULL, SHELL_HELP("Apply a named policy preset.", "<name>"),
-		  cmd_sched_policy),
-	SHELL_CMD(set, NULL, SHELL_HELP("Set one knob.", "<key> <value>"), cmd_sched_set),
+		  cmd_sched_policy_on_work),
+	SHELL_CMD(set, NULL, SHELL_HELP("Set one knob.", "<key> <value>"), cmd_sched_set_on_work),
 	SHELL_CMD(stats, NULL, SHELL_HELP("Show or reset live counters.", "[reset]"),
-		  cmd_sched_stats),
+		  cmd_sched_stats_on_work),
 	SHELL_CMD(defaults, NULL, SHELL_HELP("Revert to compiled defaults.", NULL),
-		  cmd_sched_defaults),
+		  cmd_sched_defaults_on_work),
 	SHELL_SUBCMD_SET_END);
 
 
@@ -5327,6 +5448,7 @@ static int cmd_power(const struct shell *sh, size_t argc, char **argv)
 	return -EINVAL;
 #endif
 }
+MTSH_DEFINE_ON_WORK(cmd_power)
 
 /*
  * pm [on|off] — a volatile debug hold that pins the node awake, distinct from
@@ -5383,6 +5505,7 @@ static int cmd_pm(const struct shell *sh, size_t argc, char **argv)
 	shell_error(sh, "expected on or off, got %s", argv[1]);
 	return -EINVAL;
 }
+MTSH_DEFINE_ON_WORK(cmd_pm)
 #endif /* CONFIG_PM */
 
 #if defined(CONFIG_MESHTASTIC_BLE) && defined(CONFIG_MESHTASTIC_TCP)
@@ -5477,6 +5600,7 @@ static int cmd_transport(const struct shell *sh, size_t argc, char **argv)
 	return -EINVAL;
 #endif
 }
+MTSH_DEFINE_ON_WORK(cmd_transport)
 #endif /* CONFIG_MESHTASTIC_BLE && CONFIG_MESHTASTIC_TCP */
 
 /* --- LoRa modem preset ------------------------------------------------------
@@ -5779,6 +5903,7 @@ static int cmd_preset(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "NOTE: live only — `meshtastic lora preset` is what persists a preset");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_preset)
 
 #if defined(CONFIG_MESHTASTIC_BOOTLOG)
 /* `meshtastic resets` — the retrieval half of the boot history.
@@ -5946,6 +6071,7 @@ static int cmd_resets(const struct shell *sh, size_t argc, char **argv)
 	meshtastic_bootlog_fault_lines(resets_shell_line, (void *)sh);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_resets)
 #endif /* CONFIG_MESHTASTIC_BOOTLOG */
 
 /* `meshtastic crashinfo` -- the three RTC-persistent crash breadcrumbs
@@ -6034,6 +6160,7 @@ static int cmd_crashinfo(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_crashinfo)
 
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 /* `meshtastic lora power <dBm>`: this node's own transmit power, at the
@@ -6103,6 +6230,7 @@ static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 	return cmd_lora_preset_set(sh, argv[2]);
 #endif
 }
+MTSH_DEFINE_ON_WORK(cmd_lora)
 
 #if defined(CONFIG_LOG_BACKEND_NET) && !defined(CONFIG_LOG_BACKEND_NET_AUTOSTART)
 /* Remote syslog no longer starts itself -- see the rationale on
@@ -6125,6 +6253,7 @@ static int cmd_netlog(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_netlog)
 #endif
 
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
@@ -6166,6 +6295,7 @@ static int cmd_backup(const struct shell *sh, size_t argc, char **argv)
 	}
 	return ret;
 }
+MTSH_DEFINE_ON_WORK(cmd_backup)
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
 
 #if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
@@ -6315,6 +6445,7 @@ static int cmd_blepeer_status(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_blepeer_status)
 
 static int cmd_blepeer_scan(const struct shell *sh, size_t argc, char **argv)
 {
@@ -6342,6 +6473,7 @@ static int cmd_blepeer_scan(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "peer scan %s", on ? "armed" : "off");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_blepeer_scan)
 
 static int cmd_blepeer_list(const struct shell *sh, size_t argc, char **argv)
 {
@@ -6362,6 +6494,7 @@ static int cmd_blepeer_list(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_blepeer_list)
 
 static int cmd_blepeer_connect(const struct shell *sh, size_t argc, char **argv)
 {
@@ -6392,6 +6525,7 @@ static int cmd_blepeer_connect(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_blepeer_connect)
 
 static int cmd_blepeer_disconnect(const struct shell *sh, size_t argc, char **argv)
 {
@@ -6412,6 +6546,7 @@ static int cmd_blepeer_disconnect(const struct shell *sh, size_t argc, char **ar
 	shell_print(sh, "disconnecting");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_blepeer_disconnect)
 
 static int cmd_blepeer_hold(const struct shell *sh, size_t argc, char **argv)
 {
@@ -6430,6 +6565,7 @@ static int cmd_blepeer_hold(const struct shell *sh, size_t argc, char **argv)
 		    meshtastic_ble_peer_hold_get() ? "set" : "clear");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_blepeer_hold)
 
 static int cmd_blepeer_beat(const struct shell *sh, size_t argc, char **argv)
 {
@@ -6440,25 +6576,26 @@ static int cmd_blepeer_beat(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "beat scheduled on every active link (none = no-op; see blepeer status)");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_blepeer_beat)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_blepeer_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Slots, ledger, classification and link counters.", NULL),
-		  cmd_blepeer_status),
+		  cmd_blepeer_status_on_work),
 	SHELL_CMD(scan, NULL, SHELL_HELP("Arm/disarm the passive peer scanner.", "[on|off]"),
-		  cmd_blepeer_scan),
-	SHELL_CMD(list, NULL, SHELL_HELP("Peers heard advertising.", NULL), cmd_blepeer_list),
+		  cmd_blepeer_scan_on_work),
+	SHELL_CMD(list, NULL, SHELL_HELP("Peers heard advertising.", NULL), cmd_blepeer_list_on_work),
 	SHELL_CMD(connect, NULL,
 		  SHELL_HELP("Scan for and connect to a peer.", "[node-num-hex]"),
-		  cmd_blepeer_connect),
+		  cmd_blepeer_connect_on_work),
 	SHELL_CMD(disconnect, NULL, SHELL_HELP("Drop the outbound peer link.", NULL),
-		  cmd_blepeer_disconnect),
+		  cmd_blepeer_disconnect_on_work),
 	SHELL_CMD(beat, NULL, SHELL_HELP("Send one heartbeat now on every active link.", NULL),
-		  cmd_blepeer_beat),
+		  cmd_blepeer_beat_on_work),
 	SHELL_CMD(hold, NULL,
 		  SHELL_HELP("Show or set HOLD (\"do not push firmware to me\") in this node's beats.",
 			     "[on|off]"),
-		  cmd_blepeer_hold),
+		  cmd_blepeer_hold_on_work),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_BLE_PEER */
 
@@ -6613,6 +6750,7 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 }
+MTSH_DEFINE_ON_WORK(cmd_admin_trust)
 
 #if defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
 /* meshtastic admin remote <node> get owner
@@ -6790,6 +6928,7 @@ usage:
 		    "       meshtastic admin remote <node> set-time [<unix-epoch-seconds>]");
 	return -EINVAL;
 }
+MTSH_DEFINE_ON_WORK(cmd_admin_remote)
 #endif /* CONFIG_MESHTASTIC_ADMIN_CLIENT */
 #endif /* CONFIG_MESHTASTIC_ADMIN */
 
@@ -7036,6 +7175,7 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_cluster_status)
 
 static int cmd_cluster_promote(const struct shell *sh, size_t argc, char **argv)
 {
@@ -7072,6 +7212,7 @@ static int cmd_cluster_promote(const struct shell *sh, size_t argc, char **argv)
 		    argv[1]);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_cluster_promote)
 
 /*
  * meshtastic cluster pin <sec> — this node's own override for one section.
@@ -7118,6 +7259,7 @@ static int cmd_cluster_pin(const struct shell *sh, size_t argc, char **argv)
 		    "underneath and `unpin` returns to whatever it holds then", argv[1]);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_cluster_pin)
 
 /* meshtastic cluster unpin <sec> — drop the override. A TOMBSTONE, not a
  * deletion: removal has to replicate, or the next anti-entropy pass pulls the
@@ -7155,6 +7297,7 @@ static int cmd_cluster_unpin(const struct shell *sh, size_t argc, char **argv)
 		    "now (with no fleet base for the section, it keeps what it has)", argv[1]);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_cluster_unpin)
 
 static int cmd_cluster_digest(const struct shell *sh, size_t argc, char **argv)
 {
@@ -7165,6 +7308,7 @@ static int cmd_cluster_digest(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "digest queued");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_cluster_digest)
 
 /* meshtastic cluster pull <node> — run the anti-entropy walk against one peer
  * now instead of waiting for its next digest. The convergence proof, on demand:
@@ -7200,6 +7344,7 @@ static int cmd_cluster_pull(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "pulling from 0x%08x — `cluster status` shows the walk", node_num);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_cluster_pull)
 
 static int cmd_cluster_scope(const struct shell *sh, size_t argc, char **argv)
 {
@@ -7246,6 +7391,7 @@ static int cmd_cluster_scope(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_cluster_scope)
 
 static int cmd_cluster_reset(const struct shell *sh, size_t argc, char **argv)
 {
@@ -7281,6 +7427,7 @@ static int cmd_cluster_reset(const struct shell *sh, size_t argc, char **argv)
 			"that is the peer-transport property working, not a fault.");
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_cluster_reset)
 
 /* `cluster fleet` — who agrees with me, and can I safely make a fleet-wide move.
  *
@@ -7353,48 +7500,49 @@ static int cmd_cluster_fleet(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_cluster_fleet)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_cluster_cmds,
 			       SHELL_CMD(fleet, NULL,
 					 SHELL_HELP("Who agrees with my document — the "
 						    "pre-flight for a fleet-wide change.",
 						    NULL),
-					 cmd_cluster_fleet),
+					 cmd_cluster_fleet_on_work),
 			       SHELL_CMD(status, NULL,
 					 SHELL_HELP("Cluster doc, digest stats, channel binding.",
 						    NULL),
-					 cmd_cluster_status),
+					 cmd_cluster_status_on_work),
 			       SHELL_CMD(promote, NULL,
 					 SHELL_HELP("Promote my current section to fleet base.",
 						    "<device|position|power|display|bluetooth>"),
-					 cmd_cluster_promote),
+					 cmd_cluster_promote_on_work),
 			       SHELL_CMD(pin, NULL,
 					 SHELL_HELP("Override one section for THIS node "
 						    "(base keeps replicating underneath).",
 						    "<device|position|power|display|bluetooth>"),
-					 cmd_cluster_pin),
+					 cmd_cluster_pin_on_work),
 			       SHELL_CMD(unpin, NULL,
 					 SHELL_HELP("Drop this node's override (a replicating "
 						    "tombstone); follow the current base.",
 						    "<device|position|power|display|bluetooth>"),
-					 cmd_cluster_unpin),
+					 cmd_cluster_unpin_on_work),
 			       SHELL_CMD(reset, NULL,
 					 SHELL_HELP("Forget the whole document (local only — a "
 						    "peer that still holds it will re-seed).",
 						    "--confirm"),
-					 cmd_cluster_reset),
+					 cmd_cluster_reset_on_work),
 			       SHELL_CMD(scope, NULL,
 					 SHELL_HELP("What this node claims to track. core = "
 						    "base + my own sections (constrained tier).",
 						    "<full|core|auto>"),
-					 cmd_cluster_scope),
+					 cmd_cluster_scope_on_work),
 			       SHELL_CMD(digest, NULL,
 					 SHELL_HELP("Broadcast one digest now.", NULL),
-					 cmd_cluster_digest),
+					 cmd_cluster_digest_on_work),
 			       SHELL_CMD(pull, NULL,
 					 SHELL_HELP("Run the anti-entropy walk against a peer "
 						    "now.", "<node>"),
-					 cmd_cluster_pull),
+					 cmd_cluster_pull_on_work),
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_CLUSTER */
 
@@ -7575,6 +7723,7 @@ static int cmd_fleet_status(const struct shell *sh, size_t argc, char **argv)
 #endif
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_fleet_status)
 
 #if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
 static int cmd_fleet_arm(const struct shell *sh, size_t argc, char **argv)
@@ -7601,6 +7750,7 @@ static int cmd_fleet_arm(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_fleet_arm)
 
 static int cmd_fleet_clear(const struct shell *sh, size_t argc, char **argv)
 {
@@ -7615,6 +7765,7 @@ static int cmd_fleet_clear(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "cleared any reverted/backoff latch on 0x%08x", node);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_fleet_clear)
 #endif /* CONFIG_MESHTASTIC_FLEET_COURIER */
 
 static void fleet_version_copy(struct shell_fleet_work *fw, const char *v)
@@ -7665,6 +7816,7 @@ static int cmd_fleet_desire(const struct shell *sh, size_t argc, char **argv)
 	}
 	return mtsh_enqueue(sh, shell_fleet_work_run, fw, sizeof(*fw));
 }
+MTSH_DEFINE_ON_WORK(cmd_fleet_desire)
 
 static int cmd_fleet_pin(const struct shell *sh, size_t argc, char **argv)
 {
@@ -7702,6 +7854,7 @@ static int cmd_fleet_pin(const struct shell *sh, size_t argc, char **argv)
 	}
 	return mtsh_enqueue(sh, shell_fleet_work_run, fw, sizeof(*fw));
 }
+MTSH_DEFINE_ON_WORK(cmd_fleet_pin)
 
 #if defined(CONFIG_MESHTASTIC_DEPOT)
 static int cmd_fleet_rescan(const struct shell *sh, size_t argc, char **argv)
@@ -7717,30 +7870,31 @@ static int cmd_fleet_rescan(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "depot: %d image(s)", rc);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_fleet_rescan)
 #endif
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	meshtastic_fleet_cmds,
 	SHELL_CMD(status, NULL, SHELL_HELP("Base rows per class, pins, and what I should run.", NULL),
-		  cmd_fleet_status),
+		  cmd_fleet_status_on_work),
 	SHELL_CMD(desire, NULL,
 		  SHELL_HELP("Publish the fleet's intent for an image class (master only).",
 			     "<class> <maj.min.rev> [hash8hex] [pause|downgrade] [hw=<model>]"),
-		  cmd_fleet_desire),
+		  cmd_fleet_desire_on_work),
 	SHELL_CMD(pin, NULL, SHELL_HELP("Pin one node to a version.",
 					"<node-hex> <maj.min.rev> [hash8hex] [downgrade]"),
-		  cmd_fleet_pin),
+		  cmd_fleet_pin_on_work),
 	SHELL_CMD(unpin, NULL, SHELL_HELP("Withdraw a node's pin (it falls back to base).",
 					  "<node-hex>"),
-		  cmd_fleet_pin),
+		  cmd_fleet_pin_on_work),
 #if defined(CONFIG_MESHTASTIC_DEPOT)
 	SHELL_CMD(rescan, NULL, SHELL_HELP("Re-read /depot (after loading cargo).", NULL),
-		  cmd_fleet_rescan),
+		  cmd_fleet_rescan_on_work),
 #endif
 #if defined(CONFIG_MESHTASTIC_FLEET_COURIER)
-	SHELL_CMD(arm, NULL, SHELL_HELP("Arm/disarm the courier loop.", "[on|off]"), cmd_fleet_arm),
+	SHELL_CMD(arm, NULL, SHELL_HELP("Arm/disarm the courier loop.", "[on|off]"), cmd_fleet_arm_on_work),
 	SHELL_CMD(clear, NULL, SHELL_HELP("Clear a node's reverted/refused/backoff latch.", "<node-hex>"),
-		  cmd_fleet_clear),
+		  cmd_fleet_clear_on_work),
 #endif
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_FLEET */
@@ -7750,14 +7904,14 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_admin_cmds,
 			       SHELL_CMD(trust, NULL,
 					 SHELL_HELP("List/manage trusted remote-admin keys.",
 						    "[<node> [off] | key:<hex-prefix> off]"),
-					 cmd_admin_trust),
+					 cmd_admin_trust_on_work),
 #if defined(CONFIG_MESHTASTIC_ADMIN_CLIENT)
 			       SHELL_CMD(remote, NULL,
 					 SHELL_HELP("Administer a peer node (PKC, any bearer).",
 						    "<node> get owner | get config <t> | "
 						    "set-owner <long> [short] | "
 						    "set-time [<epoch>]"),
-					 cmd_admin_remote),
+					 cmd_admin_remote_on_work),
 #endif
 			       SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_MESHTASTIC_ADMIN */
@@ -7816,6 +7970,7 @@ static int cmd_intents(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "intents: %u set", (unsigned int)n);
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_intents)
 
 /* The root, `meshtastic`, is a section-backed set (agents-ls39.4.4.1): each command
  * adds itself with SHELL_SUBCMD_ADD((meshtastic), ...), so a command file needs no
@@ -7824,21 +7979,21 @@ SHELL_SUBCMD_SET_CREATE(meshtastic_cmds, (meshtastic));
 
 SHELL_SUBCMD_ADD((meshtastic), status, NULL,
 		 SHELL_HELP("Show Meshtastic status.", NULL),
-		 cmd_status, 0, 0);
+		 cmd_status_on_work, 0, 0);
 SHELL_SUBCMD_ADD((meshtastic), version, NULL,
 		 SHELL_HELP("Show build id / firmware version.", NULL),
-		 cmd_version, 0, 0);
+		 cmd_version_on_work, 0, 0);
 SHELL_SUBCMD_ADD((meshtastic), intents, NULL,
 		 SHELL_HELP("The roles this node remembers across reboots (peer target, brain, "
 		 "heads, ear, courier arm, relay, pinned presets, cluster document); "
 		 "`clear` forgets them all and reboots. Identity, radio, channels and "
 		 "owner are untouched.",
 		 "[clear]"),
-		 cmd_intents, 1, 1);
+		 cmd_intents_on_work, 1, 1);
 SHELL_SUBCMD_ADD((meshtastic), state, NULL,
 		 SHELL_HELP("This node's state as one machine-readable line, for tools: "
 		 "~S{json}*crc16.", NULL),
-		 cmd_state, 0, 0);
+		 cmd_state_on_work, 0, 0);
 #if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
 SHELL_SUBCMD_ADD((meshtastic), api, NULL,
 		 SHELL_HELP("The phone API as text, for tools: ToRadio in, ~P<FromRadio> lines out.",
@@ -7847,11 +8002,11 @@ SHELL_SUBCMD_ADD((meshtastic), api, NULL,
 #endif
 SHELL_SUBCMD_ADD((meshtastic), time, NULL,
 		 SHELL_HELP("Show or set the wall clock.", "[set <unix-epoch-seconds>]"),
-		 cmd_time, 0, 0);
+		 cmd_time_on_work, 0, 0);
 SHELL_SUBCMD_ADD((meshtastic), owner, NULL,
 		 SHELL_HELP("Show or set this node's owner names.",
 		 "[set <long> [short]]"),
-		 cmd_owner, 0, 0);
+		 cmd_owner_on_work, 0, 0);
 #if defined(CONFIG_MESHTASTIC_SHELL_CRASHTEST)
 SHELL_SUBCMD_ADD((meshtastic), crashtest, NULL,
 		 SHELL_HELP("Crash on purpose, to prove the coredump pipeline works "
@@ -7868,22 +8023,22 @@ SHELL_SUBCMD_ADD((meshtastic), netpause, NULL,
 #if defined(CONFIG_PM)
 SHELL_SUBCMD_ADD((meshtastic), power, NULL,
 		 SHELL_HELP("Show or set the light-sleep power-saving policy.", "[on|off]"),
-		 cmd_power, 0, 0);
+		 cmd_power_on_work, 0, 0);
 SHELL_SUBCMD_ADD((meshtastic), pm, NULL,
 		 SHELL_HELP("Volatile bench hold: pin the node awake (off) or release (on). "
 		 "Not persisted; distinct from `power`.",
 		 "[on|off]"),
-		 cmd_pm, 0, 0);
+		 cmd_pm_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_BLE) && defined(CONFIG_MESHTASTIC_TCP)
 SHELL_SUBCMD_ADD((meshtastic), transport, NULL,
 		 SHELL_HELP("Show or set the phone transport, reboot to apply (unified image).",
 		 "[ble|wifi]"),
-		 cmd_transport, 0, 0);
+		 cmd_transport_on_work, 0, 0);
 #endif
 SHELL_SUBCMD_ADD((meshtastic), sched, &meshtastic_sched_cmds,
 		 SHELL_HELP("Scheduler / QoS policy commands.", NULL),
-		 cmd_sched_show, 0, 0);
+		 cmd_sched_show_on_work, 0, 0);
 SHELL_SUBCMD_ADD((meshtastic), channel, &meshtastic_channel_cmds,
 		 SHELL_HELP("Channel table commands.", NULL),
 		 NULL, 0, 0);
@@ -7898,35 +8053,35 @@ SHELL_SUBCMD_ADD((meshtastic), admin, &meshtastic_admin_cmds,
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
 SHELL_SUBCMD_ADD((meshtastic), cluster, &meshtastic_cluster_cmds,
 		 SHELL_HELP("Fleet config convergence.", NULL),
-		 cmd_cluster_status, 0, 0);
+		 cmd_cluster_status_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_FLEET)
 SHELL_SUBCMD_ADD((meshtastic), fleet, &meshtastic_fleet_cmds,
 		 SHELL_HELP("Fleet firmware intent (what each class should run).", NULL),
-		 cmd_fleet_status, 0, 0);
+		 cmd_fleet_status_on_work, 0, 0);
 #endif
 SHELL_SUBCMD_ADD((meshtastic), lora, NULL,
 		 SHELL_HELP("Show or set the LoRa modem preset (reboot to apply), "
 		 "the TX-enable switch or the TX power (both apply live).",
 		 "[preset <name>] [tx on|off] [power <dBm>]"),
-		 cmd_lora, 0, 0);
+		 cmd_lora_on_work, 0, 0);
 #if defined(CONFIG_MESHTASTIC_BOOTLOG)
 SHELL_SUBCMD_ADD((meshtastic), resets, NULL,
 		 SHELL_HELP("Why this node last rebooted, and the boot history. "
 		 "`durable` reads the FLASH ring, which survives power loss.",
 		 "[durable]"),
-		 cmd_resets, 0, 0);
+		 cmd_resets_on_work, 0, 0);
 #endif
 SHELL_SUBCMD_ADD((meshtastic), crashinfo, NULL,
 		 SHELL_HELP("Durable crash breadcrumbs: watchdog, hw-watchdog and "
 		 "fatal-error info from the last abnormal reset.",
 		 NULL),
-		 cmd_crashinfo, 0, 0);
+		 cmd_crashinfo_on_work, 0, 0);
 SHELL_SUBCMD_ADD((meshtastic), preset, NULL,
 		 SHELL_HELP("Live preset switching: what would hold a scheduled hop off, "
 		 "and the counters for the ones that were.",
 		 "[hop <name> | reset]"),
-		 cmd_preset, 0, 0);
+		 cmd_preset_on_work, 0, 0);
 #if defined(CONFIG_MESHTASTIC_MESSAGE)
 SHELL_SUBCMD_ADD((meshtastic), text, &meshtastic_text_cmds,
 		 SHELL_HELP("Text message commands.", NULL),
@@ -7940,7 +8095,7 @@ SHELL_SUBCMD_ADD((meshtastic), nodedb, &meshtastic_nodedb_cmds,
 #if defined(CONFIG_MESHTASTIC_POSITION)
 SHELL_SUBCMD_ADD((meshtastic), position, &meshtastic_position_cmds,
 		 SHELL_HELP("Position: gps_mode, broadcast interval.", NULL),
-		 cmd_position_root, 0, 0);
+		 cmd_position_root_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_GNSS)
 SHELL_SUBCMD_ADD((meshtastic), gnss, &meshtastic_gnss_cmds,
@@ -7953,25 +8108,25 @@ SHELL_SUBCMD_ADD((meshtastic), gnss, &meshtastic_gnss_cmds,
 SHELL_SUBCMD_ADD((meshtastic), netlog, NULL,
 		 SHELL_HELP("Start the remote syslog backend for this boot.",
 		 "netlog on"),
-		 cmd_netlog, 0, 0);
+		 cmd_netlog_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 SHELL_SUBCMD_ADD((meshtastic), airtime, NULL,
 		 SHELL_HELP("Channel utilization per preset, and band-wide TX duty.", NULL),
-		 cmd_airtime, 0, 0);
+		 cmd_airtime_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_DUTY_CYCLE)
 SHELL_SUBCMD_ADD((meshtastic), duty, NULL,
 		 SHELL_HELP("Regulatory duty cycle: ceiling, hour used, refusals.",
 		 "[reset]"),
-		 cmd_duty, 0, 0);
+		 cmd_duty_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_PHONELOG)
 SHELL_SUBCMD_ADD((meshtastic), phonelog, NULL,
 		 SHELL_HELP("Log forwarding to the phone: state + counters, or set the "
 		 "severity ceiling.",
 		 "[off|err|wrn|inf|dbg|reset]"),
-		 cmd_phonelog, 0, 0);
+		 cmd_phonelog_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_DEVICE_METRICS)
 SHELL_SUBCMD_ADD((meshtastic), metrics, &meshtastic_metrics_cmds,
@@ -7992,66 +8147,66 @@ SHELL_SUBCMD_ADD((meshtastic), nodeinfo, &meshtastic_nodeinfo_cmds,
 #if defined(CONFIG_MESHTASTIC_XEDDSA)
 SHELL_SUBCMD_ADD((meshtastic), xeddsa, &meshtastic_xeddsa_cmds,
 		 SHELL_HELP("Packet signature verification: counters, reset.", NULL),
-		 cmd_xeddsa_show, 0, 0);
+		 cmd_xeddsa_show_on_work, 0, 0);
 #endif
 SHELL_SUBCMD_ADD((meshtastic), keyverify, &meshtastic_keyverify_cmds,
 		 SHELL_HELP("Manual key verification (security-number handshake): status, "
 		 "start, number, accept, reject.",
 		 NULL),
-		 cmd_keyverify_show, 0, 0);
+		 cmd_keyverify_show_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_EXTNOTIFY)
 SHELL_SUBCMD_ADD((meshtastic), notify, &meshtastic_notify_cmds,
 		 SHELL_HELP("External notification (board LED): show, enable/disable, test, "
 		 "stop.",
 		 NULL),
-		 cmd_notify_show, 0, 0);
+		 cmd_notify_show_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_TRAFFIC)
 SHELL_SUBCMD_ADD((meshtastic), traffic, &meshtastic_traffic_cmds,
 		 SHELL_HELP("Traffic management: position dedup, rate limit, unknown filter; "
 		 "counters.",
 		 NULL),
-		 cmd_traffic_show, 0, 0);
+		 cmd_traffic_show_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_MESHBEACON)
 SHELL_SUBCMD_ADD((meshtastic), beacon, &meshtastic_beacon_cmds,
 		 SHELL_HELP("Mesh beacon (join-my-mesh announcement): show, flag, text, "
 		 "interval, send, forget.",
 		 NULL),
-		 cmd_beacon_show, 0, 0);
+		 cmd_beacon_show_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_NEIGHBORINFO)
 SHELL_SUBCMD_ADD((meshtastic), neighbors, &meshtastic_neighbors_cmds,
 		 SHELL_HELP("Directly-heard neighbors + the NeighborInfo broadcast: show, "
 		 "enable/disable, interval, lora, send.",
 		 NULL),
-		 cmd_neighbors_show, 0, 0);
+		 cmd_neighbors_show_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY_EAR)
 SHELL_SUBCMD_ADD((meshtastic), ear, &meshtastic_ear_cmds,
 		 SHELL_HELP("Cross-preset relay ear: show, peer.", NULL),
-		 cmd_ear_show, 0, 0);
+		 cmd_ear_show_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
 SHELL_SUBCMD_ADD((meshtastic), attach, &meshtastic_attach_cmds,
 		 SHELL_HELP("Radio heads: list, status, preset, forget.", NULL),
-		 cmd_attach_list, 0, 0);
+		 cmd_attach_list_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
 SHELL_SUBCMD_ADD((meshtastic), attach, &meshtastic_attach_head_cmds,
 		 SHELL_HELP("This keyless radio head: show, brain, status.", NULL),
-		 cmd_attach_head_show, 0, 0);
+		 cmd_attach_head_show_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_LED_STATUS)
 SHELL_SUBCMD_ADD((meshtastic), led, &meshtastic_led_cmds,
 		 SHELL_HELP("Bench LED: show, mode, color, locate.", NULL),
-		 cmd_led_show, 0, 0);
+		 cmd_led_show_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY)
 SHELL_SUBCMD_ADD((meshtastic), relay, &meshtastic_relay_cmds,
 		 SHELL_HELP("Cross-preset text relay: show, dir, ignore, reset.", NULL),
-		 cmd_relay_show, 0, 0);
+		 cmd_relay_show_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_STATUSMESSAGE)
 /* `statusmsg`, not `status` (agents-ls39.1.4): `status` is the node's own status,
@@ -8060,7 +8215,7 @@ SHELL_SUBCMD_ADD((meshtastic), statusmsg, &meshtastic_status_cmds,
 		 SHELL_HELP("Node status message (away-message): show, set, clear, send, "
 		 "peers.",
 		 NULL),
-		 cmd_status_show, 0, 0);
+		 cmd_status_show_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 SHELL_SUBCMD_ADD((meshtastic), scan, &meshtastic_scan_cmds,
@@ -8070,7 +8225,7 @@ SHELL_SUBCMD_ADD((meshtastic), scan, &meshtastic_scan_cmds,
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 SHELL_SUBCMD_ADD((meshtastic), blepeer, &meshtastic_blepeer_cmds,
 		 SHELL_HELP("Node-to-node BLE peer link.", NULL),
-		 cmd_blepeer_status, 0, 0);
+		 cmd_blepeer_status_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_DFU_TRIGGER)
 SHELL_SUBCMD_ADD((meshtastic), dfu, NULL,
@@ -8078,16 +8233,17 @@ SHELL_SUBCMD_ADD((meshtastic), dfu, NULL,
 		 cmd_dfu, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_STORAGE_STATS)
+MTSH_DEFINE_ON_WORK(meshtastic_storage_shell_cmd)
 SHELL_SUBCMD_ADD((meshtastic), storage, NULL,
 		 SHELL_HELP("Settings store: free space, per-subtree use, boot restore time.",
 		 NULL),
-		 meshtastic_storage_shell_cmd, 0, 0);
+		 meshtastic_storage_shell_cmd_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_SETTINGS)
 SHELL_SUBCMD_ADD((meshtastic), backup, NULL,
 		 SHELL_HELP("Preferences backup in flash: show, save, restore (then reboot), "
 		 "remove.", "[save|restore|remove]"),
-		 cmd_backup, 0, 0);
+		 cmd_backup_on_work, 0, 0);
 #endif
 #if defined(CONFIG_MESHTASTIC_RF_PATH_REPORT) && defined(CONFIG_MESHTASTIC_RF_HIST)
 /* Bare `meshtastic rf` runs the gain-path report; the subcommands cover
@@ -8095,11 +8251,11 @@ SHELL_SUBCMD_ADD((meshtastic), backup, NULL,
  * cases rather than one. */
 SHELL_SUBCMD_ADD((meshtastic), rf, &meshtastic_rf_cmds,
 		 SHELL_HELP("Gain path in signal order, plus signal measurement.", NULL),
-		 cmd_rf_path, 0, 0);
+		 cmd_rf_path_on_work, 0, 0);
 #elif defined(CONFIG_MESHTASTIC_RF_PATH_REPORT)
 SHELL_SUBCMD_ADD((meshtastic), rf, NULL,
 		 SHELL_HELP("Gain path in signal order: what the radio is REALLY doing.", NULL),
-		 cmd_rf_path, 0, 0);
+		 cmd_rf_path_on_work, 0, 0);
 #elif defined(CONFIG_MESHTASTIC_RF_HIST)
 SHELL_SUBCMD_ADD((meshtastic), rf, &meshtastic_rf_cmds,
 		 SHELL_HELP("Signal measurement: distributions and per-peer rates.", NULL),

@@ -13,7 +13,9 @@
 #include <stdint.h>
 
 #include <zephyr/meshtastic/meshtastic.h>
+#include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
+#include <zephyr/sys/iterable_sections.h>
 #include <zephyr/toolchain.h>
 
 #include "meshtastic/config.pb.h"
@@ -67,8 +69,9 @@ uint32_t mtsh_work_dest(const void *arg, size_t len);
  * work thread while a command runs (exec_cmd releases the shell's lock for exactly
  * this). No "queued" or "done" line.
  *
- * Not for a handler that reads from the console (shell_readline): that has to run on
- * the shell thread. Parse and prompt there, then queue the work.
+ * Every `meshtastic` command is registered this way except the few in
+ * mtsh_shell_thread_cmds[]: one that reads from the console (shell_readline) or waits
+ * on the work thread has to run on the shell thread.
  */
 int mtsh_run_on_work(const struct shell *sh, shell_cmd_handler handler, size_t argc, char **argv);
 
@@ -83,7 +86,35 @@ int mtsh_run_on_work(const struct shell *sh, shell_cmd_handler handler, size_t a
 	static int handler##_on_work(const struct shell *sh, size_t argc, char **argv)       \
 	{                                                                                    \
 		return mtsh_run_on_work(sh, handler, argc, argv);                            \
-	}
+	}                                                                                    \
+	Z_MTSH_WRAPPED(handler)
+
+/** @brief A command that stays on the shell thread, and why (one line). */
+struct mtsh_shell_thread_cmd {
+	const char *path; /* the words after `meshtastic` */
+	const char *why;
+};
+
+extern const struct mtsh_shell_thread_cmd mtsh_shell_thread_cmds[];
+extern const size_t mtsh_shell_thread_cmds_len;
+
+#if defined(CONFIG_ZTEST)
+/* Test builds list every wrapper in a section, so tests/shell can tell a wrapped
+ * handler from one that runs on the shell thread. Production builds carry nothing. */
+struct mtsh_wrapped {
+	shell_cmd_handler fn;
+};
+
+#define Z_MTSH_WRAPPED(handler)                                                              \
+	static const STRUCT_SECTION_ITERABLE(mtsh_wrapped, handler##_wrapped) = {            \
+		.fn = handler##_on_work,                                                     \
+	};
+
+/** @brief Test-only: the shell work thread. */
+k_tid_t mtsh_test_work_thread(void);
+#else
+#define Z_MTSH_WRAPPED(handler)
+#endif
 
 /* ---- Gates (each prints why it refused) ---------------------------------- */
 

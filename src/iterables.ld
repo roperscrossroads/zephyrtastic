@@ -8,3 +8,4 @@
 ITERABLE_SECTION_ROM(meshtastic_module, Z_LINK_ITERABLE_SUBALIGN)
 ITERABLE_SECTION_ROM(meshtastic_settings_apply, Z_LINK_ITERABLE_SUBALIGN)
 ITERABLE_SECTION_ROM(meshtastic_intent, Z_LINK_ITERABLE_SUBALIGN)
+ITERABLE_SECTION_ROM(mtsh_wrapped, Z_LINK_ITERABLE_SUBALIGN) /* test builds only: shell wrappers */

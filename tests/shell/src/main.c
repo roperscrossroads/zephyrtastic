@@ -25,6 +25,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_dummy.h>
+#include <zephyr/sys/iterable_sections.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/ztest.h>
@@ -38,6 +39,9 @@
 #include "meshtastic_channels.h"
 #include "meshtastic_scanner.h"
 #include "meshtastic_shell_internal.h"
+/* z_shell_cmd_get(): the shell's own walk of a command set (section, static or
+ * dynamic), private to subsys/shell; the test reads the tree the way the shell does. */
+#include "shell_utils.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_position.h"
 #include "meshtastic_core.h"
@@ -234,6 +238,93 @@ ZTEST(meshtastic_shell, test_a_command_on_the_work_thread_keeps_its_output_and_r
 	zassert_equal(run_cmd("meshtastic testprobe fail", &out), -EIO,
 		      "the handler's return code is the command's");
 	zassert_not_null(strstr(out, "probe fail"), "%s", out);
+}
+
+/* Every `meshtastic` command runs on the work thread except the ones in
+ * mtsh_shell_thread_cmds[], each with its reason. Walk the tree as registered in this
+ * build: a handler that is neither wrapped nor listed fails here, so a new command
+ * cannot land on the 2 KB shell stack by default, and a listed path that is wrapped
+ * after all fails too. */
+static bool handler_is_wrapped(shell_cmd_handler fn)
+{
+	STRUCT_SECTION_FOREACH(mtsh_wrapped, w) {
+		if (w->fn == fn) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool path_stays_on_shell_thread(const char *path)
+{
+	for (size_t i = 0U; i < mtsh_shell_thread_cmds_len; i++) {
+		if (strcmp(mtsh_shell_thread_cmds[i].path, path) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static unsigned int walked;
+static unsigned int on_shell_thread;
+
+static void walk_commands(const struct shell_static_entry *parent, char *path, size_t len)
+{
+	struct shell_static_entry dloc;
+	const struct shell_static_entry *e;
+
+	for (size_t idx = 0U; (e = z_shell_cmd_get(parent, idx, &dloc)) != NULL; idx++) {
+		size_t n = len;
+
+		if (n > 0U) {
+			path[n++] = ' ';
+		}
+		strncpy(&path[n], e->syntax, 127U - n);
+		path[127] = '\0';
+
+		if (e->handler != NULL) {
+			bool wrapped = handler_is_wrapped(e->handler);
+			bool listed = path_stays_on_shell_thread(path);
+
+			walked++;
+			on_shell_thread += listed ? 1U : 0U;
+			zassert_true(wrapped || listed,
+				     "`meshtastic %s` runs on the shell thread: wrap it "
+				     "(MTSH_DEFINE_ON_WORK) or list it in mtsh_shell_thread_cmds[]",
+				     path);
+			zassert_false(wrapped && listed,
+				      "`meshtastic %s` is wrapped and also listed as staying", path);
+		}
+		if (e->subcmd != NULL && e != &dloc) {
+			char sub[128];
+
+			memcpy(sub, path, sizeof(sub));
+			walk_commands(e, sub, strlen(sub));
+		}
+		path[len] = '\0';
+	}
+}
+
+ZTEST(meshtastic_shell, test_every_command_is_wrapped_or_listed_as_staying)
+{
+	struct shell_static_entry dloc;
+	const struct shell_static_entry *root = NULL;
+	const struct shell_static_entry *e;
+	char path[128] = "";
+
+	for (size_t idx = 0U; (e = z_shell_cmd_get(NULL, idx, &dloc)) != NULL; idx++) {
+		if (strcmp(e->syntax, "meshtastic") == 0) {
+			root = e;
+		}
+	}
+	zassert_not_null(root, "no `meshtastic` command");
+
+	walked = 0U;
+	on_shell_thread = 0U;
+	walk_commands(root, path, 0U);
+	TC_PRINT("%u commands with a handler, %u stay on the shell thread\n", walked,
+		 on_shell_thread);
+	zassert_true(walked > 20U, "the walk found only %u commands", walked);
 }
 
 /* ---- Reads are always available ------------------------------------------ */

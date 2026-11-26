@@ -45,6 +45,7 @@ static int cmd_lockdown_status(const struct shell *sh, size_t argc, char **argv)
 	}
 	return 0;
 }
+MTSH_DEFINE_ON_WORK(cmd_lockdown_status)
 
 /* What a lockdown verb's run function gets: the passphrase, and the token's boot count. */
 struct shell_lockdown_work {
@@ -248,4 +249,4 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_lockdown_cmds,
 
 SHELL_SUBCMD_ADD((meshtastic), lockdown, &meshtastic_lockdown_cmds,
 		 SHELL_HELP("Lockdown mode: status, provision, unlock, lock, disable.", NULL),
-		 cmd_lockdown_status, 0, 0);
+		 cmd_lockdown_status_on_work, 0, 0);
