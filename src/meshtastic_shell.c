@@ -71,6 +71,7 @@
 #include "meshtastic_hlc.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_core.h"
+#include "meshtastic_shell_internal.h"
 #include "meshtastic_shell_state.h"
 #if defined(CONFIG_MESHTASTIC_SHELL_PHONEAPI)
 #include "meshtastic_shell_api.h"
@@ -156,26 +157,6 @@ BUILD_ASSERT(!DT_SAME_NODE(MT_LOG_UART_NODE, DT_CHOSEN(zephyr_shell_uart)),
 	     "CONFIG_LOG_BACKEND_UART on the serial shell's UART: the shell's own log backend "
 	     "already prints the logs there; drop CONFIG_LOG_BACKEND_UART");
 #endif
-
-/* The shell work thread (agents-ls39.4.4.1). A command that must not run on the shell
- * thread's own stack (the send path, PBKDF2, a cluster publish: each overflowed the
- * XIAO's 2048-byte shell stack once, see the run functions' comments) parses its
- * arguments there, and queues a run function with them. The thread knows no command:
- * it calls the function, then prints the result line ("done" or "failed: ..."). Each
- * command owns its argument layout; the arguments live in a pool item, not on the
- * shell stack. */
-typedef int (*mtsh_work_fn)(const struct shell *sh, const void *arg, size_t len);
-
-/* Room for the largest argument: a text message and its address. */
-#define MTSH_WORK_ARG_MAX (MESHTASTIC_MAX_TEXT_LEN + 1U + 8U)
-
-struct mtsh_work {
-	const struct shell *sh;
-	mtsh_work_fn run;
-	bool quiet; /* no result line: the caller waits and prints itself */
-	size_t len;
-	uint8_t arg[MTSH_WORK_ARG_MAX] __aligned(4);
-};
 
 #if defined(CONFIG_MESHTASTIC_FLEET)
 enum shell_fleet_verb {
@@ -322,7 +303,7 @@ static void shell_work_thread_fn(void *p1, void *p2, void *p3)
 }
 
 /* An empty item for @p run, from the pool. NULL when the queue is full (said on @p sh). */
-static struct mtsh_work *mtsh_work_alloc(const struct shell *sh, mtsh_work_fn run)
+struct mtsh_work *mtsh_work_alloc(const struct shell *sh, mtsh_work_fn run)
 {
 	struct mtsh_work *w;
 
@@ -339,14 +320,14 @@ static struct mtsh_work *mtsh_work_alloc(const struct shell *sh, mtsh_work_fn ru
 }
 
 /* Give an item back unqueued: its command refused its arguments after all. */
-static void mtsh_work_cancel(struct mtsh_work *w)
+void mtsh_work_cancel(struct mtsh_work *w)
 {
 	memset(w, 0, sizeof(*w));
 	k_mem_slab_free(&shell_work_slab, w);
 }
 
 /* Queue a filled item (@p len bytes of argument) and say "queued". */
-static int mtsh_work_submit(struct mtsh_work *w, size_t len)
+int mtsh_work_submit(struct mtsh_work *w, size_t len)
 {
 	const struct shell *sh = w->sh;
 	int ret;
@@ -368,7 +349,7 @@ static int mtsh_work_submit(struct mtsh_work *w, size_t len)
 }
 
 /* Queue @p run with a copy of @p len bytes at @p arg. */
-static int mtsh_enqueue(const struct shell *sh, mtsh_work_fn run, const void *arg, size_t len)
+int mtsh_enqueue(const struct shell *sh, mtsh_work_fn run, const void *arg, size_t len)
 {
 	struct mtsh_work *w;
 
@@ -384,7 +365,7 @@ static int mtsh_enqueue(const struct shell *sh, mtsh_work_fn run, const void *ar
 }
 
 /* The common argument: one node id. */
-static __unused uint32_t mtsh_work_dest(const void *arg, size_t len)
+uint32_t mtsh_work_dest(const void *arg, size_t len)
 {
 	uint32_t dest;
 
@@ -394,40 +375,6 @@ static __unused uint32_t mtsh_work_dest(const void *arg, size_t len)
 	return dest;
 }
 
-static int parse_u32(const struct shell *sh, const char *arg, uint32_t *value)
-{
-	char *end;
-	unsigned long parsed;
-
-	if (strcmp(arg, "broadcast") == 0) {
-		*value = MESHTASTIC_NODE_BROADCAST;
-		return 0;
-	}
-
-	parsed = strtoul(arg, &end, 0);
-	if (*end != '\0' || parsed > UINT32_MAX) {
-		shell_error(sh, "invalid integer: %s", arg);
-		return -EINVAL;
-	}
-
-	*value = (uint32_t)parsed;
-	return 0;
-}
-
-static int parse_optional_dest(const struct shell *sh, size_t argc, char **argv, uint32_t *dest)
-{
-	if (argc == 1U) {
-		*dest = MESHTASTIC_NODE_BROADCAST;
-		return 0;
-	}
-
-	if (argc == 2U) {
-		return parse_u32(sh, argv[1], dest);
-	}
-
-	shell_error(sh, "too many arguments");
-	return -EINVAL;
-}
 
 /* Shared by the position / metrics / environment / nodeinfo "send" commands. A keyless
  * head (class 12) compiles all four out, and the fleet lane builds with -Werror, so the
@@ -439,7 +386,7 @@ static __unused int cmd_deferred_send(const struct shell *sh, size_t argc, char 
 	uint32_t dest;
 	int ret;
 
-	ret = parse_optional_dest(sh, argc, argv, &dest);
+	ret = mtsh_parse_optional_dest(sh, argc, argv, &dest);
 	if (ret < 0) {
 		return ret;
 	}
@@ -447,61 +394,6 @@ static __unused int cmd_deferred_send(const struct shell *sh, size_t argc, char 
 	return mtsh_enqueue(sh, run, &dest, sizeof(dest));
 }
 
-static __unused int append_message_from_argv(uint8_t *buf, size_t buf_max, size_t argc, char **argv,
-				    size_t first_arg)
-{
-	size_t pos = 0;
-
-	for (size_t i = first_arg; i < argc; i++) {
-		size_t len = strlen(argv[i]);
-
-		if (i > first_arg) {
-			if (pos >= buf_max) {
-				return -ENOMEM;
-			}
-			buf[pos++] = ' ';
-		}
-
-		if (pos + len > buf_max) {
-			return -ENOMEM;
-		}
-
-		memcpy(buf + pos, argv[i], len);
-		pos += len;
-	}
-
-	return (int)pos;
-}
-
-static __unused int32_t scaled_tenths(float value)
-{
-	return (int32_t)(value * 10.0f);
-}
-
-static __unused int32_t scaled_whole(int32_t scaled, int32_t divisor)
-{
-	return scaled / divisor;
-}
-
-/* __unused: a keyless head (class 12) compiles every caller out (-Werror, fleet lane). */
-static __unused uint32_t scaled_fraction(int32_t scaled, int32_t divisor)
-{
-	int32_t fraction = scaled % divisor;
-
-	if (fraction < 0) {
-		fraction = -fraction;
-	}
-
-	return (uint32_t)fraction;
-}
-
-static const char *shell_device_role_name(meshtastic_Config_DeviceConfig_Role role);
-static const char *shell_rebroadcast_mode_name(meshtastic_Config_DeviceConfig_RebroadcastMode mode);
-#if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
-static bool shell_config_write_refused(const struct shell *sh);
-static bool shell_managed_refused(const struct shell *sh);
-#endif
-static bool shell_store_locked(const struct shell *sh);
 
 static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 {
@@ -573,23 +465,6 @@ int meshtastic_shell_api_submit(void)
 }
 #endif
 
-static const char *clock_quality_name(enum meshtastic_clock_quality q)
-{
-	switch (q) {
-	case MESHTASTIC_CLOCK_QUALITY_NONE:
-		return "NONE (never set)";
-	case MESHTASTIC_CLOCK_QUALITY_DEVICE:
-		return "device RTC";
-	case MESHTASTIC_CLOCK_QUALITY_NET:
-		return "mesh-relayed";
-	case MESHTASTIC_CLOCK_QUALITY_NTP:
-		return "NTP/operator";
-	case MESHTASTIC_CLOCK_QUALITY_GPS:
-		return "GPS";
-	default:
-		return "?";
-	}
-}
 
 /* Wall-clock bench surface. A BLE-only node has no SNTP and an indoor bench
  * no GNSS fix, so without this the only time source is a paired phone — and
@@ -622,7 +497,7 @@ static const char *clock_quality_name(enum meshtastic_clock_quality q)
  */
 static int cmd_owner(const struct shell *sh, size_t argc, char **argv)
 {
-	if (shell_store_locked(sh)) {
+	if (mtsh_store_locked(sh)) {
 		return -EACCES;
 	}
 	if (argc == 1U) {
@@ -654,7 +529,7 @@ static int cmd_owner(const struct shell *sh, size_t argc, char **argv)
 		bool unmessagable = false;
 		int ret;
 
-		if (shell_config_write_refused(sh)) {
+		if (mtsh_config_write_refused(sh)) {
 			return -EACCES;
 		}
 
@@ -806,7 +681,7 @@ static int cmd_time(const struct shell *sh, size_t argc, char **argv)
 					"`meshtastic time set <unix-epoch-seconds>`");
 			return 0;
 		}
-		shell_print(sh, "clock: epoch %u, source %s", epoch, clock_quality_name(q));
+		shell_print(sh, "clock: epoch %u, source %s", epoch, mtsh_clock_quality_name(q));
 #if defined(CONFIG_MESHTASTIC_CLOCK_SKEW)
 		{
 			int32_t ppb;
@@ -862,7 +737,7 @@ static int cmd_time(const struct shell *sh, size_t argc, char **argv)
 #else
 	/* Managed only, not the lockdown gate: the clock is not sealed, and a
 	 * token's expiry epoch needs one on a locked node. */
-	if (shell_managed_refused(sh)) {
+	if (mtsh_managed_refused(sh)) {
 		return -EACCES;
 	}
 
@@ -882,7 +757,7 @@ static int cmd_time(const struct shell *sh, size_t argc, char **argv)
 	/* The ladder may have kept a better source (e.g. a GPS fix) — report what
 	 * the clock actually holds rather than claiming the write won. */
 	shell_print(sh, "clock now: epoch %u, source %s", meshtastic_clock_now_epoch(),
-		    clock_quality_name(meshtastic_clock_get_quality()));
+		    mtsh_clock_quality_name(meshtastic_clock_get_quality()));
 	return 0;
 #endif
 }
@@ -932,9 +807,9 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "primary channel: %u \"%s\" hash=0x%02x",
 		    (unsigned int)meshtastic_channels_primary_index(),
 		    meshtastic_channels_primary_name(), meshtastic_channels_primary_hash());
-	shell_print(sh, "device role: %s", shell_device_role_name(meshtastic_device_role()));
+	shell_print(sh, "device role: %s", mtsh_device_role_name(meshtastic_device_role()));
 	shell_print(sh, "rebroadcast mode: %s",
-		    shell_rebroadcast_mode_name(meshtastic_rebroadcast_mode()));
+		    mtsh_rebroadcast_mode_name(meshtastic_rebroadcast_mode()));
 	shell_print(sh, "rebroadcasting: %s", meshtastic_is_rebroadcaster() ? "yes" : "no");
 
 	return 0;
@@ -973,35 +848,6 @@ static int shell_parse_channel_role(const struct shell *sh, const char *arg,
 }
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
-static const char *shell_device_role_name(meshtastic_Config_DeviceConfig_Role role)
-{
-	switch (role) {
-	case meshtastic_Config_DeviceConfig_Role_CLIENT:
-		return "client";
-	case meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE:
-		return "client_mute";
-	case meshtastic_Config_DeviceConfig_Role_ROUTER:
-		return "router";
-	case meshtastic_Config_DeviceConfig_Role_ROUTER_LATE:
-		return "router_late";
-	case meshtastic_Config_DeviceConfig_Role_CLIENT_BASE:
-		return "client_base";
-	case meshtastic_Config_DeviceConfig_Role_SENSOR:
-		return "sensor";
-	case meshtastic_Config_DeviceConfig_Role_TRACKER:
-		return "tracker";
-	case meshtastic_Config_DeviceConfig_Role_TAK:
-		return "tak";
-	case meshtastic_Config_DeviceConfig_Role_CLIENT_HIDDEN:
-		return "client_hidden";
-	case meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND:
-		return "lost_and_found";
-	case meshtastic_Config_DeviceConfig_Role_TAK_TRACKER:
-		return "tak_tracker";
-	default:
-		return "unknown";
-	}
-}
 
 /* Parsers used only by the config-write commands below. */
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
@@ -1039,25 +885,6 @@ static int shell_parse_device_role(const struct shell *sh, const char *arg,
 }
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
-static const char *shell_rebroadcast_mode_name(meshtastic_Config_DeviceConfig_RebroadcastMode mode)
-{
-	switch (mode) {
-	case meshtastic_Config_DeviceConfig_RebroadcastMode_ALL:
-		return "all";
-	case meshtastic_Config_DeviceConfig_RebroadcastMode_ALL_SKIP_DECODING:
-		return "all_skip_decoding";
-	case meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY:
-		return "local_only";
-	case meshtastic_Config_DeviceConfig_RebroadcastMode_KNOWN_ONLY:
-		return "known_only";
-	case meshtastic_Config_DeviceConfig_RebroadcastMode_NONE:
-		return "none";
-	case meshtastic_Config_DeviceConfig_RebroadcastMode_CORE_PORTNUMS_ONLY:
-		return "core_portnums_only";
-	default:
-		return "unknown";
-	}
-}
 
 /* Parsers used only by the config-write commands below. */
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
@@ -1085,20 +912,6 @@ static int shell_parse_rebroadcast_mode(const struct shell *sh, const char *arg,
 }
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
-static int shell_parse_channel_index(const struct shell *sh, const char *arg, uint8_t *index)
-{
-	unsigned long parsed;
-	char *end;
-
-	parsed = strtoul(arg, &end, 0);
-	if (*end != '\0' || parsed >= MESHTASTIC_MAX_CHANNELS) {
-		shell_error(sh, "invalid channel index: %s", arg);
-		return -EINVAL;
-	}
-
-	*index = (uint8_t)parsed;
-	return 0;
-}
 
 /* Parsers used only by the config-write commands below. */
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
@@ -1222,7 +1035,7 @@ static void shell_print_psk_hex(const struct shell *sh, const meshtastic_Channel
  *
  * Here and not in the config store's setters for now: the store's one
  * config_write_allowed(origin) is agents-ls39.4.2. */
-static bool shell_store_locked(const struct shell *sh)
+bool mtsh_store_locked(const struct shell *sh)
 {
 #if defined(CONFIG_MESHTASTIC_LOCKDOWN)
 	if (meshtastic_lockdown_active() && !meshtastic_lockdown_store_ready()) {
@@ -1245,7 +1058,7 @@ static bool shell_store_locked(const struct shell *sh)
  * With admin compiled out there is no admin model to defer to, so nothing is
  * refused — the compile-time CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE switch is the
  * control that still applies in that build. */
-static bool shell_managed_refused(const struct shell *sh)
+bool mtsh_managed_refused(const struct shell *sh)
 {
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 	if (meshtastic_admin_is_managed()) {
@@ -1260,9 +1073,9 @@ static bool shell_managed_refused(const struct shell *sh)
 }
 
 /* Every config write: refused while the store is locked, then on a managed node. */
-static bool shell_config_write_refused(const struct shell *sh)
+bool mtsh_config_write_refused(const struct shell *sh)
 {
-	return shell_store_locked(sh) || shell_managed_refused(sh);
+	return mtsh_store_locked(sh) || mtsh_managed_refused(sh);
 }
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
 
@@ -1301,7 +1114,7 @@ static int cmd_channel_list(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	if (shell_store_locked(sh)) {
+	if (mtsh_store_locked(sh)) {
 		return -EACCES;
 	}
 
@@ -1318,7 +1131,7 @@ static int cmd_channel_show(const struct shell *sh, size_t argc, char **argv)
 	const meshtastic_Channel *ch;
 	int ret;
 
-	if (shell_store_locked(sh)) {
+	if (mtsh_store_locked(sh)) {
 		return -EACCES;
 	}
 
@@ -1327,7 +1140,7 @@ static int cmd_channel_show(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = shell_parse_channel_index(sh, argv[1], &index);
+	ret = mtsh_parse_channel_index(sh, argv[1], &index);
 	if (ret < 0) {
 		return ret;
 	}
@@ -1409,7 +1222,7 @@ static int cmd_channel_set(const struct shell *sh, size_t argc, char **argv)
 	int ret;
 	bool changed = false;
 
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 
@@ -1421,7 +1234,7 @@ static int cmd_channel_set(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = shell_parse_channel_index(sh, argv[1], &index);
+	ret = mtsh_parse_channel_index(sh, argv[1], &index);
 	if (ret < 0) {
 		return ret;
 	}
@@ -1519,7 +1332,7 @@ static int cmd_channel_disable(const struct shell *sh, size_t argc, char **argv)
 	meshtastic_Channel ch;
 	int ret;
 
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 
@@ -1528,7 +1341,7 @@ static int cmd_channel_disable(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = shell_parse_channel_index(sh, argv[1], &index);
+	ret = mtsh_parse_channel_index(sh, argv[1], &index);
 	if (ret < 0) {
 		return ret;
 	}
@@ -1572,11 +1385,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 
 static int cmd_device_role(const struct shell *sh, size_t argc, char **argv)
 {
-	if (shell_store_locked(sh)) {
+	if (mtsh_store_locked(sh)) {
 		return -EACCES;
 	}
 	if (argc == 1U) {
-		shell_print(sh, "role: %s", shell_device_role_name(meshtastic_device_role()));
+		shell_print(sh, "role: %s", mtsh_device_role_name(meshtastic_device_role()));
 		return 0;
 	}
 
@@ -1596,7 +1409,7 @@ static int cmd_device_role(const struct shell *sh, size_t argc, char **argv)
 		meshtastic_Config_DeviceConfig_Role role;
 		int ret;
 
-		if (shell_config_write_refused(sh)) {
+		if (mtsh_config_write_refused(sh)) {
 			return -EACCES;
 		}
 
@@ -1610,7 +1423,7 @@ static int cmd_device_role(const struct shell *sh, size_t argc, char **argv)
 			shell_error(sh, "role set failed: %d", ret);
 			return ret;
 		}
-		shell_print(sh, "role set to %s", shell_device_role_name(role));
+		shell_print(sh, "role set to %s", mtsh_device_role_name(role));
 		return 0;
 	}
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
@@ -1618,12 +1431,12 @@ static int cmd_device_role(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_device_rebroadcast(const struct shell *sh, size_t argc, char **argv)
 {
-	if (shell_store_locked(sh)) {
+	if (mtsh_store_locked(sh)) {
 		return -EACCES;
 	}
 	if (argc == 1U) {
 		shell_print(sh, "rebroadcast: %s",
-			    shell_rebroadcast_mode_name(meshtastic_rebroadcast_mode()));
+			    mtsh_rebroadcast_mode_name(meshtastic_rebroadcast_mode()));
 		return 0;
 	}
 
@@ -1641,7 +1454,7 @@ static int cmd_device_rebroadcast(const struct shell *sh, size_t argc, char **ar
 		meshtastic_Config_DeviceConfig_RebroadcastMode mode;
 		int ret;
 
-		if (shell_config_write_refused(sh)) {
+		if (mtsh_config_write_refused(sh)) {
 			return -EACCES;
 		}
 
@@ -1655,7 +1468,7 @@ static int cmd_device_rebroadcast(const struct shell *sh, size_t argc, char **ar
 			shell_error(sh, "rebroadcast set failed: %d", ret);
 			return ret;
 		}
-		shell_print(sh, "rebroadcast set to %s", shell_rebroadcast_mode_name(mode));
+		shell_print(sh, "rebroadcast set to %s", mtsh_rebroadcast_mode_name(mode));
 		return 0;
 	}
 #endif /* CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE */
@@ -1673,7 +1486,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_device_cmds,
 static void shell_print_node_summary(const struct shell *sh,
 				     const struct meshtastic_nodedb_node *node)
 {
-	int32_t snr = scaled_tenths(node->snr);
+	int32_t snr = mtsh_scaled_tenths(node->snr);
 	const char *long_name = node->has_user ? node->long_name : "";
 	const char *short_name = node->has_user ? node->short_name : "";
 	char heard[24];
@@ -1703,12 +1516,12 @@ static void shell_print_node_summary(const struct shell *sh,
 
 	if (node->has_hops_away) {
 		shell_print(sh, "0x%08x last=%s snr=%d.%u hops=%u via=%s long=\"%s\" short=\"%s\"",
-			    node->num, heard, scaled_whole(snr, 10), scaled_fraction(snr, 10),
+			    node->num, heard, mtsh_scaled_whole(snr, 10), mtsh_scaled_fraction(snr, 10),
 			    node->hops_away, node->via_mqtt ? "yes" : "no", long_name,
 			    short_name);
 	} else {
 		shell_print(sh, "0x%08x last=%s snr=%d.%u hops=? via=%s long=\"%s\" short=\"%s\"",
-			    node->num, heard, scaled_whole(snr, 10), scaled_fraction(snr, 10),
+			    node->num, heard, mtsh_scaled_whole(snr, 10), mtsh_scaled_fraction(snr, 10),
 			    node->via_mqtt ? "yes" : "no", long_name, short_name);
 	}
 }
@@ -1780,7 +1593,7 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = parse_u32(sh, argv[1], &node_num);
+	ret = mtsh_parse_u32(sh, argv[1], &node_num);
 	if (ret < 0) {
 		return ret;
 	}
@@ -1791,7 +1604,7 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	snr = scaled_tenths(node.snr);
+	snr = mtsh_scaled_tenths(node.snr);
 	shell_print(sh, "node: 0x%08x", node.num);
 	/* An age, as `nodedb list` prints it -- the raw uptime stamp printed here
 	 * until 2026-09-27 read like an age ("last heard: 82908s") and was not. */
@@ -1804,7 +1617,7 @@ static int cmd_nodedb_show(const struct shell *sh, size_t argc, char **argv)
 			    (now > node.last_heard_uptime_sec)
 				    ? (now - node.last_heard_uptime_sec) : 0U);
 	}
-	shell_print(sh, "snr: %d.%u", scaled_whole(snr, 10), scaled_fraction(snr, 10));
+	shell_print(sh, "snr: %d.%u", mtsh_scaled_whole(snr, 10), mtsh_scaled_fraction(snr, 10));
 	shell_print(sh, "channel: %u", node.channel);
 	if (node.heard_preset != 0xFFU) {
 		shell_print(sh, "heard on: %s",
@@ -1894,11 +1707,11 @@ static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
 	/* A favourite is persisted device state that changes how we relay; treat it
 	 * as a config write, so a managed node refuses it the same way it refuses
 	 * the other mutating shell commands. */
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 
-	ret = parse_u32(sh, argv[1], &node_num);
+	ret = mtsh_parse_u32(sh, argv[1], &node_num);
 	if (ret < 0) {
 		return ret;
 	}
@@ -1928,13 +1741,6 @@ static int cmd_nodedb_favorite(const struct shell *sh, size_t argc, char **argv)
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 #include "meshtastic_packet.h"
 #include "meshtastic_scanner.h"
-
-/* Defined further down, alongside the `lora preset` command that also uses it.
- * Forward-declared rather than moved, so each stays next to its own command
- * group; sharing the parser is the point — the accepted preset spellings must
- * not drift between `lora preset`, `scan presets` and `preset hop`. */
-static int shell_parse_modem_preset(const char *name,
-				    meshtastic_Config_LoRaConfig_ModemPreset *out);
 
 static int cmd_scan_start(const struct shell *sh, size_t argc, char **argv)
 {
@@ -2143,7 +1949,7 @@ static int cmd_scan_presets(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	for (size_t i = 1; i < argc; i++) {
-		if (shell_parse_modem_preset(argv[i], &list[i - 1U]) < 0) {
+		if (mtsh_parse_modem_preset(argv[i], &list[i - 1U]) < 0) {
 			shell_error(sh, "unknown preset '%s'", argv[i]);
 			return -EINVAL;
 		}
@@ -2734,7 +2540,7 @@ static int cmd_text_send(const struct shell *sh, size_t argc, char **argv)
 					"<message>");
 			return -EINVAL;
 		}
-		ret = shell_parse_channel_index(sh, argv[2], &channel_index);
+		ret = mtsh_parse_channel_index(sh, argv[2], &channel_index);
 		if (ret < 0) {
 			return ret;
 		}
@@ -2744,7 +2550,7 @@ static int cmd_text_send(const struct shell *sh, size_t argc, char **argv)
 	if (argc == (msg_arg + 1U)) {
 		first = msg_arg;
 	} else if (argc >= (msg_arg + 2U)) {
-		ret = parse_u32(sh, argv[msg_arg], &dest);
+		ret = mtsh_parse_u32(sh, argv[msg_arg], &dest);
 		if (ret < 0) {
 			return ret;
 		}
@@ -2762,7 +2568,7 @@ static int cmd_text_send(const struct shell *sh, size_t argc, char **argv)
 	tw = (struct shell_text_work *)w->arg;
 	tw->dest = dest;
 	tw->channel_index = channel_index;
-	len = append_message_from_argv(tw->text, MESHTASTIC_MAX_TEXT_LEN, argc, argv, first);
+	len = mtsh_append_argv(tw->text, MESHTASTIC_MAX_TEXT_LEN, argc, argv, first);
 
 	if (len < 0) {
 		mtsh_work_cancel(w);
@@ -2948,7 +2754,7 @@ static int cmd_gnss_status(const struct shell *sh, size_t argc, char **argv)
 	} else {
 		shell_print(sh, "1PPS:     not armed");
 	}
-	shell_print(sh, "clock:    %s", clock_quality_name(meshtastic_clock_get_quality()));
+	shell_print(sh, "clock:    %s", mtsh_clock_quality_name(meshtastic_clock_get_quality()));
 
 	return 0;
 }
@@ -3003,7 +2809,7 @@ static int cmd_position_show(const struct shell *sh, size_t argc, char **argv)
 	bool have;
 	bool stored;
 
-	if (shell_store_locked(sh)) {
+	if (mtsh_store_locked(sh)) {
 		return -EACCES;
 	}
 
@@ -3084,7 +2890,7 @@ static int cmd_position_interval(const struct shell *sh, size_t argc, char **arg
 	if (argc == 1U) {
 		return cmd_position_show(sh, argc, argv);
 	}
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 	secs = strtoul(argv[1], &end, 10);
@@ -3110,7 +2916,7 @@ static int cmd_position_gps_mode(const struct shell *sh, size_t argc, char **arg
 	if (argc == 1U) {
 		return cmd_position_show(sh, argc, argv);
 	}
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 	for (size_t i = 0U; i < ARRAY_SIZE(gps_mode_names); i++) {
@@ -3160,19 +2966,19 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 static int cmd_airtime(const struct shell *sh, size_t argc, char **argv)
 {
 	uint8_t cur = meshtastic_airtime_current_slot();
-	int32_t tx10 = scaled_tenths(meshtastic_airtime_tx_util_percent());
+	int32_t tx10 = mtsh_scaled_tenths(meshtastic_airtime_tx_util_percent());
 	bool any = false;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
 	shell_print(sh, "tx (band-wide, 1 h): %d.%u%%  <- what the duty cycle measures",
-		    scaled_whole(tx10, 10), scaled_fraction(tx10, 10));
+		    mtsh_scaled_whole(tx10, 10), mtsh_scaled_fraction(tx10, 10));
 	shell_print(sh, "channel (per preset, 60 s)  <- what CSMA and the beacon gate read");
 
 	for (uint8_t slot = 0; slot < MESHTASTIC_AIRTIME_PRESET_SLOTS; slot++) {
 		float pct = meshtastic_airtime_channel_util_percent_slot(slot);
-		int32_t p10 = scaled_tenths(pct);
+		int32_t p10 = mtsh_scaled_tenths(pct);
 		const char *name;
 
 		if (p10 == 0 && slot != cur) {
@@ -3185,8 +2991,8 @@ static int cmd_airtime(const struct shell *sh, size_t argc, char **argv)
 			       : meshtastic_preset_display_name(
 					 (meshtastic_Config_LoRaConfig_ModemPreset)slot, true);
 
-		shell_print(sh, "  %-12s %d.%u%%%s", name, scaled_whole(p10, 10),
-			    scaled_fraction(p10, 10), (slot == cur) ? "   <- on air now" : "");
+		shell_print(sh, "  %-12s %d.%u%%%s", name, mtsh_scaled_whole(p10, 10),
+			    mtsh_scaled_fraction(p10, 10), (slot == cur) ? "   <- on air now" : "");
 	}
 
 	if (!any) {
@@ -3207,7 +3013,7 @@ static int cmd_duty(const struct shell *sh, size_t argc, char **argv)
 	struct meshtastic_duty_stats stats;
 	float ceiling = meshtastic_duty_effective_pct();
 	float used = meshtastic_airtime_tx_util_percent();
-	int32_t c10 = scaled_tenths(ceiling), u10 = scaled_tenths(used);
+	int32_t c10 = mtsh_scaled_tenths(ceiling), u10 = mtsh_scaled_tenths(used);
 	uint8_t silent = 0U;
 	bool blocked;
 
@@ -3223,11 +3029,11 @@ static int cmd_duty(const struct shell *sh, size_t argc, char **argv)
 	if (ceiling >= 100.0f) {
 		shell_print(sh, "ceiling : none (this region sets no duty cycle)");
 	} else {
-		shell_print(sh, "ceiling : %d.%u%%", scaled_whole(c10, 10),
-			    scaled_fraction(c10, 10));
+		shell_print(sh, "ceiling : %d.%u%%", mtsh_scaled_whole(c10, 10),
+			    mtsh_scaled_fraction(c10, 10));
 	}
-	shell_print(sh, "used    : %d.%u%% of the last hour", scaled_whole(u10, 10),
-		    scaled_fraction(u10, 10));
+	shell_print(sh, "used    : %d.%u%% of the last hour", mtsh_scaled_whole(u10, 10),
+		    mtsh_scaled_fraction(u10, 10));
 	shell_print(sh, "state   : %s", blocked ? "BLOCKING egress" : "sending allowed");
 	if (blocked) {
 		shell_print(sh, "clear in: %u min", silent);
@@ -3324,13 +3130,13 @@ static int cmd_metrics_localstats(const struct shell *sh, size_t argc, char **ar
 		return ret;
 	}
 
-	chan_util = scaled_tenths(stats.channel_utilization);
-	tx_util = scaled_tenths(stats.air_util_tx);
+	chan_util = mtsh_scaled_tenths(stats.channel_utilization);
+	tx_util = mtsh_scaled_tenths(stats.air_util_tx);
 
 	shell_print(sh, "uptime  : %us", stats.uptime_seconds);
-	shell_print(sh, "util    : chan %d.%u%% tx %d.%u%%", scaled_whole(chan_util, 10),
-		    scaled_fraction(chan_util, 10), scaled_whole(tx_util, 10),
-		    scaled_fraction(tx_util, 10));
+	shell_print(sh, "util    : chan %d.%u%% tx %d.%u%%", mtsh_scaled_whole(chan_util, 10),
+		    mtsh_scaled_fraction(chan_util, 10), mtsh_scaled_whole(tx_util, 10),
+		    mtsh_scaled_fraction(tx_util, 10));
 	shell_print(sh, "packets : tx %u, rx %u (%u bad), dupe %u, tx dropped %u",
 		    stats.num_packets_tx, stats.num_packets_rx, stats.num_packets_rx_bad,
 		    stats.num_rx_dupe, stats.num_tx_dropped);
@@ -3459,7 +3265,7 @@ static int cmd_nodeinfo_request(const struct shell *sh, size_t argc, char **argv
 
 	ARG_UNUSED(argc);
 
-	ret = parse_u32(sh, argv[1], &dest);
+	ret = mtsh_parse_u32(sh, argv[1], &dest);
 	if (ret < 0) {
 		return ret;
 	}
@@ -3499,7 +3305,7 @@ static int cmd_nodeinfo_interval(const struct shell *sh, size_t argc, char **arg
 		char *end;
 		int ret;
 
-		if (shell_config_write_refused(sh)) {
+		if (mtsh_config_write_refused(sh)) {
 			return -EACCES;
 		}
 
@@ -3575,7 +3381,7 @@ static int cmd_status_write(const struct shell *sh, const char *text)
 #else
 	int ret;
 
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 
@@ -3977,10 +3783,6 @@ static int cmd_attach_status(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-/* Defined further down, with `lora preset`: one list of accepted spellings. */
-static int shell_parse_modem_preset(const char *name,
-				    meshtastic_Config_LoRaConfig_ModemPreset *out);
-
 /* A preset as a name (ShortFast), its number (6), or "none". Anything else is refused: a
  * name used to parse as the number 0, which is LongFast, and put the head there. */
 static int attach_parse_preset(const char *s, uint8_t *out)
@@ -3993,7 +3795,7 @@ static int attach_parse_preset(const char *s, uint8_t *out)
 		*out = MESHTASTIC_PRESET_UNKNOWN;
 		return 0;
 	}
-	if (shell_parse_modem_preset(s, &named) == 0) {
+	if (mtsh_parse_modem_preset(s, &named) == 0) {
 		*out = (uint8_t)named;
 		return 0;
 	}
@@ -4308,7 +4110,7 @@ static int cmd_neighbors_write(const struct shell *sh, bool enabled, uint32_t in
 #else
 	int ret;
 
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 	ret = meshtastic_neighborinfo_set(enabled, interval_secs, transmit_over_lora);
@@ -4486,7 +4288,7 @@ static int beacon_write(const struct shell *sh, const meshtastic_ModuleConfig_Me
 #else
 	int ret;
 
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 	ret = meshtastic_meshbeacon_set(cfg);
@@ -4708,7 +4510,7 @@ static int cmd_traffic_set(const struct shell *sh, size_t argc, char **argv)
 	{
 		int ret;
 
-		if (shell_config_write_refused(sh)) {
+		if (mtsh_config_write_refused(sh)) {
 			return -EACCES;
 		}
 		ret = meshtastic_traffic_set(&cfg);
@@ -4816,7 +4618,7 @@ static int cmd_notify_enable(const struct shell *sh, size_t argc, char **argv)
 	{
 		int ret;
 
-		if (shell_config_write_refused(sh)) {
+		if (mtsh_config_write_refused(sh)) {
 			return -EACCES;
 		}
 		ret = meshtastic_extnotify_set(cfg);
@@ -5417,7 +5219,7 @@ static int cmd_power_set(const struct shell *sh, bool on)
 	meshtastic_Config config;
 	int ret;
 
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 
@@ -5562,7 +5364,7 @@ static int cmd_transport_set(const struct shell *sh, bool wifi)
 	meshtastic_Config config;
 	int ret;
 
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 
@@ -5754,34 +5556,6 @@ static void cmd_lora_show(const struct shell *sh)
 	}
 }
 
-/* Match a preset display name (as reported by meshtastic_preset_display_name, so
- * the accepted spellings always equal what `meshtastic lora` shows).
- *
- * Outside the config-write guard, because parsing a preset name has nothing to
- * do with writing config: `scan presets` and `preset hop` both move the live
- * radio only, and a build with writes compiled out still wants them. */
-static int shell_parse_modem_preset(const char *s,
-				    meshtastic_Config_LoRaConfig_ModemPreset *out)
-{
-	static const meshtastic_Config_LoRaConfig_ModemPreset presets[] = {
-		meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
-		meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW,
-		meshtastic_Config_LoRaConfig_ModemPreset_LONG_MODERATE,
-		meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_SLOW,
-		meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST,
-		meshtastic_Config_LoRaConfig_ModemPreset_SHORT_SLOW,
-		meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST,
-		meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO,
-	};
-
-	for (size_t i = 0U; i < ARRAY_SIZE(presets); i++) {
-		if (strcmp(s, meshtastic_preset_display_name(presets[i], true)) == 0) {
-			*out = presets[i];
-			return 0;
-		}
-	}
-	return -EINVAL;
-}
 
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 static int cmd_lora_preset_set(const struct shell *sh, const char *name)
@@ -5790,10 +5564,10 @@ static int cmd_lora_preset_set(const struct shell *sh, const char *name)
 	meshtastic_Config_LoRaConfig_ModemPreset preset;
 	int ret;
 
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
-	if (shell_parse_modem_preset(name, &preset) < 0) {
+	if (mtsh_parse_modem_preset(name, &preset) < 0) {
 		shell_error(sh, "unknown preset '%s' (e.g. LongFast, MediumFast, ShortTurbo; "
 				"see `meshtastic lora`)", name);
 		return -EINVAL;
@@ -5834,7 +5608,7 @@ static int cmd_lora_tx_set(const struct shell *sh, const char *arg)
 	bool enable;
 	int ret;
 
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 	if (strcmp(arg, "on") == 0) {
@@ -5930,7 +5704,7 @@ static int cmd_preset(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	if (shell_parse_modem_preset(argv[2], &target) < 0) {
+	if (mtsh_parse_modem_preset(argv[2], &target) < 0) {
 		shell_error(sh, "unknown preset '%s' (e.g. LongFast, ShortTurbo)", argv[2]);
 		return -EINVAL;
 	}
@@ -6226,7 +6000,7 @@ static int cmd_lora_power_set(const struct shell *sh, const char *arg)
 	long dbm = strtol(arg, &end, 10);
 	int ret;
 
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 	if (end == arg || *end != '\0' || dbm < 0 || dbm > 30) {
@@ -6252,7 +6026,7 @@ static int cmd_lora_power_set(const struct shell *sh, const char *arg)
 
 static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 {
-	if (shell_store_locked(sh)) {
+	if (mtsh_store_locked(sh)) {
 		return -EACCES;
 	}
 	if (argc == 1U) {
@@ -6418,7 +6192,7 @@ static int lockdown_enqueue(const struct shell *sh, mtsh_work_fn run, const uint
 	if (boots_arg != NULL) {
 		uint32_t boots;
 
-		ret = parse_u32(sh, boots_arg, &boots);
+		ret = mtsh_parse_u32(sh, boots_arg, &boots);
 		if (ret < 0 || boots > 255U) {
 			shell_error(sh, "boots must be 0-255 (0 = default)");
 			return -EINVAL;
@@ -6891,7 +6665,7 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
 	pb_size_t match;
 	int ret;
 
-	if (shell_store_locked(sh)) {
+	if (mtsh_store_locked(sh)) {
 		return -EACCES;
 	}
 	ret = meshtastic_config_store_get_config(meshtastic_Config_security_tag, &cfg);
@@ -6923,7 +6697,7 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(key);
 	return -ENOTSUP;
 #else
-	if (shell_config_write_refused(sh)) {
+	if (mtsh_config_write_refused(sh)) {
 		return -EACCES;
 	}
 
@@ -6946,7 +6720,7 @@ static int cmd_admin_trust(const struct shell *sh, size_t argc, char **argv)
 		}
 		prefix_len = n / 2U;
 	} else {
-		ret = parse_u32(sh, argv[1], &node_num);
+		ret = mtsh_parse_u32(sh, argv[1], &node_num);
 		if (ret < 0) {
 			return ret;
 		}
@@ -7086,7 +6860,7 @@ static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 	if (argc < 3U) {
 		goto usage;
 	}
-	ret = parse_u32(sh, argv[1], &dest);
+	ret = mtsh_parse_u32(sh, argv[1], &dest);
 	if (ret < 0) {
 		return ret;
 	}
@@ -7106,7 +6880,7 @@ static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 		} else if (strcmp(argv[3], "config") == 0 && argc >= 5U) {
 			uint32_t type;
 
-			ret = parse_u32(sh, argv[4], &type);
+			ret = mtsh_parse_u32(sh, argv[4], &type);
 			if (ret < 0) {
 				mtsh_work_cancel(w);
 				return ret;
@@ -7135,7 +6909,7 @@ static int cmd_admin_remote(const struct shell *sh, size_t argc, char **argv)
 		uint32_t epoch;
 
 		if (argc >= 4U) {
-			ret = parse_u32(sh, argv[3], &epoch);
+			ret = mtsh_parse_u32(sh, argv[3], &epoch);
 			if (ret < 0) {
 				mtsh_work_cancel(w);
 				return ret;
@@ -7337,7 +7111,7 @@ static int cmd_cluster_status(const struct shell *sh, size_t argc, char **argv)
 		} else {
 			shell_print(sh, "horizon : ±%u min around epoch %u (clock source %s)",
 				    (unsigned int)(MESHTASTIC_HLC_MAX_DRIFT_MS / 60000U), epoch,
-				    clock_quality_name(meshtastic_clock_get_quality()));
+				    mtsh_clock_quality_name(meshtastic_clock_get_quality()));
 		}
 	}
 	/* "queued", not "sent": the counter increments where the digest enters
@@ -7448,7 +7222,7 @@ static int cmd_cluster_promote(const struct shell *sh, size_t argc, char **argv)
 	uint16_t tag;
 	int ret;
 
-	if (shell_store_locked(sh)) {
+	if (mtsh_store_locked(sh)) {
 		return -EACCES;
 	}
 	if (argc != 2U || cluster_section_parse(argv[1], &tag) != 0) {
@@ -7584,7 +7358,7 @@ static int cmd_cluster_pull(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "usage: meshtastic cluster pull <node>");
 		return -EINVAL;
 	}
-	ret = parse_u32(sh, argv[1], &node_num);
+	ret = mtsh_parse_u32(sh, argv[1], &node_num);
 	if (ret < 0) {
 		return ret;
 	}
@@ -7661,7 +7435,7 @@ static int cmd_cluster_reset(const struct shell *sh, size_t argc, char **argv)
 	 * versioned entry that the fleet can argue with; this one throws away
 	 * the whole local copy, and a fat-fingered `cluster reset` next to
 	 * `cluster status` should not be able to do that silently. */
-	if (shell_store_locked(sh)) {
+	if (mtsh_store_locked(sh)) {
 		return -EACCES;
 	}
 	if (argc != 2 || strcmp(argv[1], "--confirm") != 0) {
