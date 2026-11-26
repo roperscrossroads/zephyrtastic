@@ -306,6 +306,27 @@ config MESHTASTIC_NODE_SHORT_NAME
 	  provisional, hardware-derived number, as in the reference: the names
 	  keep its digits after the key-derived number is adopted.
 
+config MESHTASTIC_HW_MODEL
+	int "Hardware model advertised to peers and the phone"
+	range 0 255
+	# meshtastic_HardwareModel values; meshtastic_identity.c pins each
+	# number below against the generated enum.
+	default 132 if BOARD_HELTEC_WIFI_LORA32_V4_R8  # HELTEC_V4_R8
+	default 110 if BOARD_HELTEC_WIFI_LORA32_V4     # HELTEC_V4
+	default 88 if BOARD_XIAO_BLE                   # XIAO_NRF52_KIT
+	default 69 if BOARD_HELTEC_T114_V2             # HELTEC_MESH_NODE_T114
+	default 255                                    # PRIVATE_HW
+	help
+	  The HardwareModel this node reports in its User (NodeInfo) and
+	  DeviceMetadata. Peers and the phone app use it to tell boards apart,
+	  and the courier checks an image class against it before a push.
+
+	  Each board this port builds and upstream has an enum value for sets
+	  its default above. Anything else is PRIVATE_HW (255), the honest
+	  answer for a board upstream has no value for. A board that does have
+	  one (the V3, the Vision Master E290 and the SenseCAP Indicator do)
+	  should get a default line here rather than fall through.
+
 choice MESHTASTIC_NODE_ID_SOURCE
 	prompt "Node ID source"
 	default MESHTASTIC_NODE_ID_HWINFO if HWINFO_HAS_DRIVER

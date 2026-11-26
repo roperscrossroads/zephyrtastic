@@ -30,44 +30,14 @@
 
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-#if defined(CONFIG_BOARD_TWATCH_S3)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_T_WATCH_S3
-#elif defined(CONFIG_BOARD_TTGO_TBEAM)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_TBEAM
-#elif defined(CONFIG_BOARD_TTGO_LORA32)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_TLORA_V2_1_1P8
-/* V4_R8 before V4: they are independent boards today (the R8 carries octal PSRAM
- * and is not a revision of the plain V4), so the order is not load-bearing — but
- * keeping the more specific symbol first means this stays correct if the R8 is
- * ever folded in as a variant that also defines the base symbol. */
-#elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V4_R8)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V4_R8
-#elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V4)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V4
-#elif defined(CONFIG_BOARD_HELTEC_WIFI_LORA32_V2)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_V2_1
-#elif defined(CONFIG_BOARD_HELTEC_WIRELESS_TRACKER)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_WIRELESS_TRACKER
-#elif defined(CONFIG_BOARD_HELTEC_WIRELESS_STICK_LITE_V3)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_WSL_V3
-#elif defined(CONFIG_BOARD_HELTEC_T114_V2)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_HELTEC_MESH_NODE_T114
-#elif defined(CONFIG_BOARD_RAK4631)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_RAK4631
-/* Seeed XIAO nRF52840 (+ Wio-SX1262 shield) — upstream's enum for exactly this
- * pairing. Covers the plain and the Sense variant (one BOARD symbol). Before
- * this case existed the kits fell through to PRIVATE_HW, so a peer's NodeDB
- * could not tell a XIAO from unknown hardware — which matters once an image
- * class is checked against hw_model before a firmware push. */
-#elif defined(CONFIG_BOARD_XIAO_BLE)
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_XIAO_NRF52_KIT
-#else
-/* An unmapped board advertises PRIVATE_HW to every peer and to the phone app.
- * That is the honest answer for hardware upstream has no enum for, but it is the
- * wrong answer for a board that does have one — add the case above rather than
- * letting a supported board fall through here. */
-#define MESHTASTIC_BOARD_HW_MODEL meshtastic_HardwareModel_PRIVATE_HW
-#endif
+/* CONFIG_MESHTASTIC_HW_MODEL's defaults are bare numbers (Kconfig cannot see the
+ * generated enum): pin each one, so a renumbered proto fails the build here
+ * instead of shipping a board under another board's model. */
+BUILD_ASSERT(meshtastic_HardwareModel_HELTEC_V4_R8 == 132);
+BUILD_ASSERT(meshtastic_HardwareModel_HELTEC_V4 == 110);
+BUILD_ASSERT(meshtastic_HardwareModel_XIAO_NRF52_KIT == 88);
+BUILD_ASSERT(meshtastic_HardwareModel_HELTEC_MESH_NODE_T114 == 69);
+BUILD_ASSERT(meshtastic_HardwareModel_PRIVATE_HW == 255);
 
 
 #if IS_ENABLED(CONFIG_MESHTASTIC_NODE_ID_HWINFO)
@@ -208,7 +178,7 @@ const char *meshtastic_short_name(void)
 
 meshtastic_HardwareModel meshtastic_hw_model(void)
 {
-	return MESHTASTIC_BOARD_HW_MODEL;
+	return (meshtastic_HardwareModel)CONFIG_MESHTASTIC_HW_MODEL;
 }
 
 void meshtastic_fill_user(meshtastic_User *user)
