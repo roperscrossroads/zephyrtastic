@@ -91,6 +91,8 @@ int meshtastic_build_wire_packet(const struct meshtastic_packet *packet, uint8_t
  */
 int meshtastic_build_wire_from_mesh(const meshtastic_MeshPacket *mesh, uint8_t *out,
 				    uint32_t *out_len);
+/* Send a phone MeshPacket, decoded or already encrypted. Part of the send engine
+ * (meshtastic_send.c); declared here, where its callers already look. */
 int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh);
 
 #ifdef __cplusplus

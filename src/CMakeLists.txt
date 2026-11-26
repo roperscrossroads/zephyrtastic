@@ -87,6 +87,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_log.c
     meshtastic_identity.c
     meshtastic_state.c
+    meshtastic_send.c
     meshtastic_build.c
     meshtastic_channels.c
     meshtastic_clock.c
