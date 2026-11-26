@@ -180,6 +180,7 @@ if(CONFIG_MESHTASTIC)
   # module, and adds its commands to `meshtastic` itself (SHELL_SUBCMD_ADD).
   if(CONFIG_MESHTASTIC_SHELL)
     zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_LOCKDOWN meshtastic_lockdown_shell.c)
+    zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_FLEET meshtastic_fleet_shell.c)
     zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_CLUSTER meshtastic_cluster_shell.c)
     zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_DFU_TRIGGER meshtastic_dfu_trigger_shell.c)
     zephyr_library_sources_ifdef(CONFIG_MESHTASTIC_BLE_PEER meshtastic_ble_peer_shell.c)
