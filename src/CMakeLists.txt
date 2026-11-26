@@ -84,6 +84,7 @@ if(CONFIG_MESHTASTIC)
 
   zephyr_library_sources(
     meshtastic.c
+    meshtastic_log.c
     meshtastic_build.c
     meshtastic_channels.c
     meshtastic_clock.c
