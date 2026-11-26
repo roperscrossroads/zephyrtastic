@@ -1,0 +1,61 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -1813,6 +1813,49 @@
+ 	return ret;
+ }
+ 
++/*
++ * lora_cad(): one channel activity detection on its own, with the parameters
++ * of the last lora_config() (the same ones LORA_CAD_MODE_LBT uses inside
++ * lora_send()). A caller that must change something between the check and the
++ * transmit -- an external front end that has to stay in receive while the
++ * channel is checked and switch to transmit only after a clear one -- runs this,
++ * then lora_send() with cad.mode = LORA_CAD_MODE_NONE.
++ *
++ * The chip is left in standby (CAD exits to STDBY_RC), ready for the send that
++ * normally follows; a caller that does not send re-arms receive itself.
++ * Returns 0 when the channel is clear, 1 when activity was detected, -EBUSY when
++ * the modem is in use, or a negative errno from the CAD (see sx126x_do_cad()).
++ */
++static int sx126x_lora_cad(const struct device *dev, k_timeout_t timeout)
++{
++	struct sx126x_data *data = dev->data;
++	int ret;
++
++	/* sx126x_do_cad() bounds its own wait (SX126X_CAD_TIMEOUT_MS). */
++	ARG_UNUSED(timeout);
++
++	/* Held as TX for the duration: CAD and TX share the chip's standby
++	 * precondition, and this keeps a receive or another send out. */
++	if (!atomic_cas(&data->state, SX126X_REST_STATE, SX126X_STATE_TX)) {
++		return -EBUSY;
++	}
++
++	k_mutex_lock(&data->lock, K_FOREVER);
++	ret = sx126x_ensure_ready(dev);
++	if (ret == 0) {
++		ret = sx126x_do_cad(dev, &data->config);
++	}
++	k_mutex_unlock(&data->lock);
++	atomic_set(&data->state, SX126X_REST_STATE);
++
++	/* sx126x_do_cad() reports activity as -EBUSY (lora_send()'s contract);
++	 * lora_cad() reports it as 1 and keeps -EBUSY for "modem in use". */
++	if (ret == -EBUSY) {
++		return 1;
++	}
++	return ret;
++}
++
+ static int sx126x_lora_send(const struct device *dev,
+ 			    uint8_t *data_buf, uint32_t data_len)
+ {
+@@ -2355,6 +2398,7 @@
+ 	.recv_duty_cycle = sx126x_lora_recv_duty_cycle,
+ 	.recv_duty_cycle_async = sx126x_lora_recv_duty_cycle_async,
+ 	.airtime = sx126x_lora_airtime,
++	.cad = sx126x_lora_cad,
+ 	.test_cw = sx126x_lora_test_cw,
+ 	.rssi = sx126x_lora_rssi,
+ };

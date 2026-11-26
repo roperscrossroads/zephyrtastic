@@ -855,3 +855,24 @@ patches:
       before the probe), so the application keeps its shell, BLE and phone API
       without a radio, as upstream does. A CAD whose IRQ status reads 0xFFFF is
       an error (-EIO, cad_error), not activity.
+  - path: 0024-sx126x-lora-cad-on-its-own.patch
+    sha256sum: d87d157c1fb5c019640136f2beaa9fc8a27252eb6c99f556e9f609250701b6ad
+    module: zephyr
+    author: Adam Roper
+    email: adam.r.roper@gmail.com
+    date: "2026-11-26"
+    upstreamable: true
+    comments: |
+      The driver ran channel activity detection only inside lora_send()
+      (LORA_CAD_MODE_LBT), so nothing could happen between the check and the
+      transmit. A board with an external front end must keep it in receive for
+      the check and switch it to transmit only after a clear one: on the Heltec
+      V4's KCT8103L the transmit select also bypasses the receive amplifier, so
+      a check run after the switch listens deaf by the LNA's gain. The reference
+      firmware orders it that way (scan with the front end in receive, then
+      select transmit and send).
+
+      Implements the optional lora_cad() API op with the CAD this driver already
+      has (sx126x_do_cad(), from patch 0004): the parameters of the last
+      lora_config(), the chip left in standby for the send that follows. Returns
+      0 clear, 1 activity, -EBUSY when the modem is in use.
