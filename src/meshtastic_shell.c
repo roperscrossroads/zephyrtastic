@@ -364,6 +364,56 @@ int mtsh_enqueue(const struct shell *sh, mtsh_work_fn run, const void *arg, size
 	return mtsh_work_submit(w, len);
 }
 
+/* A command run on the work thread for a waiting shell thread: mtsh_run_on_work(). */
+struct mtsh_call {
+	shell_cmd_handler handler;
+	size_t argc;
+	char **argv;
+	int rc;
+	struct k_sem done;
+};
+
+static int mtsh_call_run(const struct shell *sh, const void *arg, size_t len)
+{
+	struct mtsh_call *call;
+
+	ARG_UNUSED(len);
+	memcpy(&call, arg, sizeof(call));
+	call->rc = call->handler(sh, call->argc, call->argv);
+	k_sem_give(&call->done);
+	return 0;
+}
+
+int mtsh_run_on_work(const struct shell *sh, shell_cmd_handler handler, size_t argc, char **argv)
+{
+	struct mtsh_call call = {.handler = handler, .argc = argc, .argv = argv};
+	struct mtsh_call *ptr = &call;
+	struct mtsh_work *w;
+
+	/* Already on the work thread (a queued command that runs another): no one to
+	 * wait for, so run it here. */
+	if (k_current_get() == &shell_work_thread) {
+		return handler(sh, argc, argv);
+	}
+
+	/* The caller waits anyway, so it also waits for a free item rather than being
+	 * told the queue is full: a command that used to run inline must not start
+	 * failing because sends are queued. */
+	if (k_mem_slab_alloc(&shell_work_slab, (void **)&w, K_FOREVER) != 0) {
+		return -ENOMSG;
+	}
+	memset(w, 0, sizeof(*w));
+	w->sh = sh;
+	w->run = mtsh_call_run;
+	w->quiet = true;
+	w->len = sizeof(ptr);
+	memcpy(w->arg, &ptr, sizeof(ptr));
+	k_sem_init(&call.done, 0, 1);
+	(void)k_msgq_put(&shell_work_msgq, &w, K_FOREVER);
+	(void)k_sem_take(&call.done, K_FOREVER);
+	return call.rc;
+}
+
 /* The common argument: one node id. */
 uint32_t mtsh_work_dest(const void *arg, size_t len)
 {
@@ -6289,6 +6339,9 @@ static int cmd_lockdown_lock(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* Deletes the token and writes NVS: on the work thread. */
+MTSH_DEFINE_ON_WORK(cmd_lockdown_lock)
+
 SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_lockdown_cmds,
 			       SHELL_CMD_ARG(provision, NULL,
 					     SHELL_HELP("Provision a passphrase and seal the store. "
@@ -6302,7 +6355,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(meshtastic_lockdown_cmds,
 					     cmd_lockdown_unlock, 1, 2),
 			       SHELL_CMD(lock, NULL,
 					 SHELL_HELP("Lock now: delete the token, zero the keys.", NULL),
-					 cmd_lockdown_lock),
+					 cmd_lockdown_lock_on_work),
 			       SHELL_CMD_ARG(disable, NULL,
 					     SHELL_HELP("Verify the passphrase, rewrite the store in "
 							"the clear, remove the artifacts. Omit the "

@@ -57,6 +57,34 @@ int mtsh_enqueue(const struct shell *sh, mtsh_work_fn run, const void *arg, size
 /** @brief The common argument, one node id, back out of an item. */
 uint32_t mtsh_work_dest(const void *arg, size_t len);
 
+/**
+ * @brief Run a command's handler on the work thread while the shell thread waits.
+ *
+ * Every command that changes state runs this way (agents-ls39.4.4.1): the shell
+ * thread's stack is 2 KB on a XIAO, and each config write, NVS save or send that ran
+ * on it was one more way to overflow it, found one crash at a time. Its output and
+ * return code are the handler's own, unchanged: the shell lends its context to the
+ * work thread while a command runs (exec_cmd releases the shell's lock for exactly
+ * this). No "queued" or "done" line.
+ *
+ * Not for a handler that reads from the console (shell_readline): that has to run on
+ * the shell thread. Parse and prompt there, then queue the work.
+ */
+int mtsh_run_on_work(const struct shell *sh, shell_cmd_handler handler, size_t argc, char **argv);
+
+/**
+ * @brief Define `<handler>_on_work`, the handler run through mtsh_run_on_work().
+ *
+ * Register the result instead of the handler:
+ *   MTSH_DEFINE_ON_WORK(cmd_owner_set)
+ *   SHELL_CMD(set, NULL, help, cmd_owner_set_on_work)
+ */
+#define MTSH_DEFINE_ON_WORK(handler)                                                         \
+	static int handler##_on_work(const struct shell *sh, size_t argc, char **argv)       \
+	{                                                                                    \
+		return mtsh_run_on_work(sh, handler, argc, argv);                            \
+	}
+
 /* ---- Gates (each prints why it refused) ---------------------------------- */
 
 /** @brief True while lockdown holds the store: config is neither readable nor writable. */

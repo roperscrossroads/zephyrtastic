@@ -37,6 +37,7 @@
 #include "meshtastic_clock.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_scanner.h"
+#include "meshtastic_shell_internal.h"
 #include "meshtastic_config_store.h"
 #include "meshtastic_position.h"
 #include "meshtastic_core.h"
@@ -194,6 +195,46 @@ static void shell_before(void *fixture)
 }
 
 ZTEST_SUITE(meshtastic_shell, NULL, shell_suite_setup, shell_before, NULL, NULL);
+
+/* ---- The framework (agents-ls39.4.4.1) ------------------------------------ */
+
+/* A command file adds itself to the root with SHELL_SUBCMD_ADD((meshtastic), ...); this
+ * test file is one more such file. Its handler runs through mtsh_run_on_work(), as every
+ * command that changes state does. */
+static k_tid_t probe_thread;
+
+static int cmd_testprobe(const struct shell *sh, size_t argc, char **argv)
+{
+	probe_thread = k_current_get();
+	shell_print(sh, "probe %s", argc > 1 ? argv[1] : "-");
+	return (argc > 1 && strcmp(argv[1], "fail") == 0) ? -EIO : 0;
+}
+
+MTSH_DEFINE_ON_WORK(cmd_testprobe)
+
+SHELL_SUBCMD_ADD((meshtastic), testprobe, NULL, "Test only: report the thread it ran on.",
+		 cmd_testprobe_on_work, 1, 1);
+
+ZTEST(meshtastic_shell, test_a_command_on_the_work_thread_keeps_its_output_and_rc)
+{
+	const char *out = NULL;
+
+	probe_thread = NULL;
+	zassert_ok(run_cmd("meshtastic testprobe hello", &out), "rc: %s", out);
+	zassert_not_null(strstr(out, "probe hello"), "its output, at once: %s", out);
+	zassert_is_null(strstr(out, "queued"), "no queue chatter: %s", out);
+	zassert_is_null(strstr(out, "done"), "no result line: %s", out);
+	zassert_not_null(probe_thread, "the handler ran");
+	zassert_not_equal(probe_thread, k_current_get(), "not on the calling (shell) thread");
+#if defined(CONFIG_THREAD_NAME)
+	zassert_str_equal(k_thread_name_get(probe_thread), "meshtastic_shell",
+			  "on the shell work thread");
+#endif
+
+	zassert_equal(run_cmd("meshtastic testprobe fail", &out), -EIO,
+		      "the handler's return code is the command's");
+	zassert_not_null(strstr(out, "probe fail"), "%s", out);
+}
 
 /* ---- Reads are always available ------------------------------------------ */
 
