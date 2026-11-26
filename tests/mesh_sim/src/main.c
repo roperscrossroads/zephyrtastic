@@ -147,6 +147,7 @@ static struct {
 	int8_t tx_power_gain_db; /* subtracted from every requested radiated dBm */
 
 	bool     tx_calls[8];
+	uint32_t tx_call_cad[8]; /* lora_sim_cad_count() at each call */
 	uint32_t tx_call_count;
 } fem_spy;
 
@@ -175,6 +176,7 @@ void meshtastic_radio_fem_set_tx(bool tx)
 {
 	if (fem_spy.tx_call_count < ARRAY_SIZE(fem_spy.tx_calls)) {
 		fem_spy.tx_calls[fem_spy.tx_call_count] = tx;
+		fem_spy.tx_call_cad[fem_spy.tx_call_count] = lora_sim_cad_count(lora_dev);
 	}
 	fem_spy.tx_call_count++;
 }
@@ -1914,6 +1916,61 @@ ZTEST(mesh_sim, test_fem_set_tx_gates_around_a_real_transmit)
 		      fem_spy.tx_call_count);
 	zassert_true(fem_spy.tx_calls[0], "the first call must steer the front-end to TX");
 	zassert_false(fem_spy.tx_calls[1], "the second call must return the front-end to RX");
+}
+
+/*
+ * The channel check runs with the front end in RECEIVE, and the switch to
+ * transmit comes only after a clear one. On the Heltec V4's KCT8103L the
+ * transmit select also bypasses the receive amplifier, so a check after the
+ * switch listens deaf by the LNA's gain. Reference: SX126xInterface's
+ * isChannelActive() (setTransmitEnable(false), then the scan) and
+ * configHardwareForSend() (setTransmitEnable(true), after a clear scan).
+ */
+ZTEST(mesh_sim, test_fem_switches_to_tx_only_after_a_clear_channel_check)
+{
+	struct lora_sim_frame f;
+	uint32_t cad_before = lora_sim_cad_count(lora_dev);
+
+	zassert_ok(meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "check first"),
+		   "send_text failed");
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(1000)), "no TX captured");
+
+	zassert_equal(2U, fem_spy.tx_call_count, "expected TX then RX, got %u calls",
+		      fem_spy.tx_call_count);
+	zassert_true(fem_spy.tx_calls[0], "the first call must steer the front end to TX");
+	zassert_equal(cad_before + 1U, fem_spy.tx_call_cad[0],
+		      "the channel check must run BEFORE the front end is switched to TX "
+		      "(CAD count %u at the switch, %u before the send)",
+		      fem_spy.tx_call_cad[0], cad_before);
+	zassert_false(fem_spy.tx_calls[1], "the second call must return the front end to RX");
+}
+
+static void enqueue_own_text(uint32_t id, const char *text);
+
+/* A busy channel never switches the front end to transmit at all. */
+ZTEST(mesh_sim, test_fem_stays_in_rx_when_the_channel_check_is_busy)
+{
+	struct lora_sim_frame f;
+
+	wait_rx_armed();
+	lora_sim_set_busy(lora_dev, 200U);
+	enqueue_own_text(0xFE3C0001U, "busy first");
+
+	k_msleep(60);
+	zassert_equal(lora_sim_tx_pending(lora_dev), 0, "must not transmit on a busy channel");
+	for (uint32_t i = 0U; i < MIN(fem_spy.tx_call_count, ARRAY_SIZE(fem_spy.tx_calls)); i++) {
+		zassert_false(fem_spy.tx_calls[i],
+			      "call %u steered the front end to TX on a busy channel", i);
+	}
+
+	/* After the channel clears the frame goes out, with the front end switched. */
+	zassert_ok(lora_sim_take_tx(lora_dev, &f, K_MSEC(2000)), "the frame must go out later");
+	bool switched = false;
+
+	for (uint32_t i = 0U; i < MIN(fem_spy.tx_call_count, ARRAY_SIZE(fem_spy.tx_calls)); i++) {
+		switched = switched || fem_spy.tx_calls[i];
+	}
+	zassert_true(switched, "the eventual send must switch the front end to TX");
 }
 
 /*

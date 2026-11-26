@@ -35,6 +35,7 @@ struct lora_sim_data {
 	void        *rx_user;
 
 	int64_t      busy_until_ms; /* channel modelled busy until this uptime */
+	uint32_t     cad_count;     /* lora_cad() calls since reset */
 	unsigned int drop_next;     /* silently drop this many upcoming TX */
 
 	/* The SX126x's latched PREAMBLE_DETECTED / HEADER_VALID flags, as a test
@@ -235,6 +236,7 @@ static int lora_sim_cad(const struct device *dev, k_timeout_t timeout)
 
 	ARG_UNUSED(timeout);
 	k_mutex_lock(&d->lock, K_FOREVER);
+	d->cad_count++;
 	detected = (k_uptime_get() < d->busy_until_ms) ? 1 : 0;
 	k_mutex_unlock(&d->lock);
 	return detected; /* 1 = activity detected, 0 = clear */
@@ -447,6 +449,17 @@ void lora_sim_set_busy(const struct device *dev, uint32_t ms)
 	k_mutex_unlock(&d->lock);
 }
 
+uint32_t lora_sim_cad_count(const struct device *dev)
+{
+	struct lora_sim_data *d = dev->data;
+	uint32_t n;
+
+	k_mutex_lock(&d->lock, K_FOREVER);
+	n = d->cad_count;
+	k_mutex_unlock(&d->lock);
+	return n;
+}
+
 void lora_sim_drop_next(const struct device *dev, unsigned int n)
 {
 	struct lora_sim_data *d = dev->data;
@@ -488,6 +501,7 @@ void lora_sim_reset(const struct device *dev)
 	k_msgq_purge(&d->txq);
 	d->drop_next        = 0U;
 	d->busy_until_ms    = 0;
+	d->cad_count        = 0U;
 	d->act_preamble     = false;
 	d->act_header       = false;
 	d->cosite_aggressor = NULL;

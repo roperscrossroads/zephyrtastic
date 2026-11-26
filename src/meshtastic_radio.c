@@ -639,8 +639,19 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	mt_lora_cfg.frequency = mt.frequency;
 	apply_modem_params();
 	mt_lora_cfg.tx_power = meshtastic_tx_power_chip_drive(mt.tx_power, mt.licensed);
+	/* Listen before talk, with the front end still in RECEIVE. On a board whose
+	 * front end has a receive amplifier (the Heltec V4's KCT8103L), the pin
+	 * that selects transmit also bypasses that amplifier, so a check run after
+	 * the switch listens deaf by the LNA's gain. The reference runs the check
+	 * with the front end in receive (SX126xInterface::isChannelActive()) and
+	 * selects transmit only once it is clear (configHardwareForSend()). A driver
+	 * with lora_cad() lets the check run on its own here; one without falls
+	 * back to the check inside lora_send(), with the front end switched first,
+	 * as before. */
+	const bool cad_separate = (DEVICE_API_GET(lora, mt.lora_dev)->cad != NULL);
+
 	mt_lora_cfg.tx = true;
-	mt_lora_cfg.cad.mode = LORA_CAD_MODE_LBT;
+	mt_lora_cfg.cad.mode = cad_separate ? LORA_CAD_MODE_NONE : LORA_CAD_MODE_LBT;
 	/* Four symbols, as the reference runs on the SX126x. It passes the *encoded*
 	 * SetCadParams value (raw 0x02 is CAD_ON_4_SYMB), which is easy to read as "2
 	 * symbols": this asked for 2 from 2026-09-02 until upstream named the value
@@ -649,12 +660,24 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	 * the driver's defaults, which match upstream. */
 	mt_lora_cfg.cad.symbol_num = LORA_CAD_SYMB_4;
 
-	/* Steer any RF front-end to its TX path before keying the transmitter. */
-	meshtastic_radio_fem_set_tx(true);
+	if (!cad_separate) {
+		meshtastic_radio_fem_set_tx(true);
+	}
 
 	ret = lora_config(mt.lora_dev, &mt_lora_cfg);
 	mt_record_effective(true, ret);
+	if ((ret == 0) && cad_separate) {
+		int cad = lora_cad(mt.lora_dev, K_SECONDS(1));
+
+		/* lora_cad(): 0 clear, 1 activity. Activity takes the same deferral
+		 * as the check inside lora_send() (-EBUSY, below). */
+		ret = (cad == 1) ? -EBUSY : cad;
+	}
 	if (ret == 0) {
+		/* Steer the front end to transmit only now, after a clear check. */
+		if (cad_separate) {
+			meshtastic_radio_fem_set_tx(true);
+		}
 		/* One attempt. A busy CAD (-EBUSY) is not retried here: until
 		 * 2026-09-02 this looped up to six times at 8-40 ms with RX stopped
 		 * and then DROPPED the frame -- on a slow preset the retries fit

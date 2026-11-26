@@ -110,6 +110,9 @@ bool lora_sim_rx_armed(const struct device *dev);
 /** @brief Force the modelled channel busy for @p ms from now (LBT/contention). */
 void lora_sim_set_busy(const struct device *dev, uint32_t ms);
 
+/** @brief lora_cad() calls since the last lora_sim_reset(). */
+uint32_t lora_sim_cad_count(const struct device *dev);
+
 /**
  * @brief Model the SX126x's latched PREAMBLE_DETECTED / HEADER_VALID flags.
  *
