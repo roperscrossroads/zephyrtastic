@@ -39,3 +39,18 @@ tests:
       - CONFIG_BT_MAX_CONN=2
       - CONFIG_MESHTASTIC_BLE_IDLE_DROP=y
       - CONFIG_MESHTASTIC_BLE_IDLE_DROP_SEC=5
+  # Both phone transports, BLE and TCP, as only the unified image has them (it does
+  # not link), plus the shell: the one build of `meshtastic transport`
+  # (agents-ls39.2.16), and its test (test_13). TCP over the native IP stack; nothing
+  # here opens a socket.
+  meshtastic.ble_sim.transport:
+    extra_configs:
+      - CONFIG_SHELL=y
+      - CONFIG_SHELL_BACKEND_DUMMY=y
+      - CONFIG_SHELL_BACKEND_SERIAL=n
+      - CONFIG_MESHTASTIC_SHELL=y
+      - CONFIG_NETWORKING=y
+      - CONFIG_NET_IPV4=y
+      - CONFIG_NET_TCP=y
+      - CONFIG_NET_SOCKETS=y
+      - CONFIG_MESHTASTIC_TCP=y

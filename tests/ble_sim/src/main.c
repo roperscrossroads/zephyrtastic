@@ -34,6 +34,10 @@
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/ztest.h>
+#if defined(CONFIG_MESHTASTIC_TCP) && defined(CONFIG_MESHTASTIC_SHELL)
+#include <zephyr/shell/shell.h>
+#include <zephyr/shell/shell_dummy.h>
+#endif
 
 #include <zephyr/meshtastic/meshtastic.h>
 
@@ -470,5 +474,43 @@ ZTEST(ble_sim, test_12_an_idle_incoming_non_peer_link_is_dropped)
 	zassert_true(UNTIL(hci().conns_active == 0U && hci().adv_enabled, 3000),
 		     "the slot was not freed / advertising not re-armed");
 	zassert_equal(meshtastic_ble_idle_drops(), drops + 1U);
+}
+#endif
+
+#if defined(CONFIG_MESHTASTIC_TCP) && defined(CONFIG_MESHTASTIC_SHELL)
+/* `meshtastic transport` exists only on an image with both phone transports, BLE and
+ * TCP, and no fleet image has both (agents-ls39.2.16): this scenario is its one build.
+ * Show, switch to wifi (persisted, applies on reboot), show again, switch back. */
+static int transport_cmd(const char *cmd, const char **out)
+{
+	const struct shell *sh = shell_backend_dummy_get_ptr();
+	size_t len;
+	int ret;
+
+	shell_backend_dummy_clear_output(sh);
+	ret = shell_execute_cmd(sh, cmd);
+	*out = shell_backend_dummy_get_output(sh, &len);
+	return ret;
+}
+
+ZTEST(ble_sim, test_13_transport_shows_and_persists_the_phone_transport)
+{
+	const char *out = "";
+
+	zassert_ok(transport_cmd("meshtastic transport", &out), "%s", out);
+	zassert_not_null(strstr(out, "phone transport:  ble"), "boots on BLE: %s", out);
+
+	zassert_ok(transport_cmd("meshtastic transport wifi", &out), "%s", out);
+	zassert_not_null(strstr(out, "phone transport -> wifi (persisted)"), "%s", out);
+	zassert_ok(transport_cmd("meshtastic transport", &out), "%s", out);
+	zassert_not_null(strstr(out, "phone transport:  wifi"), "the stored choice: %s", out);
+	zassert_not_null(strstr(out, "applies on reboot"), "%s", out);
+
+	zassert_ok(transport_cmd("meshtastic transport ble", &out), "%s", out);
+	zassert_ok(transport_cmd("meshtastic transport", &out), "%s", out);
+	zassert_not_null(strstr(out, "phone transport:  ble"), "back on BLE: %s", out);
+
+	zassert_equal(transport_cmd("meshtastic transport serial", &out), -EINVAL,
+		      "an unknown transport is refused");
 }
 #endif
