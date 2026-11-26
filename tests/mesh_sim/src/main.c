@@ -6094,7 +6094,9 @@ ZTEST(mesh_sim, test_a_want_ack_broadcast_is_reported_to_the_phone)
 	/* 2. Nobody relays: three attempts in all, then MAX_RETRANSMIT. */
 	pkt.id = 0xBC02U;
 	zassert_ok(meshtastic_send_packet(&pkt, K_NO_WAIT));
-	zassert_equal(count_tx_of(0xBC02U, 15000), 3U, "three attempts in all");
+	/* LongFast's slot is 44 ms, so each retransmit interval is ~8 s: the third
+	 * attempt goes at ~16 s. */
+	zassert_equal(count_tx_of(0xBC02U, 20000), 3U, "three attempts in all");
 	/* It is given up one interval after the last attempt. */
 	for (int i = 0; i < 150 && meshtastic_reliable_pending() != 0U; i++) {
 		k_msleep(100);

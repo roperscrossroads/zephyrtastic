@@ -103,7 +103,7 @@ def us_tuning(preset, channel_name=None):
 # 2*CWmax slots and then random(0, 2^CW) more (random's upper bound is
 # exclusive).
 
-NUM_SYM_CAD, CW_MIN, CW_MAX = 2, 3, 8
+NUM_SYM_CAD, CW_MIN, CW_MAX = 4, 3, 8
 
 
 def slot_ms(preset):

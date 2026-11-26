@@ -15,17 +15,19 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
 
-/* Symbols of CAD before transmitting. Reference RadioInterface.h: 2 for sub-GHz
- * (RadioLib default per AN1200.48), 4 at 2.4 GHz (AN1200.22 of the SX1280). */
-#define NUM_SYM_CAD       2U
-#define NUM_SYM_CAD_24GHZ 4U
+/* Symbols the CAD scan really runs, which size the contention slot (reference
+ * getCadSymbolCount(), upstream 0fc168d87): 4 on the SX126x sub-GHz, and the
+ * RadioInterface.h fallback of 8 at 2.4 GHz (no radio of ours goes there). The
+ * radio is told the same figure: keep meshtastic_radio.c's symbol_num in step. */
+#define NUM_SYM_CAD       4U
+#define NUM_SYM_CAD_24GHZ 8U
 
 /* Propagation (~30 km) + transceiver turnaround + MAC processing, in HUNDREDTHS
  * of a millisecond so the slot computation stays integral: 0.2 + 0.4 + 7 = 7.6.
  *
  * Hundredths, not tenths, because the symbol time is where the precision is
- * needed: LongFast's 2^11/250 = 8.192 ms truncates to 8.1 at tenths, which drags
- * the computed slot from 28 ms down to 27 and scales every contention delay
+ * needed: LongFast's 2^11/250 = 8.192 ms truncates to 8.1 at tenths, which can
+ * drag the computed slot down by a millisecond and scale every contention delay
  * with it. The harvested vectors caught exactly that. */
 #define FIXED_TIME_HUNDREDTHS 760U
 
@@ -140,22 +142,23 @@ uint32_t meshtastic_contention_slot_ms(uint8_t spread_factor, uint32_t bandwidth
 		return 0U;
 	}
 
+	/* One division at the end: multiplying 2^sf by the multiplier before dividing by
+	 * the bandwidth keeps the symbol time's fractional part, which is where the
+	 * accuracy lives. */
 	if (wide_lora) {
-		/* (NUM_SYM_CAD_24GHZ + (2*sf + 3)/32) * symbolTime. That inner
-		 * division is integer in the reference too — both operands are ints —
-		 * so it contributes 0 for every spreading factor a real radio uses,
-		 * and the multiplier is simply NUM_SYM_CAD_24GHZ. Kept in full so it
-		 * still tracks if the reference ever widens sf. */
-		cad_hundredths = (NUM_SYM_CAD_24GHZ + ((2U * spread_factor + 3U) / 32U)) * 100U;
+		/* (NUM_SYM_CAD_24GHZ + (2*sf + 3)/32) * symbolTime, the trailing term the
+		 * post-scan processing window. A float division upstream (as integers it
+		 * would truncate to 0 for every real sf), so the multiplier is kept in
+		 * 32nds here. */
+		slot_hundredths = (uint32_t)(((uint64_t)BIT(spread_factor) *
+					      (NUM_SYM_CAD_24GHZ * 32U + 2U * spread_factor + 3U) *
+					      100U) /
+					     (32ULL * bw_khz));
 	} else {
 		/* max(2.25, NUM_SYM_CAD + 0.5) * symbolTime. */
 		cad_hundredths = MAX(225U, (NUM_SYM_CAD * 100U) + 50U);
+		slot_hundredths = ((uint32_t)BIT(spread_factor) * cad_hundredths) / bw_khz;
 	}
-
-	/* One division at the end: multiplying 2^sf by the x100 multiplier before
-	 * dividing by the bandwidth keeps the symbol time's fractional part, which
-	 * is where the accuracy lives. */
-	slot_hundredths = ((uint32_t)BIT(spread_factor) * cad_hundredths) / bw_khz;
 
 	return (slot_hundredths + FIXED_TIME_HUNDREDTHS) / 100U;
 }

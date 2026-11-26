@@ -2680,7 +2680,7 @@ ZTEST(protocol_stack, test_relay_is_deferred_by_the_contention_window)
 	uint32_t before;
 
 	/* A narrow but non-zero window keeps the test quick while still deferring:
-	 * cw.max 3 with the default offset gives 2*3 = 6 slots of ~28 ms minimum. */
+	 * cw.max 3 with the default offset gives 2*3 = 6 slots of ~44 ms minimum. */
 	zassert_ok(meshtastic_sched_set("cw.min", "3"));
 	zassert_ok(meshtastic_sched_set("cw.max", "3"));
 

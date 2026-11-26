@@ -36,7 +36,7 @@
  * turnaround + MAC processing, where the fixed part is 0.2 + 0.4 + 7 = 7.6 ms
  * and the symbol time is 2^sf / bandwidth(kHz).
  *
- * LongFast (sf 11, 250 kHz) works out at 28 ms.
+ * LongFast (sf 11, 250 kHz) works out at 44 ms.
  *
  * @param spread_factor  5..12
  * @param bandwidth_hz   modem bandwidth

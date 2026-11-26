@@ -1,5 +1,5 @@
 {
-  "upstream": "firmware @ e2460b546",
+  "upstream": "firmware @ 7fcbbe15d",
   "regions": {
     "xor_hash": {
       "file": "src/mesh/Channels.cpp",
@@ -9,19 +9,19 @@
     },
     "djb2_hash": {
       "file": "src/mesh/RadioInterface.cpp",
-      "line": 943,
+      "line": 990,
       "anchor": "uint32_t hash(const char *str)",
       "sha256": "a40dc5227198efd31211d550ba05b2c245a1b04ee8b01d4543d863460317453b"
     },
     "modem_preset_to_params": {
       "file": "src/mesh/MeshRadio.h",
-      "line": 203,
+      "line": 216,
       "anchor": "static inline void modemPresetToParams(",
       "sha256": "ae57bdd95cbc01a9ef181c135b4841ebb825d8face8da721c7a60401794919ec"
     },
     "init_nonce": {
       "file": "src/mesh/CryptoEngine.cpp",
-      "line": 428,
+      "line": 675,
       "anchor": "void CryptoEngine::initNonce(",
       "sha256": "80e7d0462008af8011fecdc66738ae8a862af7933f62b235de89d116d2ad572a"
     },
@@ -33,13 +33,13 @@
     },
     "compute_slot_time": {
       "file": "src/mesh/RadioInterface.cpp",
-      "line": 1387,
+      "line": 1438,
       "anchor": "uint32_t RadioInterface::computeSlotTimeMsec(",
-      "sha256": "0975fc4b008d1941a251bca7490f3dc373359d8ea79ba8ec157052ce5b4086ff"
+      "sha256": "aa472291c20d8b4d8b77d978920fc575795efa1891db6bab8ceaa48a5ebef906"
     },
     "get_cw_size": {
       "file": "src/mesh/RadioInterface.cpp",
-      "line": 794,
+      "line": 841,
       "anchor": "uint8_t RadioInterface::getCWsize(",
       "sha256": "b0e8505473141b47de7568a7f34acea19f84981d38fb1da8cde632d227440386"
     }

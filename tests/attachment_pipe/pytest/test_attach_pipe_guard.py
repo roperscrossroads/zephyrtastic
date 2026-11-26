@@ -80,7 +80,7 @@ def test_x9a_lag_is_measured_and_warns_a_router(hub, images, lat_ms):
 ])
 def test_x9b_lag_does_not_warn_a_late_role(hub, images, role):
     """The same 25 ms link under a role that relays in the late window (16 slots
-    in, 192 ms here): the lag is measured but cannot make a relay late, so LAG
+    in, 256 ms here): the lag is measured but cannot make a relay late, so LAG
     stays quiet. CLIENT and ROUTER_LATE both wait out that offset."""
     rig(hub, images, role, 25)
     relays(hub, MEDIUM_FAST, 4, 0x9B00 + role * 16)
@@ -91,8 +91,8 @@ def test_x9b_lag_does_not_warn_a_late_role(hub, images, role):
 
 @pytest.mark.parametrize("head_preset,warns", [(SHORT_TURBO, True), (LONG_FAST, False)])
 def test_x9c_a_head_faster_than_the_brain_warns(hub, images, head_preset, warns):
-    """A MediumFast brain (12 ms slot). A ShortTurbo head (8 ms) carries the
-    faster preset: FAST-HEAD. A LongFast head (28 ms) is where a head belongs:
+    """A MediumFast brain (16 ms slot). A ShortTurbo head (8 ms) carries the
+    faster preset: FAST-HEAD. A LongFast head (44 ms) is where a head belongs:
     quiet."""
     rig(hub, images, ROLE_CLIENT, 0, head_preset=head_preset, brain_preset=MEDIUM_FAST)
     relays(hub, head_preset, 1, 0x9C00 + head_preset)

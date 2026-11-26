@@ -332,8 +332,11 @@ static constexpr uint8_t CWmax = 8;
 // double literal against an int expression. Defined after the includes so it
 // cannot shadow std::max for anything above.
 #define max(a, b) ((a) > (b) ? (a) : (b))
-static constexpr uint8_t NUM_SYM_CAD = 2;
-static constexpr uint8_t NUM_SYM_CAD_24GHZ = 4;
+// getCadSymbolCount() is per radio driver upstream: SX126x runs 4 symbols sub-GHz
+// (SX126xInterface::getCadSymbolCountSubGhz), and 8 is the RadioInterface.h
+// fallback at 2.4 GHz. The port's radios are SX126x.
+static constexpr uint8_t NUM_SYM_CAD = 4;
+static constexpr uint8_t NUM_SYM_CAD_24GHZ = 8;
 
 // ===== VERBATIM UPSTREAM BODY: computeSlotTimeMsec (%(compute_slot_time_src)s) =====
 %(compute_slot_time_shim)s
@@ -491,7 +494,8 @@ def build_probe(regions: dict[str, Region], presets: dict[str, int]) -> str:
     slot_body = slot_region[slot_region.find("{"):]
     slot_shim = (
         "static uint32_t computeSlotTimeMsec(uint8_t sf, float bw, bool wideLora)\n"
-        + slot_body.replace("myRegion->wideLora", "wideLora")
+        + slot_body.replace("myRegion->wideLora", "wideLora").replace(
+            "getCadSymbolCount()", "(wideLora ? NUM_SYM_CAD_24GHZ : NUM_SYM_CAD)")
     )
 
     # getCWsize only needs the class qualifier dropped; SNR_MIN/SNR_MAX are

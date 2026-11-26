@@ -2231,23 +2231,23 @@ ZTEST(attachment, test_guard_flags_link_lag_over_half_the_router_window_for_a_ro
 		.tx_seq = 99U, .rc = 0, .defers = 0, .tx_ms = 1000U, .has_lag = false,
 	};
 
-	/* A MediumFast head (slot 12 ms, ROUTER window 60 ms, threshold 30 ms). */
+	/* A MediumFast head (slot 16 ms, ROUTER window 80 ms, threshold 40 ms). */
 	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);
 	head_reports_preset(HEAD1_NODE, (uint8_t)PRESET_MF);
 	for (uint16_t i = 0U; i < 16U; i++) {
-		head_reports_lag(HEAD1_NODE, i, (i == 15U) ? 200U : 40U);
+		head_reports_lag(HEAD1_NODE, i, (i == 15U) ? 200U : 50U);
 	}
 	zassert_true(attach_info_for(HEAD1_NODE, &a));
 	zassert_equal(a.lag_n, 16U);
-	zassert_equal(a.lag_p50_ms, 40U);
-	zassert_equal(a.lag_p90_ms, 40U, "p90 of 16 is the 2nd largest, not the one outlier");
+	zassert_equal(a.lag_p50_ms, 50U);
+	zassert_equal(a.lag_p90_ms, 50U, "p90 of 16 is the 2nd largest, not the one outlier");
 	zassert_equal(a.lag_max_ms, 200U);
 	zassert_false(a.warn_lag, "under CLIENT the lag cannot bite");
 	/* As a ROUTER the same samples warn. */
 	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_ROUTER);
-	head_reports_lag(HEAD1_NODE, 16U, 40U);
+	head_reports_lag(HEAD1_NODE, 16U, 50U);
 	zassert_true(attach_info_for(HEAD1_NODE, &a));
-	zassert_true(a.warn_lag, "40 ms p90 > 30 ms (half of MediumFast's 60 ms ROUTER window)");
+	zassert_true(a.warn_lag, "50 ms p90 > 40 ms (half of MediumFast's 80 ms ROUTER window)");
 	/* Back to CLIENT: the flag goes with the role, no new sample needed
 	 * (agents-pcs2.5 -- it used to stay set until the next relay). */
 	meshtastic_set_device_role(meshtastic_Config_DeviceConfig_Role_CLIENT);

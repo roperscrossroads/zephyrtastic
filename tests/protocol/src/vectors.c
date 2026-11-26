@@ -1034,7 +1034,7 @@ ZTEST(wire_vectors, test_relay_delay_respects_router_priority_and_bounds)
 	const uint32_t slot = meshtastic_contention_slot_ms(11U, 250000U, false);
 	const int8_t snrs[] = {-20, -10, 0, 5, 10};
 
-	zassert_equal(slot, 28U, "LongFast slot time should be 28 ms, got %u", slot);
+	zassert_equal(slot, 44U, "LongFast slot time should be 44 ms, got %u", slot);
 
 	for (unsigned int i = 0; i < ARRAY_SIZE(snrs); i++) {
 		uint32_t worst = meshtastic_contention_delay_relay_worst_ms(snrs[i], slot);
@@ -1171,7 +1171,7 @@ ZTEST(wire_vectors, test_plan_is_internally_consistent)
 		for (unsigned int trial = 0; trial < 32U; trial++) {
 			meshtastic_contention_plan_relay(snrs[i], false, 11U, 250000U, false,
 							 &plan);
-			zassert_equal(plan.slot_ms, 28U, "LongFast slot should be 28 ms");
+			zassert_equal(plan.slot_ms, 44U, "LongFast slot should be 44 ms");
 			zassert_true(plan.delay_ms <= plan.worst_ms,
 				     "delay %u exceeded its own bound %u", plan.delay_ms,
 				     plan.worst_ms);

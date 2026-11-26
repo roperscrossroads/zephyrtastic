@@ -8,15 +8,15 @@
  * reimplementing an algorithm. That is what makes these vectors able to
  * catch a symmetric error that the self-loopback tests cannot.
  *
- * Upstream: firmware @ e2460b546
+ * Upstream: firmware @ 7fcbbe15d
  * Verbatim regions (sha256 of extracted text):
  *   xor_hash                 src/mesh/Channels.cpp:27  77646cb87b60e197
- *   djb2_hash                src/mesh/RadioInterface.cpp:943  a40dc5227198efd3
- *   modem_preset_to_params   src/mesh/MeshRadio.h:203  ae57bdd95cbc01a9
- *   init_nonce               src/mesh/CryptoEngine.cpp:428  80e7d0462008af80
+ *   djb2_hash                src/mesh/RadioInterface.cpp:990  a40dc5227198efd3
+ *   modem_preset_to_params   src/mesh/MeshRadio.h:216  ae57bdd95cbc01a9
+ *   init_nonce               src/mesh/CryptoEngine.cpp:675  80e7d0462008af80
  *   preset_display_name      src/DisplayFormatters.cpp:4  745b97c5d1836239
- *   compute_slot_time        src/mesh/RadioInterface.cpp:1387  0975fc4b008d1941
- *   get_cw_size              src/mesh/RadioInterface.cpp:794  b0e8505473141b47
+ *   compute_slot_time        src/mesh/RadioInterface.cpp:1438  aa472291c20d8b4d
+ *   get_cw_size              src/mesh/RadioInterface.cpp:841  b0e8505473141b47
  */
 
 #ifndef MESHTASTIC_VECTORS_H_
@@ -271,40 +271,40 @@ static const struct mt_vec_nonce mt_vec_nonces[] = {
  */
 struct mt_vec_slot_time { const char *preset; uint32_t slot_ms; };
 static const struct mt_vec_slot_time mt_vec_slot_times[] = {
-	{ "LITE_FAST", 17U },
-	{ "LITE_FAST_wide", 23U },
-	{ "LITE_SLOW", 28U },
-	{ "LITE_SLOW_wide", 40U },
-	{ "LONG_FAST", 28U },
-	{ "LONG_FAST_wide", 17U },
-	{ "LONG_MODERATE", 48U },
-	{ "LONG_MODERATE_wide", 27U },
-	{ "LONG_SLOW", 89U },
-	{ "LONG_SLOW_wide", 47U },
-	{ "LONG_TURBO", 17U },
-	{ "LONG_TURBO_wide", 12U },
-	{ "MEDIUM_FAST", 12U },
-	{ "MEDIUM_FAST_wide", 10U },
-	{ "MEDIUM_SLOW", 17U },
-	{ "MEDIUM_SLOW_wide", 12U },
-	{ "MEDIUM_TURBO", 10U },
-	{ "MEDIUM_TURBO_wide", 8U },
-	{ "NARROW_FAST", 12U },
-	{ "NARROW_FAST_wide", 15U },
-	{ "NARROW_SLOW", 17U },
-	{ "NARROW_SLOW_wide", 23U },
-	{ "SHORT_FAST", 8U },
+	{ "LITE_FAST", 26U },
+	{ "LITE_FAST_wide", 43U },
+	{ "LITE_SLOW", 44U },
+	{ "LITE_SLOW_wide", 79U },
+	{ "LONG_FAST", 44U },
+	{ "LONG_FAST_wide", 29U },
+	{ "LONG_MODERATE", 81U },
+	{ "LONG_MODERATE_wide", 51U },
+	{ "LONG_SLOW", 155U },
+	{ "LONG_SLOW_wide", 96U },
+	{ "LONG_TURBO", 26U },
+	{ "LONG_TURBO_wide", 18U },
+	{ "MEDIUM_FAST", 16U },
+	{ "MEDIUM_FAST_wide", 13U },
+	{ "MEDIUM_SLOW", 26U },
+	{ "MEDIUM_SLOW_wide", 18U },
+	{ "MEDIUM_TURBO", 12U },
+	{ "MEDIUM_TURBO_wide", 10U },
+	{ "NARROW_FAST", 16U },
+	{ "NARROW_FAST_wide", 25U },
+	{ "NARROW_SLOW", 26U },
+	{ "NARROW_SLOW_wide", 42U },
+	{ "SHORT_FAST", 9U },
 	{ "SHORT_FAST_wide", 8U },
-	{ "SHORT_SLOW", 10U },
-	{ "SHORT_SLOW_wide", 8U },
+	{ "SHORT_SLOW", 12U },
+	{ "SHORT_SLOW_wide", 10U },
 	{ "SHORT_TURBO", 8U },
-	{ "SHORT_TURBO_wide", 7U },
-	{ "TINY_FAST", 28U },
-	{ "TINY_FAST_wide", 40U },
-	{ "TINY_SLOW", 48U },
-	{ "TINY_SLOW_wide", 73U },
-	{ "VERY_LONG_SLOW", 28U },
-	{ "VERY_LONG_SLOW_wide", 17U },
+	{ "SHORT_TURBO_wide", 8U },
+	{ "TINY_FAST", 44U },
+	{ "TINY_FAST_wide", 77U },
+	{ "TINY_SLOW", 81U },
+	{ "TINY_SLOW_wide", 148U },
+	{ "VERY_LONG_SLOW", 44U },
+	{ "VERY_LONG_SLOW_wide", 29U },
 };
 
 /* --- SNR -> contention window exponent -------------------------------
