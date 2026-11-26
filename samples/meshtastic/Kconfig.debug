@@ -28,7 +28,7 @@
 #                                      MODEM_MODULES_LOG_LEVEL_DBG=y
 #       OTA fault-injection timer:    MESHTASTIC_OTA_FAULT_TEST_SEC=45
 #     Class overlays that switch diagnostics on per fleet class:
-#       overlay-health.conf (health report), overlay-rf.conf (rf histograms +
+#       overlay-health.conf (health report), prj.conf (rf histograms +
 #       path report), overlay-coredump-flash.conf.
 #
 # COSTS -- the binding budget per board (what running out looks like):
@@ -421,7 +421,7 @@ configdefault STATS_SHELL
 # ---------------------------------------------------------------------------
 
 # rf: RX/TX histograms, `meshtastic rf`, the path report. Class images turn it
-# on with overlay-rf.conf.
+# on in prj.conf (it was overlay-rf.conf).
 # Cost: -1.4 KB dram0 on V4 | -10.1 KB XIAO flash, -1.4 KB RAM.
 configdefault MESHTASTIC_RF
 	default n
