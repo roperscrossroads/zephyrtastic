@@ -59,6 +59,9 @@ int mtsh_enqueue(const struct shell *sh, mtsh_work_fn run, const void *arg, size
 /** @brief The common argument, one node id, back out of an item. */
 uint32_t mtsh_work_dest(const void *arg, size_t len);
 
+/** @brief `<cmd> [dest]`: queue @p run with the node id (broadcast when absent). */
+int mtsh_deferred_send(const struct shell *sh, size_t argc, char **argv, mtsh_work_fn run);
+
 /**
  * @brief Run a command's handler on the work thread while the shell thread waits.
  *

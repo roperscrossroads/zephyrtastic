@@ -382,12 +382,8 @@ uint32_t mtsh_work_dest(const void *arg, size_t len)
 }
 
 
-/* Shared by the position / metrics / environment / nodeinfo "send" commands. A keyless
- * head (class 12) compiles all four out, and the fleet lane builds with -Werror, so the
- * helper is __unused there rather than guarded by a list of callers that would rot
- * (found by the lane 2026-09-29). */
-static __unused int cmd_deferred_send(const struct shell *sh, size_t argc, char **argv,
-				      mtsh_work_fn run)
+/* Shared by the position / metrics / environment / nodeinfo "send" commands. */
+int mtsh_deferred_send(const struct shell *sh, size_t argc, char **argv, mtsh_work_fn run)
 {
 	uint32_t dest;
 	int ret;
@@ -2265,7 +2261,7 @@ static int shell_position_send_run(const struct shell *sh, const void *arg, size
 
 static int cmd_gnss_send(const struct shell *sh, size_t argc, char **argv)
 {
-	return cmd_deferred_send(sh, argc, argv, shell_position_send_run);
+	return mtsh_deferred_send(sh, argc, argv, shell_position_send_run);
 }
 MTSH_DEFINE_ON_WORK(cmd_gnss_send)
 
@@ -2562,7 +2558,7 @@ static int shell_metrics_send_run(const struct shell *sh, const void *arg, size_
 
 static int cmd_metrics_send(const struct shell *sh, size_t argc, char **argv)
 {
-	return cmd_deferred_send(sh, argc, argv, shell_metrics_send_run);
+	return mtsh_deferred_send(sh, argc, argv, shell_metrics_send_run);
 }
 MTSH_DEFINE_ON_WORK(cmd_metrics_send)
 
@@ -2664,7 +2660,7 @@ static int shell_environment_send_run(const struct shell *sh, const void *arg, s
 
 static int cmd_environment_send(const struct shell *sh, size_t argc, char **argv)
 {
-	return cmd_deferred_send(sh, argc, argv, shell_environment_send_run);
+	return mtsh_deferred_send(sh, argc, argv, shell_environment_send_run);
 }
 MTSH_DEFINE_ON_WORK(cmd_environment_send)
 
@@ -2686,7 +2682,7 @@ static int shell_nodeinfo_send_run(const struct shell *sh, const void *arg, size
 
 static int cmd_nodeinfo_send(const struct shell *sh, size_t argc, char **argv)
 {
-	return cmd_deferred_send(sh, argc, argv, shell_nodeinfo_send_run);
+	return mtsh_deferred_send(sh, argc, argv, shell_nodeinfo_send_run);
 }
 MTSH_DEFINE_ON_WORK(cmd_nodeinfo_send)
 
