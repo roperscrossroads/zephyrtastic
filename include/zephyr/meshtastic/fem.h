@@ -148,8 +148,8 @@ enum meshtastic_fem_state {
 	/** Detected and configured; @ref meshtastic_radio_fem_name says which. */
 	MESHTASTIC_FEM_STATE_DETECTED,
 	/** Detection could not be carried out. The board HAS a front-end and we
-	 *  do not know which — so no gain table is in use and transmit is being
-	 *  under-driven by that front-end's gain. A fault, not a configuration. */
+	 *  do not know which, so the conversion assumes the highest-gain part and
+	 *  transmit is under-driven by up to that gain. A fault, not a configuration. */
 	MESHTASTIC_FEM_STATE_FAILED,
 	/** Detection ran and disagreed with what this board is known to carry.
 	 *  Only possible where the build knows statically (the V4-R8 is only ever

@@ -55,6 +55,13 @@ LOG_MODULE_REGISTER(heltec_v4_fem, LOG_LEVEL_INF);
 static const struct device *fem_mode_port;
 static gpio_pin_t fem_mode_pin;
 
+/* Whether the mode pin is in its transmit state, and the lock that keeps a
+ * receive-path change (meshtastic_radio_fem_lna_set(), from a config apply on
+ * another thread) from driving the pin to a receive level in the middle of a
+ * transmission: on the KCT8103L that would drop CTX and cut the frame. */
+static bool fem_in_tx;
+static struct k_spinlock fem_pin_lock;
+
 /*
  * Transmit gain of each fitted front-end, in dB, indexed by the SX1262 drive
  * level in dBm (index 0 == drive 0 dBm). Straight from the reference firmware
@@ -256,8 +263,12 @@ void meshtastic_radio_fem_set_tx(bool tx)
 	 * KCT8103L's LNA, HIGH bypasses it. Honour the configured mode there rather
 	 * than always assuming the LNA, so fem_lna_mode is a real control and not
 	 * decoration. ("Don't care" on the GC1109, which has no RX path choice.) */
+	k_spinlock_key_t key = k_spin_lock(&fem_pin_lock);
+
+	fem_in_tx = tx;
 	gpio_pin_set_raw(fem_mode_port, fem_mode_pin,
 			 tx ? 1 : (fem_lna_enabled ? 0 : 1));
+	k_spin_unlock(&fem_pin_lock, key);
 }
 
 bool meshtastic_radio_fem_lna_can_control(void)
@@ -280,8 +291,9 @@ bool meshtastic_radio_fem_lna_get(void)
 /*
  * The detected part, not a compile-time guess: one image serves both PCB
  * revisions and detection can fail (see heltec_v4_fem_init). NULL here means
- * detection did not complete, which matters — the gain table degrades to
- * identity in that case and transmit power is quietly under-driven.
+ * detection did not complete, which matters: the conversion then assumes the
+ * highest-gain part (fem_gain_table's comment), so transmit is under-driven by
+ * up to that part's gain, never over-driven.
  */
 const char *meshtastic_radio_fem_name(void)
 {
@@ -312,13 +324,17 @@ enum meshtastic_fem_state meshtastic_radio_fem_state(void)
 
 void meshtastic_radio_fem_lna_set(bool enable)
 {
+	k_spinlock_key_t key = k_spin_lock(&fem_pin_lock);
+
 	fem_lna_enabled = enable;
 
-	/* Apply immediately if we are sitting in receive, so the change takes
-	 * effect without waiting for the next transmit to cycle the pin. */
-	if (fem_mode_port != NULL) {
+	/* Apply now if we are sitting in receive, so the change takes effect
+	 * without waiting for the next transmit to cycle the pin. During a
+	 * transmission it is only recorded: the return to receive applies it. */
+	if ((fem_mode_port != NULL) && !fem_in_tx) {
 		gpio_pin_set_raw(fem_mode_port, fem_mode_pin, enable ? 0 : 1);
 	}
+	k_spin_unlock(&fem_pin_lock, key);
 	LOG_INF("LoRa FEM receive path: %s", enable ? "LNA" : "bypass");
 }
 
