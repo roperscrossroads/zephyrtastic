@@ -1,0 +1,35 @@
+diff --git a/drivers/lora/native/sx126x/sx126x.c b/drivers/lora/native/sx126x/sx126x.c
+--- a/drivers/lora/native/sx126x/sx126x.c
++++ b/drivers/lora/native/sx126x/sx126x.c
+@@ -915,6 +915,11 @@
+  * time anything reads it the evidence is already gone. This is the durable
+  * "has this ever happened, how many times" fact the streak cannot answer. */
+ static uint32_t sx126x_wedge_reset_count;
++/* Frames received with a failed payload CRC this boot. The frame itself is
++ * dropped (the receive callback has no status to carry it in); the count lets a
++ * radio layer tell a busy-but-damaged channel from a quiet one. One count for
++ * every instance of the driver, as the counters above. */
++static uint32_t sx126x_crc_error_count;
+ 
+ uint32_t sx126x_cad_clear_count_get(void)
+ {
+@@ -961,6 +966,11 @@
+ 	return sx126x_wedge_reset_count;
+ }
+ 
++uint32_t sx126x_crc_error_count_get(void)
++{
++	return sx126x_crc_error_count;
++}
++
+ void sx126x_cad_agc_stats_reset(void)
+ {
+ 	sx126x_cad_clear_count = 0U;
+@@ -1198,6 +1208,7 @@
+ 
+ 	if (irq_status & SX126X_IRQ_CRC_ERR) {
+ 		LOG_WRN("CRC error");
++		sx126x_crc_error_count++;
+ 		result.status = -EIO;
+ 		goto out;
+ 	}

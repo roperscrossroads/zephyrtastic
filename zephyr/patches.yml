@@ -876,3 +876,14 @@ patches:
       has (sx126x_do_cad(), from patch 0004): the parameters of the last
       lora_config(), the chip left in standby for the send that follows. Returns
       0 clear, 1 activity, -EBUSY when the modem is in use.
+  - path: 0025-sx126x-count-frames-with-a-failed-crc.patch
+    sha256sum: cebec8fc589fe633b8c0dc6de1f81087822aa7cbaf2ae511bf4fc579fbf10956
+    module: zephyr
+    author: Adam Roper
+    email: 72768950+roperscrossroads@users.noreply.github.com
+    date: "2026-11-27"
+    upstreamable: false
+    comments: |
+      A frame whose payload CRC failed was logged and dropped, so a radio layer
+      could not count it. Count it, with a getter (sx126x_crc_error_count_get());
+      the frame is still dropped, as the receive callback has no status for it.

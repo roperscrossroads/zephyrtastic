@@ -665,3 +665,14 @@ Same treatment as the existing CAD/AGC counters: reset together via
 `meshtastic_radio_wedge_reset_count()` (guarded by `CONFIG_LORA_SX126X`, a
 0-returning fallback otherwise) into `struct meshtastic_rf_path.wedge_resets`,
 printed as a new `HEALTH` row in `meshtastic rf`.
+
+### 0025-sx126x-count-frames-with-a-failed-crc.patch (2026-11-27)
+
+> Numbering note: the headings above follow an older numbering. The files and `patches.yml` are the
+> source of truth; this `0025` is the one in `patches.yml` (sha256 `cebec8fc…`), not the historical
+> "expose-cumulative-wedge-reset-counter" entry above.
+
+**Observability.** A frame whose payload CRC failed was logged ("CRC error") and dropped, so nothing could
+count it. The driver now counts it, read with `sx126x_crc_error_count_get()`. The frame is still dropped:
+Zephyr's receive callback has no status for it. Bad CRCs are normal noise and collisions, so the count is
+a warning-class health counter, not an error. The same file is carried by the platform layer's patch set.
