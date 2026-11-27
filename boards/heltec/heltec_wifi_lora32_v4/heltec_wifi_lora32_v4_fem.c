@@ -28,6 +28,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/dt-bindings/gpio/espressif-esp32-gpio.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
@@ -161,6 +162,22 @@ static enum meshtastic_fem_state fem_state = MESHTASTIC_FEM_STATE_FAILED;
 #define FEM_EXPECTED_KCT8103L 0
 #endif
 
+/*
+ * The front end through the SoC's light sleep (PM builds). The radio does not
+ * sleep: the SX1262 keeps receiving while the ESP32 light-sleeps, so the front
+ * end must stay exactly as it was, powered and in its receive state. The pads
+ * are latched for the sleep (ESP32_GPIO_SLEEP_HOLD_EN), as the reference holds
+ * them; without it the rail, the enable or the mode pin could drop while the
+ * peripheral is powered down, and the node would hear through an unpowered or
+ * mis-set front end. Powering the front end down belongs with a radio that
+ * sleeps, which this firmware does not do yet.
+ */
+#if defined(CONFIG_PM)
+#define FEM_HOLD ESP32_GPIO_SLEEP_HOLD_EN
+#else
+#define FEM_HOLD 0
+#endif
+
 static int heltec_v4_fem_init(void)
 {
 	const struct device *const gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
@@ -176,7 +193,7 @@ static int heltec_v4_fem_init(void)
 	}
 
 	/* 1. Power the FEM LDO rail; let it settle (5 ms, matching firmware). */
-	gpio_pin_configure(gpio0, FEM_POWER_PIN, GPIO_OUTPUT_HIGH);
+	gpio_pin_configure(gpio0, FEM_POWER_PIN, GPIO_OUTPUT_HIGH | FEM_HOLD);
 	k_busy_wait(5000);
 
 	/* 2. Detect the fitted FEM: read CSD as a (bias-free) input. */
@@ -203,7 +220,7 @@ static int heltec_v4_fem_init(void)
 	 *    in the RX state (LOW) — the KCT8103L LNA is then active by default;
 	 *    the radio hook raises it only during TX.
 	 */
-	gpio_pin_configure(gpio0, FEM_CSD_PIN, GPIO_OUTPUT_HIGH);
+	gpio_pin_configure(gpio0, FEM_CSD_PIN, GPIO_OUTPUT_HIGH | FEM_HOLD);
 
 	/* On a board that can only carry the KCT8103L, the detect is a check. A
 	 * disagreement does NOT get to pick the part — it gets reported while the
@@ -242,7 +259,7 @@ static int heltec_v4_fem_init(void)
 		fem_gain_len = ARRAY_SIZE(fem_gain_gc1109);
 	}
 
-	gpio_pin_configure(fem_mode_port, fem_mode_pin, GPIO_OUTPUT_LOW);
+	gpio_pin_configure(fem_mode_port, fem_mode_pin, GPIO_OUTPUT_LOW | FEM_HOLD);
 	LOG_INF("LoRa FEM ready: mode pin follows TX/RX (RX-LNA active on KCT8103L)");
 
 	return 0;
