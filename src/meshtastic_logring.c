@@ -52,6 +52,8 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/shell/shell.h>
+
+#include "meshtastic_ext_ram.h"
 #include <string.h>
 
 #include <zephyr/meshtastic/logring.h>
@@ -105,7 +107,11 @@ static LOGRING_RTC_ATTR char ring_buf[RING_SIZE];
  * boot-time logging in the ~30 s before the network is up enough to report it.
  * Costs a second RING_SIZE buffer in DRAM; that is the price of being able to
  * read the thing at a convenient moment rather than the earliest possible one. */
-static char prev_buf[RING_SIZE];
+/* The previous boot's tail, copied out of the retained ring at PRE_KERNEL_1. On a board with
+ * PSRAM it lives there (4 KB of internal DRAM back): the copy runs after the SoC's early init has
+ * brought PSRAM up and cleared its BSS, and from then on only the `logring prev` shell command
+ * reads it, never a flash write or an ISR (meshtastic_ext_ram.h's rules). */
+static char prev_buf[RING_SIZE] MESHTASTIC_EXT_RAM_BSS_ATTR;
 static uint32_t prev_len;
 static bool prev_valid;
 
