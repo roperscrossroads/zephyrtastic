@@ -442,6 +442,7 @@ static void st_health(struct st *s)
 	st_hgroup(s, "warn");
 	st_hk(s, true, "false_preamble", ra.false_preamble);
 	st_hk(s, false, "false_header", ra.false_header);
+	st_hk(s, false, "bad_crc", meshtastic_radio_crc_error_count());
 	st_hk(s, false, "pki_no_key", st.rx_pki_no_key);
 	st_hk(s, false, "log_lost", pl.dropped_core);
 	st_hk(s, false, "phone_drop", sc.phone_drop);

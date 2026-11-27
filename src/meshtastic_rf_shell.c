@@ -231,10 +231,11 @@ static int cmd_rf_path(const struct shell *sh, size_t argc, char **argv)
 	 * (unknown on a driver that cannot report them), the two timing rules'
 	 * verdicts, and the windows they judge against on the current modem. */
 	shell_print(sh, "  [%s] RX activity      now: preamble %s  header %s   busy-rx %u  "
-			"false-preamble %u  false-header %u",
+			"false-preamble %u  false-header %u  bad-crc %u",
 		    (p.rx_act_preamble == MESHTASTIC_RADIO_TRI_UNKNOWN) ? "??" : "--",
 		    tri_str(p.rx_act_preamble), tri_str(p.rx_act_header), p.rx_act.busy_rx,
-		    p.rx_act.false_preamble, p.rx_act.false_header);
+		    p.rx_act.false_preamble, p.rx_act.false_header,
+		    (unsigned int)meshtastic_radio_crc_error_count());
 	shell_print(sh, "       windows: preamble %u ms, max packet %u ms", p.rx_act.preamble_ms,
 		    p.rx_act.max_packet_ms);
 	/* A defer is a transmit the radio refused for now (a packet arriving, or

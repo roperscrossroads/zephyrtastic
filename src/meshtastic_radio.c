@@ -1036,6 +1036,16 @@ extern uint32_t sx126x_wedge_reset_count_get(void);
 extern void sx126x_cad_agc_stats_reset(void);
 
 /*
+ * Frames the driver dropped for a failed payload CRC (carried patch 0025). __weak, like the
+ * rx-activity readback below, so the firmware still links against a Zephyr tree without the
+ * patch: there it reads 0, which is what it reported before the patch existed.
+ */
+__weak uint32_t sx126x_crc_error_count_get(void)
+{
+	return 0U;
+}
+
+/*
  * The chip half of meshtastic_radio_actively_receiving(): carried patch 0013
  * enables the preamble/header IRQ flags in the SX126x's IRQ mask (latched, not
  * on DIO1) and exposes them here. Declared __weak for the same reason as the
@@ -1113,6 +1123,12 @@ uint32_t meshtastic_radio_agc_patch_fail_count(void)
 uint32_t meshtastic_radio_wedge_reset_count(void)
 {
 	return sx126x_wedge_reset_count_get();
+}
+
+/* Bad CRCs are noise and collisions, not a fault of this node: a warning-class count. */
+uint32_t meshtastic_radio_crc_error_count(void)
+{
+	return sx126x_crc_error_count_get();
 }
 
 void meshtastic_radio_cad_agc_stats_reset(void)
