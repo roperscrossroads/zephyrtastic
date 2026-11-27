@@ -36,6 +36,7 @@
 #include "meshtastic_duty.h"
 #include "meshtastic_phonelog.h"
 #include "meshtastic_preset.h"
+#include "meshtastic_rf_profile.h"
 #include "meshtastic_sched.h"
 #if defined(CONFIG_MESHTASTIC_XEDDSA)
 #include "meshtastic_xeddsa.h"
@@ -222,6 +223,9 @@ static void st_radio(struct st *s)
 		 * not say which) or "mismatch" (detection disagreed with the one part the
 		 * board can carry; that part is used). */
 		st_fem(s);
+		/* prof: the radio profile the stored fields match (RF-PROFILES.md), or custom. */
+		st_out(s, "\"prof\":\"%s\",",
+		       meshtastic_rf_profile_of(l, meshtastic_radio_fem_lna_can_control()));
 		st_out(s, "\"chip\":%d}",
 		       chip == MESHTASTIC_RADIO_TRI_ON ? 1 : (chip == MESHTASTIC_RADIO_TRI_OFF ? 0 : -1));
 	}

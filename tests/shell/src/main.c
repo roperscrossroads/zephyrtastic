@@ -45,6 +45,7 @@
 #include "meshtastic_config_store.h"
 #include "meshtastic_position.h"
 #include "meshtastic_core.h"
+#include "meshtastic_rf_profile.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_preset.h"
 #if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
@@ -2011,6 +2012,23 @@ ZTEST(meshtastic_shell, test_state_follows_what_is_set_and_never_prints_a_key)
 	/* No front end on the sim board: reported as none, not as a failed detection. */
 	zassert_not_null(strstr(json, "\"fem\":\"none\","), "%s", json);
 
+	/* Radio profiles: applied through the standard fields, reported by matching them. */
+	zassert_ok(run_cmd("meshtastic lora profile bench", NULL));
+	state_json(json, sizeof(json));
+	zassert_not_null(strstr(json, "\"pwr\":2,"), "bench sets 2 dBm: %s", json);
+	zassert_not_null(strstr(json, "\"prof\":\"bench\","), "%s", json);
+	zassert_ok(run_cmd("meshtastic lora power 10", NULL));
+	state_json(json, sizeof(json));
+	/* No switchable LNA on the sim: boosted off at 10 dBm is battery, not bench. */
+	zassert_not_null(strstr(json, "\"prof\":\"battery\","), "%s", json);
+	zassert_ok(run_cmd("meshtastic lora profile standard", NULL));
+	state_json(json, sizeof(json));
+	zassert_not_null(strstr(json, "\"prof\":\"standard\","), "%s", json);
+	zassert_not_null(strstr(json, "\"pwr\":10,"), "standard never changes power: %s", json);
+	zassert_not_ok(run_cmd("meshtastic lora profile adaptive", NULL), "adaptive is not built");
+	zassert_not_ok(run_cmd("meshtastic lora profile loud", NULL), "unknown profile");
+	zassert_ok(run_cmd("meshtastic lora power 2", NULL));
+
 	/* A name with a quote and a backslash stays valid JSON. */
 	zassert_ok(run_cmd("meshtastic owner set \"a\\\"b\" ab", NULL));
 	state_json(json, sizeof(json));
@@ -2581,4 +2599,25 @@ ZTEST(meshtastic_shell, test_version_prints_the_class_and_its_bundle)
 		zassert_true(at[strlen(want)] == '\r' || at[strlen(want)] == '\n',
 			     "'%s' is not the whole line in: %s", want, out);
 	}
+}
+
+/* The profile a config matches, on a board WITH a switchable LNA (the sim has none). */
+ZTEST(meshtastic_shell, test_rf_profile_of_with_a_switchable_lna)
+{
+	meshtastic_Config_LoRaConfig l = {0};
+	const char *const names[] = {"standard", "battery", "crowded", "bench"};
+
+	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+		l.tx_power = 20;
+		zassert_ok(meshtastic_rf_profile_set(&l, names[i]));
+		zassert_str_equal(names[i], meshtastic_rf_profile_of(&l, true), "%s", names[i]);
+	}
+	/* Bench's fields at full power are no profile. */
+	zassert_ok(meshtastic_rf_profile_set(&l, "bench"));
+	l.tx_power = 20;
+	zassert_str_equal("custom", meshtastic_rf_profile_of(&l, true));
+	/* Only bench writes the power. */
+	l.tx_power = 17;
+	zassert_ok(meshtastic_rf_profile_set(&l, "crowded"));
+	zassert_equal(17, l.tx_power);
 }

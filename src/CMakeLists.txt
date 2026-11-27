@@ -104,6 +104,7 @@ if(CONFIG_MESHTASTIC)
     meshtastic_outbound.c
     meshtastic_contention.c
     meshtastic_tx_power.c
+    meshtastic_rf_profile.c
     meshtastic_sched.c
     # Not gated behind CONFIG_MESHTASTIC_THREAD_SUMMARY/SUPERVISOR (both
     # `depends on THREAD_ANALYZER`, which is unavailable on native_sim/ARCH_POSIX)

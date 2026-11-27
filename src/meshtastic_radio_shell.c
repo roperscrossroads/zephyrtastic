@@ -19,6 +19,7 @@
 #include "meshtastic_core.h"
 #include "meshtastic_pki.h"
 #include "meshtastic_preset.h"
+#include "meshtastic_rf_profile.h"
 #include "meshtastic_shell_internal.h"
 #include "meshtastic_tx_power.h"
 
@@ -361,6 +362,52 @@ static int cmd_lora_power_set(const struct shell *sh, const char *arg)
 }
 #endif
 
+/* `meshtastic lora profile [name]`: show the profile the stored fields match, the
+ * choices and their tradeoffs; or write one profile's fields (tooling RF-PROFILES.md). */
+static int cmd_lora_profile(const struct shell *sh, const char *name)
+{
+	meshtastic_Config cfg;
+	const bool ctrl = meshtastic_radio_fem_lna_can_control();
+	int ret = meshtastic_config_store_get_config(meshtastic_Config_lora_tag, &cfg);
+
+	if (ret < 0) {
+		shell_error(sh, "lora get failed: %d", ret);
+		return ret;
+	}
+	if (name == NULL) {
+		shell_print(sh, "profile: %s%s", meshtastic_rf_profile_of(&cfg.payload_variant.lora, ctrl),
+			    ctrl ? "" : " (this front end has no switchable LNA)");
+		for (size_t i = 0; meshtastic_rf_profile_names[i] != NULL; i++) {
+			shell_print(sh, "  %-9s %s", meshtastic_rf_profile_names[i],
+				    meshtastic_rf_profile_tradeoff(meshtastic_rf_profile_names[i]));
+		}
+		shell_print(sh, "  %-9s %s", "adaptive", meshtastic_rf_profile_tradeoff("adaptive"));
+		return 0;
+	}
+#if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
+	shell_error(sh, "refused: shell config writes are compiled out "
+			"(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)");
+	return -ENOTSUP;
+#else
+	if (mtsh_config_write_refused(sh)) {
+		return -EACCES;
+	}
+	cfg.which_payload_variant = meshtastic_Config_lora_tag;
+	if (meshtastic_rf_profile_set(&cfg.payload_variant.lora, name) != 0) {
+		shell_error(sh, "unknown or unbuilt profile '%s': standard, battery, crowded, bench",
+			    name);
+		return -EINVAL;
+	}
+	ret = meshtastic_config_store_set_config(&cfg);
+	if (ret < 0) {
+		shell_error(sh, "lora profile set failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "profile: %s (%s)", name, meshtastic_rf_profile_tradeoff(name));
+	return 0;
+#endif
+}
+
 static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 {
 	if (mtsh_store_locked(sh)) {
@@ -370,10 +417,14 @@ static int cmd_lora(const struct shell *sh, size_t argc, char **argv)
 		cmd_lora_show(sh);
 		return 0;
 	}
+	if (strcmp(argv[1], "profile") == 0 && argc <= 3U) {
+		return cmd_lora_profile(sh, argc == 3U ? argv[2] : NULL);
+	}
 	if (argc != 3U ||
 	    (strcmp(argv[1], "preset") != 0 && strcmp(argv[1], "tx") != 0 &&
 	     strcmp(argv[1], "power") != 0)) {
-		shell_error(sh, "usage: meshtastic lora [preset <name>] [tx on|off] [power <dBm>]");
+		shell_error(sh, "usage: meshtastic lora [preset <name>] [tx on|off] [power <dBm>] "
+				"[profile [<name>]]");
 		return -EINVAL;
 	}
 #if !defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
@@ -394,8 +445,8 @@ MTSH_DEFINE_ON_WORK(cmd_lora)
 
 SHELL_SUBCMD_ADD((meshtastic), lora, NULL,
 		 SHELL_HELP("Show or set the LoRa modem preset, the TX-enable switch or "
-		 "the TX power (all three apply live).",
-		 "[preset <name>] [tx on|off] [power <dBm>]"),
+		 "the TX power (all three apply live); or the radio profile.",
+		 "[preset <name>] [tx on|off] [power <dBm>] [profile [<name>]]"),
 		 cmd_lora_on_work, 0, 0);
 SHELL_SUBCMD_ADD((meshtastic), preset, NULL,
 		 SHELL_HELP("Live preset switching: what would hold a scheduled hop off, "
