@@ -116,7 +116,7 @@ ZTEST(airtime, test_channel_rolling_window)
 		       "A expired, B(2000) survives -> 3.333%%");
 }
 
-/* agents-ls39.1.13: the RX log, the TX log and a head's channel-util read take
+/* agents-ls39.1.13: the RX log, the TX log and a worker's channel-util read take
  * the accounting's lock from different threads. Hold it, and a second logger must
  * wait on it and then count, not fault. Before the lock was static, its one
  * k_mutex_init lived in the device-metrics init, so a build without device

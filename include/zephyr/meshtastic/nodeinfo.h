@@ -107,9 +107,9 @@ static inline void meshtastic_nodeinfo_announce_soon(void)
  * @retval -EIO     Crypto or radio transmission failed.
  */
 int meshtastic_nodeinfo_request(uint32_t peer);
-/* The same, asking on attachment @p attach (the radio the peer was heard on;
+/* The same, asking on radio @p radio (the radio the peer was heard on;
  * 0 = our own). */
-int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t attach);
+int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t radio);
 
 #ifdef __cplusplus
 }

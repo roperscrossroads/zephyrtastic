@@ -2,9 +2,9 @@
 /*
  * The cross-preset relay (agents-jbrq.12): the premises it is built on.
  *
- * The relay is a PAIR: an "ear" on the source preset forwards raw frames over
+ * The relay is a PAIR: a "worker-rx" on the source preset forwards raw frames over
  * the BLE peer link to a node on the destination preset, which decides what to
- * do with them. This suite is that receiving node, with the ear's frames
+ * do with them. This suite is that receiving node, with the rx-only worker's frames
  * injected on the BLE peer bearer.
  *
  * Nothing here needs relay code. These tests pin the facts the design stands
@@ -15,7 +15,7 @@
  *   - a named channel's hash does not (why a custom channel crosses presets
  *     with no extra slot);
  *   - holding the source preset's default channel in a spare slot is enough to
- *     read the ear's frames (H29), and the link-local rule still keeps them off
+ *     read the rx-only worker's frames (H29), and the link-local rule still keeps them off
  *     our air;
  *   - the existing "well known" predicate is too wide to define the relay's
  *     public class (it takes the simple2..9 keys, which are other meshes).
@@ -45,13 +45,13 @@
 #include "meshtastic_core.h"
 #include "meshtastic_packet.h"
 #include "meshtastic_preset.h"
-#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
+#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_WORKER_RX)
 #include "meshtastic_relay.h"
 #endif
 #include "meshtastic_sched.h"
 
 #define TEST_NODE_ID 0x0A0A0A0AU
-/* An originator on the far tier, heard by the ear. */
+/* An originator on the far tier, heard by the rx-only worker. */
 #define FAR_NODE_ID  0x0D0D0D0DU
 
 #define PRESET_LF meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST
@@ -168,8 +168,8 @@ static void build_far_text(uint8_t index, uint32_t id, const char *text, uint8_t
 		  (const uint8_t *)text, strlen(text), wire, wire_len);
 }
 
-/* The ear forwards a frame over the BLE peer link. */
-static void ear_forwards(const uint8_t *wire, uint32_t wire_len)
+/* The rx-only worker forwards a frame over the BLE peer link. */
+static void worker_rx_forwards(const uint8_t *wire, uint32_t wire_len)
 {
 	zassert_ok(meshtastic_radio_rx_inject(wire, (uint16_t)wire_len,
 					      MESHTASTIC_BEARER_BLE_PEER),
@@ -192,8 +192,8 @@ static void assert_not_relayed(uint32_t id)
 	}
 }
 
-#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
-/* The ear's send seam, captured: what would have gone over the BLE peer link. */
+#if defined(CONFIG_MESHTASTIC_WORKER_RX)
+/* The rx-only worker's send seam, captured: what would have gone over the BLE peer link. */
 static struct {
 	struct k_sem sem;
 	uint32_t peer;
@@ -201,22 +201,22 @@ static struct {
 	size_t len;
 	uint32_t count;
 	int ret;
-} ear_sent;
+} worker_rx_sent;
 
-int meshtastic_relay_ear_send(uint32_t peer, const uint8_t *wire, size_t wire_len)
+int meshtastic_worker_rx_send(uint32_t peer, const uint8_t *wire, size_t wire_len)
 {
-	ear_sent.peer = peer;
-	ear_sent.len = MIN(wire_len, sizeof(ear_sent.wire));
-	memcpy(ear_sent.wire, wire, ear_sent.len);
-	ear_sent.count++;
-	k_sem_give(&ear_sent.sem);
-	return ear_sent.ret;
+	worker_rx_sent.peer = peer;
+	worker_rx_sent.len = MIN(wire_len, sizeof(worker_rx_sent.wire));
+	memcpy(worker_rx_sent.wire, wire, worker_rx_sent.len);
+	worker_rx_sent.count++;
+	k_sem_give(&worker_rx_sent.sem);
+	return worker_rx_sent.ret;
 }
 
-static void ear_sent_reset(void)
+static void worker_rx_sent_reset(void)
 {
-	memset(&ear_sent, 0, sizeof(ear_sent));
-	k_sem_init(&ear_sent.sem, 0, 8);
+	memset(&worker_rx_sent, 0, sizeof(worker_rx_sent));
+	k_sem_init(&worker_rx_sent.sem, 0, 8);
 }
 #endif
 
@@ -251,9 +251,9 @@ static void relay_before(void *fixture)
 #if defined(CONFIG_MESHTASTIC_RELAY)
 	meshtastic_relay_reset();
 #endif
-#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
-	meshtastic_relay_ear_reset();
-	ear_sent_reset();
+#if defined(CONFIG_MESHTASTIC_WORKER_RX)
+	meshtastic_worker_rx_reset();
+	worker_rx_sent_reset();
 #endif
 	meshtastic_sched_defaults();
 	zassert_ok(meshtastic_sched_set("cw.max", "0"));
@@ -315,7 +315,7 @@ ZTEST(relay, test_far_default_frame_dropped_without_spare_slot)
 	build_far_text(0U, 0x5101U, "hello from LongFast", wire, &wire_len);
 	switch_preset(PRESET_MF);
 
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN,
 		      "a LongFast default frame was delivered on a MediumFast node with no "
 		      "LongFast channel");
@@ -324,7 +324,7 @@ ZTEST(relay, test_far_default_frame_dropped_without_spare_slot)
 
 /* H29: the same frame IS understood once the spare slot holds the LongFast
  * default channel, named explicitly so its hash does not follow our preset.
- * This is all the public-class relay needs to read the ear's frames. The
+ * This is all the public-class relay needs to read the rx-only worker's frames. The
  * link-local rule still keeps the frame off our air: re-sending it is the
  * relay's job, as a new packet, not the router's. */
 ZTEST(relay, test_far_default_frame_read_through_spare_slot)
@@ -342,7 +342,7 @@ ZTEST(relay, test_far_default_frame_read_through_spare_slot)
 	zassert_equal(meshtastic_channels_get_hash(SPARE_SLOT), 0x08U,
 		      "the spare slot must hash as LongFast while we sit on MediumFast");
 
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "the far frame was not delivered");
 	zassert_equal(rx.from, FAR_NODE_ID, "wrong sender");
 	zassert_equal(rx.portnum, MESHTASTIC_PORT_TEXT_MESSAGE, "wrong portnum");
@@ -367,7 +367,7 @@ ZTEST(relay, test_custom_channel_frame_crosses_presets)
 	build_far_text(SPARE_SLOT, 0x5103U, msg, wire, &wire_len);
 	switch_preset(PRESET_MF);
 
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "the custom-channel frame was not delivered");
 	zassert_equal(rx.from, FAR_NODE_ID, "wrong sender");
 	zassert_mem_equal(rx.payload, msg, strlen(msg), "wrong text");
@@ -403,7 +403,7 @@ ZTEST(relay, test_existing_predicates_do_not_define_public_class)
  * channel can collide with the one we read the far tier through. Here the
  * stranger holds "LongFast" with the default key's bytes 0 and 1 swapped: the
  * XOR of the key is unchanged, so the hash is 0x08 exactly like the public
- * LongFast channel, but the key is different. Its frame, forwarded by the ear,
+ * LongFast channel, but the key is different. Its frame, forwarded by the rx-only worker,
  * must not surface as a message: decrypting with the wrong key yields bytes
  * that must fail to parse as Data. AES-CTR has no MAC, so the parse is the only
  * admission test the relay inherits from the router.
@@ -436,7 +436,7 @@ ZTEST(relay, test_colliding_foreign_channel_not_admitted)
 			 MESHTASTIC_CHANNEL_LONGFAST, 0x01U);
 	zassert_equal(meshtastic_channels_get_hash(SPARE_SLOT), 0x08U, "same hash");
 
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_equal(k_sem_take(&rx.sem, K_MSEC(300)), -EAGAIN,
 		      "a colliding stranger's frame surfaced as a message");
 	assert_not_relayed(0x5104U);
@@ -538,13 +538,13 @@ ZTEST(relay, test_r8b_default_is_off)
 	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_OFF,
 		      "the relay must boot off");
 	public_setup_and_build(0x5201U, "hello", wire, &wire_len);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "not delivered locally");
 	assert_nothing_relayed();
 	zassert_equal(stats().dir_off, 1U, "dir_off not counted");
 }
 
-/* R9 (v1): only inbound exists. Outbound needs an ear that transmits. */
+/* R9 (v1): only inbound exists. Outbound needs a worker that transmits. */
 ZTEST(relay, test_r9_outbound_refused_in_v1)
 {
 	zassert_equal(meshtastic_relay_set_direction(MESHTASTIC_RELAY_OUTBOUND), -ENOTSUP);
@@ -566,7 +566,7 @@ ZTEST(relay, test_r1_public_text_reoriginated)
 
 	public_setup_and_build(0x5202U, "Hello World!", wire, &wire_len);
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "nothing relayed");
 	assert_relayed_text(&r, FAR_PREFIX "Hello World!");
@@ -595,7 +595,7 @@ ZTEST(relay, test_r2_custom_channel_same_channel)
 	switch_preset(PRESET_MF);
 
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "nothing relayed");
 	assert_relayed_text(&r, FAR_PREFIX "pugs");
 	zassert_equal(r.hash, meshtastic_channels_get_hash(SPARE_SLOT),
@@ -613,7 +613,7 @@ ZTEST(relay, test_r3_no_mapping_without_local_public_channel)
 	set_slot(0U, meshtastic_Channel_Role_PRIMARY, "private-primary", custom_psk,
 		 sizeof(custom_psk));
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "not delivered locally");
 	assert_nothing_relayed();
 	zassert_equal(stats().no_mapping, 1U, "no_mapping not counted");
@@ -629,7 +629,7 @@ ZTEST(relay, test_r4_simple_key_not_public_class)
 			 MESHTASTIC_CHANNEL_LONGFAST, 0x04U);
 	build_far_text(SPARE_SLOT, 0x5205U, "simple3 mesh", wire, &wire_len);
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "not delivered locally");
 	assert_nothing_relayed();
 	zassert_equal(stats().no_mapping, 1U, "no_mapping not counted");
@@ -651,14 +651,14 @@ ZTEST(relay, test_r5_r7_only_text_crosses)
 	build_far(0U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_POSITION, 0x5207U,
 		  junk, sizeof(junk), wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 
 	switch_preset(PRESET_LF);
 	build_far(0U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_PRIVATE, 0x5208U,
 		  junk, sizeof(junk), wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 	zassert_equal(stats().not_text, 2U, "not_text not counted");
 }
@@ -676,7 +676,7 @@ ZTEST(relay, test_r6_dm_never_crosses)
 		  (const uint8_t *)msg, strlen(msg), wire, &wire_len);
 	switch_preset(PRESET_MF);
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 	zassert_equal(stats().not_broadcast, 1U, "not_broadcast not counted");
 }
@@ -708,7 +708,7 @@ ZTEST(relay, test_own_air_never_relayed)
 					  "a text heard on our own air was re-originated");
 		}
 	}
-	zassert_equal(stats().considered, 0U, "only ear frames are considered");
+	zassert_equal(stats().considered, 0U, "only rx-only worker frames are considered");
 }
 
 /* R12 + R13 (H4): the same (origin, text) under a NEW packet id is relayed
@@ -721,13 +721,13 @@ ZTEST(relay, test_r12_r13_seen_cache_and_ttl)
 
 	public_setup_and_build(0x520CU, "same words", wire, &wire_len);
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "first copy not relayed");
 
 	switch_preset(PRESET_LF);
 	build_far_text(0U, 0x520DU, "same words", wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 	zassert_equal(stats().seen, 1U, "seen not counted");
 
@@ -735,7 +735,7 @@ ZTEST(relay, test_r12_r13_seen_cache_and_ttl)
 	switch_preset(PRESET_LF);
 	build_far_text(0U, 0x520EU, "same words", wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "not relayed again after the TTL");
 	assert_relayed_text(&r, FAR_PREFIX "same words");
 }
@@ -758,7 +758,7 @@ ZTEST(relay, test_r14_any_relay_prefix_refused)
 		switch_preset(PRESET_LF);
 		build_far_text(0U, 0x5211U + i, prefixed[i], wire, &wire_len);
 		switch_preset(PRESET_MF);
-		ear_forwards(wire, wire_len);
+		worker_rx_forwards(wire, wire_len);
 		assert_nothing_relayed();
 	}
 	zassert_equal(stats().prefixed, ARRAY_SIZE(prefixed), "prefixed not counted");
@@ -796,14 +796,14 @@ ZTEST(relay, test_r15_ignore_list)
 	public_setup_and_build(0x5220U, "from a known relay", wire, &wire_len);
 	zassert_ok(meshtastic_relay_ignore_add(FAR_NODE_ID));
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 	zassert_equal(stats().ignored, 1U, "ignored not counted");
 }
 
 /* R22 (H26): convergence. We relay FAR's "Hello" once. A second relay on the
- * same tiers then carries our output back to the ear's tier, with its own
- * prefix added or with ours kept, and the ear hears it. Either way exactly one
+ * same tiers then carries our output back to the rx-only worker's tier, with its own
+ * prefix added or with ours kept, and the rx-only worker hears it. Either way exactly one
  * copy of "Hello" ever reaches our tier.
  *
  * Limit: a foreign relay that STRIPS prefixes and re-sends under its own id
@@ -822,7 +822,7 @@ ZTEST(relay, test_r22_two_relays_converge)
 
 	public_setup_and_build(0x5230U, "Hello", wire, &wire_len);
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "first copy not relayed");
 
 	for (size_t i = 0U; i < ARRAY_SIZE(echoes); i++) {
@@ -831,7 +831,7 @@ ZTEST(relay, test_r22_two_relays_converge)
 			  MESHTASTIC_PORT_TEXT_MESSAGE, 0x5231U + i, (const uint8_t *)echoes[i],
 			  strlen(echoes[i]), wire, &wire_len);
 		switch_preset(PRESET_MF);
-		ear_forwards(wire, wire_len);
+		worker_rx_forwards(wire, wire_len);
 		assert_nothing_relayed();
 	}
 	zassert_equal(stats().relayed, 1U, "exactly one copy must cross");
@@ -849,7 +849,7 @@ ZTEST(relay, test_r17_long_text_unprefixed_not_truncated)
 	text[sizeof(text) - 1U] = '\0';
 	public_setup_and_build(0x5240U, text, wire, &wire_len);
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "long text not relayed");
 	assert_relayed_text(&r, text);
 	zassert_equal(stats().unprefixed, 1U, "unprefixed not counted");
@@ -875,7 +875,7 @@ ZTEST(relay, test_r18_rate_cap)
 			  MESHTASTIC_PORT_TEXT_MESSAGE, 0x5251U + i, (const uint8_t *)text,
 			  strlen(text), wire, &wire_len);
 		switch_preset(PRESET_MF);
-		ear_forwards(wire, wire_len);
+		worker_rx_forwards(wire, wire_len);
 		if (take_relayed(&r, K_MSEC(1000)) == 0) {
 			got++;
 		}
@@ -905,21 +905,21 @@ ZTEST(relay, test_r21_admission)
 	set_default_slot(SPARE_SLOT, meshtastic_Channel_Role_SECONDARY,
 			 MESHTASTIC_CHANNEL_LONGFAST, 0x01U);
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 
 	switch_preset(PRESET_LF);
 	build_far(0U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
 		  0x5261U, garbage, sizeof(garbage), wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 
 	switch_preset(PRESET_LF);
 	build_far(0U, FAR_NODE_ID, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
 		  0x5262U, on_air, sizeof(on_air), wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 	zassert_equal(stats().bad_text, 2U, "bad_text not counted");
 }
@@ -944,7 +944,7 @@ ZTEST(relay, test_r23_r24_r25_sanitized_like_the_reference)
 	build_far(0U, 0x0D0D0001U, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
 		  0x5271U, crlf, sizeof(crlf) - 1U, wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "CRLF text not relayed");
 	assert_relayed_text(&r, "[0001] line one\r\nline two");
 
@@ -952,7 +952,7 @@ ZTEST(relay, test_r23_r24_r25_sanitized_like_the_reference)
 	build_far(0U, 0x0D0D0002U, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
 		  0x5272U, bad_minority, sizeof(bad_minority), wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "minority-bad text not relayed");
 	assert_relayed_text(&r, "[0002] caf? ok");
 
@@ -960,7 +960,7 @@ ZTEST(relay, test_r23_r24_r25_sanitized_like_the_reference)
 	build_far(0U, 0x0D0D0003U, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
 		  0x5273U, nul_cut, sizeof(nul_cut), wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "NUL-cut text not relayed");
 	assert_relayed_text(&r, "[0003] hi");
 
@@ -986,7 +986,7 @@ ZTEST(relay, test_r26_per_origin_limit)
 		switch_preset(PRESET_LF);
 		build_far_text(0U, 0x5281U + i, text, wire, &wire_len);
 		switch_preset(PRESET_MF);
-		ear_forwards(wire, wire_len);
+		worker_rx_forwards(wire, wire_len);
 		if (take_relayed(&r, K_MSEC(1000)) == 0) {
 			got++;
 		}
@@ -998,7 +998,7 @@ ZTEST(relay, test_r26_per_origin_limit)
 	build_far(0U, 0x0D0D0BEEU, MESHTASTIC_NODE_BROADCAST, MESHTASTIC_PORT_TEXT_MESSAGE,
 		  0x5290U, (const uint8_t *)"someone else", 12U, wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "another origin was starved");
 }
 /* A reaction (tapback): TEXT_MESSAGE_APP with Data.emoji set and reply_id naming
@@ -1031,7 +1031,7 @@ ZTEST(relay, test_r27_reactions_do_not_cross_replies_do)
 	mesh.decoded.emoji = 1U;
 	zassert_ok(meshtastic_build_wire_from_mesh(&mesh, wire, &wire_len));
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 	zassert_equal(stats().reaction, 1U, "reaction not counted");
 
@@ -1043,7 +1043,7 @@ ZTEST(relay, test_r27_reactions_do_not_cross_replies_do)
 	memcpy(mesh.decoded.payload.bytes, "agree", 5U);
 	zassert_ok(meshtastic_build_wire_from_mesh(&mesh, wire, &wire_len));
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "a reply was not relayed");
 	assert_relayed_text(&r, FAR_PREFIX "agree");
 }
@@ -1060,13 +1060,13 @@ ZTEST(relay, test_r16_prefixed_repeat_refused)
 
 	public_setup_and_build(0x52B0U, "Hello", wire, &wire_len);
 	relay_inbound();
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(take_relayed(&r, K_MSEC(1000)), "first copy not relayed");
 
 	switch_preset(PRESET_LF);
 	build_far_text(0U, 0x52B1U, "[c3d4] Hello", wire, &wire_len);
 	switch_preset(PRESET_MF);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 	zassert_equal(stats().prefixed, 1U);
 	zassert_equal(stats().relayed, 1U);
@@ -1074,24 +1074,24 @@ ZTEST(relay, test_r16_prefixed_repeat_refused)
 
 #endif /* CONFIG_MESHTASTIC_RELAY */
 
-#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
+#if defined(CONFIG_MESHTASTIC_WORKER_RX)
 /* ==========================================================================
- * The ear (meshtastic_relay_ear.c). E-numbers are RELAY-TESTBED.md's. The ear
+ * The rx-only worker (meshtastic_worker_rx.c). E-numbers are RELAY-TESTBED.md's. The rx-only worker
  * sits on LongFast's public channel and forwards what it hears.
  * ========================================================================== */
 
-#define EAR_PEER CONFIG_MESHTASTIC_RELAY_EAR_PEER
+#define WORKER_RX_PEER CONFIG_MESHTASTIC_WORKER_RX_PEER
 
-static struct meshtastic_relay_ear_stats ear_stats(void)
+static struct meshtastic_worker_rx_stats worker_rx_stats(void)
 {
-	struct meshtastic_relay_ear_stats st;
+	struct meshtastic_worker_rx_stats st;
 
-	meshtastic_relay_ear_stats_get(&st);
+	meshtastic_worker_rx_stats_get(&st);
 	return st;
 }
 
-/* A text heard on LongFast, as the ear's radio would receive it. */
-static void ear_hears(uint32_t id, const char *text, uint8_t *wire, uint32_t *wire_len)
+/* A text heard on LongFast, as the rx-only worker's radio would receive it. */
+static void worker_rx_hears(uint32_t id, const char *text, uint8_t *wire, uint32_t *wire_len)
 {
 	switch_preset(PRESET_LF);
 	build_far_text(0U, id, text, wire, wire_len);
@@ -1100,23 +1100,23 @@ static void ear_hears(uint32_t id, const char *text, uint8_t *wire, uint32_t *wi
 
 /* E1: a broadcast text heard on the air goes to the configured receiving half,
  * byte for byte. */
-ZTEST(relay, test_e1_ear_forwards_verbatim)
+ZTEST(relay, test_e1_worker_rx_forwards_verbatim)
 {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t wire_len;
 
-	zassert_equal(meshtastic_relay_ear_get_peer(), EAR_PEER, "peer from Kconfig");
-	ear_hears(0x5301U, "heard on LongFast", wire, &wire_len);
-	zassert_ok(k_sem_take(&ear_sent.sem, K_MSEC(1000)), "not forwarded");
-	zassert_equal(ear_sent.peer, EAR_PEER, "wrong peer");
-	zassert_equal(ear_sent.len, wire_len, "length changed");
-	zassert_mem_equal(ear_sent.wire, wire, wire_len, "the ear must not touch the frame");
-	zassert_equal(ear_stats().forwarded, 1U);
+	zassert_equal(meshtastic_worker_rx_get_peer(), WORKER_RX_PEER, "peer from Kconfig");
+	worker_rx_hears(0x5301U, "heard on LongFast", wire, &wire_len);
+	zassert_ok(k_sem_take(&worker_rx_sent.sem, K_MSEC(1000)), "not forwarded");
+	zassert_equal(worker_rx_sent.peer, WORKER_RX_PEER, "wrong peer");
+	zassert_equal(worker_rx_sent.len, wire_len, "length changed");
+	zassert_mem_equal(worker_rx_sent.wire, wire, wire_len, "the rx-only worker must not touch the frame");
+	zassert_equal(worker_rx_stats().forwarded, 1U);
 }
 
-/* E2: what can never cross is not forwarded: a frame the ear cannot decrypt,
+/* E2: what can never cross is not forwarded: a frame the rx-only worker cannot decrypt,
  * a DM, a non-text broadcast. */
-ZTEST(relay, test_e2_ear_forwards_only_what_can_cross)
+ZTEST(relay, test_e2_worker_rx_forwards_only_what_can_cross)
 {
 	static const uint8_t junk[] = { 0x08, 0x01 };
 	const char *msg = "for you";
@@ -1138,92 +1138,92 @@ ZTEST(relay, test_e2_ear_forwards_only_what_can_cross)
 		  junk, sizeof(junk), wire, &wire_len);
 	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -60, 5));
 
-	zassert_equal(k_sem_take(&ear_sent.sem, K_MSEC(500)), -EAGAIN, "something forwarded");
-	zassert_equal(ear_stats().not_broadcast, 1U, "DM not counted");
-	zassert_equal(ear_stats().not_text, 1U, "position not counted");
+	zassert_equal(k_sem_take(&worker_rx_sent.sem, K_MSEC(500)), -EAGAIN, "something forwarded");
+	zassert_equal(worker_rx_stats().not_broadcast, 1U, "DM not counted");
+	zassert_equal(worker_rx_stats().not_text, 1U, "position not counted");
 }
 
 /* E3: the same (src, id) heard twice (a neighbour's rebroadcast) is forwarded
- * once: the router's duplicate cache runs before the ear. */
-ZTEST(relay, test_e3_ear_forwards_once)
+ * once: the router's duplicate cache runs before the rx-only worker. */
+ZTEST(relay, test_e3_worker_rx_forwards_once)
 {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t wire_len;
 
-	ear_hears(0x5320U, "twice on air", wire, &wire_len);
-	zassert_ok(k_sem_take(&ear_sent.sem, K_MSEC(1000)), "not forwarded");
+	worker_rx_hears(0x5320U, "twice on air", wire, &wire_len);
+	zassert_ok(k_sem_take(&worker_rx_sent.sem, K_MSEC(1000)), "not forwarded");
 	k_msleep(50);
 	zassert_ok(lora_sim_inject(lora_dev, wire, (uint8_t)wire_len, -60, 5));
-	zassert_equal(k_sem_take(&ear_sent.sem, K_MSEC(500)), -EAGAIN, "forwarded twice");
-	zassert_equal(ear_sent.count, 1U);
+	zassert_equal(k_sem_take(&worker_rx_sent.sem, K_MSEC(500)), -EAGAIN, "forwarded twice");
+	zassert_equal(worker_rx_sent.count, 1U);
 }
 
-#if defined(CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY)
-/* E4: the ear image cannot key the radio (MESHTASTIC_RELAY_EAR_RX_ONLY), so an
- * ear parked on a public channel stays off it whatever anyone asks. */
-ZTEST(relay, test_e4_ear_never_transmits)
+#if defined(CONFIG_MESHTASTIC_WORKER_RX_RX_ONLY)
+/* E4: the rx-only worker image cannot key the radio (MESHTASTIC_WORKER_RX_RX_ONLY), so an
+ * rx-only worker parked on a public channel stays off it whatever anyone asks. */
+ZTEST(relay, test_e4_worker_rx_never_transmits)
 {
 	struct lora_sim_frame f;
 
 	switch_preset(PRESET_LF);
-	(void)meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "the ear must not speak");
+	(void)meshtastic_send_text(MESHTASTIC_NODE_BROADCAST, "the rx-only worker must not speak");
 	zassert_equal(lora_sim_take_tx(lora_dev, &f, K_MSEC(500)), -EAGAIN,
-		      "an RX-only ear transmitted");
+		      "an rx-only worker transmitted");
 }
-#endif /* CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY */
+#endif /* CONFIG_MESHTASTIC_WORKER_RX_RX_ONLY */
 
-/* The ear forwards only what crossed the AIR: a frame that reached it over the
+/* The rx-only worker forwards only what crossed the AIR: a frame that reached it over the
  * peer link is someone else's hearing, and bouncing it back would loop. */
-ZTEST(relay, test_ear_ignores_bearer_frames)
+ZTEST(relay, test_worker_rx_ignores_bearer_frames)
 {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t wire_len;
 
 	switch_preset(PRESET_LF);
 	build_far_text(0U, 0x5330U, "came over BLE", wire, &wire_len);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	zassert_ok(k_sem_take(&rx.sem, K_MSEC(1000)), "not delivered");
-	zassert_equal(k_sem_take(&ear_sent.sem, K_MSEC(300)), -EAGAIN, "bounced back");
+	zassert_equal(k_sem_take(&worker_rx_sent.sem, K_MSEC(300)), -EAGAIN, "bounced back");
 }
 
 /* No receiving half configured: counted, nothing sent. A failed send is
  * counted too. */
-ZTEST(relay, test_ear_no_peer_and_send_failure)
+ZTEST(relay, test_worker_rx_no_peer_and_send_failure)
 {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t wire_len;
 
-	meshtastic_relay_ear_set_peer(0U);
-	ear_hears(0x5340U, "nobody to tell", wire, &wire_len);
-	zassert_equal(k_sem_take(&ear_sent.sem, K_MSEC(300)), -EAGAIN, "sent with no peer");
-	zassert_equal(ear_stats().no_peer, 1U);
+	meshtastic_worker_rx_set_peer(0U);
+	worker_rx_hears(0x5340U, "nobody to tell", wire, &wire_len);
+	zassert_equal(k_sem_take(&worker_rx_sent.sem, K_MSEC(300)), -EAGAIN, "sent with no peer");
+	zassert_equal(worker_rx_stats().no_peer, 1U);
 
-	meshtastic_relay_ear_set_peer(EAR_PEER);
-	ear_sent.ret = -EHOSTUNREACH;
-	ear_hears(0x5341U, "link down", wire, &wire_len);
-	zassert_ok(k_sem_take(&ear_sent.sem, K_MSEC(1000)), "not attempted");
+	meshtastic_worker_rx_set_peer(WORKER_RX_PEER);
+	worker_rx_sent.ret = -EHOSTUNREACH;
+	worker_rx_hears(0x5341U, "link down", wire, &wire_len);
+	zassert_ok(k_sem_take(&worker_rx_sent.sem, K_MSEC(1000)), "not attempted");
 	k_msleep(20);
-	zassert_equal(ear_stats().send_failed, 1U);
-	zassert_equal(ear_stats().forwarded, 0U);
+	zassert_equal(worker_rx_stats().send_failed, 1U);
+	zassert_equal(worker_rx_stats().forwarded, 0U);
 }
-/* E6: a flood of text on the ear's preset is capped before it reaches the peer
- * link (EAR_RATE_MAX is 3 in this suite's ear builds). */
-ZTEST(relay, test_e6_ear_forwarding_cap)
+/* E6: a flood of text on the rx-only worker's preset is capped before it reaches the peer
+ * link (WORKER_RX_RATE_MAX is 3 in this suite's rx-only worker builds). */
+ZTEST(relay, test_e6_worker_rx_forwarding_cap)
 {
 	uint8_t wire[MESHTASTIC_PKT_MAX];
 	uint32_t wire_len;
 	char text[16];
 
-	for (int i = 0; i <= CONFIG_MESHTASTIC_RELAY_EAR_RATE_MAX; i++) {
+	for (int i = 0; i <= CONFIG_MESHTASTIC_WORKER_RX_RATE_MAX; i++) {
 		snprintk(text, sizeof(text), "flood %d", i);
-		ear_hears(0x5350U + i, text, wire, &wire_len);
+		worker_rx_hears(0x5350U + i, text, wire, &wire_len);
 		k_msleep(20);
 	}
 	k_msleep(200);
-	zassert_equal(ear_sent.count, CONFIG_MESHTASTIC_RELAY_EAR_RATE_MAX, "cap not applied");
-	zassert_equal(ear_stats().rate_dropped, 1U, "rate_dropped not counted");
+	zassert_equal(worker_rx_sent.count, CONFIG_MESHTASTIC_WORKER_RX_RATE_MAX, "cap not applied");
+	zassert_equal(worker_rx_stats().rate_dropped, 1U, "rate_dropped not counted");
 }
-#endif /* CONFIG_MESHTASTIC_RELAY_EAR */
+#endif /* CONFIG_MESHTASTIC_WORKER_RX */
 
 #if defined(CONFIG_MESHTASTIC_SETTINGS) && defined(CONFIG_MESHTASTIC_RELAY)
 /* ==========================================================================
@@ -1288,7 +1288,7 @@ ZTEST(relay, test_relay_settings_survive_reboot)
 
 	/* The ignore list came back too: FAR's text is refused as ignored. */
 	public_setup_and_build(0x5401U, "after the reboot", wire, &wire_len);
-	ear_forwards(wire, wire_len);
+	worker_rx_forwards(wire, wire_len);
 	assert_nothing_relayed();
 	zassert_equal(stats().ignored, 1U, "ignore list not restored");
 }
@@ -1306,23 +1306,23 @@ ZTEST(relay, test_relay_stored_unsupported_direction_refused)
 }
 #endif /* CONFIG_MESHTASTIC_SETTINGS && CONFIG_MESHTASTIC_RELAY */
 
-#if defined(CONFIG_MESHTASTIC_SETTINGS) && defined(CONFIG_MESHTASTIC_RELAY_EAR)
-/* The ear's peer survives a reboot the same way (mtear/peer). */
-ZTEST(relay, test_ear_peer_survives_reboot)
+#if defined(CONFIG_MESHTASTIC_SETTINGS) && defined(CONFIG_MESHTASTIC_WORKER_RX)
+/* The rx-only worker's peer survives a reboot the same way (mtear/peer). */
+ZTEST(relay, test_worker_rx_peer_survives_reboot)
 {
 	const uint32_t peer = 0x051c2856U;
 	uint32_t stored;
 
-	meshtastic_relay_ear_set_peer(peer);
+	meshtastic_worker_rx_set_peer(peer);
 	zassert_ok(settings_save_one("mtear/peer", &peer, sizeof(peer)), "");
-	meshtastic_relay_ear_reset();
-	zassert_equal(meshtastic_relay_ear_get_peer(), CONFIG_MESHTASTIC_RELAY_EAR_PEER,
+	meshtastic_worker_rx_reset();
+	zassert_equal(meshtastic_worker_rx_get_peer(), CONFIG_MESHTASTIC_WORKER_RX_PEER,
 		      "reset returns to the Kconfig peer");
 	stored = peer;
 	zassert_ok(settings_save_one("mtear/peer", &stored, sizeof(stored)));
 	zassert_ok(settings_load_subtree("mtear"));
-	zassert_equal(meshtastic_relay_ear_get_peer(), peer, "peer not restored");
-	meshtastic_relay_ear_reset();
+	zassert_equal(meshtastic_worker_rx_get_peer(), peer, "peer not restored");
+	meshtastic_worker_rx_reset();
 }
 #endif
 

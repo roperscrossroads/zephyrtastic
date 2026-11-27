@@ -1,0 +1,234 @@
+# SPDX-License-Identifier: GPL-3.0
+"""X6 of the link test plan: a relay through a worker keeps the reference's
+rebroadcast timing (ATTACHMENT-DESIGN §12, the operator's constraint), whatever
+the latency of the link between hub and worker.
+
+The hub decides whether to relay and by which rule; the worker keys up at
+(its own reception of the frame) + not_before, on its own clock. So the delay
+between the worker hearing a frame and the worker transmitting the relay must fall
+inside the window the reference computes for the worker's modem and the SNR the
+worker heard -- the oracle is meshwire.relay_window(), written from
+RadioInterface.cpp, not from the port.
+
+The frames are on a channel the hub has no key for: it relays them
+undecoded, as a stock node in rebroadcast ALL does, and there is no NodeInfo
+request through the worker to share its transmitter with the relay.
+"""
+
+import time
+
+import pytest
+
+from conftest import HUB, WORKER1, start_hub, start_worker
+from meshwire import MEDIUM_FAST, airframe, relay_window, relay_worst
+
+FAR = 0x0D0D0D0D
+SNR = -20                        # the tightest window: CW 3
+PRIVATE_KEY = bytes(range(16))   # a channel only FAR has
+ROLE_CLIENT, ROLE_ROUTER, ROLE_ROUTER_LATE = 0, 2, 11
+# Both clocks tick at 1 ms; key-up adds the worker's CAD/LBT and the sim radio's
+# settle. Early is never excused beyond the timestamps' own rounding.
+EARLY_MS, LATE_MS = 2, 25
+
+
+def blind(pid, hop_limit=3, relay_node=None):
+    return airframe(FAR, pid, "x6", preset=MEDIUM_FAST, name="x6-private", key=PRIVATE_KEY,
+                    hop_limit=hop_limit, hop_start=3, relay_node=relay_node)
+
+
+def setup(switchboard, images, lat_ms, role):
+    start_hub(switchboard, images)
+    start_worker(switchboard, images, WORKER1, MEDIUM_FAST)
+    switchboard.link(HUB, WORKER1, lat=(lat_ms, lat_ms))
+    switchboard.ask(HUB, f"role {role}", r"^role rc=0")
+    time.sleep(0.5)  # the worker's STATUS: the hub learns its preset (and modem)
+
+
+def worker_heard_then_tx(switchboard, pid, wire, timeout=3):
+    """Play @p wire at the worker; return (delay heard->key-up in ms, tx line),
+    or (None, None) when the worker never relayed it."""
+    mh = switchboard.mark(WORKER1)
+    switchboard.rf(WORKER1, MEDIUM_FAST, -110, SNR, wire)
+    heard = int(switchboard.wait_event(WORKER1, r"^rf heard ", 2, since=mh).split("t=")[1])
+    try:
+        tx = switchboard.wait_event(WORKER1, rf"^tx src=0d0d0d0d .*id={pid:08x}", timeout, since=mh)
+    except TimeoutError:
+        return None, None
+    return int(tx.split(" t=")[1].split()[0]) - heard, tx
+
+
+@pytest.mark.parametrize("lat_ms", [0, 40, 80])
+def test_x6a_client_relay_keys_up_inside_the_reference_window(switchboard, images, lat_ms):
+    """A CLIENT hub's relay through a worker, with the link adding lat_ms each
+    way (up to 160 ms round trip, still inside the 256 ms client offset): every
+    key-up falls in the reference window measured from the WORKER's reception,
+    i.e. the link latency does not show."""
+    setup(switchboard, images, lat_ms, ROLE_CLIENT)
+    lo, hi = relay_window(MEDIUM_FAST, SNR)
+    for i in range(4):
+        pid = 0x6A00 + lat_ms * 8 + i
+        d, tx = worker_heard_then_tx(switchboard, pid, blind(pid))
+        assert tx is not None, f"no relay through the worker for {pid:08x}"
+        assert "hops=2" in tx, tx  # one hop spent, as any relay
+        assert lo - EARLY_MS <= d <= hi + LATE_MS, f"key-up {d} ms outside [{lo}, {hi}]"
+        time.sleep(0.4)
+
+
+@pytest.mark.parametrize("lat_ms", [0, 150])
+def test_x6b_router_relays_early_and_a_late_decision_still_relays(switchboard, images, lat_ms):
+    """A ROUTER's window is 0-80 ms here. On time (no latency) the worker keys up
+    inside it. With 150 ms each way the decision reaches the worker after the
+    window closed: D3 says a ROUTER relays anyway -- as soon as it can."""
+    setup(switchboard, images, lat_ms, ROLE_ROUTER)
+    lo, hi = relay_window(MEDIUM_FAST, SNR, router=True)
+    for i in range(3):
+        pid = 0x6B00 + lat_ms * 8 + i
+        d, tx = worker_heard_then_tx(switchboard, pid, blind(pid))
+        assert tx is not None, f"a ROUTER's relay was dropped ({pid:08x})"
+        if lat_ms == 0:
+            assert lo - EARLY_MS <= d <= hi + LATE_MS, f"key-up {d} ms outside [{lo}, {hi}]"
+        else:
+            # Not before the decision could arrive; promptly once it has.
+            assert 2 * lat_ms - EARLY_MS <= d <= 2 * lat_ms + hi + LATE_MS, d
+        time.sleep(0.4)
+
+
+def test_x6c_a_late_client_decision_with_no_copy_heard_is_relayed(switchboard, images):
+    """D3, revised: a CLIENT decision that reaches the worker after its window
+    (368 ms here; with 250 ms each way it arrives at ~500 ms) is judged by the
+    CLIENT's own rule at arrival. The worker heard no other copy -- nobody in
+    earshot relayed the frame -- so it relays now, as it would have on time.
+    Within the staleness cap: 2 x worst = 768 ms."""
+    setup(switchboard, images, 250, ROLE_CLIENT)
+    cap = 2 * relay_worst(MEDIUM_FAST, SNR)
+    pid = 0x6C01
+    d, tx = worker_heard_then_tx(switchboard, pid, blind(pid), timeout=2)
+    assert tx is not None, "a late CLIENT relay nobody else made was dropped"
+    assert 2 * 250 - EARLY_MS <= d <= cap + LATE_MS, d
+
+
+def test_x6c_a_late_client_decision_after_a_copy_is_dropped(switchboard, images):
+    """Twin: the same late decision, but the worker heard a neighbour relay the
+    frame at 420 ms -- after the window, before the decision arrived. The
+    CLIENT's cancel-on-dupe applies at arrival: dropped. A CLIENT is never
+    promoted to ROUTER_LATE (which would relay anyway)."""
+    setup(switchboard, images, 250, ROLE_CLIENT)
+    pid = 0x6C02
+    mh = switchboard.mark(WORKER1)
+    switchboard.rf(WORKER1, MEDIUM_FAST, -110, SNR, blind(pid))
+    time.sleep(0.42)
+    switchboard.rf(WORKER1, MEDIUM_FAST, -100, SNR, blind(pid, hop_limit=2, relay_node=0x55))
+    time.sleep(1.5)
+    assert switchboard.lines(WORKER1, mh, rf"^tx src=0d0d0d0d .*id={pid:08x}") == [], \
+        "a late CLIENT relayed a frame a neighbour had already relayed"
+
+
+def test_x6c_a_stale_client_decision_is_dropped(switchboard, images):
+    """Past the staleness cap (2 x worst = 768 ms; 450 ms each way puts the
+    decision at ~900 ms) the flood has moved on: dropped, copy or not."""
+    setup(switchboard, images, 450, ROLE_CLIENT)
+    pid = 0x6C03
+    d, tx = worker_heard_then_tx(switchboard, pid, blind(pid), timeout=2)
+    assert tx is None, f"a stale CLIENT relay went out {d} ms after the worker heard the frame"
+
+
+def test_x6d_a_client_worker_cancels_on_a_heard_duplicate(switchboard, images):
+    """The worker hears a neighbour relay the frame (hop 2, a foreign relay byte)
+    60 ms after the original -- before the client window opens at 256 ms. The
+    reference's cancel-on-duplicate: our relay is withdrawn. Twin: X6a, the
+    same relay with no duplicate, goes out."""
+    setup(switchboard, images, 0, ROLE_CLIENT)
+    pid = 0x6D01
+    mh = switchboard.mark(WORKER1)
+    switchboard.rf(WORKER1, MEDIUM_FAST, -110, SNR, blind(pid))
+    time.sleep(0.06)
+    switchboard.rf(WORKER1, MEDIUM_FAST, -100, SNR, blind(pid, hop_limit=2, relay_node=0x55))
+    time.sleep(1.0)
+    assert switchboard.lines(WORKER1, mh, rf"^tx src=0d0d0d0d .*id={pid:08x}") == [], \
+        "the worker relayed a frame a neighbour had already relayed"
+
+
+def test_x6e_router_late_clamps_to_the_end_of_the_window(switchboard, images):
+    """ROUTER_LATE hears the duplicate and does not cancel: the reference
+    (RadioLibInterface::clampToLateRebroadcastWindow) moves its relay to
+    tx_after = now + getTxDelayMsecWeightedWorst(snr) -- measured from the
+    moment the COPY is heard, 288 ms here."""
+    setup(switchboard, images, 0, ROLE_ROUTER_LATE)
+    worst = relay_worst(MEDIUM_FAST, SNR)
+    pid = 0x6E01
+    mh = switchboard.mark(WORKER1)
+    switchboard.rf(WORKER1, MEDIUM_FAST, -110, SNR, blind(pid))
+    time.sleep(0.06)
+    mdup = switchboard.mark(WORKER1)
+    switchboard.rf(WORKER1, MEDIUM_FAST, -100, SNR, blind(pid, hop_limit=2, relay_node=0x55))
+    dup_heard = int(switchboard.wait_event(WORKER1, r"^rf heard ", 2, since=mdup).split("t=")[1])
+    tx = switchboard.wait_event(WORKER1, rf"^tx src=0d0d0d0d .*id={pid:08x}", 3, since=mh)
+    d = int(tx.split(" t=")[1].split()[0]) - dup_heard
+    assert worst - EARLY_MS <= d <= worst + LATE_MS, \
+        f"ROUTER_LATE keyed up {d} ms after hearing the copy; the reference says {worst}"
+
+
+def test_x6f_two_workers_one_preset_relay_once(switchboard, images):
+    """Two workers on one preset both hear a flood (the second 50 ms later). The
+    identity relays it once, through one worker (ATTACHMENT-DESIGN §12: one relay
+    per identity), whatever order the copies arrive in. The workers cannot hear
+    each other here, so their own cancel-on-duplicate cannot hide a hub that
+    handed the frame to both."""
+    from conftest import WORKER2
+    setup(switchboard, images, 0, ROLE_CLIENT)
+    start_worker(switchboard, images, WORKER2, MEDIUM_FAST)
+    switchboard.link(HUB, WORKER2)
+    time.sleep(0.5)
+    for i in range(5):
+        pid = 0x6F00 + i
+        m1, m2 = switchboard.mark(WORKER1), switchboard.mark(WORKER2)
+        first, second = (WORKER1, WORKER2) if i % 2 == 0 else (WORKER2, WORKER1)
+        switchboard.rf(first, MEDIUM_FAST, -110, SNR, blind(pid))
+        time.sleep(0.05)
+        switchboard.rf(second, MEDIUM_FAST, -100, SNR, blind(pid))
+        time.sleep(1.5)
+        tx1 = switchboard.lines(WORKER1, m1, rf"^tx src=0d0d0d0d .*id={pid:08x}")
+        tx2 = switchboard.lines(WORKER2, m2, rf"^tx src=0d0d0d0d .*id={pid:08x}")
+        assert len(tx1) + len(tx2) == 1, f"frame {pid:08x}: head1 sent {len(tx1)}, head2 sent {len(tx2)}"
+
+
+def worker_tx_stats(switchboard, node):
+    line = switchboard.ask(node, "stats", r"^worker ")
+    return {k: int(v) for k, v in (f.split("=") for f in line.split()[1:])}
+
+
+def test_x6g_a_deferred_client_relay_still_cancels_on_a_duplicate(switchboard, images):
+    """The channel is busy when the worker's moment comes (a peer is on air), so
+    its listen-before-talk defers. A neighbour's relay of the SAME frame is
+    heard during the wait. The CLIENT relay must be cancelled, as the reference
+    cancels a packet still waiting in its queue -- not sent once the channel
+    clears (bench, 2026-09-30: a worker sent the second relay in 3 of 24 floods).
+    Twin: the same deferral with no duplicate still sends, after the channel
+    clears -- the deferral path ran."""
+    setup(switchboard, images, 0, ROLE_CLIENT)
+
+    # Twin first: busy over the whole window, no duplicate -> deferred, then sent.
+    before = worker_tx_stats(switchboard, WORKER1)
+    pid = 0x6A60
+    mh = switchboard.mark(WORKER1)
+    switchboard.rf(WORKER1, MEDIUM_FAST, -110, SNR, blind(pid))
+    switchboard.ask(WORKER1, "busy 600", r"^busy rc=0")
+    tx = switchboard.wait_event(WORKER1, rf"^tx src=0d0d0d0d .*id={pid:08x}", 4, since=mh)
+    after = worker_tx_stats(switchboard, WORKER1)
+    assert after["tx_deferred"] > before["tx_deferred"], "the channel never deferred the relay"
+    time.sleep(0.5)
+
+    # The case: busy over the window, a neighbour's copy heard during it.
+    before = worker_tx_stats(switchboard, WORKER1)
+    pid = 0x6A61
+    mh = switchboard.mark(WORKER1)
+    switchboard.rf(WORKER1, MEDIUM_FAST, -110, SNR, blind(pid))
+    switchboard.ask(WORKER1, "busy 600", r"^busy rc=0")
+    time.sleep(0.35)  # past the window's start (192 ms): the worker is deferring
+    switchboard.rf(WORKER1, MEDIUM_FAST, -100, SNR, blind(pid, hop_limit=2, relay_node=0x55))
+    time.sleep(2.0)
+    after = worker_tx_stats(switchboard, WORKER1)
+    assert switchboard.lines(WORKER1, mh, rf"^tx src=0d0d0d0d .*id={pid:08x}") == [], \
+        "a deferred CLIENT relay went out after a neighbour had relayed the frame"
+    assert after["tx_deferred"] > before["tx_deferred"], "the relay was never deferred"
+    assert after["tx_cancelled"] == before["tx_cancelled"] + 1, (before, after)

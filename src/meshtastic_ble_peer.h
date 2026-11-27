@@ -69,7 +69,7 @@ bool meshtastic_ble_peer_frame_notify_ready(void);
 /* The M2 seam (bearer ingest): frames completed on the frame channel — peer
  * chunk-writes on the peripheral side, notifications on the central side —
  * land here. The callback runs on the BT RX thread with the peer lock NOT held
- * (agents-z7rg: holding it across the callback deadlocked a head), so it may
+ * (agents-z7rg: holding it across the callback deadlocked a worker), so it may
  * take its own locks and call blepeer APIs. The frame is a copy, valid only
  * for the duration of the call. Keep it short: the BT RX thread is blocked
  * meanwhile. NULL (the default) means completed frames are counted and
@@ -78,7 +78,7 @@ typedef void (*meshtastic_ble_peer_frame_cb_t)(unsigned int index, const uint8_t
 					       size_t len, uint8_t kind);
 void meshtastic_ble_peer_frame_rx_register(meshtastic_ble_peer_frame_cb_t cb);
 /* The beat flags the peer on registry slot @p index last sent (its capabilities:
- * COURIER, ATTACH, ...). False when that slot has never beaten. */
+ * COURIER, LINK, ...). False when that slot has never beaten. */
 bool meshtastic_ble_peer_slot_flags(unsigned int index, uint8_t *flags);
 /* The same, by the peer's node number over any live slot. */
 bool meshtastic_ble_peer_node_flags(uint32_t node_num, uint8_t *flags);
@@ -213,7 +213,7 @@ struct bt_conn *meshtastic_ble_slot_conn(unsigned int index);
  * buffers) off both the radio thread and the system work queue. */
 int meshtastic_ble_work_submit(struct k_work *work);
 /* The security level (bt_security_t) of the live connection in registry slot
- * @p index, or 0 when the slot is empty. For the attachment bearer's trust
+ * @p index, or 0 when the slot is empty. For the link bearer's trust
  * question (ATTACHMENT-SCOPE §4). */
 int meshtastic_ble_conn_security(unsigned int index);
 

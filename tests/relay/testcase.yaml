@@ -11,24 +11,24 @@ common:
 tests:
   meshtastic.relay.native_sim: {}
 
-  # The ear: a separate image in real life (a LongFast node with RX compiled
+  # The rx-only worker: a separate image in real life (a LongFast node with RX compiled
   # out), so a separate build here, without the receiving half.
-  meshtastic.relay.ear.native_sim:
+  meshtastic.relay.worker_rx.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_RELAY=n
-      - CONFIG_MESHTASTIC_RELAY_EAR=y
-      - CONFIG_MESHTASTIC_RELAY_EAR_PEER=0x0E0E0E0E
-      - CONFIG_MESHTASTIC_RELAY_EAR_RATE_MAX=3
+      - CONFIG_MESHTASTIC_WORKER_RX=y
+      - CONFIG_MESHTASTIC_WORKER_RX_PEER=0x0E0E0E0E
+      - CONFIG_MESHTASTIC_WORKER_RX_RATE_MAX=3
 
   # Persistence (mtrelay/relay, mtear/peer) on real NVS, with both halves in one
   # image so both records are exercised. Transmit stays on: the relay's cases
   # need it, and E4 is the RX-only build's case, not this one's.
   meshtastic.relay.settings.native_sim:
     extra_configs:
-      - CONFIG_MESHTASTIC_RELAY_EAR=y
-      - CONFIG_MESHTASTIC_RELAY_EAR_PEER=0x0E0E0E0E
-      - CONFIG_MESHTASTIC_RELAY_EAR_RATE_MAX=3
-      - CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY=n
+      - CONFIG_MESHTASTIC_WORKER_RX=y
+      - CONFIG_MESHTASTIC_WORKER_RX_PEER=0x0E0E0E0E
+      - CONFIG_MESHTASTIC_WORKER_RX_RATE_MAX=3
+      - CONFIG_MESHTASTIC_WORKER_RX_RX_ONLY=n
       - CONFIG_MESHTASTIC_SETTINGS=y
       - CONFIG_SETTINGS=y
       - CONFIG_FLASH=y

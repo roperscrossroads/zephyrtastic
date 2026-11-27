@@ -539,7 +539,7 @@ ZTEST(meshtastic_shell, test_0_lora_show_says_held_until_the_section_is_written)
 
 /* `lora power` sets this node's own transmit power from the console: stored,
  * shown, and 0 restores the region maximum. Before it, only the phone API
- * could, and the bench's brains sat at 14 dBm beside 2 dBm heads. */
+ * could, and the bench's hubs sat at 14 dBm beside 2 dBm workers. */
 ZTEST(meshtastic_shell, test_lora_power_sets_stores_and_reads_back)
 {
 	meshtastic_Config cfg;
@@ -1699,7 +1699,7 @@ ZTEST(meshtastic_shell, test_scanner_autostart_e_a_pinned_list_is_an_intent_and_
 #endif /* CONFIG_MESHTASTIC_SETTINGS */
 #endif /* CONFIG_MESHTASTIC_SCANNER_AUTOSTART */
 
-#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
+#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_WORKER_RX)
 #include "meshtastic_relay.h"
 #endif
 #if defined(CONFIG_MESHTASTIC_RELAY)
@@ -1718,7 +1718,7 @@ ZTEST(meshtastic_shell, test_relay_commands)
 	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_INBOUND);
 
 	zassert_not_equal(run_cmd("meshtastic relay dir both", &out), 0);
-	zassert_not_null(strstr(out, "ear that transmits"), "refusal reason: %s", out);
+	zassert_not_null(strstr(out, "worker that transmits"), "refusal reason: %s", out);
 	zassert_equal(meshtastic_relay_get_direction(), MESHTASTIC_RELAY_INBOUND,
 		      "a refused direction must not stick");
 
@@ -1735,24 +1735,28 @@ ZTEST(meshtastic_shell, test_relay_commands)
 }
 #endif /* CONFIG_MESHTASTIC_RELAY */
 
-#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
-/* `meshtastic ear`: set the peer, see it, stop forwarding with 0. */
-ZTEST(meshtastic_shell, test_ear_commands)
+#if defined(CONFIG_MESHTASTIC_WORKER_RX)
+/* `meshtastic worker-rx`: set the peer, see it, stop forwarding with 0. */
+ZTEST(meshtastic_shell, test_worker_rx_commands)
 {
 	const char *out;
 
-	meshtastic_relay_ear_reset();
-	zassert_ok(run_cmd("meshtastic ear", &out));
+	meshtastic_worker_rx_reset();
+	zassert_ok(run_cmd("meshtastic worker-rx", &out));
 	zassert_not_null(strstr(out, "not forwarding"), "%s", out);
-	zassert_ok(run_cmd("meshtastic ear peer 0e0e0e0e", &out));
-	zassert_equal(meshtastic_relay_ear_get_peer(), 0x0e0e0e0eU);
-	zassert_ok(run_cmd("meshtastic ear show", &out));
+	zassert_ok(run_cmd("meshtastic worker-rx peer 0e0e0e0e", &out));
+	zassert_equal(meshtastic_worker_rx_get_peer(), 0x0e0e0e0eU);
+	zassert_ok(run_cmd("meshtastic worker-rx show", &out));
 	zassert_not_null(strstr(out, "0x0e0e0e0e"), "%s", out);
 	zassert_not_null(strstr(out, "transmit: possible"), "%s", out);
-	zassert_ok(run_cmd("meshtastic ear peer 0", &out));
-	zassert_equal(meshtastic_relay_ear_get_peer(), 0U);
+	/* The old name works for one release, and says the new one first. */
+	zassert_ok(run_cmd("meshtastic ear show", &out));
+	zassert_not_null(strstr(out, "renamed: use meshtastic worker-rx show"), "%s", out);
+	zassert_not_null(strstr(out, "0x0e0e0e0e"), "%s", out);
+	zassert_ok(run_cmd("meshtastic worker-rx peer 0", &out));
+	zassert_equal(meshtastic_worker_rx_get_peer(), 0U);
 }
-#endif /* CONFIG_MESHTASTIC_RELAY_EAR */
+#endif /* CONFIG_MESHTASTIC_WORKER_RX */
 
 /* ---- `meshtastic state`: the machine-readable line ------------------------- */
 
@@ -2420,64 +2424,70 @@ ZTEST(meshtastic_shell, test_api_is_absent_without_config_write)
 
 #endif /* CONFIG_MESHTASTIC_SHELL_PHONEAPI */
 
-/* ---- `meshtastic attach preset`: names, numbers, and nothing else ------------ */
+/* ---- `meshtastic hub preset`: names, numbers, and nothing else ------------ */
 
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#if defined(CONFIG_MESHTASTIC_HUB)
 
-#include "meshtastic_attachment.h"
-#include "meshtastic_attachment_codec.h"
+#include "meshtastic_hub.h"
+#include "meshtastic_link_codec.h"
 
-#define SHELL_HEAD_NODE 0x00E10001U
+#define SHELL_WORKER_NODE 0x00E10001U
 
-/* agents-pcs2.12: `attach preset 1 ShortFast` used to parse the name as the number 0 and
- * put the head on LongFast. */
-ZTEST(meshtastic_shell, test_attach_preset_takes_a_name_or_a_number_and_refuses_junk)
+/* agents-pcs2.12: `hub preset 1 ShortFast` used to parse the name as the number 0 and
+ * put the worker on LongFast. */
+ZTEST(meshtastic_shell, test_hub_preset_takes_a_name_or_a_number_and_refuses_junk)
 {
-	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
-	const struct meshtastic_attachment_status st = {
+	uint8_t env[MESHTASTIC_LINK_ENV_MAX];
+	const struct meshtastic_link_status st = {
 		.preset = (uint8_t)meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST,
-		.flags = MESHTASTIC_ATTACHMENT_ST_IS_HEAD,
-		.hwid = SHELL_HEAD_NODE,
+		.flags = MESHTASTIC_LINK_ST_IS_WORKER,
+		.hwid = SHELL_WORKER_NODE,
 	};
 	const char *out = NULL;
 	char json[1536];
-	int len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
+	int len = meshtastic_link_encode_status(&st, env, sizeof(env));
 
-	/* A head, admitted by the allow-list: there is no link in this build to trust. */
-	zassert_ok(meshtastic_attachment_allow_add(SHELL_HEAD_NODE));
-	zassert_ok(meshtastic_attachment_ingest(SHELL_HEAD_NODE, env, (size_t)len));
-	zassert_equal(meshtastic_attachment_id_for_node(SHELL_HEAD_NODE), 1U);
+	/* A worker, admitted by the allow-list: there is no link in this build to trust. */
+	zassert_ok(meshtastic_hub_allow_add(SHELL_WORKER_NODE));
+	zassert_ok(meshtastic_hub_ingest(SHELL_WORKER_NODE, env, (size_t)len));
+	zassert_equal(meshtastic_hub_id_for_node(SHELL_WORKER_NODE), 1U);
 
-	zassert_not_equal(run_cmd("meshtastic attach preset 1 Bogus", &out), 0);
+	zassert_not_equal(run_cmd("meshtastic hub preset 1 Bogus", &out), 0);
 	zassert_not_null(strstr(out, "unknown preset"), "%s", out);
-	zassert_not_equal(run_cmd("meshtastic attach preset 1 6x", &out), 0, "a number and more");
-	zassert_not_equal(run_cmd("meshtastic attach preset 1 99", &out), 0, "no such preset");
-	zassert_not_equal(run_cmd("meshtastic attach preset one 6", &out), 0, "an id is a number");
-	zassert_equal(meshtastic_attachment_wanted_preset(SHELL_HEAD_NODE),
+	zassert_not_equal(run_cmd("meshtastic hub preset 1 6x", &out), 0, "a number and more");
+	zassert_not_equal(run_cmd("meshtastic hub preset 1 99", &out), 0, "no such preset");
+	zassert_not_equal(run_cmd("meshtastic hub preset one 6", &out), 0, "an id is a number");
+	zassert_equal(meshtastic_hub_wanted_preset(SHELL_WORKER_NODE),
 		      MESHTASTIC_PRESET_UNKNOWN, "a refused command stores nothing");
 
-	zassert_ok(run_cmd("meshtastic attach preset 1 ShortFast", &out), "%s", out);
-	zassert_equal(meshtastic_attachment_wanted_preset(SHELL_HEAD_NODE),
+	zassert_ok(run_cmd("meshtastic hub preset 1 ShortFast", &out), "%s", out);
+	zassert_equal(meshtastic_hub_wanted_preset(SHELL_WORKER_NODE),
 		      (uint8_t)meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST,
 		      "the name is the preset, not the number 0");
+	zassert_ok(run_cmd("meshtastic hub list", &out));
+	zassert_not_null(strstr(out, "wanted preset 6  (NOT there yet)"), "%s", out);
+	/* The old name works for one release, and says the new one first. */
 	zassert_ok(run_cmd("meshtastic attach list", &out));
+	zassert_not_null(strstr(out, "renamed: use meshtastic hub list"), "%s", out);
 	zassert_not_null(strstr(out, "wanted preset 6  (NOT there yet)"), "%s", out);
 
-	/* The state line says what the head reports and what is wanted of it. */
+	/* The state line says what the worker reports and what is wanted of it. */
 	state_json(json, sizeof(json));
 	zassert_not_null(strstr(json, "\"node\":\"0x00e10001\",\"p\":4,\"w\":6,"), "%s", json);
+	zassert_not_null(strstr(json, "\"hub\":{\"max\":"), "%s", json);
+	zassert_not_null(strstr(json, "\"workers\":[{\"a\":1,"), "%s", json);
 
-	zassert_ok(run_cmd("meshtastic attach preset 1 4", &out), "a number still works");
-	zassert_equal(meshtastic_attachment_wanted_preset(SHELL_HEAD_NODE), 4U);
-	zassert_ok(run_cmd("meshtastic attach preset 1 none", &out));
-	zassert_equal(meshtastic_attachment_wanted_preset(SHELL_HEAD_NODE),
+	zassert_ok(run_cmd("meshtastic hub preset 1 4", &out), "a number still works");
+	zassert_equal(meshtastic_hub_wanted_preset(SHELL_WORKER_NODE), 4U);
+	zassert_ok(run_cmd("meshtastic hub preset 1 none", &out));
+	zassert_equal(meshtastic_hub_wanted_preset(SHELL_WORKER_NODE),
 		      MESHTASTIC_PRESET_UNKNOWN);
 
-	zassert_ok(meshtastic_attachment_forget(1U));
-	meshtastic_attachment_allow_clear();
+	zassert_ok(meshtastic_hub_forget(1U));
+	meshtastic_hub_allow_clear();
 }
 
-#endif /* CONFIG_MESHTASTIC_ATTACHMENT_BRAIN */
+#endif /* CONFIG_MESHTASTIC_HUB */
 
 #if defined(CONFIG_MESHTASTIC_TEXT_INBOX)
 /* `meshtastic text inbox`: one line per kept message, newest first, the text last with
@@ -2498,7 +2508,7 @@ ZTEST(meshtastic_shell, test_text_inbox_lists_newest_first_and_clears)
 		.hop_limit = 1U,
 		.hop_start = 3U,
 		.channel_index = 1U,
-		.rx_attach = 2U,
+		.rx_radio = 2U,
 		.rx_heard_on = 1U + meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST,
 	};
 	const char *out;
@@ -2513,7 +2523,7 @@ ZTEST(meshtastic_shell, test_text_inbox_lists_newest_first_and_clears)
 	p.payload_len = sizeof(msg2) - 1U;
 	p.id = 0x71000002U;
 	p.to = TEST_NODE_ID;
-	p.rx_attach = 0U;
+	p.rx_radio = 0U;
 	p.rx_heard_on = 1U + meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO;
 	p.pki_encrypted = true;
 	meshtastic_text_inbox_record(&p);
@@ -2523,9 +2533,9 @@ ZTEST(meshtastic_shell, test_text_inbox_lists_newest_first_and_clears)
 	zassert_not_null(strstr(out, "from 0x0b000001 to 0x12345678 ch 1 on ShortTurbo via own "
 				     "rssi -61 snr 9 hops 2 pki: hi?there"),
 			 "the newest, its newline shown as '?': %s", out);
-	zassert_not_null(strstr(out, "from 0x0b000001 to 0xffffffff ch 1 on MediumFast via head 2 "
+	zassert_not_null(strstr(out, "from 0x0b000001 to 0xffffffff ch 1 on MediumFast via worker 2 "
 				     "rssi -61 snr 9 hops 2: first"),
-			 "the older, heard through head 2: %s", out);
+			 "the older, heard through worker 2: %s", out);
 	zassert_true(strstr(out, "hi?there") < strstr(out, ": first"), "newest first: %s", out);
 	zassert_true(meshtastic_text_inbox_total() == total + 2U);
 

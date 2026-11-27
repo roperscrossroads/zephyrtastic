@@ -370,10 +370,10 @@ static void neighborinfo_on_packet(const struct meshtastic_packet *packet,
 	    !heard_directly(packet, mesh)) {
 		return;
 	}
-	/* Heard by one of our radio heads, not by this radio: a neighbour of the
-	 * head on the head's preset, which we would then broadcast as ours on a
+	/* Heard by one of our workers, not by this radio: a neighbour of the
+	 * worker on the worker's preset, which we would then broadcast as ours on a
 	 * preset where it is not (SCOPE E2). The table is per local radio. */
-	if (packet->rx_attach != 0U) {
+	if (packet->rx_radio != 0U) {
 		return;
 	}
 

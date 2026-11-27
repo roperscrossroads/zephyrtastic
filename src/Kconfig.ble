@@ -134,7 +134,7 @@ config MESHTASTIC_BLE_PEER_CLASSIFY_WINDOW_MS
 
 config MESHTASTIC_BLE_IDLE_DROP
 	bool "Drop an idle incoming link that is not a peer"
-	default y if MESHTASTIC_ATTACHMENT_HEAD
+	default y if MESHTASTIC_WORKER
 	select MCUMGR_MGMT_NOTIFICATION_HOOKS if MCUMGR_TRANSPORT_BT
 	select MCUMGR_SMP_COMMAND_STATUS_HOOKS if MCUMGR_TRANSPORT_BT
 	help
@@ -142,8 +142,8 @@ config MESHTASTIC_BLE_IDLE_DROP
 	  (PhoneAPI access, an SMP command) for MESHTASTIC_BLE_IDLE_DROP_SEC
 	  is disconnected, which frees its slot and re-arms advertising.
 
-	  For a role with no use for a phone, a keyless head above all, which
-	  has two slots: one is its brain link, so a host that connected and
+	  For a role with no use for a phone, a keyless worker above all, which
+	  has two slots: one is its hub link, so a host that connected and
 	  then went silent (bleprobe from a bench host, agents-0inv) left it
 	  full and invisible until the host dropped the link. SMP commands
 	  count as activity, so an MCUmgr update over BLE is not cut. Off on
@@ -186,7 +186,7 @@ config MESHTASTIC_BLE_PEER_FRAME_CONN_INTERVAL_MS
 	  (peripherals run with BT_GAP_AUTO_UPDATE_CONN_PARAMS=n). A frame's
 	  delivery waits for a connection event, so the interval is the floor of
 	  the link's latency -- measured 2026-09-28 (ATTACHMENT-STATUS §2c). A
-	  role that needs frames fast (a radio head feeding its brain, whose
+	  role that needs frames fast (a worker feeding its hub, whose
 	  relay timing runs on that latency) sets this; the interval is a
 	  link-role fact, so a plain peer keeps the default and its power. The
 	  request is central-initiated (the direction the 2026-08-26 stability

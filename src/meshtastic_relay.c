@@ -3,7 +3,7 @@
 /*
  * Cross-preset text relay, the receiving half (agents-jbrq.12).
  *
- * An ear on another preset forwards what it hears over the BLE peer link. The
+ * An rx-only worker on another preset forwards what it hears over the BLE peer link. The
  * router delivers those frames locally and, by the link-local rule, never
  * floods them onto our air. This module is the one exception it makes on
  * purpose: for broadcast TEXT, it sends a NEW packet from this node, on this
@@ -206,7 +206,7 @@ static uint8_t map_channel(uint8_t src)
 	}
 
 	if (meshtastic_channels_is_public_default(src)) {
-		/* Already this preset's public channel: the ear is on our own
+		/* Already this preset's public channel: the rx-only worker is on our own
 		 * preset, and there is nothing to cross. */
 		if (strcmp(meshtastic_channels_get_name(src), here) == 0) {
 			return MESHTASTIC_CHANNEL_INDEX_INVALID;
@@ -370,8 +370,8 @@ void meshtastic_relay_on_rx(const struct meshtastic_packet *pkt, const meshtasti
 	uint8_t dest;
 	int64_t now;
 
-	/* Only what the ear forwards. Our own air is not re-sent anywhere in v1:
-	 * that is the outbound direction, which needs a transmitting ear. */
+	/* Only what the rx-only worker forwards. Our own air is not re-sent anywhere in v1:
+	 * that is the outbound direction, which needs a transmitting worker. */
 	if (pkt == NULL || bearer != MESHTASTIC_BEARER_BLE_PEER) {
 		return;
 	}
@@ -606,7 +606,7 @@ static void relay_forget(void)
 int meshtastic_relay_set_direction(enum meshtastic_relay_dir dir)
 {
 	if (dir == MESHTASTIC_RELAY_OUTBOUND || dir == MESHTASTIC_RELAY_BOTH) {
-		/* Needs an ear that transmits on its preset; v1's ear is RX-only. */
+		/* Needs a worker that transmits on its preset; v1's rx-only worker cannot. */
 		return -ENOTSUP;
 	}
 	if (dir != MESHTASTIC_RELAY_OFF && dir != MESHTASTIC_RELAY_INBOUND) {

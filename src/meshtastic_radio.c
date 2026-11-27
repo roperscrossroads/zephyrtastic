@@ -28,8 +28,8 @@
 #if defined(CONFIG_MESHTASTIC_RF_HIST)
 #include "meshtastic_rf_measure.h"
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-#include "meshtastic_attachment_head.h"
+#if defined(CONFIG_MESHTASTIC_WORKER)
+#include "meshtastic_worker.h"
 #else
 #include "meshtastic_router.h"
 #endif
@@ -224,7 +224,7 @@ struct mt_rx_slot {
 	int16_t rssi;
 	int8_t snr;
 	uint8_t bearer; /* enum meshtastic_bearer */
-	uint8_t attach; /* which radio heard it: 0 = ours, else an attachment */
+	uint8_t radio; /* which radio heard it: 0 = ours, else a worker */
 	uint8_t preset; /* that radio's preset (MESHTASTIC_PRESET_UNKNOWN if unsaid) */
 	uint32_t rx_ms; /* that radio's uptime at reception */
 	uint8_t buf[MESHTASTIC_PKT_MAX];
@@ -490,8 +490,8 @@ int meshtastic_radio_retune(void)
 
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 {
-#if defined(CONFIG_MESHTASTIC_SCANNER_RX_ONLY) || defined(CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY)
-	/* Dedicated scanner or relay-ear build: no transmit path at all. (The
+#if defined(CONFIG_MESHTASTIC_SCANNER_RX_ONLY) || defined(CONFIG_MESHTASTIC_WORKER_RX_RX_ONLY)
+	/* Dedicated scanner or worker-rx build: no transmit path at all. (The
 	 * locals below live in the other branch: declared up here, they were
 	 * unused in this one, and no -Werror build had ever compiled it.) */
 	ARG_UNUSED(pkt);
@@ -732,7 +732,7 @@ int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len)
 	}
 
 	return ret;
-#endif /* CONFIG_MESHTASTIC_SCANNER_RX_ONLY || CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY */
+#endif /* CONFIG_MESHTASTIC_SCANNER_RX_ONLY || CONFIG_MESHTASTIC_WORKER_RX_RX_ONLY */
 }
 
 /*
@@ -805,7 +805,7 @@ static void mt_rx_cb(const struct device *dev, uint8_t *data, uint16_t size, int
 	slot.rssi = rssi;
 	slot.snr = snr;
 	slot.bearer = MESHTASTIC_BEARER_LORA;
-	slot.attach = 0U;
+	slot.radio = 0U;
 	slot.preset = (uint8_t)mt.modem_preset;
 	slot.rx_ms = (uint32_t)k_uptime_get();
 	memcpy(slot.buf, data, size);
@@ -831,7 +831,7 @@ int meshtastic_radio_rx_inject_meta(const uint8_t *buf, uint16_t len,
 	slot.rssi = meta->rssi;
 	slot.snr = meta->snr;
 	slot.bearer = meta->bearer;
-	slot.attach = meta->attach;
+	slot.radio = meta->radio;
 	slot.preset = meta->preset;
 	slot.rx_ms = meta->rx_ms;
 	memcpy(slot.buf, buf, len);
@@ -853,7 +853,7 @@ int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic
 	 * gates on (it never folds non-RF frames into RF signal stats). */
 	const struct meshtastic_rx_meta meta = {
 		.bearer = (uint8_t)bearer,
-		.attach = 0U,
+		.radio = 0U,
 		.preset = MESHTASTIC_PRESET_UNKNOWN,
 		.rssi = 0,
 		.snr = 0,
@@ -863,7 +863,7 @@ int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic
 	return meshtastic_radio_rx_inject_meta(buf, len, &meta);
 }
 
-#if defined(CONFIG_MESHTASTIC_MQTT) && !defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+#if defined(CONFIG_MESHTASTIC_MQTT) && !defined(CONFIG_MESHTASTIC_WORKER)
 /* MQTT downlink MeshPackets waiting for the RX thread: one per queue slot, so a full pool
  * and a full queue are the same condition. The queue slot's buf[0] is the pool index. */
 static meshtastic_MeshPacket mqtt_pool[CONFIG_MESHTASTIC_RX_QUEUE_DEPTH] MESHTASTIC_EXT_RAM_BSS_ATTR;
@@ -954,13 +954,13 @@ static void mt_thread_fn(void *p1, void *p2, void *p3)
 
 		ret = k_msgq_get(&mt_rx_msgq, &slot, wait);
 		if (ret == 0) {
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-			/* A keyless head (ATTACHMENT-DESIGN S5): what the radio heard
-			 * goes to the brain undecoded. The router is not linked into
+#if defined(CONFIG_MESHTASTIC_WORKER)
+			/* A keyless worker (ATTACHMENT-DESIGN S5): what the radio heard
+			 * goes to the hub undecoded. The router is not linked into
 			 * this image, and a frame from any other bearer has nowhere
 			 * to go. */
 			if (slot.bearer == MESHTASTIC_BEARER_LORA) {
-				meshtastic_attachment_head_on_rx(slot.buf, slot.len, slot.rssi,
+				meshtastic_worker_on_rx(slot.buf, slot.len, slot.rssi,
 								 slot.snr, slot.preset, slot.rx_ms);
 			}
 #else
@@ -972,7 +972,7 @@ static void mt_thread_fn(void *p1, void *p2, void *p3)
 #endif
 			const struct meshtastic_rx_meta meta = {
 				.bearer = slot.bearer,
-				.attach = slot.attach,
+				.radio = slot.radio,
 				.preset = slot.preset,
 				.rssi = slot.rssi,
 				.snr = slot.snr,

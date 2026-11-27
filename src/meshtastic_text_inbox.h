@@ -35,8 +35,8 @@ struct meshtastic_text_inbox_entry {
 	int8_t snr;
 	/** The channel table index it was decrypted with (struct meshtastic_packet). */
 	uint8_t channel_index;
-	/** 0 = this board's own radio, else the radio head's id that heard it. */
-	uint8_t rx_attach;
+	/** 0 = this board's own radio, else the worker's id that heard it. */
+	uint8_t rx_radio;
 	/** 1 + the modem preset it was heard on; 0 when the bearer cannot say. */
 	uint8_t rx_heard_on;
 	/** hop_start - hop_limit: how many relays it took. */

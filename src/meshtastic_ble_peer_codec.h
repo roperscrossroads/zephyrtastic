@@ -62,10 +62,10 @@
 #define MESHTASTIC_BLE_PEER_FLAG_HOLD     0x02U
 #define MESHTASTIC_BLE_PEER_FLAG_TESTBOOT 0x04U
 #define MESHTASTIC_BLE_PEER_FLAG_COURIER  0x08U
-/* bit4 = ATTACH: I understand attachment envelopes (frame kind 1, below). A
+/* bit4 = LINK: I understand link envelopes (frame kind 1, below). A
  * sender emits kind-1 frames only to a peer whose beats carry this, so a peer
  * on an older image never sees a frame it would have to reject. */
-#define MESHTASTIC_BLE_PEER_FLAG_ATTACH   0x10U
+#define MESHTASTIC_BLE_PEER_FLAG_LINK   0x10U
 
 struct meshtastic_ble_peer_beat {
 	uint8_t version;  /* the frame version this beat carried (set by decode; encode
@@ -173,10 +173,10 @@ void meshtastic_ble_peer_rx_account(struct meshtastic_ble_peer_rx *st,
  *   kind 0 = WIRE: one Meshtastic wire frame (<= FRAME_MAX). The bytes are
  *            identical to the pre-kind encoding, whose high length byte was
  *            always 0 -- an old receiver decodes them unchanged.
- *   kind 1 = ATTACH: an attachment envelope (meshtastic_attachment_codec.h),
+ *   kind 1 = LINK: a link envelope (meshtastic_link_codec.h),
  *            <= ENV_MAX. An old receiver sees a declared length >= 4096 and
  *            refuses it with -EMSGSIZE; senders avoid that by gating on the
- *            beat's ATTACH flag.
+ *            beat's LINK flag.
  *
  * One frame in flight per direction per link. A FIRST chunk aborts any
  * partial reassembly (the sender restarted); a seq gap or overrun kills the
@@ -199,11 +199,11 @@ void meshtastic_ble_peer_rx_account(struct meshtastic_ble_peer_rx *st,
 #define MESHTASTIC_BLE_PEER_FRAME_MAX      255U
 /* Frame kinds (the 4-bit field in the FIRST chunk's length prefix). */
 #define MESHTASTIC_BLE_PEER_KIND_WIRE      0U
-#define MESHTASTIC_BLE_PEER_KIND_ATTACH    1U
+#define MESHTASTIC_BLE_PEER_KIND_LINK    1U
 #define MESHTASTIC_BLE_PEER_KIND_MAX       15U
-/* An attachment envelope: a wire frame plus its header (16 B is generous; the
+/* A link envelope: a wire frame plus its header (16 B is generous; the
  * largest header today, RX_FRAME, is 10 B). Mirrors
- * MESHTASTIC_ATTACHMENT_ENV_MAX; equality is BUILD_ASSERTed where both are
+ * MESHTASTIC_LINK_ENV_MAX; equality is BUILD_ASSERTed where both are
  * visible. */
 #define MESHTASTIC_BLE_PEER_ENV_MAX        (MESHTASTIC_BLE_PEER_FRAME_MAX + 16U)
 /* The largest frame of any kind a reassembler must hold. */

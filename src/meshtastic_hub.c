@@ -1,0 +1,1168 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+/*
+ * The hub's link table and ingest (meshtastic_hub.h;
+ * ATTACHMENT-DESIGN S6). A worker's RX_FRAME becomes an RF frame on the router's
+ * queue with the worker's preset and signal linked -- from there dedup, decrypt,
+ * NodeDB and the modules see it exactly as they would a frame from this board's
+ * own radio, because it is one: it crossed the air, on the worker's preset.
+ */
+
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
+
+#include <zephyr/meshtastic/meshtastic.h>
+#include <zephyr/meshtastic/intents.h>
+#include "meshtastic_core.h"
+#include "meshtastic_hub.h"
+#include "meshtastic_contention.h"
+#include "meshtastic_ext_ram.h"
+#include "meshtastic_channels.h"
+#include "meshtastic_outbound.h"
+#include "meshtastic_packet.h"
+#include "meshtastic_config_store.h"
+#include "meshtastic_region_presets.h"
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+#include "meshtastic_ble_peer_codec.h" /* the ENV_MAX cross-check only */
+#endif
+
+LOG_MODULE_DECLARE(meshtastic, CONFIG_MESHTASTIC_LOG_LEVEL);
+
+#if defined(CONFIG_MESHTASTIC_BLE_PEER)
+BUILD_ASSERT(MESHTASTIC_LINK_ENV_MAX == MESHTASTIC_BLE_PEER_ENV_MAX,
+	     "the envelope must fit the peer link's kind-1 frame");
+#endif
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
+
+/* [0] is the local radio and never admitted or forgotten. */
+/* PSRAM on the V4 family (a no-op elsewhere): mutex-guarded, CPU-only, never
+ * touched from an ISR or DMA -- the rules in meshtastic_ext_ram.h. The R8
+ * hub sits at 99.7 % of internal RAM; this is where a table lives. */
+static MESHTASTIC_EXT_RAM_BSS_ATTR struct meshtastic_hub_info tab[CONFIG_MESHTASTIC_HUB_WORKERS_MAX + 1U];
+static bool used[CONFIG_MESHTASTIC_HUB_WORKERS_MAX + 1U] = { true };
+static struct meshtastic_hub_stats stats;
+static uint32_t allow[CONFIG_MESHTASTIC_HUB_ALLOW_MAX];
+/* The preset wanted of each worker, by link identity (mtattach/want). node 0 = free. */
+static struct link_want {
+	uint32_t node;
+	uint8_t preset;
+	uint8_t pad[3];
+} want[CONFIG_MESHTASTIC_HUB_WORKERS_MAX];
+static K_MUTEX_DEFINE(tab_lock);
+
+/* A worker on the wrong preset is asked again no more often than this. */
+#define WANT_RETRY_MS 5000
+
+static void want_fn(struct k_work *work);
+static K_WORK_DEFINE(want_work, want_fn);
+
+static void evict_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(evict_work, evict_fn);
+
+/* ---- the allow-list (mtattach/allow) --------------------------------------- */
+
+static bool allowed_locked(uint32_t node)
+{
+	for (unsigned int i = 0U; i < ARRAY_SIZE(allow); i++) {
+		if (allow[i] == node) {
+			return true;
+		}
+	}
+	return false;
+}
+
+#if defined(CONFIG_MESHTASTIC_SETTINGS)
+static void allow_save_locked(void)
+{
+	if (settings_save_one("mtattach/allow", allow, sizeof(allow)) != 0) {
+		LOG_WRN("hub: allow-list save failed");
+	}
+}
+
+static void want_save_locked(void)
+{
+	if (settings_save_one("mtattach/want", want, sizeof(want)) != 0) {
+		LOG_WRN("hub: wanted presets save failed");
+	}
+}
+
+static int link_settings_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	uint32_t tmp[CONFIG_MESHTASTIC_HUB_ALLOW_MAX] = { 0 };
+
+	if (strcmp(key, "want") == 0) {
+		struct link_want w[ARRAY_SIZE(want)] = { 0 };
+
+		/* A record from a build with another table size: take what fits. */
+		len = MIN(len, sizeof(w)) / sizeof(w[0]) * sizeof(w[0]);
+		if (read_cb(cb_arg, w, len) != (ssize_t)len) {
+			return -EINVAL;
+		}
+		k_mutex_lock(&tab_lock, K_FOREVER);
+		memcpy(want, w, sizeof(want));
+		k_mutex_unlock(&tab_lock);
+		return 0;
+	}
+	if (strcmp(key, "allow") != 0) {
+		return -ENOENT;
+	}
+	if (len > sizeof(tmp) || read_cb(cb_arg, tmp, len) != (ssize_t)len) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	memcpy(allow, tmp, sizeof(allow));
+	k_mutex_unlock(&tab_lock);
+	return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(mt_hub, "mtattach", NULL, link_settings_set, NULL, NULL);
+
+/* The role intent: the workers this hub wants, on which presets, and whom it admits. */
+static bool hub_intent_is_set(char *detail, size_t len)
+{
+	unsigned int workers = 0U, allowed = 0U;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	for (unsigned int i = 0U; i < ARRAY_SIZE(want); i++) {
+		workers += (want[i].node != 0U);
+	}
+	for (unsigned int i = 0U; i < ARRAY_SIZE(allow); i++) {
+		allowed += (allow[i] != 0U);
+	}
+	k_mutex_unlock(&tab_lock);
+	if (workers || allowed) {
+		snprintf(detail, len, "%u worker(s) wanted, %u allowed", workers, allowed);
+	}
+	return workers || allowed;
+}
+
+static int hub_intent_clear(void)
+{
+	int ret, ret2;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	memset(want, 0, sizeof(want));
+	memset(allow, 0, sizeof(allow));
+	k_mutex_unlock(&tab_lock);
+	ret = settings_delete("mtattach/want");
+	ret2 = settings_delete("mtattach/allow");
+	ret = (ret == -ENOENT) ? 0 : ret;
+	ret2 = (ret2 == -ENOENT) ? 0 : ret2;
+	return ret != 0 ? ret : ret2;
+}
+
+MESHTASTIC_INTENT_DEFINE(hub, "hub", "mtattach/want mtattach/allow", hub_intent_is_set,
+			 hub_intent_clear);
+#else
+static void allow_save_locked(void)
+{
+}
+
+static void want_save_locked(void)
+{
+}
+#endif
+
+int meshtastic_hub_allow_add(uint32_t node)
+{
+	int ret = -ENOSPC;
+
+	if (node == 0U) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (allowed_locked(node)) {
+		ret = 0;
+	} else {
+		for (unsigned int i = 0U; i < ARRAY_SIZE(allow); i++) {
+			if (allow[i] == 0U) {
+				allow[i] = node;
+				allow_save_locked();
+				ret = 0;
+				break;
+			}
+		}
+	}
+	k_mutex_unlock(&tab_lock);
+	return ret;
+}
+
+void meshtastic_hub_allow_clear(void)
+{
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	memset(allow, 0, sizeof(allow));
+	allow_save_locked();
+	k_mutex_unlock(&tab_lock);
+}
+
+bool meshtastic_hub_allow_get(unsigned int i, uint32_t *node)
+{
+	bool ok = false;
+
+	if (i >= ARRAY_SIZE(allow) || node == NULL) {
+		return false;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (allow[i] != 0U) {
+		*node = allow[i];
+		ok = true;
+	}
+	k_mutex_unlock(&tab_lock);
+	return ok;
+}
+
+bool meshtastic_hub_is_allowed(uint32_t node)
+{
+	bool ok;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	ok = allowed_locked(node);
+	k_mutex_unlock(&tab_lock);
+	return ok;
+}
+
+void meshtastic_hub_stats_get(struct meshtastic_hub_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	*out = stats;
+	k_mutex_unlock(&tab_lock);
+}
+
+/* Is the link this envelope came over one we may extend RF trust to? The
+ * bearer answers; with no bearer (the test seam) the registry is asked. */
+static bool link_trusted(const struct meshtastic_link_bearer *b, uint32_t node)
+{
+	struct meshtastic_link_info info;
+	bool known;
+
+	known = (b != NULL) ? b->link_info(node, &info)
+			    : meshtastic_link_bearer_link_info(node, &info, NULL);
+	return known && info.up && info.auth != MESHTASTIC_LINK_AUTH_NONE;
+}
+
+/* ---- eviction: a dead link's slot is freed after the grace ------------------- */
+
+static void evict_fn(struct k_work *work)
+{
+	int64_t now = k_uptime_get();
+
+	ARG_UNUSED(work);
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	for (unsigned int i = 1U; i < ARRAY_SIZE(tab); i++) {
+		if (used[i] && !tab[i].link_up && tab[i].down_ms != 0 &&
+		    now - tab[i].down_ms >= (int64_t)CONFIG_MESHTASTIC_HUB_EVICT_SEC * 1000) {
+			LOG_INF("hub: worker 0x%08x (radio %u) evicted after %d s down",
+				tab[i].node, i, CONFIG_MESHTASTIC_HUB_EVICT_SEC);
+			used[i] = false;
+			memset(&tab[i], 0, sizeof(tab[i]));
+			stats.evicted++;
+		}
+	}
+	k_mutex_unlock(&tab_lock);
+	(void)k_work_schedule(&evict_work,
+			      K_MSEC(CONFIG_MESHTASTIC_HUB_EVICT_SEC * 1000 / 2));
+}
+
+void meshtastic_hub_start(void)
+{
+	(void)k_work_schedule(&evict_work,
+			      K_MSEC(CONFIG_MESHTASTIC_HUB_EVICT_SEC * 1000 / 2));
+}
+
+static struct meshtastic_hub_info *find_locked(uint32_t node)
+{
+	for (unsigned int i = 1U; i < ARRAY_SIZE(tab); i++) {
+		if (used[i] && tab[i].node == node) {
+			return &tab[i];
+		}
+	}
+	return NULL;
+}
+
+
+/* DESIGN §13: slot time and ROUTER window of a preset, on this board's modem
+ * rules (CW 3, the tightest case: (2*CW - 1) slots). 0 when unknown. */
+static uint32_t preset_slot_ms(uint8_t preset)
+{
+	struct meshtastic_modem_params p;
+
+	if (preset > (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX ||
+	    meshtastic_preset_to_params((meshtastic_Config_LoRaConfig_ModemPreset)preset, false, &p) != 0) {
+		return 0U;
+	}
+	return meshtastic_contention_effective_slot_ms(p.spread_factor, p.bandwidth_hz, false);
+}
+
+static uint32_t router_window_ms(uint8_t preset)
+{
+	return (2U * 3U - 1U) * preset_slot_ms(preset);
+}
+
+static bool role_relays_early(void)
+{
+	meshtastic_Config_DeviceConfig_Role r = meshtastic_device_role();
+
+	return r == meshtastic_Config_DeviceConfig_Role_ROUTER ||
+	       r == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE;
+}
+
+/* The LAG guard: under a role that relays early, a lag p90 over half the
+ * preset's ROUTER window. Role-dependent, so it is judged when read as well as
+ * when a sample lands -- a hub whose role went back to CLIENT must stop
+ * showing LAG without waiting for the next relay (agents-pcs2.5). */
+static bool lag_bites(const struct meshtastic_hub_info *a)
+{
+	return a->lag_n != 0U && role_relays_early() && a->preset != MESHTASTIC_PRESET_UNKNOWN &&
+	       (uint32_t)a->lag_p90_ms > router_window_ms(a->preset) / 2U;
+}
+
+/* Recompute the ring's p50/p90/max and the LAG guard, tab_lock held. */
+static void lag_recompute_locked(struct meshtastic_hub_info *a)
+{
+	uint16_t v[ARRAY_SIZE(a->lag)];
+	unsigned int n = a->lag_n;
+
+	if (n == 0U) {
+		return;
+	}
+	memcpy(v, a->lag, sizeof(v));
+	/* Insertion sort: n <= 16. */
+	for (unsigned int i = 1U; i < n; i++) {
+		uint16_t x = v[i];
+		unsigned int j = i;
+
+		while (j > 0U && v[j - 1U] > x) {
+			v[j] = v[j - 1U];
+			j--;
+		}
+		v[j] = x;
+	}
+	a->lag_p50_ms = v[(n - 1U) / 2U];
+	a->lag_p90_ms = v[((n * 9U + 9U) / 10U) - 1U]; /* ceil(0.9 n) - 1: the 2nd largest of 16 */
+	a->lag_max_ms = v[n - 1U];
+	a->warn_lag = lag_bites(a);
+	if (a->warn_lag && !a->warned_lag) {
+		a->warned_lag = true;
+		LOG_WRN("radio %u: link lag p90 %u ms is over half the preset-%u ROUTER window (%u ms) "
+			"-- a ROUTER's relays through this worker land late; a fast preset belongs on "
+			"the hub's radio (DESIGN §13)",
+			a->id, a->lag_p90_ms, a->preset, router_window_ms(a->preset));
+	}
+}
+
+/* The FAST-WORKER guard, tab_lock held: the worker's slot time against our own radio's. */
+static void fast_worker_check_locked(struct meshtastic_hub_info *a)
+{
+	uint32_t ours = meshtastic_contention_effective_slot_ms(mt.modem.spread_factor,
+								 mt.modem.bandwidth_hz, false);
+	uint32_t theirs = preset_slot_ms(a->preset);
+
+	a->warn_fast_worker = (theirs != 0U && ours != 0U && theirs < ours);
+	if (a->warn_fast_worker && !a->warned_fast_worker) {
+		a->warned_fast_worker = true;
+		LOG_WRN("radio %u: worker preset %u (slot %u ms) is faster than our own (slot %u ms) -- "
+			"the fastest preset an identity serves belongs on the hub's radio (DESIGN §13)",
+			a->id, a->preset, theirs, ours);
+	}
+}
+
+/* A preset's chat, created when a worker on that preset first speaks
+ * (agents-pcs2.11). Upstream makes one default channel because it has one
+ * radio; a hub has a radio per preset, so each preset a worker brings gets its
+ * default channel too: named after the preset, the well-known key in its
+ * one-byte form (what the app shows without a lock), in the first free slot,
+ * saved. An existing slot of that name is left exactly as it is, and nothing
+ * is ever removed: a channel whose worker has gone refuses the send instead.
+ *
+ * Done on the system workqueue: it writes the config store, which the bearer's
+ * receive path must not wait on. */
+static uint32_t auto_ch_pending; /* bit per preset; under tab_lock */
+
+static void auto_channel_work_fn(struct k_work *work)
+{
+	uint32_t pending;
+
+	ARG_UNUSED(work);
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	pending = auto_ch_pending;
+	auto_ch_pending = 0U;
+	k_mutex_unlock(&tab_lock);
+
+	for (uint8_t p = 0U; p <= (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX; p++) {
+		meshtastic_Channel ch = meshtastic_Channel_init_zero;
+		int slot = -1;
+		bool have = false;
+		int ret;
+
+		if ((pending & BIT(p)) == 0U || p == (uint8_t)mt.modem_preset) {
+			continue; /* our own preset is the primary's */
+		}
+		for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
+			const meshtastic_Channel *c = meshtastic_channels_get(i);
+
+			if (meshtastic_channels_named_for_preset(i, p)) {
+				have = true;
+				break;
+			}
+			if (slot < 0 && i != 0U && c != NULL &&
+			    c->role == meshtastic_Channel_Role_DISABLED) {
+				slot = (int)i;
+			}
+		}
+		if (have) {
+			continue;
+		}
+		if (slot < 0) {
+			LOG_WRN("hub: no free channel slot for preset %u", (unsigned int)p);
+			continue;
+		}
+
+		ch.index = (int8_t)slot;
+		ch.role = meshtastic_Channel_Role_SECONDARY;
+		ch.has_settings = true;
+		ch.settings.psk.size = 1U;
+		ch.settings.psk.bytes[0] = 1U;
+		strncpy(ch.settings.name,
+			meshtastic_preset_display_name((meshtastic_Config_LoRaConfig_ModemPreset)p,
+						       true),
+			sizeof(ch.settings.name) - 1U);
+		ret = meshtastic_config_store_set_channel((uint8_t)slot, &ch);
+		if (ret < 0) {
+			LOG_WRN("hub: channel for preset %u not created (%d)", (unsigned int)p,
+				ret);
+		} else {
+			LOG_INF("hub: channel \"%s\" created in slot %d for a worker's preset",
+				ch.settings.name, slot);
+		}
+	}
+}
+
+static K_WORK_DEFINE(auto_channel_work, auto_channel_work_fn);
+
+/* Record the preset worker @p a is on. Caller holds tab_lock. */
+static void note_preset_locked(struct meshtastic_hub_info *a, uint8_t preset)
+{
+	if (a->preset == preset) {
+		return;
+	}
+	a->preset = preset;
+	if (preset <= (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX) {
+		auto_ch_pending |= BIT(preset);
+		(void)k_work_submit(&auto_channel_work);
+	}
+}
+
+/* ---- the wanted presets ----------------------------------------------------- */
+
+static struct link_want *want_find_locked(uint32_t node)
+{
+	for (unsigned int i = 0U; i < ARRAY_SIZE(want); i++) {
+		if (want[i].node == node) {
+			return &want[i];
+		}
+	}
+	return NULL;
+}
+
+/* The worker just said which preset it is on. If that is not the one wanted of it, have the
+ * work item tell it: not from here, this is the bearer's receive path. Caller holds
+ * tab_lock. */
+static void want_check_locked(struct meshtastic_hub_info *a)
+{
+	const struct link_want *w = want_find_locked(a->node);
+	int64_t now = k_uptime_get();
+
+	if (w == NULL || a->preset == w->preset) {
+		a->want_asked_ms = 0;
+		return;
+	}
+	if (a->want_asked_ms != 0 && now - a->want_asked_ms < WANT_RETRY_MS) {
+		return;
+	}
+	a->want_asked_ms = now;
+	a->want_due = true;
+	(void)k_work_submit(&want_work);
+}
+
+static void want_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	for (unsigned int i = 1U; i < ARRAY_SIZE(tab); i++) {
+		uint8_t env[MESHTASTIC_LINK_SET_PRESET_LEN];
+		const struct link_want *w;
+		uint32_t node = 0U;
+		uint8_t preset = 0U;
+		int len;
+
+		k_mutex_lock(&tab_lock, K_FOREVER);
+		if (used[i] && tab[i].want_due) {
+			tab[i].want_due = false;
+			w = want_find_locked(tab[i].node);
+			if (w != NULL && w->preset != tab[i].preset) {
+				node = tab[i].node;
+				preset = w->preset;
+			}
+		}
+		k_mutex_unlock(&tab_lock);
+		if (node == 0U) {
+			continue;
+		}
+		len = meshtastic_link_encode_set_preset(preset, env, sizeof(env));
+		if (len > 0) {
+			int ret = meshtastic_hub_send(node, env, (size_t)len);
+
+			LOG_INF("hub: worker 0x%08x is not on preset %u, as wanted: asked (%d)",
+				node, (unsigned int)preset, ret);
+		}
+	}
+}
+
+void meshtastic_hub_want_clear(void)
+{
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	memset(want, 0, sizeof(want));
+	want_save_locked();
+	k_mutex_unlock(&tab_lock);
+}
+
+uint8_t meshtastic_hub_wanted_preset(uint32_t node)
+{
+	const struct link_want *w;
+	uint8_t preset = MESHTASTIC_PRESET_UNKNOWN;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	w = (node != 0U) ? want_find_locked(node) : NULL;
+	if (w != NULL) {
+		preset = w->preset;
+	}
+	k_mutex_unlock(&tab_lock);
+	return preset;
+}
+
+/* Store (or, for MESHTASTIC_PRESET_UNKNOWN, forget) the preset wanted of @p node. A full
+ * table gives up the wish for a worker that is not linked. Caller holds tab_lock. */
+static int want_set_locked(uint32_t node, uint8_t preset)
+{
+	struct link_want *w = want_find_locked(node);
+
+	if (preset == MESHTASTIC_PRESET_UNKNOWN) {
+		if (w != NULL) {
+			memset(w, 0, sizeof(*w));
+			want_save_locked();
+		}
+		return 0;
+	}
+	if (w == NULL) {
+		w = want_find_locked(0U);
+	}
+	for (unsigned int i = 0U; w == NULL && i < ARRAY_SIZE(want); i++) {
+		if (find_locked(want[i].node) == NULL) {
+			w = &want[i];
+		}
+	}
+	if (w == NULL) {
+		return -ENOSPC;
+	}
+	if (w->node != node || w->preset != preset) {
+		*w = (struct link_want){.node = node, .preset = preset};
+		want_save_locked();
+	}
+	return 0;
+}
+
+static struct meshtastic_hub_info *admit_locked(uint32_t node)
+{
+	for (unsigned int i = 1U; i < ARRAY_SIZE(tab); i++) {
+		if (!used[i]) {
+			memset(&tab[i], 0, sizeof(tab[i]));
+			tab[i].id = (uint8_t)i;
+			tab[i].node = node;
+			tab[i].preset = MESHTASTIC_PRESET_UNKNOWN;
+			tab[i].rssi_min = INT16_MAX;
+			tab[i].rssi_max = INT16_MIN;
+			used[i] = true;
+			LOG_INF("hub: worker 0x%08x admitted as radio %u", node, i);
+			return &tab[i];
+		}
+	}
+	return NULL;
+}
+
+/* The send seam: whichever registered bearer has a live link to the worker. A
+ * test overrides this, or registers a bearer of its own. */
+__weak int meshtastic_hub_send(uint32_t node, const uint8_t *env, size_t len)
+{
+	return meshtastic_link_bearer_send(node, env, len);
+}
+
+int meshtastic_hub_ingest(uint32_t node, const uint8_t *env, size_t len)
+{
+	return meshtastic_hub_ingest_from(NULL, node, env, len);
+}
+
+void meshtastic_hub_link_down(const struct meshtastic_link_bearer *b, uint32_t node)
+{
+	struct meshtastic_hub_info *a;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	a = find_locked(node);
+	if (a != NULL && (a->bearer == b || a->bearer == NULL)) {
+		a->link_up = false;
+		a->down_ms = k_uptime_get();
+		LOG_INF("hub: worker 0x%08x (radio %u) link down", node, a->id);
+	}
+	k_mutex_unlock(&tab_lock);
+}
+
+int meshtastic_hub_ingest_from(const struct meshtastic_link_bearer *b, uint32_t node,
+				      const uint8_t *env, size_t len)
+{
+	struct meshtastic_link_msg msg;
+	struct meshtastic_hub_info *a;
+	int ret;
+
+	if (node == 0U || env == NULL) {
+		return -EINVAL;
+	}
+
+	ret = meshtastic_link_decode(env, len, &msg);
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	a = find_locked(node);
+	if (a == NULL) {
+		/* Admission (ATTACHMENT-SCOPE C1): decode first, trust second. */
+		if (ret < 0) {
+			stats.not_admitted_malformed++;
+			k_mutex_unlock(&tab_lock);
+			return -EBADMSG;
+		}
+		if (!allowed_locked(node) && !link_trusted(b, node)) {
+			stats.admission_refused++;
+			k_mutex_unlock(&tab_lock);
+			LOG_WRN("hub: 0x%08x refused: link not trusted and not allowed", node);
+			return -EACCES;
+		}
+		a = admit_locked(node);
+		if (a == NULL) {
+			k_mutex_unlock(&tab_lock);
+			LOG_WRN("hub: no slot for worker 0x%08x", node);
+			return -ENOSPC;
+		}
+	}
+	a->bearer = b;
+	a->link_up = true;
+	a->down_ms = 0;
+	a->last_ms = k_uptime_get();
+	if (ret < 0) {
+		a->rejected++;
+		k_mutex_unlock(&tab_lock);
+		return -EBADMSG;
+	}
+
+	switch (msg.type) {
+	case MESHTASTIC_LINK_RX_FRAME: {
+		const struct meshtastic_rx_meta meta = {
+			.bearer = MESHTASTIC_BEARER_WORKER,
+			.radio = a->id,
+			.preset = msg.u.rx.preset,
+			.rssi = msg.u.rx.rssi,
+			.snr = msg.u.rx.snr,
+			.rx_ms = msg.u.rx.rx_ms,
+		};
+
+		note_preset_locked(a, msg.u.rx.preset);
+		want_check_locked(a);
+		a->last_rssi = msg.u.rx.rssi;
+		a->last_snr = msg.u.rx.snr;
+		a->rssi_min = MIN(a->rssi_min, msg.u.rx.rssi);
+		a->rssi_max = MAX(a->rssi_max, msg.u.rx.rssi);
+		ret = meshtastic_radio_rx_inject_meta(msg.u.rx.wire, msg.u.rx.wire_len, &meta);
+		if (ret == 0) {
+			a->rx_frames++;
+		} else {
+			a->rx_dropped++;
+		}
+		break;
+	}
+	case MESHTASTIC_LINK_STATUS:
+		a->status = msg.u.status;
+		a->have_status = true;
+		note_preset_locked(a, msg.u.status.preset);
+		want_check_locked(a);
+		fast_worker_check_locked(a);
+		ret = 0;
+		break;
+	case MESHTASTIC_LINK_TX_RESULT:
+		a->tx_results++;
+		a->last_tx_rc = msg.u.result.rc;
+		a->last_tx_defers = msg.u.result.defers;
+		/* A withdrawn relay and a stale one are the relay rules at work, not
+		 * the worker failing to transmit: counted apart, so 'failed' means it. */
+		if (msg.u.result.rc == MESHTASTIC_LINK_RC_CANCELLED) {
+			a->tx_cancelled++;
+		} else if (msg.u.result.rc == -ETIME) {
+			a->tx_late++;
+		} else if (msg.u.result.rc != 0) {
+			a->tx_failed++;
+		}
+		if (msg.u.result.has_lag) {
+			a->lag[a->lag_next] = msg.u.result.lag_ms;
+			a->lag_next = (uint8_t)((a->lag_next + 1U) % ARRAY_SIZE(a->lag));
+			if (a->lag_n < ARRAY_SIZE(a->lag)) {
+				a->lag_n++;
+			}
+			lag_recompute_locked(a);
+		}
+		ret = 0;
+		break;
+	default:
+		/* TX_FRAME and SET_PRESET are controls a WORKER accepts; a hub
+		 * receiving one is talking to something that is not a worker. */
+		a->rejected++;
+		ret = -EBADMSG;
+		break;
+	}
+	k_mutex_unlock(&tab_lock);
+	return ret;
+}
+
+unsigned int meshtastic_hub_count(void)
+{
+	unsigned int n = 0U;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	for (unsigned int i = 0U; i < ARRAY_SIZE(tab); i++) {
+		n += used[i] ? 1U : 0U;
+	}
+	k_mutex_unlock(&tab_lock);
+	return n;
+}
+
+void meshtastic_hub_note_latency(uint8_t id, uint32_t ms)
+{
+	struct meshtastic_hub_info *a;
+
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	a = &tab[id];
+	if (used[id]) {
+		if (a->lat_n == 0U || ms < a->lat_min_ms) {
+			a->lat_min_ms = ms;
+		}
+		if (ms > a->lat_max_ms) {
+			a->lat_max_ms = ms;
+		}
+		a->lat_sum_ms += ms;
+		a->lat_n++;
+	}
+	k_mutex_unlock(&tab_lock);
+}
+
+bool meshtastic_hub_get(uint8_t id, struct meshtastic_hub_info *out)
+{
+	bool ok = false;
+
+	if (id >= ARRAY_SIZE(tab) || out == NULL) {
+		return false;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (used[id]) {
+		*out = tab[id];
+		out->warn_lag = lag_bites(out);
+		if (id == 0U) {
+			out->preset = (uint8_t)mt.modem_preset;
+			out->last_rssi = mt.status.last_rssi;
+			out->last_snr = mt.status.last_snr;
+		}
+		ok = true;
+	}
+	k_mutex_unlock(&tab_lock);
+	return ok;
+}
+
+uint8_t meshtastic_hub_id_for_node(uint32_t node)
+{
+	struct meshtastic_hub_info *a;
+	uint8_t id = 0U;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	a = find_locked(node);
+	if (a != NULL) {
+		id = a->id;
+	}
+	k_mutex_unlock(&tab_lock);
+	return id;
+}
+
+int meshtastic_hub_forget(uint8_t id)
+{
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	used[id] = false;
+	memset(&tab[id], 0, sizeof(tab[id]));
+	k_mutex_unlock(&tab_lock);
+	return 0;
+}
+
+bool meshtastic_hub_tx_ready(uint8_t id)
+{
+	bool ready = false;
+
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return false;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (used[id] && tab[id].link_up) {
+		const struct meshtastic_hub_info *a = &tab[id];
+
+		ready = !a->have_status ||
+			((a->status.flags & MESHTASTIC_LINK_ST_RX_ONLY) == 0U &&
+			 (a->status.flags & MESHTASTIC_LINK_ST_TX_ENABLED) != 0U);
+	}
+	k_mutex_unlock(&tab_lock);
+	return ready;
+}
+
+uint8_t meshtastic_hub_for_preset(uint8_t preset)
+{
+	uint8_t best = 0U;
+	int64_t best_ms = INT64_MIN;
+
+	if (preset == MESHTASTIC_PRESET_UNKNOWN || preset == (uint8_t)mt.modem_preset) {
+		return 0U;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	for (uint8_t id = 1U; id < ARRAY_SIZE(tab); id++) {
+		const struct meshtastic_hub_info *a = &tab[id];
+
+		if (!used[id] || !a->link_up || a->preset != preset) {
+			continue;
+		}
+		if (a->have_status &&
+		    ((a->status.flags & MESHTASTIC_LINK_ST_RX_ONLY) != 0U ||
+		     (a->status.flags & MESHTASTIC_LINK_ST_TX_ENABLED) == 0U)) {
+			continue; /* an rx-only worker, or a worker whose transmitter is off */
+		}
+		if (best == 0U || a->last_ms > best_ms) {
+			best = id;
+			best_ms = a->last_ms;
+		}
+	}
+	k_mutex_unlock(&tab_lock);
+	return best;
+}
+
+int meshtastic_hub_for_channel(uint8_t index)
+{
+	uint8_t preset = MESHTASTIC_PRESET_UNKNOWN;
+	uint8_t worker;
+
+	for (uint8_t p = 0U; p <= (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX; p++) {
+		if (meshtastic_channels_named_for_preset(index, p)) {
+			preset = p;
+			break;
+		}
+	}
+	if (preset == MESHTASTIC_PRESET_UNKNOWN) {
+		return 0; /* an ordinary channel: our own radio */
+	}
+	worker = meshtastic_hub_for_preset(preset);
+	return (worker != 0U) ? (int)worker : -ENETUNREACH;
+}
+
+static uint8_t fan_buf[MESHTASTIC_PKT_MAX];
+static K_MUTEX_DEFINE(fan_lock);
+
+unsigned int meshtastic_hub_fan_out(const uint8_t *wire, uint32_t len, uint8_t tier,
+					   uint8_t index)
+{
+	uint8_t ids[ARRAY_SIZE(tab)];
+	unsigned int n = 0U;
+	unsigned int sent = 0U;
+
+	if (wire == NULL || len < sizeof(struct meshtastic_wire_header) || len > sizeof(fan_buf)) {
+		return 0U;
+	}
+
+	/* One worker per preset: the most recently heard that can transmit. */
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	for (uint8_t id = 1U; id < ARRAY_SIZE(tab); id++) {
+		const struct meshtastic_hub_info *a = &tab[id];
+		bool placed = false;
+
+		if (!used[id] || !a->link_up || a->preset == MESHTASTIC_PRESET_UNKNOWN ||
+		    a->preset == (uint8_t)mt.modem_preset) {
+			continue; /* our own preset is our own radio's */
+		}
+		if (a->have_status &&
+		    ((a->status.flags & MESHTASTIC_LINK_ST_RX_ONLY) != 0U ||
+		     (a->status.flags & MESHTASTIC_LINK_ST_TX_ENABLED) == 0U)) {
+			continue;
+		}
+		for (unsigned int k = 0U; k < n; k++) {
+			if (tab[ids[k]].preset == a->preset) {
+				if (a->last_ms > tab[ids[k]].last_ms) {
+					ids[k] = id;
+				}
+				placed = true;
+				break;
+			}
+		}
+		if (!placed) {
+			ids[n++] = id;
+		}
+	}
+	k_mutex_unlock(&tab_lock);
+
+	k_mutex_lock(&fan_lock, K_FOREVER);
+	for (unsigned int k = 0U; k < n; k++) {
+		struct meshtastic_wire_header *hdr = (struct meshtastic_wire_header *)fan_buf;
+
+		memcpy(fan_buf, wire, len);
+		if (index < MESHTASTIC_MAX_CHANNELS &&
+		    hdr->channel == meshtastic_channels_get_hash(index)) {
+			hdr->channel = meshtastic_hub_tx_hash(ids[k], index);
+		}
+		if (meshtastic_radio_send_wire_after_on(fan_buf, len, tier, 0U, ids[k]) >= 0) {
+			sent++;
+		}
+	}
+	k_mutex_unlock(&fan_lock);
+	return sent;
+}
+
+uint8_t meshtastic_hub_tx_hash(uint8_t id, uint8_t index)
+{
+	uint8_t preset = MESHTASTIC_PRESET_UNKNOWN;
+
+	if (id != 0U && id < ARRAY_SIZE(tab)) {
+		k_mutex_lock(&tab_lock, K_FOREVER);
+		if (used[id]) {
+			preset = tab[id].preset;
+		}
+		k_mutex_unlock(&tab_lock);
+	}
+	if (preset == MESHTASTIC_PRESET_UNKNOWN) {
+		return meshtastic_channels_get_hash(index);
+	}
+	return meshtastic_channels_hash_for_preset(index, preset);
+}
+
+int meshtastic_link_tx(uint8_t id, const uint8_t *wire, size_t len, uint8_t flags)
+{
+	uint8_t env[MESHTASTIC_LINK_ENV_MAX];
+	struct meshtastic_link_tx_frame tx = {
+		.flags = flags,
+		.wire = wire,
+		.wire_len = (uint16_t)len,
+	};
+	uint32_t node;
+	int elen;
+	int ret;
+
+	if (wire == NULL || len == 0U || len > MESHTASTIC_LINK_WIRE_MAX) {
+		return -EINVAL;
+	}
+	if (!meshtastic_hub_tx_ready(id)) {
+		return -EHOSTUNREACH;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	node = tab[id].node;
+	tx.preset = tab[id].preset;
+	tx.tx_seq = ++tab[id].tx_seq;
+	k_mutex_unlock(&tab_lock);
+
+	elen = meshtastic_link_encode_tx_frame(&tx, env, sizeof(env));
+	if (elen < 0) {
+		return elen;
+	}
+	ret = meshtastic_hub_send(node, env, (size_t)elen);
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (used[id]) {
+		if (ret == 0) {
+			tab[id].tx_frames++;
+		} else {
+			tab[id].tx_failed++;
+		}
+	}
+	k_mutex_unlock(&tab_lock);
+	return ret;
+}
+
+static int link_send_env(uint8_t id, const uint8_t *env, size_t len, bool count_tx)
+{
+	uint32_t node;
+	int ret;
+
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	node = tab[id].node;
+	k_mutex_unlock(&tab_lock);
+	ret = meshtastic_hub_send(node, env, len);
+	if (count_tx) {
+		k_mutex_lock(&tab_lock, K_FOREVER);
+		if (used[id]) {
+			if (ret == 0) {
+				tab[id].tx_frames++;
+			} else {
+				tab[id].tx_failed++;
+			}
+		}
+		k_mutex_unlock(&tab_lock);
+	}
+	return ret;
+}
+
+int meshtastic_hub_relay(uint8_t id, const uint8_t *wire, size_t len, uint32_t src,
+				uint32_t pkt_id, uint32_t rx_ms, uint32_t not_before_ms,
+				uint8_t dupe)
+{
+	uint8_t env[MESHTASTIC_LINK_ENV_MAX];
+	struct meshtastic_link_tx_frame tx = {
+		.flags = MESHTASTIC_LINK_TXF_WANT_RESULT | MESHTASTIC_LINK_TXF_RELAY,
+		.relay_src = src,
+		.relay_id = pkt_id,
+		.rx_ms = rx_ms,
+		.not_before_ms = not_before_ms,
+		.dupe = dupe,
+		.wire = wire,
+		.wire_len = (uint16_t)len,
+	};
+	int elen;
+
+	if (wire == NULL || len == 0U || len > MESHTASTIC_LINK_WIRE_MAX) {
+		return -EINVAL;
+	}
+	if (!meshtastic_hub_tx_ready(id)) {
+		return -EHOSTUNREACH;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	tx.preset = tab[id].preset;
+	tx.tx_seq = ++tab[id].tx_seq;
+	k_mutex_unlock(&tab_lock);
+	elen = meshtastic_link_encode_tx_frame(&tx, env, sizeof(env));
+	if (elen < 0) {
+		return elen;
+	}
+	return link_send_env(id, env, (size_t)elen, true);
+}
+
+int meshtastic_hub_set_tx_power(uint8_t id, int8_t dbm)
+{
+	uint8_t env[MESHTASTIC_LINK_SET_POLICY_LEN];
+	const struct meshtastic_link_policy pol = {
+		.flags = MESHTASTIC_LINK_POL_HAS_TX_POWER,
+		.tx_power = dbm,
+	};
+	int elen;
+
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (!used[id]) {
+		k_mutex_unlock(&tab_lock);
+		return -ENOENT;
+	}
+	k_mutex_unlock(&tab_lock);
+	elen = meshtastic_link_encode_set_policy(&pol, env, sizeof(env));
+	if (elen < 0) {
+		return elen;
+	}
+	return link_send_env(id, env, (size_t)elen, false);
+}
+
+int meshtastic_hub_cancel(uint8_t id, uint32_t src, uint32_t pkt_id)
+{
+	uint8_t env[MESHTASTIC_LINK_TX_CANCEL_LEN];
+	int elen;
+
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (!used[id] || !tab[id].link_up) {
+		k_mutex_unlock(&tab_lock);
+		return -ENOTCONN;
+	}
+	k_mutex_unlock(&tab_lock);
+	elen = meshtastic_link_encode_tx_cancel(src, pkt_id, env, sizeof(env));
+	if (elen < 0) {
+		return elen;
+	}
+	return link_send_env(id, env, (size_t)elen, false);
+}
+
+bool meshtastic_hub_modem(uint8_t id, uint8_t *spread_factor, uint32_t *bandwidth_hz)
+{
+	struct meshtastic_modem_params p;
+	uint8_t preset = MESHTASTIC_PRESET_UNKNOWN;
+
+	if (id == 0U || id >= ARRAY_SIZE(tab)) {
+		return false;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (used[id]) {
+		preset = tab[id].preset;
+	}
+	k_mutex_unlock(&tab_lock);
+	if (preset == MESHTASTIC_PRESET_UNKNOWN ||
+	    meshtastic_preset_to_params((meshtastic_Config_LoRaConfig_ModemPreset)preset, false, &p) != 0) {
+		return false;
+	}
+	*spread_factor = p.spread_factor;
+	*bandwidth_hz = p.bandwidth_hz;
+	return true;
+}
+
+int meshtastic_hub_set_preset(uint8_t id, uint8_t preset)
+{
+	uint8_t env[MESHTASTIC_LINK_SET_PRESET_LEN];
+	uint32_t node;
+	int len;
+
+	if (id == 0U) {
+		return -EINVAL;
+	}
+	if (preset != MESHTASTIC_PRESET_UNKNOWN &&
+	    preset > (uint8_t)_meshtastic_Config_LoRaConfig_ModemPreset_MAX) {
+		return -EINVAL;
+	}
+	if (id >= ARRAY_SIZE(tab)) {
+		return -ENOENT;
+	}
+	k_mutex_lock(&tab_lock, K_FOREVER);
+	if (!used[id]) {
+		k_mutex_unlock(&tab_lock);
+		return -ENOENT;
+	}
+	node = tab[id].node;
+	len = want_set_locked(node, preset);
+	/* The explicit send below is this wish's first asking. */
+	tab[id].want_asked_ms = k_uptime_get();
+	tab[id].want_due = false;
+	k_mutex_unlock(&tab_lock);
+	if (len < 0 || preset == MESHTASTIC_PRESET_UNKNOWN) {
+		return len;
+	}
+
+	len = meshtastic_link_encode_set_preset(preset, env, sizeof(env));
+	if (len < 0) {
+		return len;
+	}
+	return meshtastic_hub_send(node, env, (size_t)len);
+}

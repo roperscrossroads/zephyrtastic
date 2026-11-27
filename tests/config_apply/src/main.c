@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0
  *
- * agents-ls39.1.7, claim (b): after a live-only preset change (a hop, a head's
+ * agents-ls39.1.7, claim (b): after a live-only preset change (a hop, a worker's
  * SET_PRESET, the scanner) a write to ANOTHER section must not make the node's
  * state describe a preset the chip is not on. apply_core() re-derives the
  * preset from the stored LoRa section on every call.

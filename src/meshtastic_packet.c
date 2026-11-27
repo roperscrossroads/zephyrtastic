@@ -19,8 +19,8 @@
 #include <pb_encode.h>
 
 #include "meshtastic_channels.h"
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-#include "meshtastic_attachment.h"
+#if defined(CONFIG_MESHTASTIC_HUB)
+#include "meshtastic_hub.h"
 #endif
 #include "meshtastic_clock.h"
 #include "meshtastic_core.h"
@@ -397,7 +397,7 @@ uint8_t meshtastic_packet_wire_hash_for_index(uint8_t channel_index)
 }
 
 /* @p rx_preset is the modem preset the frame was heard on: the active one for
- * our own radio, a head's for a frame it forwarded (ATTACHMENT-DESIGN S2), or
+ * our own radio, a worker's for a frame it forwarded (ATTACHMENT-DESIGN S2), or
  * MESHTASTIC_PRESET_UNKNOWN. An unnamed slot's hash depends on it. */
 static int try_decrypt_wire_hash(uint8_t wire_hash, uint8_t rx_preset, uint32_t from, uint32_t id,
 				 const uint8_t *enc, size_t enc_len, meshtastic_Data *data,
@@ -406,7 +406,7 @@ static int try_decrypt_wire_hash(uint8_t wire_hash, uint8_t rx_preset, uint32_t 
 	struct meshtastic_channel_key key;
 
 	/* Two passes. First the slots named after the preset the frame was heard
-	 * on through a head: the operator's channel FOR that preset, so its
+	 * on through a worker: the operator's channel FOR that preset, so its
 	 * traffic gets its own chat instead of being folded into the primary
 	 * (which, re-hashed for that preset, would match first and always won:
 	 * bench, 2026-10-01). Then everything else, as before. With no such slot
@@ -859,7 +859,7 @@ int meshtastic_try_decode_wire_packet_on(const uint8_t *buf, int len, int16_t rs
 					}
 #if defined(CONFIG_MESHTASTIC_NODEINFO)
 					(void)meshtastic_nodeinfo_request_via(packet->from,
-									      packet->rx_attach);
+									      packet->rx_radio);
 #endif
 				}
 #endif
@@ -966,8 +966,8 @@ int meshtastic_build_wire_from_mesh(const meshtastic_MeshPacket *mesh, uint8_t *
 		return ret;
 	}
 
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-	wire_hash = (mt_ws.tx_attach != 0U) ? meshtastic_attachment_tx_hash(mt_ws.tx_attach, ch_index)
+#if defined(CONFIG_MESHTASTIC_HUB)
+	wire_hash = (mt_ws.tx_radio != 0U) ? meshtastic_hub_tx_hash(mt_ws.tx_radio, ch_index)
 					    : meshtastic_channels_get_hash(ch_index);
 #else
 	wire_hash = meshtastic_channels_get_hash(ch_index);
@@ -997,7 +997,7 @@ int meshtastic_build_wire_from_mesh(const meshtastic_MeshPacket *mesh, uint8_t *
 		 * PKC-received packet (routing_send_reply) goes PKC whatever its port.
 		 * The reference keeps ROUTING/NODEINFO/POSITION/TRACEROUTE on the
 		 * channel; it can, because two stock nodes on one preset share an
-		 * unnamed primary. A brain answering through a head on another preset
+		 * unnamed primary. A hub answering through a worker on another preset
 		 * cannot (2026-09-29, rxri: "No channel found for decoding, hash 0xe"). */
 		if (mesh->to != MESHTASTIC_NODE_BROADCAST && mesh->to != 0U &&
 		    meshtastic_pki_have_key() && !is_licensed && !mt_ws.tx_no_pkc &&

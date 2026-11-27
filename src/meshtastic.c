@@ -31,11 +31,11 @@
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_tx_power.h"
 #include "meshtastic_core.h"
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-#include "meshtastic_attachment_head.h"
+#if defined(CONFIG_MESHTASTIC_WORKER)
+#include "meshtastic_worker.h"
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-#include "meshtastic_attachment.h"
+#if defined(CONFIG_MESHTASTIC_HUB)
+#include "meshtastic_hub.h"
 #endif
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 #include "meshtastic_scanner.h"
@@ -242,10 +242,10 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 			mt.node_id);
 	}
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-	/* A keyless head has no channel table: no PSK enters RAM from the app's
+#if defined(CONFIG_MESHTASTIC_WORKER)
+	/* A keyless worker has no channel table: no PSK enters RAM from the app's
 	 * config or from flash, and with every slot unnamed the frequency slot is
-	 * the active preset's public one -- a head sits where a stock node on that
+	 * the active preset's public one -- a worker sits where a stock node on that
 	 * preset sits (ATTACHMENT-SCOPE B6, §7). */
 	ARG_UNUSED(cfg->psk);
 #else
@@ -435,11 +435,11 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 		mt.status.initialized = false;
 		return ret;
 	}
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-	meshtastic_attachment_head_start();
+#if defined(CONFIG_MESHTASTIC_WORKER)
+	meshtastic_worker_start();
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-	meshtastic_attachment_start();
+#if defined(CONFIG_MESHTASTIC_HUB)
+	meshtastic_hub_start();
 #endif
 
 #if defined(CONFIG_MESHTASTIC_GNSS)
@@ -467,7 +467,7 @@ int meshtastic_init(const struct meshtastic_config *cfg)
 	/* Before the NodeDB, which restores its records from it. A store that will
 	 * not mount is not fatal: the NodeDB falls back to its settings records.
 	 * (Its header is included under NODEDB above: without a NodeDB there is
-	 * nothing to mount it for -- the keyless head is the first such image.) */
+	 * nothing to mount it for -- the keyless worker is the first such image.) */
 	ret = meshtastic_bulk_init();
 	if (ret < 0) {
 		LOG_WRN("Bulk store unavailable (%d); node records stay in settings", ret);

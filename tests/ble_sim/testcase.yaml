@@ -31,8 +31,8 @@ tests:
     extra_configs:
       - CONFIG_TEST_RANDOM_IDENTITY=y
       - CONFIG_BT_MAX_CONN=2
-  # A keyless head's BLE shape (agents-0inv): two slots, the idle drop on, at its
-  # shortest limit so the case is quick. The XIAO identity, as every head is one.
+  # A keyless worker's BLE shape (agents-0inv): two slots, the idle drop on, at its
+  # shortest limit so the case is quick. The XIAO identity, as every worker is one.
   meshtastic.ble_sim.idle_drop:
     extra_configs:
       - CONFIG_TEST_RANDOM_IDENTITY=y

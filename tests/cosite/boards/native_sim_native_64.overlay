@@ -2,7 +2,7 @@
  *
  * Two independent sim radios: the aggressor transmits, the victim listens.
  * Physically: two SX1262 boards centimetres apart on one mast (a supernode's
- * radio heads, a brain and its head, a relay pair in one enclosure).
+ * workers, a hub and its worker, a relay pair in one enclosure).
  */
 / {
 	aliases {

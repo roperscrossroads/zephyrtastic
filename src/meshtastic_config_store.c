@@ -966,7 +966,7 @@ static int lora_bw_code_to_hz(uint32_t code)
 /* @p radio: also (re)derive the radio's operating state (preset, modem, power,
  * licence, frequency, tx) from the STORED LoRa section. Only a LoRa write, a boot,
  * a restore or a reload says that section changed. Any other write leaves the
- * radio alone: a live-only preset (a hop, a head's SET_PRESET, the scanner) is
+ * radio alone: a live-only preset (a hop, a worker's SET_PRESET, the scanner) is
  * the operating state, the stored section is not, and re-deriving it here made
  * mt describe a preset the chip was not on (agents-ls39.1.7). The structural
  * fix, an operating preset apart from the stored one, is ls39.4.1. */
@@ -1032,7 +1032,7 @@ static int apply_core(bool radio)
 	mt.config_ok_to_mqtt = lora.config_ok_to_mqtt;
 	meshtastic_duty_set_override(lora.override_duty_cycle);
 
-#if !defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+#if !defined(CONFIG_MESHTASTIC_WORKER)
 	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		ret = meshtastic_channels_set_slot(i, &channels[i]);
 		if (ret < 0) {
@@ -1040,8 +1040,8 @@ static int apply_core(bool radio)
 		}
 	}
 #else
-	/* A keyless head keeps no channel table: not the records in flash (never
-	 * loaded, head_hidden_key) and not the store's defaults either, whose
+	/* A keyless worker keeps no channel table: not the records in flash (never
+	 * loaded, worker_hidden_key) and not the store's defaults either, whose
 	 * slot 0 carries the public PSK (ATTACHMENT-SCOPE §7). */
 	ARG_UNUSED(channels);
 #endif
@@ -1112,7 +1112,7 @@ static int apply_core(bool radio)
 	}
 
 	tx_enabled = lora.tx_enabled;
-#if defined(CONFIG_MESHTASTIC_TX_HOLD_UNPROVISIONED) && !defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+#if defined(CONFIG_MESHTASTIC_TX_HOLD_UNPROVISIONED) && !defined(CONFIG_MESHTASTIC_WORKER)
 	/* The provisioned hold (agents-xhli.21): a LoRa section nobody ever wrote
 	 * has no write-stamp, and its seeded tx_enabled is the build's guess, not a
 	 * choice. Stay receive-only until a real write stamps it, so a forgotten
@@ -1278,8 +1278,8 @@ int meshtastic_config_store_set_channel(uint8_t index, const meshtastic_Channel 
 {
 	int ret;
 
-	if (IS_ENABLED(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)) {
-		return -EPERM; /* a head has no channels to set (ATTACHMENT-SCOPE §7) */
+	if (IS_ENABLED(CONFIG_MESHTASTIC_WORKER)) {
+		return -EPERM; /* a worker has no channels to set (ATTACHMENT-SCOPE §7) */
 	}
 	if (index >= MESHTASTIC_MAX_CHANNELS || !channel_is_valid(channel)) {
 		return -EINVAL;
@@ -1999,15 +1999,15 @@ int meshtastic_config_store_set_canned_messages(const char *messages)
 	return 0;
 }
 
-/* A keyless radio head loads only what its role needs (ATTACHMENT-SCOPE §7):
+/* A keyless worker loads only what its role needs (ATTACHMENT-SCOPE §7):
  * the identity's records -- the channel table with its PSKs, the security
  * section with the X25519 key, and the module configs that make a node speak
  * -- are neither read into RAM nor ever written, so a board's identity waits in
  * flash, untouched, for the day it is a node again. The same predicate gates
  * load, runtime get, export (and so the wipe) and the channel setter. */
-static bool head_hidden_key(const char *key)
+static bool worker_hidden_key(const char *key)
 {
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+#if defined(CONFIG_MESHTASTIC_WORKER)
 	return strncmp(key, "channel/", strlen("channel/")) == 0 ||
 	       strcmp(key, "config/security") == 0 ||
 	       strncmp(key, "module/", strlen("module/")) == 0;
@@ -2019,7 +2019,7 @@ static bool head_hidden_key(const char *key)
 
 int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_len)
 {
-	if (head_hidden_key(key)) {
+	if (worker_hidden_key(key)) {
 		return -ENOENT;
 	}
 
@@ -2130,8 +2130,8 @@ int meshtastic_config_store_setting_get(const char *key, void *buf, size_t buf_l
 
 int meshtastic_config_store_setting_set(const char *key, const void *buf, size_t len)
 {
-	if (head_hidden_key(key)) {
-		return 0; /* a head neither reads nor keeps it; the record stays in flash */
+	if (worker_hidden_key(key)) {
+		return 0; /* a worker neither reads nor keeps it; the record stays in flash */
 	}
 
 	meshtastic_Channel channel = meshtastic_Channel_init_zero;
@@ -2306,7 +2306,7 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 
 	for (uint8_t i = 0U; i < MESHTASTIC_MAX_CHANNELS; i++) {
 		snprintk(name, sizeof(name), "channel/%u", i);
-		if (head_hidden_key(name)) {
+		if (worker_hidden_key(name)) {
 			continue;
 		}
 		ret = export_one(export_func, name);
@@ -2317,7 +2317,7 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 
 	for (size_t i = 0; i < ARRAY_SIZE(config_names); i++) {
 		snprintk(name, sizeof(name), "config/%s", config_names[i].name);
-		if (head_hidden_key(name)) {
+		if (worker_hidden_key(name)) {
 			continue;
 		}
 		ret = export_one(export_func, name);
@@ -2328,7 +2328,7 @@ int meshtastic_config_store_export(int (*export_func)(const char *name, const vo
 
 	for (size_t i = 0; i < ARRAY_SIZE(module_names); i++) {
 		snprintk(name, sizeof(name), "module/%s", module_names[i].name);
-		if (head_hidden_key(name)) {
+		if (worker_hidden_key(name)) {
 			continue;
 		}
 		ret = export_one(export_func, name);

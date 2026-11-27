@@ -10,7 +10,7 @@
  * meshtastic_send_mesh_decoded() (a decoded MeshPacket from the phone, whose
  * Data is sent as it came). Both build under mt_ws.lock, then share the
  * lock-free tail: scheduling tier, airtime gate, own-broadcast contention
- * delay, radio or head submit, reliable tracking, MQTT uplink, TX_DONE.
+ * delay, radio or worker submit, reliable tracking, MQTT uplink, TX_DONE.
  * meshtastic_send_mesh_pb() takes the phone's packets, and sends an already
  * encrypted one (PKC) as it is, with only the header stamped here.
  *
@@ -40,8 +40,8 @@
 #include "meshtastic_reliable.h"
 #include "meshtastic_router.h"
 #include "meshtastic_sched.h"
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-#include "meshtastic_attachment.h"
+#if defined(CONFIG_MESHTASTIC_HUB)
+#include "meshtastic_hub.h"
 #endif
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 #include "meshtastic_airtime.h"
@@ -61,8 +61,8 @@ static int mt_ws_build_wire_locked(uint8_t *wire, uint32_t *pkt_len,
 				   struct meshtastic_packet *local, uint8_t *local_payload,
 				   meshtastic_MeshPacket *tx_local)
 {
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-	/* A keyless head has no identity to originate with (ATTACHMENT-DESIGN S5).
+#if defined(CONFIG_MESHTASTIC_WORKER)
+	/* A keyless worker has no identity to originate with (ATTACHMENT-DESIGN S5).
 	 * The PhoneAPI and the shell still reach this step; refusing HERE, before
 	 * anything is built, is what keeps the frame builder (and every key it
 	 * would use) out of the image -- cmake/keyless-assert.cmake checks. */
@@ -137,7 +137,7 @@ static int mt_ws_build_wire_locked(uint8_t *wire, uint32_t *pkt_len,
 	 * back into mt_ws.tx_mesh after we drop the lock. */
 	return meshtastic_mesh_pb_to_packet(mesh, local, local_payload,
 					    MESHTASTIC_MAX_PAYLOAD_LEN);
-#endif /* CONFIG_MESHTASTIC_ATTACHMENT_HEAD */
+#endif /* CONFIG_MESHTASTIC_WORKER */
 }
 
 static int send_packet_complete(const struct meshtastic_packet *local,
@@ -168,28 +168,28 @@ static int send_packet_complete(const struct meshtastic_packet *local,
 	return 0;
 }
 
-#if defined(CONFIG_MESHTASTIC_DUTY_CYCLE) || defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#if defined(CONFIG_MESHTASTIC_DUTY_CYCLE) || defined(CONFIG_MESHTASTIC_HUB)
 static void routing_nak_to_phone(const struct meshtastic_packet *blocked,
 				 meshtastic_Routing_Error reason);
 #endif
 
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#if defined(CONFIG_MESHTASTIC_HUB)
 /* Which radio an ORIGINATED packet on @p send_index leaves by (agents-pcs2.11):
- * a slot named after a preset a head is on sends through that head. With no
- * ready head on that preset the send is refused -- and the phone is told
+ * a slot named after a preset a worker is on sends through that worker. With no
+ * ready worker on that preset the send is refused -- and the phone is told
  * (NO_INTERFACE, upstream's "no suitable interface for this packet") -- rather
  * than keyed up on our own radio with another preset's channel hash, where
  * nothing would decode it. @p id is the phone's packet id, 0 if not from one. */
-static int attach_for_send(uint8_t send_index, uint32_t to, uint32_t id, uint8_t *attach)
+static int link_for_send(uint8_t send_index, uint32_t to, uint32_t id, uint8_t *radio)
 {
 	int a;
 
-	if (*attach != 0U && *attach != MESHTASTIC_ATTACH_ALL) {
+	if (*radio != 0U && *radio != MESHTASTIC_RADIO_ALL) {
 		return 0; /* a reply: already bound to the radio it came in on */
 	}
-	a = meshtastic_attachment_for_channel(send_index);
+	a = meshtastic_hub_for_channel(send_index);
 	if (a < 0) {
-		LOG_WRN("TX refused: channel %u is for a preset no ready head is on",
+		LOG_WRN("TX refused: channel %u is for a preset no ready worker is on",
 			(unsigned int)send_index);
 		if (id != 0U) {
 			const struct meshtastic_packet blocked = {
@@ -202,13 +202,13 @@ static int attach_for_send(uint8_t send_index, uint32_t to, uint32_t id, uint8_t
 		return a;
 	}
 	if (a > 0) {
-		*attach = (uint8_t)a; /* a preset's own channel: that preset's head */
+		*radio = (uint8_t)a; /* a preset's own channel: that preset's worker */
 		return 0;
 	}
 #if defined(CONFIG_MESHTASTIC_NODEDB)
 	/* A unicast goes to the peer on the radio that last heard it
 	 * (agents-pcs2.13): one transmission on the preset it is on, not one on
-	 * every preset we cover. Unknown since boot, or no head ready on that
+	 * every preset we cover. Unknown since boot, or no worker ready on that
 	 * preset any more: the caller's default stands. */
 	if (to != MESHTASTIC_NODE_BROADCAST && to != 0U && to != mt.node_id) {
 		struct meshtastic_nodedb_node peer;
@@ -216,12 +216,12 @@ static int attach_for_send(uint8_t send_index, uint32_t to, uint32_t id, uint8_t
 		if (meshtastic_nodedb_get(to, &peer) == 0 &&
 		    peer.heard_preset != MESHTASTIC_PRESET_UNKNOWN) {
 			if (peer.heard_preset == (uint8_t)mt.modem_preset) {
-				*attach = 0U;
+				*radio = 0U;
 				return 1; /* our own radio, and settled */
 			}
-			a = (int)meshtastic_attachment_for_preset(peer.heard_preset);
+			a = (int)meshtastic_hub_for_preset(peer.heard_preset);
 			if (a > 0) {
-				*attach = (uint8_t)a;
+				*radio = (uint8_t)a;
 				return 1;
 			}
 		}
@@ -245,7 +245,7 @@ static void duty_nak_to_phone(const struct meshtastic_packet *blocked)
 }
 #endif
 
-#if defined(CONFIG_MESHTASTIC_DUTY_CYCLE) || defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#if defined(CONFIG_MESHTASTIC_DUTY_CYCLE) || defined(CONFIG_MESHTASTIC_HUB)
 static void routing_nak_to_phone(const struct meshtastic_packet *blocked,
 				 meshtastic_Routing_Error reason)
 {
@@ -280,42 +280,42 @@ static void routing_nak_to_phone(const struct meshtastic_packet *blocked,
  * longer touched here, so the blocking radio submit runs without the workspace lock. */
 static int send_wire_tail(const struct meshtastic_packet *local,
 			  const meshtastic_MeshPacket *mesh, uint8_t *wire, uint32_t pkt_len,
-			  k_timeout_t wait, uint8_t attach)
+			  k_timeout_t wait, uint8_t radio)
 {
 	uint8_t tier = meshtastic_sched_tier_for(local->portnum);
-	const bool all = (attach == MESHTASTIC_ATTACH_ALL);
+	const bool all = (radio == MESHTASTIC_RADIO_ALL);
 	int ret;
 
 	if (all) {
-		/* Every radio: ours through everything below, then the heads. On a
-		 * node without heads this is an ordinary send. */
-		attach = 0U;
+		/* Every radio: ours through everything below, then the workers. On a
+		 * node without workers this is an ordinary send. */
+		radio = 0U;
 	}
 
-	if (attach != 0U) {
-		/* Through a radio head (ATTACHMENT-P3-PLAN slice 2): the head keys
+	if (radio != 0U) {
+		/* Through a worker (ATTACHMENT-P3-PLAN slice 2): the worker keys
 		 * up on its own clock with its own contention window and CAD; the
-		 * brain's airtime gate and own-CW below are its own radio's. A
-		 * blocking caller waits for the hand-over to the head, not for the
+		 * hub's airtime gate and own-CW below are its own radio's. A
+		 * blocking caller waits for the hand-over to the worker, not for the
 		 * air. */
 		if (K_TIMEOUT_EQ(wait, K_NO_WAIT)) {
-			ret = meshtastic_radio_send_wire_after_on(wire, pkt_len, tier, 0U, attach);
+			ret = meshtastic_radio_send_wire_after_on(wire, pkt_len, tier, 0U, radio);
 		} else {
-			ret = meshtastic_radio_send_wire_wait_prio_on(wire, pkt_len, tier, wait, attach);
+			ret = meshtastic_radio_send_wire_wait_prio_on(wire, pkt_len, tier, wait, radio);
 		}
 		if (ret == -EHOSTUNREACH) {
-			LOG_DBG("TX via attachment %u refused: head not ready", (unsigned int)attach);
+			LOG_DBG("TX via radio %u refused: worker not ready", (unsigned int)radio);
 		}
 		if (ret >= 0) {
 			/* Retransmits, and the implicit ACK heard back through the
-			 * head, belong to this radio. */
-			meshtastic_reliable_on_tx(local, wire, pkt_len, mesh, attach);
+			 * worker, belong to this radio. */
+			meshtastic_reliable_on_tx(local, wire, pkt_len, mesh, radio);
 		}
-		/* "Done" for a head send is the hand-over: queued at the head (a blocking
+		/* "Done" for a worker send is the hand-over: queued at the worker (a blocking
 		 * caller waited for exactly that), as ours is queued at the radio. The
-		 * head's own TX_RESULT comes later and is the brain's, not this event's. */
+		 * worker's own TX_RESULT comes later and is the hub's, not this event's. */
 		if (ret < 0) {
-			return ret; /* a refused head send stays a debug line, as before */
+			return ret; /* a refused worker send stays a debug line, as before */
 		}
 		return send_packet_complete(local, mesh, wire, pkt_len, ret,
 					    K_TIMEOUT_EQ(wait, K_FOREVER));
@@ -385,10 +385,10 @@ static int send_wire_tail(const struct meshtastic_packet *local,
 		/* Track for retransmission if it is a want_ack packet we originate
 		 * (the hook self-filters everything else). */
 		meshtastic_reliable_on_tx(local, wire, pkt_len, mesh,
-					  all ? MESHTASTIC_ATTACH_ALL : 0U);
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+					  all ? MESHTASTIC_RADIO_ALL : 0U);
+#if defined(CONFIG_MESHTASTIC_HUB)
 		if (all) {
-			(void)meshtastic_attachment_fan_out(wire, pkt_len, tier,
+			(void)meshtastic_hub_fan_out(wire, pkt_len, tier,
 							    local->channel_index);
 		}
 #endif
@@ -406,7 +406,7 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 	uint32_t pkt_len = 0U;
 	uint8_t channel_index;
 	uint8_t send_index;
-	uint8_t attach;
+	uint8_t radio;
 	int ret;
 
 	if (!mt.initialized) {
@@ -429,12 +429,12 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 				: packet->channel_index;
 	send_index = meshtastic_channels_resolve_send_index(packet->to, channel_index,
 							    packet->channel);
-	attach = packet->tx_attach;
-	if (attach == MESHTASTIC_ATTACH_OWN) {
-		attach = 0U; /* a reply to something our own radio heard: stays there */
+	radio = packet->tx_radio;
+	if (radio == MESHTASTIC_RADIO_OWN) {
+		radio = 0U; /* a reply to something our own radio heard: stays there */
 	} else {
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-		ret = attach_for_send(send_index, packet->to, 0U, &attach);
+#if defined(CONFIG_MESHTASTIC_HUB)
+		ret = link_for_send(send_index, packet->to, 0U, &radio);
 		if (ret < 0) {
 			return ret;
 		}
@@ -450,18 +450,18 @@ int meshtastic_send_packet(const struct meshtastic_packet *packet, k_timeout_t w
 		mt_ws.tx_mesh.channel = send_index;
 		mt_ws.tx_zero_hop = packet->zero_hop;
 		mt_ws.tx_no_pkc = packet->no_pkc;
-		mt_ws.tx_attach = (attach == MESHTASTIC_ATTACH_ALL) ? 0U : attach;
+		mt_ws.tx_radio = (radio == MESHTASTIC_RADIO_ALL) ? 0U : radio;
 		ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
 		mt_ws.tx_zero_hop = false;
 		mt_ws.tx_no_pkc = false;
-		mt_ws.tx_attach = 0U;
+		mt_ws.tx_radio = 0U;
 	}
 	k_mutex_unlock(&mt_ws.lock);
 	if (ret < 0) {
 		return ret;
 	}
 
-	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait, attach);
+	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait, radio);
 }
 
 int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t wait)
@@ -474,7 +474,7 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 	uint32_t to_norm;
 	uint8_t channel_index;
 	uint8_t send_index;
-	uint8_t attach = 0U;
+	uint8_t radio = 0U;
 	int ret;
 
 	if (!mt.initialized || mesh == NULL) {
@@ -491,8 +491,8 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 				? (uint8_t)mesh->channel
 				: meshtastic_channels_primary_index();
 	send_index = meshtastic_channels_resolve_send_index(to_norm, channel_index, 0U);
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-	ret = attach_for_send(send_index, to_norm, mesh->id, &attach);
+#if defined(CONFIG_MESHTASTIC_HUB)
+	ret = link_for_send(send_index, to_norm, mesh->id, &radio);
 	if (ret < 0) {
 		return ret;
 	}
@@ -502,11 +502,11 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 	 * (one heard since went to its radio above, ret 1), and anything on a
 	 * channel with a name of its own, which is one chat across all presets --
 	 * as it already is on receive. A preset's own channel went to that
-	 * preset's head above; the primary is our own radio's. */
-	if (ret == 0 && attach == 0U && (mesh->from == 0U || mesh->from == mt.node_id) &&
+	 * preset's worker above; the primary is our own radio's. */
+	if (ret == 0 && radio == 0U && (mesh->from == 0U || mesh->from == mt.node_id) &&
 	    (to_norm != MESHTASTIC_NODE_BROADCAST ||
 	     meshtastic_channels_custom_named(send_index))) {
-		attach = MESHTASTIC_ATTACH_ALL;
+		radio = MESHTASTIC_RADIO_ALL;
 	}
 #endif
 
@@ -517,15 +517,15 @@ int meshtastic_send_mesh_decoded(const meshtastic_MeshPacket *mesh, k_timeout_t 
 	mt_ws.tx_mesh.channel = send_index;
 	mt_ws.tx_zero_hop = false;
 	mt_ws.tx_no_pkc = false;
-	mt_ws.tx_attach = (attach == MESHTASTIC_ATTACH_ALL) ? 0U : attach;
+	mt_ws.tx_radio = (radio == MESHTASTIC_RADIO_ALL) ? 0U : radio;
 	ret = mt_ws_build_wire_locked(wire, &pkt_len, &local, local_payload, &tx_local);
-	mt_ws.tx_attach = 0U;
+	mt_ws.tx_radio = 0U;
 	k_mutex_unlock(&mt_ws.lock);
 	if (ret < 0) {
 		return ret;
 	}
 
-	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait, attach);
+	return send_wire_tail(&local, &tx_local, wire, pkt_len, wait, radio);
 }
 
 int meshtastic_send_data(uint32_t dest, uint32_t portnum, const uint8_t *payload,
@@ -618,10 +618,10 @@ int meshtastic_send_mesh_pb(const meshtastic_MeshPacket *mesh)
 		hdr->channel = 0x00U;
 	} else if (mesh->channel < MESHTASTIC_MAX_CHANNELS) {
 		/* Our own radio's hash. This pre-encrypted path always leaves by this
-		 * board's radio: mt_ws.tx_attach is set only around the encode path
-		 * (mt_ws_build_wire_locked), never here, so the head-preset hash that
+		 * board's radio: mt_ws.tx_radio is set only around the encode path
+		 * (mt_ws_build_wire_locked), never here, so the worker-preset hash that
 		 * used to sit in a branch here could not be reached (agents-ls39.1.10).
-		 * A head is chosen for a send on the encode path, which hashes for it. */
+		 * A worker is chosen for a send on the encode path, which hashes for it. */
 		hdr->channel = meshtastic_channels_get_hash((uint8_t)mesh->channel);
 	} else {
 		hdr->channel = (mesh->channel != 0U) ? (uint8_t)mesh->channel : mt.ch_hash;

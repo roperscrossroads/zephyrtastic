@@ -386,8 +386,8 @@ uint8_t meshtastic_channels_hash_for_preset(uint8_t index, uint8_t preset)
 		 * under that preset in every way that reaches the air (the reference
 		 * substitutes exactly that name for an unnamed one, so the hash is the
 		 * same byte), and it re-hashes under another preset like an unnamed
-		 * slot would. The bench's brains carry "ShortTurbo" on slot 0: every
-		 * reply through a MediumFast head left as 0x0e until this (2026-09-29). */
+		 * slot would. The bench's hubs carry "ShortTurbo" on slot 0: every
+		 * reply through a MediumFast worker left as 0x0e until this (2026-09-29). */
 		return channel_hashes[index];
 	}
 	if (channel_get_key(index, &key) < 0) {

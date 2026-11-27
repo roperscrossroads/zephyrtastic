@@ -3,12 +3,12 @@
  * as opposed to what the node is (identity), how its radio is set, which channels it has
  * and who owns it.
  *
- * A BLE peer target the courier dials, the brain a head reports to and the heads a brain
- * wants on which presets, the ear's receiving half, the courier's arm, the relay's
+ * A BLE peer target the courier dials, the hub a worker reports to and the workers a hub
+ * wants on which presets, the rx-only worker's receiving half, the courier's arm, the relay's
  * direction, a listener's pinned presets, a cluster's document: each is set by a command,
  * persisted by its module, and restored at boot. None of them keys off a declared setting
  * the way the cluster module keys off a channel named "cluster", so a node moved from a
- * rig layout to a plain one kept dialling its old peers (the bench, 2026-10-06).
+ * hub setup layout to a plain one kept dialling its old peers (the bench, 2026-10-06).
  *
  * This is the one place they are all listed, so that a tool can ask "what roles does this
  * node still remember?" and say "none" and have it be so. Each module registers its intent
@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 struct meshtastic_intent {
-	/** A short name: "peer", "head", "brain", "ear", "courier", "relay", "scan", "cluster". */
+	/** A short name: "peer", "worker", "hub", "worker-rx", "courier", "relay", "scan", "cluster". */
 	const char *name;
 	/** The settings keys it lives under, for the reader. */
 	const char *keys;

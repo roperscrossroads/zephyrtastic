@@ -17,8 +17,8 @@
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-#include "meshtastic_attachment.h"
+#if defined(CONFIG_MESHTASTIC_HUB)
+#include "meshtastic_hub.h"
 #endif
 #include "meshtastic_channels.h"
 #include "meshtastic_contention.h"
@@ -33,7 +33,7 @@
 #endif
 #include "meshtastic_phoneapi.h"
 #include "meshtastic_reliable.h"
-#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_RELAY_EAR)
+#if defined(CONFIG_MESHTASTIC_RELAY) || defined(CONFIG_MESHTASTIC_WORKER_RX)
 #include "meshtastic_relay.h"
 #endif
 #include "meshtastic_router.h"
@@ -87,7 +87,7 @@ static enum dup_verdict dup_check_hops(uint32_t src, uint32_t id, uint8_t hop_li
 			mt.dup_cache[i].hop_limit = hop_limit;
 			/* The entry's time is the first copy's; this copy is another
 			 * transmission, so the entry no longer measures a link. */
-			mt.dup_cache[i].attach = 0xFFU;
+			mt.dup_cache[i].radio = 0xFFU;
 			return DUP_UPGRADE;
 		}
 		mt.status.duplicate_packets++;
@@ -183,16 +183,16 @@ static void note_possible_redundant_relay(const struct meshtastic_wire_header *h
 	 * runs on the LoRa RX path, matching the reference's TRANSPORT_LORA gate.
 	 * Nothing happens when our copy is already on air, the common case for a
 	 * short window. */
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-	if (e->relay_attach != 0U) {
-		/* Our relay sits on a head. The head cancels or clamps itself on a
+#if defined(CONFIG_MESHTASTIC_HUB)
+	if (e->relay_radio != 0U) {
+		/* Our relay sits on a worker. The worker cancels or clamps itself on a
 		 * copy IT hears; this copy reached us by another radio, so tell it
 		 * -- for CANCEL. LATE and KEEP still relay: nothing to say. */
 		if (relay_dupe_action(src, sys_le32_to_cpu(hdr->dest)) == RELAY_DUPE_CANCEL &&
-		    meshtastic_attachment_cancel(e->relay_attach, src, id) == 0) {
+		    meshtastic_hub_cancel(e->relay_radio, src, id) == 0) {
 			meshtastic_sched_stat_relay_cancelled();
-			LOG_DBG("Cancelled our relay of (src=0x%08x id=0x%08x) on attachment %u",
-				src, id, (unsigned int)e->relay_attach);
+			LOG_DBG("Cancelled our relay of (src=0x%08x id=0x%08x) on radio %u",
+				src, id, (unsigned int)e->relay_radio);
 		}
 		return;
 	}
@@ -224,16 +224,16 @@ static void note_possible_redundant_relay(const struct meshtastic_wire_header *h
 	}
 }
 
-static void dup_add(uint32_t src, uint32_t id, uint8_t hop_limit, uint8_t attach,
-		    uint8_t relay_node, uint32_t attach_rx_ms)
+static void dup_add(uint32_t src, uint32_t id, uint8_t hop_limit, uint8_t radio,
+		    uint8_t relay_node, uint32_t radio_rx_ms)
 {
-	mt.dup_cache[mt.dup_head].relay_attach = 0U;
-	mt.dup_cache[mt.dup_head].attach_rx_ms = attach_rx_ms;
+	mt.dup_cache[mt.dup_head].relay_radio = 0U;
+	mt.dup_cache[mt.dup_head].radio_rx_ms = radio_rx_ms;
 	mt.dup_cache[mt.dup_head].src = src;
 	mt.dup_cache[mt.dup_head].id = id;
 	mt.dup_cache[mt.dup_head].ms = k_uptime_get_32();
 	mt.dup_cache[mt.dup_head].hop_limit = hop_limit;
-	mt.dup_cache[mt.dup_head].attach = attach;
+	mt.dup_cache[mt.dup_head].radio = radio;
 	mt.dup_cache[mt.dup_head].relay_node = relay_node;
 	/* Ring slots are reused: clear the relay marks or a new (src,id) inherits
 	 * the previous occupant's and mis-attributes a redundant relay. */
@@ -258,9 +258,9 @@ static void log_wire_rx(const uint8_t *pkt, int len, int16_t rssi, int8_t snr)
 
 /* May a frame that arrived on @p bearer be flood-relayed on THIS board's radio?
  * Only a frame this radio heard: a relay goes back out on the air it came in on.
- * A head's frame (another preset, another radio) is never relayed on THIS radio;
- * on a brain it is relayed through the head that heard it (P3: the relay sites
- * check `meta->attach` beside this predicate and hand the frame to that head).
+ * A worker's frame (another preset, another radio) is never relayed on THIS radio;
+ * on a hub it is relayed through the worker that heard it (P3: the relay sites
+ * check `meta->link` beside this predicate and hand the frame to that worker).
  * Both relay sites (first copy and the hop-upgraded duplicate) use this one
  * predicate (review F1). The peer-link bearer is not RF at all: the link-local
  * rule (agents-xhli.2). */
@@ -379,7 +379,7 @@ static enum relay_dupe_action relay_dupe_action(uint32_t from, uint32_t to)
 }
 
 static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wire_header *hdr,
-			 uint8_t hop_limit, int8_t snr, uint8_t attach)
+			 uint8_t hop_limit, int8_t snr, uint8_t radio)
 {
 	uint8_t relay_buf[MESHTASTIC_PKT_MAX];
 	struct meshtastic_wire_header *relay_hdr;
@@ -408,40 +408,40 @@ static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wi
 	 * unlearned destination still resolves to 0 = flood. */
 	relay_hdr->next_hop = meshtastic_nodedb_get_next_hop(sys_le32_to_cpu(hdr->dest));
 
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-	if (attach != 0U) {
-		/* Through the head that heard it (ATTACHMENT-DESIGN §12): the brain
-		 * decides WHETHER and by what rule; the head decides WHEN, on its own
+#if defined(CONFIG_MESHTASTIC_HUB)
+	if (radio != 0U) {
+		/* Through the worker that heard it (ATTACHMENT-DESIGN §12): the hub
+		 * decides WHETHER and by what rule; the worker decides WHEN, on its own
 		 * clock of reception, with its own CAD. The window is planned with
-		 * the HEAD's modem and the SNR the HEAD heard the frame at. */
+		 * the WORKER's modem and the SNR the WORKER heard the frame at. */
 		const struct meshtastic_dup_entry *e = dup_find(sys_le32_to_cpu(hdr->src),
 								sys_le32_to_cpu(hdr->id));
 		uint8_t sf;
 		uint32_t bw;
 		uint8_t dupe;
 
-		if (e == NULL || !meshtastic_attachment_modem(attach, &sf, &bw)) {
-			LOG_DBG("Not relaying id=0x%08x via attachment %u: no modem/entry",
-				(unsigned int)sys_le32_to_cpu(hdr->id), (unsigned int)attach);
+		if (e == NULL || !meshtastic_hub_modem(radio, &sf, &bw)) {
+			LOG_DBG("Not relaying id=0x%08x via radio %u: no modem/entry",
+				(unsigned int)sys_le32_to_cpu(hdr->id), (unsigned int)radio);
 			return;
 		}
 		meshtastic_contention_plan_relay(snr, relay_early_like_router(), sf, bw, false, &plan);
 		switch (relay_dupe_action(sys_le32_to_cpu(hdr->src), sys_le32_to_cpu(hdr->dest))) {
 		case RELAY_DUPE_KEEP:
-			dupe = MESHTASTIC_ATTACHMENT_DUPE_KEEP;
+			dupe = MESHTASTIC_LINK_DUPE_KEEP;
 			break;
 		case RELAY_DUPE_LATE:
-			dupe = MESHTASTIC_ATTACHMENT_DUPE_LATE;
+			dupe = MESHTASTIC_LINK_DUPE_LATE;
 			break;
 		default:
-			dupe = MESHTASTIC_ATTACHMENT_DUPE_CANCEL;
+			dupe = MESHTASTIC_LINK_DUPE_CANCEL;
 			break;
 		}
-		ret = meshtastic_attachment_relay(attach, relay_buf, (size_t)len,
+		ret = meshtastic_hub_relay(radio, relay_buf, (size_t)len,
 						  sys_le32_to_cpu(hdr->src), sys_le32_to_cpu(hdr->id),
-						  e->attach_rx_ms, plan.delay_ms, dupe);
+						  e->radio_rx_ms, plan.delay_ms, dupe);
 		if (ret < 0) {
-			LOG_DBG("Relay via attachment %u failed (%d)", (unsigned int)attach, ret);
+			LOG_DBG("Relay via radio %u failed (%d)", (unsigned int)radio, ret);
 		} else {
 			struct meshtastic_dup_entry *me = dup_find(sys_le32_to_cpu(hdr->src),
 								   sys_le32_to_cpu(hdr->id));
@@ -449,16 +449,16 @@ static void relay_packet(const uint8_t *buf, int len, const struct meshtastic_wi
 			mt.status.relayed_packets++;
 			dup_mark_relayed(sys_le32_to_cpu(hdr->src), sys_le32_to_cpu(hdr->id));
 			if (me != NULL) {
-				me->relay_attach = attach;
+				me->relay_radio = radio;
 			}
-			LOG_DBG("Relay handed to attachment %u id=0x%08x not_before %u ms (cw=%u slot=%u snr=%d)",
-				(unsigned int)attach, (unsigned int)sys_le32_to_cpu(hdr->id),
+			LOG_DBG("Relay handed to radio %u id=0x%08x not_before %u ms (cw=%u slot=%u snr=%d)",
+				(unsigned int)radio, (unsigned int)sys_le32_to_cpu(hdr->id),
 				plan.delay_ms, plan.cw, plan.slot_ms, snr);
 		}
 		return;
 	}
 #else
-	ARG_UNUSED(attach);
+	ARG_UNUSED(radio);
 #endif
 	/* Contention window. wide_lora is false to match how the modem itself is
 	 * configured (meshtastic.c resolves the preset with wide_lora=false); if
@@ -626,7 +626,7 @@ void meshtastic_routing_sniff_rebroadcast(const struct meshtastic_wire_header *h
 	 * (rx_mesh->rx_snr == (float)packet->snr by construction), else the flat struct on
 	 * the encrypted-relay / DUP_UPGRADE / inject paths that carry no MeshPacket. */
 	relay_packet(wire, (int)wire_len, hdr, hop_limit,
-		     mesh != NULL ? (int8_t)mesh->rx_snr : packet->snr, packet->rx_attach);
+		     mesh != NULL ? (int8_t)mesh->rx_snr : packet->snr, packet->rx_radio);
 }
 
 static meshtastic_Routing_Error decode_fail_to_routing_err(enum meshtastic_decode_fail r)
@@ -653,7 +653,7 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 {
 	const struct meshtastic_rx_meta meta = {
 		.bearer = (uint8_t)bearer,
-		.attach = 0U,
+		.radio = 0U,
 		.preset = (bearer == MESHTASTIC_BEARER_LORA) ? (uint8_t)mt.modem_preset
 							      : MESHTASTIC_PRESET_UNKNOWN,
 		.rssi = rssi,
@@ -709,19 +709,19 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 	const int8_t snr = meta->snr;
 	/* The link-local rule (agents-xhli.2) hangs off this one flag: everything
 	 * that describes RF — relay, signal stats, route learning, the MQTT uplink
-	 * — happens only for a frame that actually crossed the air. A radio head's
+	 * — happens only for a frame that actually crossed the air. A worker's
 	 * frame did (ATTACHMENT-DESIGN S1); the BLE peer link's did not. */
 	const bool rf = meshtastic_bearer_is_rf(bearer);
 #if defined(CONFIG_MESHTASTIC_AIRTIME)
 	/* The airtime ledger is priced with THIS board's modem and budgets THIS
-	 * board's air: a head's frame spent no time on it. */
+	 * board's air: a worker's frame spent no time on it. */
 	const bool lora = (bearer == MESHTASTIC_BEARER_LORA);
 #endif
 	const struct meshtastic_wire_header *hdr;
 	uint32_t src;
 	uint32_t pkt_id;
 	/* Zeroed: the decode fills it from the header but reads fields it does not set
-	 * (rx_attach, agents-ls39.1.1). */
+	 * (rx_radio, agents-ls39.1.1). */
 	struct meshtastic_packet packet = {0};
 	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	/* C3 Phase 2: try_decode fills this with the fully decoded MeshPacket (emoji,
@@ -792,18 +792,18 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 				(unsigned int)bearer);
 			return;
 		}
-		/* Our own transmission, heard by ANOTHER of our radios (a head, or
-		 * the local radio hearing a head's TX): the relay byte is still ours,
+		/* Our own transmission, heard by ANOTHER of our radios (a worker, or
+		 * the local radio hearing a worker's TX): the relay byte is still ours,
 		 * so nobody rebroadcast it -- it is our voice, not an echo, and must
 		 * not count as an implicit ACK. A single-radio node can never hear
 		 * itself, so this is asked only of frames that came through an
-		 * attachment (S1): on the local radio a matching relay byte is a
+		 * link (S1): on the local radio a matching relay byte is a
 		 * neighbour that shares our low byte relaying us -- a real implicit
 		 * ACK, as upstream treats it (review F7). */
-		if (meta->attach != 0U && hdr->relay_node == (uint8_t)(mt.node_id & 0xFFU)) {
+		if (meta->radio != 0U && hdr->relay_node == (uint8_t)(mt.node_id & 0xFFU)) {
 			mt.status.self_heard++;
-			LOG_DBG("Own frame id=0x%08x heard on attach %u: our own voice",
-				pkt_id, (unsigned int)meta->attach);
+			LOG_DBG("Own frame id=0x%08x heard on radio %u: our own voice",
+				pkt_id, (unsigned int)meta->radio);
 			return;
 		}
 		/* A neighbour rebroadcast one of our own packets: implicit ACK that it
@@ -834,7 +834,7 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 		    hop_start == rx_hop_limit) {
 			LOG_DBG("Re-ACK repeated reliable id=0x%08x from 0x%08x", pkt_id, src);
 			meshtastic_routing_reack_duplicate(src, pkt_id, hdr->channel, rx_hop_limit,
-							   hop_start, meta->attach);
+							   hop_start, meta->radio);
 		}
 
 		/* Redundancy accounting reasons about peers RELAYING on the air; a
@@ -843,27 +843,27 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 		if (rf) {
 			note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
 		}
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#if defined(CONFIG_MESHTASTIC_HUB)
 		/* The same air frame, heard first by our own radio and now again
-		 * through a head: the two radios heard it at the same instant, so
-		 * the gap between the arrivals, on this one clock, is the head's
+		 * through a worker: the two radios heard it at the same instant, so
+		 * the gap between the arrivals, on this one clock, is the worker's
 		 * link latency (ATTACHMENT-SCOPE F5 / R2). Only the local-first
-		 * order measures anything -- a head's copy cannot precede the air --
+		 * order measures anything -- a worker's copy cannot precede the air --
 		 * and only a copy of the SAME transmission: a neighbour's rebroadcast
-		 * (another relay byte, one hop fewer) heard through the head is
+		 * (another relay byte, one hop fewer) heard through the worker is
 		 * seconds later and says nothing about the link (bench, 22:06Z). */
-		if (meta->attach != 0U) {
+		if (meta->radio != 0U) {
 			const struct meshtastic_dup_entry *e = dup_find(src, pkt_id);
 
-			if (e != NULL && e->attach == 0U && e->hop_limit == rx_hop_limit &&
+			if (e != NULL && e->radio == 0U && e->hop_limit == rx_hop_limit &&
 			    e->relay_node == hdr->relay_node) {
 				uint32_t delta = k_uptime_get_32() - e->ms;
 
-				meshtastic_attachment_note_latency(meta->attach, delta);
+				meshtastic_hub_note_latency(meta->radio, delta);
 				/* INF, not DBG: fleet images compile DBG out, and this line
 				 * is the bench's per-frame sample (one per diversity frame). */
-				LOG_INF("attach %u: link latency %u ms (src=0x%08x id=0x%08x len=%d)",
-					(unsigned int)meta->attach, delta, src, pkt_id, len);
+				LOG_INF("radio %u: link latency %u ms (src=0x%08x id=0x%08x len=%d)",
+					(unsigned int)meta->radio, delta, src, pkt_id, len);
 			}
 		}
 #endif
@@ -882,7 +882,7 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 			.from = src,
 			.to = sys_le32_to_cpu(hdr->dest),
 			.id = pkt_id,
-			.rx_attach = meta->attach,
+			.rx_radio = meta->radio,
 			/* The relay is planned from this copy's signal (its contention
 			 * window scales with SNR); without it, it was planned at 0 dB
 			 * (agents-ls39.1.10). */
@@ -894,7 +894,7 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 			note_possible_redundant_relay(hdr, src, pkt_id, rx_hop_limit, snr);
 		}
 		if (relay_local_ok(bearer) ||
-		    (IS_ENABLED(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN) && meta->attach != 0U)) {
+		    (IS_ENABLED(CONFIG_MESHTASTIC_HUB) && meta->radio != 0U)) {
 			LOG_DBG("Hop-upgraded duplicate (src=0x%08x id=0x%08x hops=%u): relay",
 				src, pkt_id, rx_hop_limit);
 			meshtastic_routing_sniff_rebroadcast(hdr, buf, (size_t)len, &upgraded,
@@ -909,11 +909,11 @@ void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 		break;
 	}
 
-	dup_add(src, pkt_id, rx_hop_limit, meta->attach, hdr->relay_node, meta->rx_ms);
+	dup_add(src, pkt_id, rx_hop_limit, meta->radio, hdr->relay_node, meta->rx_ms);
 
 	/* Before the decode, which reads it: a PKC frame from an unknown key asks for
 	 * the sender's NodeInfo by the radio it came in on (agents-ls39.1.1). */
-	packet.rx_attach = meta->attach;
+	packet.rx_radio = meta->radio;
 	ret = meshtastic_try_decode_wire_packet_on(buf, len, rssi, snr, meta->preset, &packet,
 						   payload, sizeof(payload), &decoded, &fail_reason,
 						   &rx_mesh);
@@ -1180,7 +1180,7 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		}
 		/* The MeshPacket has no notion of which of our radios heard it;
 		 * the flat struct does. Carry it across (SCOPE E1/E2). */
-		materialized.rx_attach = (packet != NULL) ? packet->rx_attach : 0U;
+		materialized.rx_radio = (packet != NULL) ? packet->rx_radio : 0U;
 		materialized.rx_heard_on = (packet != NULL) ? packet->rx_heard_on : 0U;
 		pkt = &materialized;
 	}
@@ -1306,13 +1306,13 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		 * It needs the bearer, which modules are not given. */
 		meshtastic_relay_on_rx(pkt, decoded_mesh, bearer);
 #endif
-#if defined(CONFIG_MESHTASTIC_RELAY_EAR)
-		/* The relay's ear: a decoded broadcast heard on LoRa goes, byte for
+#if defined(CONFIG_MESHTASTIC_WORKER_RX)
+		/* The relay's rx-only worker: a decoded broadcast heard on LoRa goes, byte for
 		 * byte, to the receiving half over the BLE peer link. Only frames
-		 * THIS radio heard: a bearer frame -- and an attachment's -- is
+		 * THIS radio heard: a bearer frame -- and a link's -- is
 		 * someone else's hearing, already forwarded once. */
 		if (bearer == MESHTASTIC_BEARER_LORA && wire != NULL) {
-			meshtastic_relay_ear_on_rx(pkt, wire, wire_len);
+			meshtastic_worker_rx_on_rx(pkt, wire, wire_len);
 		}
 #endif
 		/* After module dispatch: the NodeDB has now created/refreshed the
@@ -1320,9 +1320,9 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 		 * Phase 4b: pass rx_mesh (NULL on the public inject/test path -> struct
 		 * fallback inside). LoRa only: a bearer frame's relay_node never rode
 		 * the air and says nothing about RF topology. And only OUR radio's
-		 * air: a next hop learned through a head is a neighbour on the
-		 * head's preset, which our radio cannot reach (SCOPE E1). */
-		if (rf && pkt->rx_attach == 0U) {
+		 * air: a next hop learned through a worker is a neighbour on the
+		 * worker's preset, which our radio cannot reach (SCOPE E1). */
+		if (rf && pkt->rx_radio == 0U) {
 			meshtastic_routing_learn_next_hop(pkt, decoded_mesh);
 		}
 	} else if (hdr != NULL) {
@@ -1334,11 +1334,11 @@ static void handle_inbound_impl(const struct meshtastic_packet *packet, const ui
 	 * says whether this board's radio is that air. */
 	if (hdr != NULL && !suppress_relay &&
 	    (relay_local_ok(bearer) ||
-	     (IS_ENABLED(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN) && pkt->rx_attach != 0U))) {
+	     (IS_ENABLED(CONFIG_MESHTASTIC_HUB) && pkt->rx_radio != 0U))) {
 		/* Phase 4b: decoded_mesh is NULL on the encrypted-relay path (no decode) and
 		 * the public inject/test path -> struct-fallback for snr inside. Phase 4c: pkt is
 		 * the materialised struct on the decoded RF path, else the passed-in struct.
-		 * A head's frame relays THROUGH that head (relay_packet, P3 slice 3),
+		 * A worker's frame relays THROUGH that worker (relay_packet, P3 slice 3),
 		 * never on our own radio. */
 		meshtastic_routing_sniff_rebroadcast(hdr, wire, wire_len, pkt, decoded_mesh);
 	}

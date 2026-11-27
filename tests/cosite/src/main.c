@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0
  *
- * The co-site desense model (H18 / attachment measurement R3), tested at the
+ * The co-site desense model (H18 / link measurement R3), tested at the
  * driver level with two lora_sim instances and no mesh stack.
  *
  * What this models and why: a multi-preset supernode is DEFINED by "one radio

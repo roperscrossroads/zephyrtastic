@@ -129,8 +129,8 @@ struct nodedb_entry {
 	 * boot (agents-pcs2.13). A node with several radios hears a peer on one
 	 * of them, and that is the radio to answer it on. RAM only: it is learned
 	 * again from the first frame after a boot, and the stored record stays the
-	 * reference's. The preset, not the attachment id: a head's id changes when
-	 * it re-attaches, and two heads on one preset are interchangeable. */
+	 * reference's. The preset, not the radio id: a worker's id changes when
+	 * it re-attaches, and two workers on one preset are interchangeable. */
 	uint8_t heard_preset1;
 };
 

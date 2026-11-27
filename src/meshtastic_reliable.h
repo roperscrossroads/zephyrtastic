@@ -32,12 +32,12 @@ extern "C" {
  * @param wire_len Length of @p wire.
  * @param mesh   The outgoing MeshPacket when the send engine supplied one, else NULL;
  *               read in preference to @p local (C3 Phase 7d currency).
- * @param attach The radio it left by: 0 = this board's, else an attachment id.
+ * @param radio The radio it left by: 0 = this board's, else a worker's radio id.
  *               Its retransmits leave by the same radio.
  */
 void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint8_t *wire,
 			       uint32_t wire_len, const meshtastic_MeshPacket *mesh,
-			       uint8_t attach);
+			       uint8_t radio);
 
 /**
  * Consume a decoded ROUTING packet addressed to us. If its request_id matches a
@@ -76,13 +76,13 @@ void meshtastic_reliable_reset(void);
 
 static inline void meshtastic_reliable_on_tx(const struct meshtastic_packet *local,
 					     const uint8_t *wire, uint32_t wire_len,
-					     const meshtastic_MeshPacket *mesh, uint8_t attach)
+					     const meshtastic_MeshPacket *mesh, uint8_t radio)
 {
 	ARG_UNUSED(local);
 	ARG_UNUSED(wire);
 	ARG_UNUSED(wire_len);
 	ARG_UNUSED(mesh);
-	ARG_UNUSED(attach);
+	ARG_UNUSED(radio);
 }
 
 static inline void meshtastic_reliable_on_routing(const struct meshtastic_packet *routing,

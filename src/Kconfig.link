@@ -1,0 +1,113 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+# SPDX-License-Identifier: GPL-3.0
+
+menu "Links: one hub, many radios (ATTACHMENT-DESIGN)"
+
+config MESHTASTIC_LINK_CODEC
+	bool
+	default y if MESHTASTIC_HUB || MESHTASTIC_WORKER || MESHTASTIC_WORKER_RX
+	help
+	  The envelope a worker and its hub exchange (pure byte packing).
+	  Pulled in by anything that speaks it; not a user choice.
+
+config MESHTASTIC_LINK_BEARER
+	bool
+	default y if MESHTASTIC_LINK_CODEC
+	help
+	  The board-to-board link between a hub and its workers (ATTACHMENT-SCOPE §4):
+	  a registry of bearers -- the BLE peer link, a wire, a test pipe -- each
+	  a send and a link_info. Envelopes never see a bearer's types.
+
+config MESHTASTIC_HUB
+	bool "This node is a hub: it hears through workers"
+	default n
+	help
+	  Accept link envelopes over the BLE peer link. A worker's RX_FRAME
+	  enters the router as an RF frame tagged with the worker's preset and
+	  signal; the node's identity, keys, NodeDB and modules stay exactly as
+	  they are. Costs a small table (MESHTASTIC_HUB_WORKERS_MAX entries) and
+	  8 B per RX queue slot; the code is flash.
+
+config MESHTASTIC_HUB_WORKERS_MAX
+	int "Workers a hub tracks (its own radio is not counted)"
+	depends on MESHTASTIC_HUB
+	default 4
+	range 1 8
+	help
+	  A BLE peer link per worker; the R8 has 3 connection slots in total.
+
+config MESHTASTIC_HUB_EVICT_SEC
+	int "Seconds a worker stays in the table after its link went down"
+	depends on MESHTASTIC_HUB
+	default 180
+	range 1 3600
+	help
+	  A worker whose bearer link dropped keeps its slot (and counters) this long
+	  so a reboot or a BLE hiccup re-admits it in place; after that the slot
+	  is freed. A worker that speaks again before then is simply up again.
+
+config MESHTASTIC_HUB_ALLOW_MAX
+	int "Operator allow-list entries (workers admitted on an untrusted link)"
+	depends on MESHTASTIC_HUB
+	default 4
+	range 1 8
+
+config MESHTASTIC_WORKER
+	bool "This node is a keyless worker"
+	depends on !MESHTASTIC_HUB
+	default n
+	help
+	  The radio forwards every frame it hears, undecoded, with its RSSI/SNR
+	  and preset, to its hub over the peer link (overlay-ble-peer.conf; on
+	  native_sim the send is a test seam), and retunes when the hub says
+	  so. Transmit for the hub is phase 3. The image carries no channel
+	  keys, no PKI, no NodeDB and no config beyond its preset and its hub:
+	  build with samples/meshtastic/overlay-worker.conf, whose
+	  post-build step refuses an image in which any of those linked
+	  (cmake/keyless-assert.cmake). The router is never reached from the
+	  radio on a worker; origination is refused at the outbound queue.
+
+config MESHTASTIC_WORKER_HUB_ID
+	hex "The hub's node number (0 = set at runtime)"
+	depends on MESHTASTIC_WORKER
+	default 0
+	help
+	  Baked-in hub. `meshtastic worker hub <id>` overrides it and the
+	  value persists (mtattach/brain) with MESHTASTIC_SETTINGS.
+
+config MESHTASTIC_WORKER_STATUS_PERIOD_SEC
+	int "STATUS report period (s)"
+	depends on MESHTASTIC_WORKER
+	default 60
+	range 5 3600
+
+config MESHTASTIC_WORKER_TX_STACK_SIZE
+	int "Stack of the worker's transmit thread (bytes)"
+	depends on MESHTASTIC_WORKER
+	default 2048
+	help
+	  A transmit blocks for the frame's airtime (and its contention wait),
+	  so it runs on its own thread: the forward path -- the RX thread's
+	  queue and the work item that writes envelopes to the hub -- must
+	  keep draining while the radio is keyed up, or a busy preset overflows
+	  the worker's RX queue. Sized like the hub's outbound worker.
+
+config MESHTASTIC_WORKER_TX_QUEUE_SIZE
+	int "Frames the hub has handed this worker, waiting to key up"
+	depends on MESHTASTIC_WORKER
+	default 4
+	range 1 16
+	help
+	  TX_FRAMEs accepted from the hub and not yet transmitted. A full queue
+	  refuses the envelope (counted; the hub sees no TX_RESULT). Each entry
+	  is a full airframe.
+
+config MESHTASTIC_WORKER_QUEUE_SIZE
+	int "Frames queued for the hub"
+	depends on MESHTASTIC_WORKER
+	default 4
+	range 1 16
+	help
+	  Between the RX thread and the forwarding work item. ~260 B each.
+
+endmenu

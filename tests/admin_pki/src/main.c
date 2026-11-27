@@ -4197,8 +4197,8 @@ ZTEST(admin_pki, test_a_peer_advertising_our_public_key_is_refused_and_warned_on
 
 /* A ROUTING ACK for a PKC-received DM is itself PKC (wire hash 0), never a channel
  * frame on index 0. The reference builds its ACK on channel index 0 and is saved by two
- * stock nodes on one preset sharing an unnamed primary; a brain whose primary is NAMED,
- * answering through a head on another preset, stamped the name's hash and the stock
+ * stock nodes on one preset sharing an unnamed primary; a hub whose primary is NAMED,
+ * answering through a worker on another preset, stamped the name's hash and the stock
  * sender logged "No channel found for decoding, hash 0xe" (bench, 2026-09-29). The
  * sender holds our key -- it just used it -- so PKC always decodes. Reversal: drop the
  * pki_encrypted inheritance in routing_send_ack, or the (mesh->pki_encrypted || ...)

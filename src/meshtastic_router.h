@@ -38,11 +38,11 @@ void meshtastic_router_process_rx(const uint8_t *buf, int len, int16_t rssi, int
 /**
  * @brief Process one raw frame with everything the receiving radio knew about it.
  *
- * The form the RX thread uses. An ATTACHMENT bearer (a remote radio head) counts as
+ * The form the RX thread uses. A WORKER bearer (a remote worker) counts as
  * RF for every rule that describes the air -- relay, own-echo, signal bookkeeping,
- * route learning -- because its frames did cross the air, on the head's preset;
+ * route learning -- because its frames did cross the air, on the worker's preset;
  * only what is priced with THIS board's modem (the airtime ledger) and the relay
- * ear (an ear forwards its own hearing) stay LoRa-only.
+ * rx-only worker (an rx-only worker forwards its own hearing) stay LoRa-only.
  */
 void meshtastic_router_process_rx_meta(const uint8_t *buf, int len,
 				       const struct meshtastic_rx_meta *meta);
@@ -146,11 +146,11 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
  * generic ACK for the same request (agents-dnr4.32; reference ReliableRouter::sniffReceived
  * acks only when no module replied).
  */
-/* @p attach: the radio the request arrived on (packet.rx_attach); the answer
+/* @p radio: the radio the request arrived on (packet.rx_radio); the answer
  * leaves by it. 0 = our own radio. */
 int meshtastic_routing_answer(uint32_t to, uint32_t request_id, uint8_t channel_index,
 			      uint8_t req_hop_limit, uint8_t req_hop_start, bool want_ack,
-			      meshtastic_Routing_Error err, uint8_t attach, bool pki);
+			      meshtastic_Routing_Error err, uint8_t radio, bool pki);
 
 /** @brief The hop limit a reply to a request that arrived with these hop fields should carry. */
 uint8_t meshtastic_routing_reply_hop_limit(uint8_t req_hop_limit, uint8_t req_hop_start);
@@ -178,7 +178,7 @@ void meshtastic_routing_note_own_echo(uint32_t id, uint8_t relay_node);
  * payload decode; @p wire_hash selects the reply channel.
  */
 void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire_hash,
-					uint8_t hop_limit, uint8_t hop_start, uint8_t attach);
+					uint8_t hop_limit, uint8_t hop_start, uint8_t radio);
 
 #ifdef __cplusplus
 }

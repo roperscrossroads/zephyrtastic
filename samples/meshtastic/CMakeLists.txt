@@ -30,9 +30,9 @@ if(CONFIG_MESHTASTIC_FLEET_CLASS AND NOT CONFIG_MESHTASTIC_FLEET_CLASS EQUAL 0
   endif()
 endif()
 
-# A radio head carries no identity code; prove it on the final ELF
-# (ATTACHMENT-DESIGN §4). The same script guards tests/attachment's head build.
-if(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
+# A worker carries no identity code; prove it on the final ELF
+# (ATTACHMENT-DESIGN §4). The same script guards tests/hub_worker's worker build.
+if(CONFIG_MESHTASTIC_WORKER)
   # Zephyr's post_build_commands is not extensible from an application, and a
   # POST_BUILD on the ELF target must be declared in zephyr/'s own directory;
   # an ALL target that depends on the ELF is the portable hook.

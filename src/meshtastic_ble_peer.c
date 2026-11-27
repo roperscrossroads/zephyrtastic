@@ -41,8 +41,8 @@
 
 #include <zephyr/sys/byteorder.h>
 
-#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
-#include "meshtastic_attach_bearer.h"
+#if defined(CONFIG_MESHTASTIC_LINK_BEARER)
+#include "meshtastic_link_bearer.h"
 #endif
 #include "meshtastic_backoff.h"
 #include "meshtastic_ble_peer.h"
@@ -225,18 +225,18 @@ static void frame_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
  * chunk-writes and central-side notifications land here. Returns the
  * reassembler's verdict (1 frame complete, 0 accepted, <0 refused). */
 /* A completed frame is handed to the callback from here, with the peer lock
- * RELEASED (agents-z7rg). The callback reaches the attachment head or brain,
+ * RELEASED (agents-z7rg). The callback reaches the link worker or hub,
  * which take their own locks and, holding them, send through this module --
  * which takes the peer lock. Delivering under the peer lock made that an
- * AB-BA: the BT RX thread held peer_lock and waited for head_lock while
- * head_tx held head_lock and waited for peer_lock (rzr5, 2026-11-24:
- * "mutex deadlock", thread head_tx). The frame is copied out under the peer
+ * AB-BA: the BT RX thread held peer_lock and waited for worker_lock while
+ * worker_tx held worker_lock and waited for peer_lock (rzr5, 2026-11-24:
+ * "mutex deadlock", thread worker_tx). The frame is copied out under the peer
  * lock because the reassembler can be reset from another thread
  * (meshtastic_ble_peer_conn_down() runs on the system workqueue); deliver_lock
  * serialises the two RX paths (GATT writes, notifications) over the one copy
  * and is taken by nothing else, so it cannot close a cycle. */
 static K_MUTEX_DEFINE(deliver_lock);
-/* In PSRAM on boards that have it (agents-ls39.2.14: c2.brain overflowed dram0 by
+/* In PSRAM on boards that have it (agents-ls39.2.14: c2.hub overflowed dram0 by
  * 112 B after this buffer and the settings wiper landed): CPU-only, written and read
  * under deliver_lock, and no flash write reads it, as meshtastic_ext_ram.h requires. */
 static uint8_t deliver_buf[MESHTASTIC_BLE_PEER_REASM_MAX] MESHTASTIC_EXT_RAM_BSS_ATTR;
@@ -356,10 +356,10 @@ static void beat_fill_identity(struct meshtastic_ble_peer_beat *beat, bool hello
 	if (IS_ENABLED(CONFIG_MESHTASTIC_SMP_CENTRAL)) {
 		beat->flags |= MESHTASTIC_BLE_PEER_FLAG_COURIER;
 	}
-	/* A brain understands attachment envelopes; heads and ears send them
+	/* A hub understands link envelopes; workers and rx-only workers send them
 	 * only to a peer that says so (ATTACHMENT-DESIGN S4). */
-	if (IS_ENABLED(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)) {
-		beat->flags |= MESHTASTIC_BLE_PEER_FLAG_ATTACH;
+	if (IS_ENABLED(CONFIG_MESHTASTIC_HUB)) {
+		beat->flags |= MESHTASTIC_BLE_PEER_FLAG_LINK;
 	}
 	beat->class_id = (uint8_t)CONFIG_MESHTASTIC_FLEET_CLASS;
 	beat->node_num = mt.node_id;
@@ -1192,8 +1192,8 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 						central.conn_node, err);
 				}
 			}
-#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
-			/* The attachment bearer trusts an encrypted link only
+#if defined(CONFIG_MESHTASTIC_LINK_BEARER)
+			/* The link bearer trusts an encrypted link only
 			 * (ATTACHMENT-SCOPE C1/C8): ask for L2 now. A bonded pair
 			 * answers at once from its keys; an unbonded one pairs
 			 * Just-Works (the residual the design names). An already
@@ -1207,7 +1207,7 @@ static uint8_t central_discover_cb(struct bt_conn *conn, const struct bt_gatt_at
 						central.conn_node, sec);
 				}
 			}
-			meshtastic_attach_bearer_link_up(&meshtastic_attach_bearer_ble,
+			meshtastic_link_bearer_link_up(&meshtastic_link_bearer_ble,
 							 central.conn_node);
 #endif
 		}

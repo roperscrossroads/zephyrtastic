@@ -20,14 +20,14 @@
 #include "meshtastic_ble_name.h"
 #include "meshtastic_ble_peer.h"
 #include "meshtastic_ble_peer_codec.h"
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-#include "meshtastic_attachment.h"
+#if defined(CONFIG_MESHTASTIC_HUB)
+#include "meshtastic_hub.h"
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-#include "meshtastic_attachment_head.h"
+#if defined(CONFIG_MESHTASTIC_WORKER)
+#include "meshtastic_worker.h"
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
-#include "meshtastic_attach_bearer.h"
+#if defined(CONFIG_MESHTASTIC_LINK_BEARER)
+#include "meshtastic_link_bearer.h"
 #endif
 #include "meshtastic_ble_registry.h"
 #include "meshtastic_config_store.h"
@@ -493,7 +493,7 @@ static void ble_note_activity(unsigned int index)
 #if defined(CONFIG_MESHTASTIC_BLE_IDLE_DROP)
 /*
  * The idle drop (agents-0inv): an incoming link that is not a peer and has shown no
- * activity for MESHTASTIC_BLE_IDLE_DROP_SEC is disconnected. On a keyless head the
+ * activity for MESHTASTIC_BLE_IDLE_DROP_SEC is disconnected. On a keyless worker the
  * second of its two slots otherwise stayed with a host that had connected and gone
  * silent (rzr5, 2026-11-25: "2/2 slots, advertising NO" after bleprobe gave up, and
  * every later connect found no peripheral). On the system workqueue, never from a BT
@@ -873,7 +873,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	unsigned int index = bt_conn_index(conn);
 	bool was_phone;
-#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+#if defined(CONFIG_MESHTASTIC_LINK_BEARER)
 	struct meshtastic_ble_peer_rx peer_rx;
 	uint32_t peer_node = 0U;
 
@@ -899,9 +899,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	/* Drop any peer-beat accounting for this slot before the index can be
 	 * recycled (no-op stub when the peer link is compiled out). */
 	meshtastic_ble_peer_conn_down(index);
-#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
+#if defined(CONFIG_MESHTASTIC_LINK_BEARER)
 	if (peer_node != 0U) {
-		meshtastic_attach_bearer_link_down(&meshtastic_attach_bearer_ble, peer_node);
+		meshtastic_link_bearer_link_down(&meshtastic_link_bearer_ble, peer_node);
 	}
 #endif
 
@@ -1287,18 +1287,18 @@ uint32_t meshtastic_ble_adv_starts(void)
  * channel enters the same RX pipeline as an airframe, tagged with its bearer
  * so the router applies the link-local rule (delivered locally, never relayed
  * onto LoRa). Runs on the BT RX thread with the peer lock released
- * (agents-z7rg): an attachment envelope takes the head's or brain's lock, and
+ * (agents-z7rg): a link envelope takes the worker's or hub's lock, and
  * those send back through the peer module under it. */
 static void ble_peer_frame_ingest(unsigned int index, const uint8_t *frame, size_t len,
 				  uint8_t kind)
 {
 	int ret;
 
-	if (kind == MESHTASTIC_BLE_PEER_KIND_ATTACH) {
-#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
-		/* An attachment envelope (ATTACHMENT-DESIGN S6): the peer is known
+	if (kind == MESHTASTIC_BLE_PEER_KIND_LINK) {
+#if defined(CONFIG_MESHTASTIC_LINK_BEARER)
+		/* A link envelope (ATTACHMENT-DESIGN S6): the peer is known
 		 * by its link identity, the beat's node number, and the bearer
-		 * registry routes it to the brain's ingest or the head's control
+		 * registry routes it to the hub's ingest or the worker's control
 		 * handler, whichever this image is. */
 		struct meshtastic_ble_peer_rx rx;
 
@@ -1306,7 +1306,7 @@ static void ble_peer_frame_ingest(unsigned int index, const uint8_t *frame, size
 			LOG_WRN("BLE peer envelope (conn %u) before any beat: dropped", index);
 			return;
 		}
-		ret = meshtastic_attach_bearer_rx(&meshtastic_attach_bearer_ble, rx.last.node_num,
+		ret = meshtastic_link_bearer_rx(&meshtastic_link_bearer_ble, rx.last.node_num,
 						  frame, len);
 #else
 		ret = -ENOTSUP;
@@ -1369,8 +1369,8 @@ int meshtastic_ble_init(void)
 
 #if defined(CONFIG_MESHTASTIC_BLE_PEER)
 	meshtastic_ble_peer_frame_rx_register(ble_peer_frame_ingest);
-#if defined(CONFIG_MESHTASTIC_ATTACH_BEARER)
-	(void)meshtastic_attach_bearer_register(&meshtastic_attach_bearer_ble);
+#if defined(CONFIG_MESHTASTIC_LINK_BEARER)
+	(void)meshtastic_link_bearer_register(&meshtastic_link_bearer_ble);
 #endif
 #endif
 

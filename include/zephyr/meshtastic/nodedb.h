@@ -37,7 +37,7 @@ struct meshtastic_nodedb_node {
 	uint8_t channel;
 	/* The modem preset (meshtastic_Config_LoRaConfig_ModemPreset) this node was
 	 * last heard on, 0xFF when it has not been heard since boot. Only a node
-	 * with radio heads hears on more than one; it sends a unicast to the peer
+	 * with workers hears on more than one; it sends a unicast to the peer
 	 * on that preset's radio. Not persisted. */
 	uint8_t heard_preset;
 	uint8_t next_hop;

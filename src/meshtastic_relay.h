@@ -18,8 +18,8 @@
 extern "C" {
 #endif
 
-/* Which way text crosses. INBOUND is ear -> this node's preset. OUTBOUND
- * (this preset -> the ear's) needs an ear that transmits, which v1's ear does
+/* Which way text crosses. INBOUND is rx-only worker -> this node's preset. OUTBOUND
+ * (this preset -> the rx-only worker's) needs a worker that transmits, which v1's rx-only worker does
  * not, so it is refused for now. */
 enum meshtastic_relay_dir {
 	MESHTASTIC_RELAY_OFF = 0,
@@ -29,7 +29,7 @@ enum meshtastic_relay_dir {
 };
 
 struct meshtastic_relay_stats {
-	uint32_t considered;    /* decoded frames that arrived from the ear */
+	uint32_t considered;    /* decoded frames that arrived from the rx-only worker */
 	uint32_t relayed;       /* texts queued for re-origination */
 	uint32_t sent;          /* ...and actually handed to the radio */
 	uint32_t tx_failed;     /* send refused (queue full, no airtime) */
@@ -73,9 +73,9 @@ bool meshtastic_relay_has_prefix(const uint8_t *text, size_t len);
 void meshtastic_relay_on_rx(const struct meshtastic_packet *pkt, const meshtastic_MeshPacket *mesh,
 			    enum meshtastic_bearer bearer);
 
-/* ---- the ear (MESHTASTIC_RELAY_EAR) ---------------------------------------- */
+/* ---- the rx-only worker (MESHTASTIC_WORKER_RX) ---------------------------------------- */
 
-struct meshtastic_relay_ear_stats {
+struct meshtastic_worker_rx_stats {
 	uint32_t heard;         /* decoded broadcast frames heard on LoRa */
 	uint32_t forwarded;     /* handed to the peer link */
 	uint32_t not_text;      /* only text can cross, so only text is forwarded */
@@ -83,29 +83,29 @@ struct meshtastic_relay_ear_stats {
 	uint32_t no_peer;       /* no receiving half configured */
 	uint32_t queue_full;
 	uint32_t send_failed;   /* the peer link refused (no live link, GATT error) */
-	uint32_t rate_dropped;  /* over the ear's forwarding cap */
+	uint32_t rate_dropped;  /* over the rx-only worker's forwarding cap */
 };
 
 /* The receiving half's node id; 0 stops forwarding. Saved with
  * MESHTASTIC_SETTINGS; reset() returns to the Kconfig value and forgets it. */
-void meshtastic_relay_ear_set_peer(uint32_t node_id);
-uint32_t meshtastic_relay_ear_get_peer(void);
-void meshtastic_relay_ear_stats_get(struct meshtastic_relay_ear_stats *out);
-void meshtastic_relay_ear_reset(void);
+void meshtastic_worker_rx_set_peer(uint32_t node_id);
+uint32_t meshtastic_worker_rx_get_peer(void);
+void meshtastic_worker_rx_stats_get(struct meshtastic_worker_rx_stats *out);
+void meshtastic_worker_rx_reset(void);
 
 /* The router's hook: a decoded frame heard on LoRa, with its wire bytes. */
-void meshtastic_relay_ear_on_rx(const struct meshtastic_packet *pkt, const uint8_t *wire,
+void meshtastic_worker_rx_on_rx(const struct meshtastic_packet *pkt, const uint8_t *wire,
 				size_t wire_len);
 
 /* The send seam. The default forwards over the BLE peer link
  * (meshtastic_ble_peer_frame_send_to); a test overrides it. */
-int meshtastic_relay_ear_send(uint32_t peer, const uint8_t *wire, size_t wire_len);
-/* The same seam for a peer that takes attachment envelopes (a brain,
+int meshtastic_worker_rx_send(uint32_t peer, const uint8_t *wire, size_t wire_len);
+/* The same seam for a peer that takes link envelopes (a hub,
  * ATTACHMENT-DESIGN P0): the frame wrapped with this radio's signal and preset,
- * sent as frame kind ATTACH. Whether the peer takes them is its beat's ATTACH
+ * sent as frame kind LINK. Whether the peer takes them is its beat's LINK
  * flag; both are __weak so a test can decide. */
-int meshtastic_relay_ear_send_env(uint32_t peer, const uint8_t *env, size_t env_len);
-bool meshtastic_relay_ear_peer_takes_env(uint32_t peer);
+int meshtastic_worker_rx_send_env(uint32_t peer, const uint8_t *env, size_t env_len);
+bool meshtastic_worker_rx_peer_takes_env(uint32_t peer);
 
 #ifdef __cplusplus
 }

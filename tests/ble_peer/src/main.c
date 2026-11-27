@@ -586,15 +586,15 @@ ZTEST(ble_peer_codec, test_bringup_expiry)
 	zassert_true(meshtastic_ble_peer_bringup_expired(5000, 99999, 10000));
 }
 
-/* ---- frame kinds and the attachment envelope (ATTACHMENT-DESIGN S4) ------------- */
+/* ---- frame kinds and the link envelope (ATTACHMENT-DESIGN S4) ------------- */
 
-#include "meshtastic_attachment_codec.h"
+#include "meshtastic_link_codec.h"
 
-ZTEST_SUITE(ble_peer_attach, NULL, NULL, NULL, NULL, NULL);
+ZTEST_SUITE(ble_peer_link, NULL, NULL, NULL, NULL, NULL);
 
 /* A WIRE frame's bytes are identical to the pre-kind encoding: the length's
  * high byte was always 0, and that is where the kind nibble now lives. */
-ZTEST(ble_peer_attach, test_kind_wire_is_byte_identical_to_legacy)
+ZTEST(ble_peer_link, test_kind_wire_is_byte_identical_to_legacy)
 {
 	static const uint8_t frame[5] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE};
 	struct meshtastic_ble_peer_chunker a, b;
@@ -613,7 +613,7 @@ ZTEST(ble_peer_attach, test_kind_wire_is_byte_identical_to_legacy)
 
 /* A kind-1 frame of envelope size round-trips, carries its kind out of the
  * reassembler, and a WIRE frame may not exceed FRAME_MAX while an envelope may. */
-ZTEST(ble_peer_attach, test_kind_attach_roundtrip_and_caps)
+ZTEST(ble_peer_link, test_kind_link_roundtrip_and_caps)
 {
 	static uint8_t env[MESHTASTIC_BLE_PEER_ENV_MAX];
 	struct meshtastic_ble_peer_chunker ck;
@@ -625,15 +625,15 @@ ZTEST(ble_peer_attach, test_kind_attach_roundtrip_and_caps)
 	for (size_t i = 0; i < sizeof(env); i++) {
 		env[i] = (uint8_t)(i * 7U);
 	}
-	/* Over FRAME_MAX as WIRE: refused; as ATTACH: fine. */
+	/* Over FRAME_MAX as WIRE: refused; as LINK: fine. */
 	zassert_equal(meshtastic_ble_peer_chunker_start(&ck, env, sizeof(env)), -EMSGSIZE);
 	zassert_equal(meshtastic_ble_peer_chunker_start_kind(&ck, env, sizeof(env) + 1U,
-							      MESHTASTIC_BLE_PEER_KIND_ATTACH),
+							      MESHTASTIC_BLE_PEER_KIND_LINK),
 		      -EMSGSIZE);
 	zassert_equal(meshtastic_ble_peer_chunker_start_kind(&ck, env, 4U, 16U), -EINVAL,
 		      "kind past the nibble");
 	zassert_ok(meshtastic_ble_peer_chunker_start_kind(&ck, env, sizeof(env),
-							   MESHTASTIC_BLE_PEER_KIND_ATTACH));
+							   MESHTASTIC_BLE_PEER_KIND_LINK));
 
 	meshtastic_ble_peer_reasm_reset(&rs);
 	while ((n = meshtastic_ble_peer_chunker_next(&ck, buf, sizeof(buf))) > 0) {
@@ -642,7 +642,7 @@ ZTEST(ble_peer_attach, test_kind_attach_roundtrip_and_caps)
 	zassert_equal(n, 0);
 	zassert_equal(ret, 1, "frame complete (%d)", ret);
 	zassert_equal(out_len, sizeof(env));
-	zassert_equal(rs.kind, MESHTASTIC_BLE_PEER_KIND_ATTACH);
+	zassert_equal(rs.kind, MESHTASTIC_BLE_PEER_KIND_LINK);
 	zassert_mem_equal(rs.frame, env, sizeof(env));
 }
 
@@ -650,7 +650,7 @@ ZTEST(ble_peer_attach, test_kind_attach_roundtrip_and_caps)
  * 4095 -- refused with -EMSGSIZE, nothing in flight afterwards. Modelled by
  * feeding a kind-1 first chunk to a reassembler and checking what a kind-blind
  * length read would have seen. */
-ZTEST(ble_peer_attach, test_kind_attach_first_chunk_reads_huge_to_a_kindless_decoder)
+ZTEST(ble_peer_link, test_kind_link_first_chunk_reads_huge_to_a_kindless_decoder)
 {
 	static const uint8_t env[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
 	struct meshtastic_ble_peer_chunker ck;
@@ -659,7 +659,7 @@ ZTEST(ble_peer_attach, test_kind_attach_first_chunk_reads_huge_to_a_kindless_dec
 	uint16_t legacy_declared;
 
 	zassert_ok(meshtastic_ble_peer_chunker_start_kind(&ck, env, sizeof(env),
-							   MESHTASTIC_BLE_PEER_KIND_ATTACH));
+							   MESHTASTIC_BLE_PEER_KIND_LINK));
 	n = meshtastic_ble_peer_chunker_next(&ck, buf, sizeof(buf));
 	zassert_true(n > 3);
 	legacy_declared = (uint16_t)buf[1] | ((uint16_t)buf[2] << 8);
@@ -668,12 +668,12 @@ ZTEST(ble_peer_attach, test_kind_attach_first_chunk_reads_huge_to_a_kindless_dec
 	zassert_equal(legacy_declared & 0x0FFFU, sizeof(env), "the 12-bit length is intact");
 }
 
-ZTEST(ble_peer_attach, test_envelope_rx_frame_roundtrip_and_max)
+ZTEST(ble_peer_link, test_envelope_rx_frame_roundtrip_and_max)
 {
-	static uint8_t wire[MESHTASTIC_ATTACHMENT_WIRE_MAX];
-	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
-	struct meshtastic_attachment_msg msg;
-	struct meshtastic_attachment_rx_frame m = {
+	static uint8_t wire[MESHTASTIC_LINK_WIRE_MAX];
+	uint8_t env[MESHTASTIC_LINK_ENV_MAX];
+	struct meshtastic_link_msg msg;
+	struct meshtastic_link_rx_frame m = {
 		.preset = 7U, .rssi = -101, .snr = -3, .rx_ms = 0xDEADBEEFU, .flags = 0U,
 		.wire = wire, .wire_len = sizeof(wire),
 	};
@@ -682,11 +682,11 @@ ZTEST(ble_peer_attach, test_envelope_rx_frame_roundtrip_and_max)
 	for (size_t i = 0; i < sizeof(wire); i++) {
 		wire[i] = (uint8_t)i;
 	}
-	len = meshtastic_attachment_encode_rx_frame(&m, env, sizeof(env));
-	zassert_equal(len, (int)(MESHTASTIC_ATTACHMENT_RX_HDR_LEN + sizeof(wire)),
+	len = meshtastic_link_encode_rx_frame(&m, env, sizeof(env));
+	zassert_equal(len, (int)(MESHTASTIC_LINK_RX_HDR_LEN + sizeof(wire)),
 		      "a max wire plus the header fits ENV_MAX");
-	zassert_ok(meshtastic_attachment_decode(env, (size_t)len, &msg));
-	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_RX_FRAME);
+	zassert_ok(meshtastic_link_decode(env, (size_t)len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_LINK_RX_FRAME);
 	zassert_equal(msg.u.rx.preset, 7U);
 	zassert_equal(msg.u.rx.rssi, -101);
 	zassert_equal(msg.u.rx.snr, -3);
@@ -695,141 +695,141 @@ ZTEST(ble_peer_attach, test_envelope_rx_frame_roundtrip_and_max)
 	zassert_mem_equal(msg.u.rx.wire, wire, sizeof(wire));
 
 	m.wire_len = 0U;
-	zassert_equal(meshtastic_attachment_encode_rx_frame(&m, env, sizeof(env)), -EINVAL);
+	zassert_equal(meshtastic_link_encode_rx_frame(&m, env, sizeof(env)), -EINVAL);
 	m.wire_len = 1U;
-	zassert_equal(meshtastic_attachment_encode_rx_frame(&m, env, 5U), -EMSGSIZE);
+	zassert_equal(meshtastic_link_encode_rx_frame(&m, env, 5U), -EMSGSIZE);
 }
 
-ZTEST(ble_peer_attach, test_envelope_other_types_roundtrip)
+ZTEST(ble_peer_link, test_envelope_other_types_roundtrip)
 {
-	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
-	struct meshtastic_attachment_msg msg;
+	uint8_t env[MESHTASTIC_LINK_ENV_MAX];
+	struct meshtastic_link_msg msg;
 	static const uint8_t wire[16] = {9};
-	const struct meshtastic_attachment_tx_frame tx = {
-		.preset = 2U, .flags = MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT, .tx_seq = 0xBEEFU,
+	const struct meshtastic_link_tx_frame tx = {
+		.preset = 2U, .flags = MESHTASTIC_LINK_TXF_WANT_RESULT, .tx_seq = 0xBEEFU,
 		.wire = wire, .wire_len = sizeof(wire),
 	};
-	const struct meshtastic_attachment_tx_result res = {
+	const struct meshtastic_link_tx_result res = {
 		.tx_seq = 0xBEEFU, .rc = -16, .defers = 3U, .tx_ms = 12345U,
 	};
-	struct meshtastic_attachment_status st = {
-		.preset = 4U, .flags = MESHTASTIC_ATTACHMENT_ST_TX_ENABLED, .hwid = 0x11223344U,
-		.brain = 0x0A0A0A0AU, .rx_frames = 1U, .tx_frames = 2U, .uptime_s = 3U,
+	struct meshtastic_link_status st = {
+		.preset = 4U, .flags = MESHTASTIC_LINK_ST_TX_ENABLED, .hwid = 0x11223344U,
+		.hub = 0x0A0A0A0AU, .rx_frames = 1U, .tx_frames = 2U, .uptime_s = 3U,
 		.rx_dropped = 4U,
 	};
 	int len;
 
-	len = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
-	zassert_equal(len, (int)(MESHTASTIC_ATTACHMENT_TX_HDR_LEN + sizeof(wire)));
-	zassert_ok(meshtastic_attachment_decode(env, (size_t)len, &msg));
-	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_TX_FRAME);
+	len = meshtastic_link_encode_tx_frame(&tx, env, sizeof(env));
+	zassert_equal(len, (int)(MESHTASTIC_LINK_TX_HDR_LEN + sizeof(wire)));
+	zassert_ok(meshtastic_link_decode(env, (size_t)len, &msg));
+	zassert_equal(msg.type, MESHTASTIC_LINK_TX_FRAME);
 	zassert_equal(msg.u.tx.tx_seq, 0xBEEFU);
-	zassert_equal(msg.u.tx.flags, MESHTASTIC_ATTACHMENT_TXF_WANT_RESULT);
+	zassert_equal(msg.u.tx.flags, MESHTASTIC_LINK_TXF_WANT_RESULT);
 	zassert_mem_equal(msg.u.tx.wire, wire, sizeof(wire));
 
-	len = meshtastic_attachment_encode_tx_result(&res, env, sizeof(env));
-	zassert_equal(len, (int)MESHTASTIC_ATTACHMENT_TX_RESULT_LEN);
-	zassert_ok(meshtastic_attachment_decode(env, (size_t)len, &msg));
+	len = meshtastic_link_encode_tx_result(&res, env, sizeof(env));
+	zassert_equal(len, (int)MESHTASTIC_LINK_TX_RESULT_LEN);
+	zassert_ok(meshtastic_link_decode(env, (size_t)len, &msg));
 	zassert_equal(msg.u.result.rc, -16);
 	zassert_equal(msg.u.result.tx_ms, 12345U);
 
-	len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
-	zassert_equal(len, (int)MESHTASTIC_ATTACHMENT_STATUS_LEN, "no position: the short form");
-	zassert_ok(meshtastic_attachment_decode(env, (size_t)len, &msg));
+	len = meshtastic_link_encode_status(&st, env, sizeof(env));
+	zassert_equal(len, (int)MESHTASTIC_LINK_STATUS_LEN, "no position: the short form");
+	zassert_ok(meshtastic_link_decode(env, (size_t)len, &msg));
 	zassert_equal(msg.u.status.hwid, 0x11223344U);
 	zassert_equal(msg.u.status.lat, 0);
-	st.flags |= MESHTASTIC_ATTACHMENT_ST_HAS_POS;
+	st.flags |= MESHTASTIC_LINK_ST_HAS_POS;
 	st.lat = -5;
-	len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
-	zassert_equal(len, (int)MESHTASTIC_ATTACHMENT_STATUS_POS_LEN);
-	zassert_ok(meshtastic_attachment_decode(env, (size_t)len, &msg));
+	len = meshtastic_link_encode_status(&st, env, sizeof(env));
+	zassert_equal(len, (int)MESHTASTIC_LINK_STATUS_POS_LEN);
+	zassert_ok(meshtastic_link_decode(env, (size_t)len, &msg));
 	zassert_equal(msg.u.status.lat, -5);
 	/* A short-form length on a HAS_POS status is malformed. */
-	zassert_equal(meshtastic_attachment_decode(env, MESHTASTIC_ATTACHMENT_STATUS_LEN, &msg),
+	zassert_equal(meshtastic_link_decode(env, MESHTASTIC_LINK_STATUS_LEN, &msg),
 		      -EBADMSG);
 
-	len = meshtastic_attachment_encode_set_preset(9U, env, sizeof(env));
+	len = meshtastic_link_encode_set_preset(9U, env, sizeof(env));
 	zassert_equal(len, 2);
-	zassert_ok(meshtastic_attachment_decode(env, 2U, &msg));
-	zassert_equal(msg.type, MESHTASTIC_ATTACHMENT_SET_PRESET);
+	zassert_ok(meshtastic_link_decode(env, 2U, &msg));
+	zassert_equal(msg.type, MESHTASTIC_LINK_SET_PRESET);
 	zassert_equal(msg.u.preset, 9U);
 
-	zassert_equal(meshtastic_attachment_decode(env, 0U, &msg), -EINVAL);
+	zassert_equal(meshtastic_link_decode(env, 0U, &msg), -EINVAL);
 	env[0] = 0xEEU;
-	zassert_equal(meshtastic_attachment_decode(env, 3U, &msg), -EBADMSG);
+	zassert_equal(meshtastic_link_decode(env, 3U, &msg), -EBADMSG);
 }
 
 /* U1/U3 (review F8, SCOPE D5/D6): every truncation of every type is refused
  * without reading past len, and the compatibility rule holds -- a fixed-layout
  * type with bytes APPENDED (a newer sender) decodes its known prefix; the two
  * frame-carrying types treat the tail as the frame. */
-ZTEST(ble_peer_attach, test_envelope_truncations_refused_and_tails_ignored)
+ZTEST(ble_peer_link, test_envelope_truncations_refused_and_tails_ignored)
 {
-	uint8_t env[MESHTASTIC_ATTACHMENT_ENV_MAX];
-	struct meshtastic_attachment_msg msg;
+	uint8_t env[MESHTASTIC_LINK_ENV_MAX];
+	struct meshtastic_link_msg msg;
 	static const uint8_t wire[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-	const struct meshtastic_attachment_rx_frame rx = {
+	const struct meshtastic_link_rx_frame rx = {
 		.preset = 4U, .rssi = -70, .snr = 5, .rx_ms = 99U, .wire = wire,
 		.wire_len = sizeof(wire),
 	};
-	const struct meshtastic_attachment_tx_frame tx = {
+	const struct meshtastic_link_tx_frame tx = {
 		.preset = 4U, .tx_seq = 7U, .wire = wire, .wire_len = sizeof(wire),
 	};
-	const struct meshtastic_attachment_tx_result res = { .tx_seq = 7U, .rc = 0, .tx_ms = 1U };
-	struct meshtastic_attachment_status st = {
-		.preset = 4U, .flags = MESHTASTIC_ATTACHMENT_ST_IS_HEAD, .hwid = 1U, .brain = 2U,
+	const struct meshtastic_link_tx_result res = { .tx_seq = 7U, .rc = 0, .tx_ms = 1U };
+	struct meshtastic_link_status st = {
+		.preset = 4U, .flags = MESHTASTIC_LINK_ST_IS_WORKER, .hwid = 1U, .hub = 2U,
 	};
 	int len;
 
 	/* RX_FRAME / TX_FRAME: the header alone (no frame) is malformed; header +
 	 * 1 byte is a 1-byte frame. */
-	len = meshtastic_attachment_encode_rx_frame(&rx, env, sizeof(env));
+	len = meshtastic_link_encode_rx_frame(&rx, env, sizeof(env));
 	zassert_true(len > 0);
-	for (size_t l = 1U; l <= MESHTASTIC_ATTACHMENT_RX_HDR_LEN; l++) {
-		zassert_equal(meshtastic_attachment_decode(env, l, &msg), -EBADMSG, "rx len %zu", l);
+	for (size_t l = 1U; l <= MESHTASTIC_LINK_RX_HDR_LEN; l++) {
+		zassert_equal(meshtastic_link_decode(env, l, &msg), -EBADMSG, "rx len %zu", l);
 	}
-	zassert_ok(meshtastic_attachment_decode(env, MESHTASTIC_ATTACHMENT_RX_HDR_LEN + 1U, &msg));
+	zassert_ok(meshtastic_link_decode(env, MESHTASTIC_LINK_RX_HDR_LEN + 1U, &msg));
 	zassert_equal(msg.u.rx.wire_len, 1U);
-	len = meshtastic_attachment_encode_tx_frame(&tx, env, sizeof(env));
+	len = meshtastic_link_encode_tx_frame(&tx, env, sizeof(env));
 	zassert_true(len > 0);
-	for (size_t l = 1U; l <= MESHTASTIC_ATTACHMENT_TX_HDR_LEN; l++) {
-		zassert_equal(meshtastic_attachment_decode(env, l, &msg), -EBADMSG, "tx len %zu", l);
+	for (size_t l = 1U; l <= MESHTASTIC_LINK_TX_HDR_LEN; l++) {
+		zassert_equal(meshtastic_link_decode(env, l, &msg), -EBADMSG, "tx len %zu", l);
 	}
 
 	/* TX_RESULT: every shorter length refused; longer accepted, tail ignored. */
-	len = meshtastic_attachment_encode_tx_result(&res, env, sizeof(env));
-	zassert_equal(len, (int)MESHTASTIC_ATTACHMENT_TX_RESULT_LEN);
-	for (size_t l = 1U; l < MESHTASTIC_ATTACHMENT_TX_RESULT_LEN; l++) {
-		zassert_equal(meshtastic_attachment_decode(env, l, &msg), -EBADMSG, "res len %zu", l);
+	len = meshtastic_link_encode_tx_result(&res, env, sizeof(env));
+	zassert_equal(len, (int)MESHTASTIC_LINK_TX_RESULT_LEN);
+	for (size_t l = 1U; l < MESHTASTIC_LINK_TX_RESULT_LEN; l++) {
+		zassert_equal(meshtastic_link_decode(env, l, &msg), -EBADMSG, "res len %zu", l);
 	}
-	env[MESHTASTIC_ATTACHMENT_TX_RESULT_LEN] = 0xAAU; /* a field from the future */
-	zassert_ok(meshtastic_attachment_decode(env, MESHTASTIC_ATTACHMENT_TX_RESULT_LEN + 1U, &msg));
+	env[MESHTASTIC_LINK_TX_RESULT_LEN] = 0xAAU; /* a field from the future */
+	zassert_ok(meshtastic_link_decode(env, MESHTASTIC_LINK_TX_RESULT_LEN + 1U, &msg));
 	zassert_equal(msg.u.result.tx_seq, 7U);
 
 	/* STATUS: the 1- and 2-byte forms used to read the flags byte past the
 	 * end; every short length refused; longer accepted; HAS_POS needs its tail. */
-	len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
-	zassert_equal(len, (int)MESHTASTIC_ATTACHMENT_STATUS_LEN);
-	for (size_t l = 1U; l < MESHTASTIC_ATTACHMENT_STATUS_LEN; l++) {
-		zassert_equal(meshtastic_attachment_decode(env, l, &msg), -EBADMSG, "st len %zu", l);
+	len = meshtastic_link_encode_status(&st, env, sizeof(env));
+	zassert_equal(len, (int)MESHTASTIC_LINK_STATUS_LEN);
+	for (size_t l = 1U; l < MESHTASTIC_LINK_STATUS_LEN; l++) {
+		zassert_equal(meshtastic_link_decode(env, l, &msg), -EBADMSG, "st len %zu", l);
 	}
-	memset(&env[MESHTASTIC_ATTACHMENT_STATUS_LEN], 0x55, 6U); /* appended fields */
-	zassert_ok(meshtastic_attachment_decode(env, MESHTASTIC_ATTACHMENT_STATUS_LEN + 6U, &msg));
-	zassert_equal(msg.u.status.brain, 2U);
-	zassert_false((msg.u.status.flags & MESHTASTIC_ATTACHMENT_ST_HAS_POS) != 0U);
-	st.flags |= MESHTASTIC_ATTACHMENT_ST_HAS_POS;
-	len = meshtastic_attachment_encode_status(&st, env, sizeof(env));
-	zassert_equal(len, (int)MESHTASTIC_ATTACHMENT_STATUS_POS_LEN);
-	for (size_t l = MESHTASTIC_ATTACHMENT_STATUS_LEN; l < MESHTASTIC_ATTACHMENT_STATUS_POS_LEN;
+	memset(&env[MESHTASTIC_LINK_STATUS_LEN], 0x55, 6U); /* appended fields */
+	zassert_ok(meshtastic_link_decode(env, MESHTASTIC_LINK_STATUS_LEN + 6U, &msg));
+	zassert_equal(msg.u.status.hub, 2U);
+	zassert_false((msg.u.status.flags & MESHTASTIC_LINK_ST_HAS_POS) != 0U);
+	st.flags |= MESHTASTIC_LINK_ST_HAS_POS;
+	len = meshtastic_link_encode_status(&st, env, sizeof(env));
+	zassert_equal(len, (int)MESHTASTIC_LINK_STATUS_POS_LEN);
+	for (size_t l = MESHTASTIC_LINK_STATUS_LEN; l < MESHTASTIC_LINK_STATUS_POS_LEN;
 	     l++) {
-		zassert_equal(meshtastic_attachment_decode(env, l, &msg), -EBADMSG, "pos len %zu", l);
+		zassert_equal(meshtastic_link_decode(env, l, &msg), -EBADMSG, "pos len %zu", l);
 	}
-	zassert_ok(meshtastic_attachment_decode(env, MESHTASTIC_ATTACHMENT_STATUS_POS_LEN + 3U, &msg));
+	zassert_ok(meshtastic_link_decode(env, MESHTASTIC_LINK_STATUS_POS_LEN + 3U, &msg));
 
 	/* SET_PRESET: 1 byte refused, 2 accepted, 3 accepted (tail ignored). */
-	len = meshtastic_attachment_encode_set_preset(3U, env, sizeof(env));
+	len = meshtastic_link_encode_set_preset(3U, env, sizeof(env));
 	zassert_equal(len, 2);
-	zassert_equal(meshtastic_attachment_decode(env, 1U, &msg), -EBADMSG);
-	zassert_ok(meshtastic_attachment_decode(env, 3U, &msg));
+	zassert_equal(meshtastic_link_decode(env, 1U, &msg), -EBADMSG);
+	zassert_ok(meshtastic_link_decode(env, 3U, &msg));
 	zassert_equal(msg.u.preset, 3U);
 }

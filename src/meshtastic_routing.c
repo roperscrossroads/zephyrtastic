@@ -122,7 +122,7 @@ static bool routing_ack_should_request_ack(const struct meshtastic_packet *req,
  * receive thread, which must not stand still while a reply waits for the air. */
 static int routing_send_reply(uint32_t to, uint32_t request_id, uint8_t ch_index,
 			      meshtastic_Routing_Error err, uint8_t hop_limit, bool want_ack,
-			      uint8_t attach, bool pki)
+			      uint8_t radio, bool pki)
 {
 	meshtastic_Routing routing = meshtastic_Routing_init_zero;
 	uint8_t rbuf[16];
@@ -150,11 +150,11 @@ static int routing_send_reply(uint32_t to, uint32_t request_id, uint8_t ch_index
 		.want_ack = want_ack,
 		.channel_index = ch_index,
 		/* Back out the radio the request came in on (P3 slice 2). */
-		.tx_attach = MESHTASTIC_REPLY_ATTACH(attach),
+		.tx_radio = MESHTASTIC_REPLY_RADIO(radio),
 		/* A reply to a PKC-received packet goes PKC (wire hash 0), not on
 		 * channel index 0. The reference builds its ACK on index 0 and gets away
 		 * with it because two stock nodes on one preset share an unnamed primary;
-		 * a brain whose primary is NAMED answering through a head on another
+		 * a hub whose primary is NAMED answering through a worker on another
 		 * preset stamps that name's hash, which no peer there can look up
 		 * (rxri: "No channel found for decoding, hash 0xe", 2026-09-29). The
 		 * sender holds our key -- it just used it -- so PKC always decodes. */
@@ -214,12 +214,12 @@ static int routing_send_ack(const struct meshtastic_packet *req, const meshtasti
 	 * loses it as the reference's would; the sender's retransmission is re-ACKed. */
 	return routing_send_reply(from, id, ch_index, meshtastic_Routing_Error_NONE,
 				  routing_hop_limit_for_reply(req),
-				  routing_ack_should_request_ack(req, mesh), req->rx_attach,
+				  routing_ack_should_request_ack(req, mesh), req->rx_radio,
 				  mesh ? mesh->pki_encrypted : req->pki_encrypted);
 }
 
 void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire_hash,
-					uint8_t hop_limit, uint8_t hop_start, uint8_t attach)
+					uint8_t hop_limit, uint8_t hop_start, uint8_t radio)
 {
 	struct meshtastic_packet req = {
 		.from = from,
@@ -235,7 +235,7 @@ void meshtastic_routing_reack_duplicate(uint32_t from, uint32_t id, uint8_t wire
 	 * re-ACK is recoverable — the sender's next retransmission triggers
 	 * another. Never request an ACK for an ACK. */
 	(void)routing_send_reply(from, id, ch_index, meshtastic_Routing_Error_NONE,
-				 routing_hop_limit_for_reply(&req), false, attach, false);
+				 routing_hop_limit_for_reply(&req), false, radio, false);
 }
 
 void meshtastic_routing_send_error(const struct meshtastic_packet *req,
@@ -249,7 +249,7 @@ void meshtastic_routing_send_error(const struct meshtastic_packet *req,
 	 * the primary channel (as the reference does). Never request an ACK for a NAK
 	 * (avoid ack storms), and send fire-and-forget so we don't block RX. */
 	(void)routing_send_reply(req->from, req->id, meshtastic_channels_primary_index(), err,
-				 routing_hop_limit_for_reply(req), false, req->rx_attach,
+				 routing_hop_limit_for_reply(req), false, req->rx_radio,
 				 req->pki_encrypted);
 }
 
@@ -265,7 +265,7 @@ uint8_t meshtastic_routing_reply_hop_limit(uint8_t req_hop_limit, uint8_t req_ho
 
 int meshtastic_routing_answer(uint32_t to, uint32_t request_id, uint8_t channel_index,
 			      uint8_t req_hop_limit, uint8_t req_hop_start, bool want_ack,
-			      meshtastic_Routing_Error err, uint8_t attach, bool pki)
+			      meshtastic_Routing_Error err, uint8_t radio, bool pki)
 {
 	if (to == 0U || to == mt.node_id) {
 		return -EINVAL;
@@ -276,7 +276,7 @@ int meshtastic_routing_answer(uint32_t to, uint32_t request_id, uint8_t channel_
 					  ? channel_index
 					  : meshtastic_channels_primary_index(),
 				  err, meshtastic_routing_reply_hop_limit(req_hop_limit, req_hop_start),
-				  want_ack, attach, pki);
+				  want_ack, radio, pki);
 }
 
 void meshtastic_routing_on_decoded(const struct meshtastic_packet *packet,

@@ -72,7 +72,7 @@ int meshtastic_try_decode_wire_packet(const uint8_t *buf, int len, int16_t rssi,
 /*
  * The same, for a frame heard on @p rx_preset (a meshtastic_Config_LoRaConfig_ModemPreset,
  * or MESHTASTIC_PRESET_UNKNOWN for "the active one"): an unnamed channel slot is matched
- * under THAT preset's hash, so a frame a radio head heard on another preset decrypts
+ * under THAT preset's hash, so a frame a worker heard on another preset decrypts
  * with the same key (ATTACHMENT-DESIGN S2). The PKC path (wire hash 0) is preset-blind.
  */
 int meshtastic_try_decode_wire_packet_on(const uint8_t *buf, int len, int16_t rssi, int8_t snr,

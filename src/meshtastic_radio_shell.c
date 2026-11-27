@@ -326,9 +326,9 @@ MTSH_DEFINE_ON_WORK(cmd_preset)
 #if defined(CONFIG_MESHTASTIC_SHELL_CONFIG_WRITE)
 /* `meshtastic lora power <dBm>`: this node's own transmit power, at the
  * antenna, from its console. Until 2026-10-01 only the phone API could set
- * it -- a brain could set a head's (`attach power`) but nothing could set its
- * own without a BLE config write, which is how the bench's brains sat at
- * 14 dBm while every head was at 2. Same pattern as the head's SET_POLICY:
+ * it -- a hub could set a worker's (`hub power`) but nothing could set its
+ * own without a BLE config write, which is how the bench's hubs sat at
+ * 14 dBm while every worker was at 2. Same pattern as the worker's SET_POLICY:
  * read the LoRa section, change the field, write it back -- applied now,
  * persisted, region-clamped by the store. 0 = the region's maximum. */
 static int cmd_lora_power_set(const struct shell *sh, const char *arg)

@@ -124,12 +124,12 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_TX_ENABLED_DEFAULT=n
 
-  # `meshtastic attach` and the brain's part of `meshtastic state`. The attachment suite
+  # `meshtastic hub` and the hub's part of `meshtastic state`. The hub_worker suite
   # builds without the shell, so this is where the commands compile and run on native_sim.
-  meshtastic.shell.attachment_brain.native_sim:
+  meshtastic.shell.hub.native_sim:
     extra_configs:
-      - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=y
-      - CONFIG_MESHTASTIC_ATTACHMENT_MAX=2
+      - CONFIG_MESHTASTIC_HUB=y
+      - CONFIG_MESHTASTIC_HUB_WORKERS_MAX=2
 
   # `meshtastic relay` (agents-jbrq.12). The relay is default-N and its own
   # suite builds without the shell, so this is where its commands compile and run.
@@ -137,11 +137,11 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_RELAY=y
 
-  # `meshtastic ear`. Transmit stays possible here: other shell tests send.
-  meshtastic.shell.relay_ear.native_sim:
+  # `meshtastic worker-rx`. Transmit stays possible here: other shell tests send.
+  meshtastic.shell.worker_rx.native_sim:
     extra_configs:
-      - CONFIG_MESHTASTIC_RELAY_EAR=y
-      - CONFIG_MESHTASTIC_RELAY_EAR_RX_ONLY=n
+      - CONFIG_MESHTASTIC_WORKER_RX=y
+      - CONFIG_MESHTASTIC_WORKER_RX_RX_ONLY=n
 
   # The first-boot hold (agents-xhli.21): a node nobody configured is receive-only
   # whatever the seed says, and `meshtastic lora` must not say "yes" over it.

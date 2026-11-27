@@ -19,7 +19,7 @@
  *
  * Retransmits reuse the stored wire bytes, so the packet id and ciphertext are
  * unchanged and other nodes dedup them correctly. A packet that left through a
- * radio head is retransmitted through that head, on that head's timing.
+ * worker is retransmitted through that worker, on that worker's timing.
  */
 
 #include <errno.h>
@@ -35,7 +35,7 @@
 #include "meshtastic/mesh.pb.h"
 
 #include "meshtastic_airtime.h"
-#include "meshtastic_attachment.h"
+#include "meshtastic_hub.h"
 #include "meshtastic_channels.h"
 #include "meshtastic_contention.h"
 #include "meshtastic_core.h"
@@ -62,7 +62,7 @@ struct pending {
 	int64_t next_due; /* k_uptime_get() ms of the next retransmit */
 	uint8_t retries_left;
 	uint8_t tier;
-	uint8_t attach;  /* the radio it left by: 0 = ours, else a head */
+	uint8_t radio;  /* the radio it left by: 0 = ours, else a worker */
 	uint8_t channel; /* channel slot, for the report to the app */
 	bool active;
 };
@@ -213,7 +213,7 @@ void meshtastic_reliable_reset(void)
  * otherwise derive an airtime-adaptive interval that mirrors upstream
  * RadioInterface::getRetransmissionMsec, so the wait scales with the modem
  * preset instead of firing before an ACK can physically return on a slow one. */
-static uint32_t retx_interval_ms(size_t wire_len, uint32_t override_ms, uint8_t attach)
+static uint32_t retx_interval_ms(size_t wire_len, uint32_t override_ms, uint8_t radio)
 {
 	uint8_t sf = mt.modem.spread_factor;
 	uint32_t bw = mt.modem.bandwidth_hz;
@@ -238,15 +238,15 @@ static uint32_t retx_interval_ms(size_t wire_len, uint32_t override_ms, uint8_t 
 	 * the slot term below; the packet-airtime and utilisation terms are 0. */
 #endif
 
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-	/* Through a head, the relay we are waiting to overhear is timed on the
-	 * head's preset: wait in ITS slots. (The airtime term stays our radio's;
+#if defined(CONFIG_MESHTASTIC_HUB)
+	/* Through a worker, the relay we are waiting to overhear is timed on the
+	 * worker's preset: wait in ITS slots. (The airtime term stays our radio's;
 	 * the slot term is the one that dominates.) */
-	if (attach != 0U && attach != MESHTASTIC_ATTACH_ALL) {
-		(void)meshtastic_attachment_modem(attach, &sf, &bw);
+	if (radio != 0U && radio != MESHTASTIC_RADIO_ALL) {
+		(void)meshtastic_hub_modem(radio, &sf, &bw);
 	}
 #else
-	ARG_UNUSED(attach);
+	ARG_UNUSED(radio);
 #endif
 
 	slot = meshtastic_contention_effective_slot_ms(sf, bw, false);
@@ -255,7 +255,7 @@ static uint32_t retx_interval_ms(size_t wire_len, uint32_t override_ms, uint8_t 
 
 void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint8_t *wire,
 			       uint32_t wire_len, const meshtastic_MeshPacket *mesh,
-			       uint8_t attach)
+			       uint8_t radio)
 {
 	struct meshtastic_sched_config c;
 	uint8_t retries;
@@ -334,15 +334,15 @@ void meshtastic_reliable_on_tx(const struct meshtastic_packet *local, const uint
 	pend[slot].to = to;
 	pend[slot].tier = meshtastic_sched_tier_for(portnum);
 	pend[slot].retries_left = retries;
-	pend[slot].attach = attach;
+	pend[slot].radio = radio;
 	pend[slot].channel = (local != NULL) ? local->channel_index
 					     : meshtastic_channels_primary_index();
 	pend[slot].next_due =
-		now + (int64_t)retx_interval_ms(wire_len, c.reliable_timeout_ms, attach);
+		now + (int64_t)retx_interval_ms(wire_len, c.reliable_timeout_ms, radio);
 	pend[slot].active = true;
 
-	LOG_DBG("reliable: track id=0x%08x to 0x%08x retries=%u attach=%u", id, to, retries,
-		(unsigned int)attach);
+	LOG_DBG("reliable: track id=0x%08x to 0x%08x retries=%u radio=%u", id, to, retries,
+		(unsigned int)radio);
 
 	reschedule_locked(now);
 	k_mutex_unlock(&pend_lock);
@@ -465,21 +465,21 @@ static void retx_work_fn(struct k_work *work)
 		pend[i].retries_left--;
 		pend[i].next_due = now + (int64_t)retx_interval_ms(pend[i].wire_len,
 								   c.reliable_timeout_ms,
-								   pend[i].attach);
+								   pend[i].radio);
 		LOG_DBG("reliable: retransmit id=0x%08x (%u left)", pend[i].id,
 			pend[i].retries_left);
-		if (pend[i].attach == MESHTASTIC_ATTACH_ALL) {
+		if (pend[i].radio == MESHTASTIC_RADIO_ALL) {
 			/* It went out on every radio: so does the retransmit. */
 			(void)meshtastic_radio_send_wire_prio(pend[i].wire, pend[i].wire_len,
 							      pend[i].tier);
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-			(void)meshtastic_attachment_fan_out(pend[i].wire, pend[i].wire_len,
+#if defined(CONFIG_MESHTASTIC_HUB)
+			(void)meshtastic_hub_fan_out(pend[i].wire, pend[i].wire_len,
 							    pend[i].tier, pend[i].channel);
 #endif
-		} else if (pend[i].attach != 0U) {
+		} else if (pend[i].radio != 0U) {
 			(void)meshtastic_radio_send_wire_after_on(pend[i].wire, pend[i].wire_len,
 								  pend[i].tier, 0U,
-								  pend[i].attach);
+								  pend[i].radio);
 		} else {
 			(void)meshtastic_radio_send_wire_prio(pend[i].wire, pend[i].wire_len,
 							      pend[i].tier);

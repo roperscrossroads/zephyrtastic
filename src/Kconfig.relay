@@ -5,7 +5,7 @@ menuconfig MESHTASTIC_RELAY
 	bool "Cross-preset text relay (receiving half)"
 	default n
 	help
-	  The receiving half of a cross-preset relay (agents-jbrq.12). An "ear"
+	  The receiving half of a cross-preset relay (agents-jbrq.12). A "worker-rx"
 	  node on another preset forwards the frames it hears over the BLE peer
 	  link. This node reads them through a channel it holds, and
 	  RE-ORIGINATES broadcast text on its own preset as a new packet from
@@ -32,7 +32,7 @@ menuconfig MESHTASTIC_RELAY
 if MESHTASTIC_RELAY
 
 config MESHTASTIC_RELAY_INBOUND_AT_BOOT
-	bool "Relay inbound (ear -> this preset) from boot"
+	bool "Relay inbound (rx-only worker -> this preset) from boot"
 	default n
 	help
 	  Start with the direction set to inbound. The default is off:
@@ -46,7 +46,7 @@ config MESHTASTIC_RELAY_SEEN_SIZE
 	range 4 128
 	help
 	  Recently relayed (origin, text hash) pairs. A repeat inside the TTL is
-	  dropped. The ear already drops a repeated (origin, packet id); this
+	  dropped. The rx-only worker already drops a repeated (origin, packet id); this
 	  catches the same text arriving under a NEW id, which is what a second
 	  relay or a re-send produces.
 
@@ -124,8 +124,8 @@ config MESHTASTIC_RELAY_QUEUE_SIZE
 
 endif # MESHTASTIC_RELAY
 
-menuconfig MESHTASTIC_RELAY_EAR
-	bool "Cross-preset relay: the ear"
+menuconfig MESHTASTIC_WORKER_RX
+	bool "Cross-preset relay: the rx-only worker"
 	default n
 	help
 	  The other node of a cross-preset relay pair: it sits on the source
@@ -133,21 +133,21 @@ menuconfig MESHTASTIC_RELAY_EAR
 	  byte, over the BLE peer link to the relay's receiving half
 	  (MESHTASTIC_RELAY) on the destination preset.
 
-	  The ear does not decide what crosses: the receiving half does, and
-	  re-checks everything. The ear only avoids spending BLE on what could
+	  The rx-only worker does not decide what crosses: the receiving half does, and
+	  re-checks everything. The rx-only worker only avoids spending BLE on what could
 	  never cross (DMs, non-text).
 
-if MESHTASTIC_RELAY_EAR
+if MESHTASTIC_WORKER_RX
 
-config MESHTASTIC_RELAY_EAR_PEER
+config MESHTASTIC_WORKER_RX_PEER
 	hex "Receiving half's node id"
 	default 0x0
 	help
-	  The node the ear forwards to, over whichever BLE peer link reaches
-	  it. 0 means none until set at runtime (`meshtastic ear peer <id>`),
+	  The node the rx-only worker forwards to, over whichever BLE peer link reaches
+	  it. 0 means none until set at runtime (`meshtastic rx-only worker peer <id>`),
 	  which is saved (mtear/peer) when MESHTASTIC_SETTINGS is on.
 
-config MESHTASTIC_RELAY_EAR_QUEUE_SIZE
+config MESHTASTIC_WORKER_RX_QUEUE_SIZE
 	int "Frames waiting to be forwarded"
 	default 4
 	range 1 32
@@ -155,27 +155,27 @@ config MESHTASTIC_RELAY_EAR_QUEUE_SIZE
 	  Each slot holds one wire frame (up to 256 B). Forwarding runs on the
 	  BLE work queue, never on the LoRa receive thread.
 
-config MESHTASTIC_RELAY_EAR_RATE_MAX
+config MESHTASTIC_WORKER_RX_RATE_MAX
 	int "Frames forwarded per window"
 	default 30
 	range 1 1000
 	help
-	  The ear does not judge content (the receiving half does), but a
+	  The rx-only worker does not judge content (the receiving half does), but a
 	  flood of text frames on its preset must not saturate the peer link
 	  or the receiving half. Excess frames are counted and dropped.
 
-config MESHTASTIC_RELAY_EAR_RATE_WINDOW_SEC
-	int "Ear forwarding window in seconds"
+config MESHTASTIC_WORKER_RX_RATE_WINDOW_SEC
+	int "Rx-only worker forwarding window in seconds"
 	default 60
 	range 1 3600
 
-config MESHTASTIC_RELAY_EAR_RX_ONLY
+config MESHTASTIC_WORKER_RX_RX_ONLY
 	bool "Compile the transmit path out"
 	default y
 	help
-	  An ear usually sits on a PUBLIC channel it does not own. With this on
+	  An rx-only worker usually sits on a PUBLIC channel it does not own. With this on
 	  the image cannot key the radio at all (the same gate as
 	  MESHTASTIC_SCANNER_RX_ONLY), so a stored tx_enabled, a phone or an
 	  admin write cannot put it on someone else's air.
 
-endif # MESHTASTIC_RELAY_EAR
+endif # MESHTASTIC_WORKER_RX

@@ -353,13 +353,13 @@ ZTEST(ble_sim, test_10_dial_out_with_one_link_in)
 }
 
 /* agents-z7rg: a frame completed on the peer frame channel is handed to its
- * callback (the attachment head's or brain's ingest) with the peer lock
- * RELEASED. The head's ingest takes the head's lock, and the head sends to its
- * brain through this module, which takes the peer lock: delivering under the
- * peer lock was one half of the AB-BA that crashed rzr5 (head_tx waiting for
- * peer_lock, the BT RX thread holding it and waiting for head_lock). Here a
+ * callback (the link worker's or hub's ingest) with the peer lock
+ * RELEASED. The worker's ingest takes the worker's lock, and the worker sends to its
+ * hub through this module, which takes the peer lock: delivering under the
+ * peer lock was one half of the AB-BA that crashed rzr5 (worker_tx waiting for
+ * peer_lock, the BT RX thread holding it and waiting for worker_lock). Here a
  * central writes one frame chunk to our frame characteristic, and the callback
- * asks another thread to take the peer lock -- as head_tx would -- and waits for
+ * asks another thread to take the peer lock -- as worker_tx would -- and waits for
  * it. Under the old contract it never could. */
 #define FRAME_CHAR_UUID                                                                            \
 	BT_UUID_128_ENCODE(0xf3f1a2c2, 0x8e5e, 0x4d8b, 0x9f2a, 0x6c1d3b7e5a10)
@@ -435,7 +435,7 @@ ZTEST(ble_sim, test_11_frame_callback_runs_without_the_peer_lock)
 }
 
 #if defined(CONFIG_MESHTASTIC_BLE_IDLE_DROP)
-/* agents-0inv: on a keyless head (two slots, one its brain link) a host that
+/* agents-0inv: on a keyless worker (two slots, one its hub link) a host that
  * connected and went silent kept the other slot, and advertising stayed off: rzr5
  * showed "2/2 slots, advertising NO" and every later connect found no peripheral.
  * An incoming link that is not a peer is dropped after MESHTASTIC_BLE_IDLE_DROP_SEC

@@ -92,6 +92,23 @@ int mtsh_run_on_work(const struct shell *sh, shell_cmd_handler handler, size_t a
 	}                                                                                    \
 	Z_MTSH_WRAPPED(handler)
 
+/**
+ * @brief An old command name kept for one release: says the new name, then runs the command.
+ *
+ * Zephyr's shell has no hidden flag; register the alias with no help text so it stays out of
+ * the descriptions. @p handler is the new command's own handler (not its _on_work wrapper:
+ * the alias is wrapped itself, so it runs on the work thread too).
+ *   MTSH_RENAMED(cmd_attach_list, cmd_hub_list, "hub list")
+ *   SHELL_CMD(list, NULL, NULL, cmd_attach_list_on_work)
+ */
+#define MTSH_RENAMED(alias, handler, new_name)                                               \
+	static int alias(const struct shell *sh, size_t argc, char **argv)                  \
+	{                                                                                    \
+		shell_warn(sh, "renamed: use meshtastic %s", new_name);                      \
+		return handler(sh, argc, argv);                                              \
+	}                                                                                    \
+	MTSH_DEFINE_ON_WORK(alias)
+
 /** @brief A command that stays on the shell thread, and why (one line). */
 struct mtsh_shell_thread_cmd {
 	const char *path; /* the words after `meshtastic` */

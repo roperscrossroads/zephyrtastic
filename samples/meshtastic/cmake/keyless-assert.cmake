@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0
 #
-# The keyless head's negative capability gate (ATTACHMENT-DESIGN §4, D1/D5):
-# an image built as a radio head must contain none of the code that decodes,
+# The keyless worker's negative capability gate (ATTACHMENT-DESIGN §4, D1/D5):
+# an image built as a worker must contain none of the code that decodes,
 # encrypts, signs or remembers on the identity's behalf. --gc-sections does the
 # removing; this proves it, by name, on the final ELF. Run as a post-build step
 # with -DNM=<nm> -DELF=<zephyr.elf>.
 #
-# Every pattern is a symbol PREFIX of a subsystem the head must not carry. A
+# Every pattern is a symbol PREFIX of a subsystem the worker must not carry. A
 # match names the symbol and the build fails: find who references it, the
 # reference is the bug.
 if(NOT NM OR NOT ELF)
@@ -55,6 +55,6 @@ endforeach()
 if(_hits)
   list(REMOVE_DUPLICATES _hits)
   string(REPLACE ";" "\n  " _hits_txt "${_hits}")
-  message(FATAL_ERROR "keyless-assert: a radio head image links identity code:\n  ${_hits_txt}")
+  message(FATAL_ERROR "keyless-assert: a worker image links identity code:\n  ${_hits_txt}")
 endif()
 message(STATUS "keyless-assert: ${ELF} carries no decode, crypto, NodeDB, cluster, position or admin symbols")

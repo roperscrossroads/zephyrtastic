@@ -7001,7 +7001,7 @@ static bool take_ack_to_peer(int64_t window_ms)
  * ACK to reach the air -- the channel's contention, then the frame's airtime,
  * ~200 ms on a quiet ShortTurbo channel and ~315 ms in a flood -- every frame
  * behind it waited too, and a node taking direct messages back to back filled the
- * queue and dropped (rzr4 and a brain on the bench, 2026-10-14). The reference
+ * queue and dropped (rzr4 and a hub on the bench, 2026-10-14). The reference
  * queues its ACK (ReliableRouter::sniffReceived -> sendAckNak -> sendLocal) as
  * this node already queued its NAKs and re-ACKs. Here the channel is held busy,
  * so an ACK sent from the receive thread would hold that thread for as long. */

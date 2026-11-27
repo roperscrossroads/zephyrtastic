@@ -44,12 +44,12 @@ extern "C" {
 enum meshtastic_bearer {
 	MESHTASTIC_BEARER_LORA = 0,
 	MESHTASTIC_BEARER_BLE_PEER,
-	/* A radio head (ATTACHMENT-DESIGN, D1): a remote SX1262 that forwards the
+	/* A worker (ATTACHMENT-DESIGN, D1): a remote SX1262 that forwards the
 	 * frames it hears, undecoded and tagged with the signal it saw, and holds
-	 * none of this node's keys. Its frames DID cross the air -- on the head's
+	 * none of this node's keys. Its frames DID cross the air -- on the worker's
 	 * preset -- so everything that describes RF applies to them; only the
-	 * things priced with the LOCAL modem (airtime, the ear) stay LoRa-only. */
-	MESHTASTIC_BEARER_ATTACHMENT,
+	 * things priced with the LOCAL modem (airtime, the rx-only worker) stay LoRa-only. */
+	MESHTASTIC_BEARER_WORKER,
 	/* A packet an MQTT broker delivered (downlink). It never crossed our air and is
 	 * not a wire frame: the MeshPacket waits in a pool and the queue slot carries its
 	 * index, so dedup, dispatch and relay run on the RX thread like any other frame
@@ -58,21 +58,21 @@ enum meshtastic_bearer {
 };
 
 /* "Did this frame cross the air?" -- the question the router's link-local rule
- * actually asks. LoRa and an attachment say yes; the BLE peer link says no. */
+ * actually asks. LoRa and a link say yes; the BLE peer link says no. */
 static inline bool meshtastic_bearer_is_rf(enum meshtastic_bearer b)
 {
-	return b == MESHTASTIC_BEARER_LORA || b == MESHTASTIC_BEARER_ATTACHMENT;
+	return b == MESHTASTIC_BEARER_LORA || b == MESHTASTIC_BEARER_WORKER;
 }
 
 /* Everything the RX path knows about a frame besides its bytes. The LoRa
- * callback fills it for the local radio (attach 0, the active preset); an
- * attachment's envelope fills it for a head. preset is a
+ * callback fills it for the local radio (radio 0, the active preset); an
+ * link's envelope fills it for a worker. preset is a
  * meshtastic_Config_LoRaConfig_ModemPreset value, MESHTASTIC_PRESET_UNKNOWN when
  * the bearer cannot say (the BLE peer link). */
 #define MESHTASTIC_PRESET_UNKNOWN 0xFFU
 struct meshtastic_rx_meta {
 	uint8_t bearer; /* enum meshtastic_bearer */
-	uint8_t attach; /* attachment id; 0 = this board's radio */
+	uint8_t radio; /* radio id; 0 = this board's radio */
 	uint8_t preset;
 	int16_t rssi;
 	int8_t snr;
@@ -91,12 +91,12 @@ struct meshtastic_dup_entry {
 	uint32_t ms;        /* k_uptime_get_32() when recorded, for TTL expiry */
 	uint32_t relayed_ms; /* when WE relayed it; valid only if relayed */
 	uint8_t hop_limit;  /* highest hop budget seen for this (src,id) */
-	uint8_t attach;     /* the attachment that delivered the FIRST copy (0 = local radio;
+	uint8_t radio;     /* the radio that delivered the FIRST copy (0 = local radio;
 			     * 0xFF = no longer that copy, after a hop upgrade) */
 	uint8_t relay_node; /* the first copy's relay byte: a later copy with another
 			     * relayer or hop budget is a rebroadcast, not the same air */
-	uint8_t relay_attach; /* the head we handed our relay of this (src,id) to, 0 = none/local */
-	uint32_t attach_rx_ms; /* the head's own clock of that first copy (echoed in the relay) */
+	uint8_t relay_radio; /* the worker we handed our relay of this (src,id) to, 0 = none/local */
+	uint32_t radio_rx_ms; /* the worker's own clock of that first copy (echoed in the relay) */
 	bool relayed;       /* we transmitted a relay of this (src,id) */
 };
 
@@ -179,10 +179,10 @@ struct meshtastic_workspace {
 	 * wire build does not fill 0 with the node default. Guarded by @ref lock; every
 	 * staging path resets it. */
 	bool tx_zero_hop;
-	/* The attachment the frame being built leaves by (packet.tx_attach): the
+	/* The radio the frame being built leaves by (packet.tx_radio): the
 	 * wire builders stamp an unnamed slot's channel hash under THAT radio's
 	 * preset. 0 = our own radio. Reset by every staging path. */
-	uint8_t tx_attach;
+	uint8_t tx_radio;
 	/* The sender opted out of PKC for this unicast (meshtastic_packet.no_pkc):
 	 * the wire build encrypts on the channel instead of refusing. Reset by
 	 * every staging path. */
@@ -261,10 +261,10 @@ int meshtastic_radio_rx_inject(const uint8_t *buf, uint16_t len, enum meshtastic
 int meshtastic_radio_rx_inject_mqtt(const void *mesh_packet);
 #endif
 
-/* The same, with everything the receiving radio knew: bearer, attachment id,
- * preset, rssi/snr, its uptime at reception. This is how a head's frames enter
- * the brain. meshtastic_radio_rx_inject() is this with an all-zero signal and
- * attach 0. */
+/* The same, with everything the receiving radio knew: bearer, radio id,
+ * preset, rssi/snr, its uptime at reception. This is how a worker's frames enter
+ * the hub. meshtastic_radio_rx_inject() is this with an all-zero signal and
+ * radio 0. */
 int meshtastic_radio_rx_inject_meta(const uint8_t *buf, uint16_t len,
 				    const struct meshtastic_rx_meta *meta);
 

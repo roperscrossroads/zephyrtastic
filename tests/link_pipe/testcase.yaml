@@ -1,0 +1,25 @@
+common:
+  tags:
+    - meshtastic
+    - lora_sim
+    - native_sim
+    - link
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # Layer 3 of the link test plan (ATTACHMENT-REVIEW part 2): a real hub
+  # image and real keyless worker images (sysbuild builds both), joined through
+  # the link pipe (tests/common/link_pipe). The pytest driver is the switchboard:
+  # it plays RF, carries envelopes with latency/loss/trust, reads both images.
+  meshtastic.link_pipe.native_sim:
+    sysbuild: true
+    harness: pytest
+    harness_config:
+      pytest_root:
+        - "pytest/test_link_pipe.py"
+        - "pytest/test_link_pipe_timing.py"
+        - "pytest/test_link_pipe_guard.py"
+        - "pytest/test_link_pipe_reply.py"
+    timeout: 300

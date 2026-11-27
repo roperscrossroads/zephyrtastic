@@ -44,18 +44,18 @@ int meshtastic_radio_send_wire_wait_prio(const uint8_t *pkt, uint32_t pkt_len, u
 int meshtastic_radio_send_wire_now(uint8_t *pkt, uint32_t pkt_len);
 
 /*
- * As _after, but the frame leaves through attachment @p attach (0 = this
- * board's radio, identical to _after): the brain hands it to that radio head as
- * a TX_FRAME and the head keys up on its own clock with its own CAD
- * (ATTACHMENT-P3-PLAN slice 1). -EHOSTUNREACH when that head is not ready to
+ * As _after, but the frame leaves through radio @p radio (0 = this
+ * board's radio, identical to _after): the hub hands it to that worker as
+ * a TX_FRAME and the worker keys up on its own clock with its own CAD
+ * (ATTACHMENT-P3-PLAN slice 1). -EHOSTUNREACH when that worker is not ready to
  * transmit (unknown, link down, or it reports itself receive-only).
  */
 int meshtastic_radio_send_wire_after_on(uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
-					uint32_t delay_ms, uint8_t attach);
-/* The blocking twin: returns when the frame was handed to the head (its
+					uint32_t delay_ms, uint8_t radio);
+/* The blocking twin: returns when the frame was handed to the worker (its
  * TX_RESULT arrives later), or -EAGAIN on @p timeout. */
 int meshtastic_radio_send_wire_wait_prio_on(const uint8_t *pkt, uint32_t pkt_len, uint8_t tier,
-					    k_timeout_t timeout, uint8_t attach);
+					    k_timeout_t timeout, uint8_t radio);
 
 /**
  * @brief "Not now" — meshtastic_radio_send_wire_now()'s answer when the air is in use.

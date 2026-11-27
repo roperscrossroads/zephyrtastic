@@ -174,15 +174,15 @@ enum meshtastic_event_type {
 	MESHTASTIC_EVENT_METRICS_ERROR,
 };
 
-/** tx_attach value: every radio this node has (its own, and one head per other preset). */
-#define MESHTASTIC_ATTACH_ALL 0xFFU
-/** tx_attach value: this board's own radio, and nothing else may choose otherwise. 0 also
+/** tx_radio value: every radio this node has (its own, and one worker per other preset). */
+#define MESHTASTIC_RADIO_ALL 0xFFU
+/** tx_radio value: this board's own radio, and nothing else may choose otherwise. 0 also
  * means the own radio, but as a default the send path may replace (a unicast goes to the
  * radio its peer was last heard on). */
-#define MESHTASTIC_ATTACH_OWN 0xFEU
-/** The tx_attach of a reply to something heard on @p rx_attach: that same radio. */
-#define MESHTASTIC_REPLY_ATTACH(rx_attach) \
-	(((rx_attach) == 0U) ? MESHTASTIC_ATTACH_OWN : (uint8_t)(rx_attach))
+#define MESHTASTIC_RADIO_OWN 0xFEU
+/** The tx_radio of a reply to something heard on @p rx_radio: that same radio. */
+#define MESHTASTIC_REPLY_RADIO(rx_radio) \
+	(((rx_radio) == 0U) ? MESHTASTIC_RADIO_OWN : (uint8_t)(rx_radio))
 
 /**
  * @brief Decoded Meshtastic packet — the public API boundary adapter.
@@ -233,30 +233,30 @@ struct meshtastic_packet {
 	/** Initial hop limit. */
 	uint8_t hop_start;
 	/**
-	 * The attachment this frame was heard on: 0 = this board's own radio, else
-	 * a radio head's id in the brain's table. What a frame teaches about RF
+	 * The radio this frame was heard on: 0 = this board's own radio, else
+	 * a worker's id in the hub's table. What a frame teaches about RF
 	 * topology (next hops, neighbours) is true for THAT radio only.
 	 */
-	uint8_t rx_attach;
+	uint8_t rx_radio;
 	/**
 	 * The modem preset this frame was heard on, plus one
 	 * (1 + meshtastic_Config_LoRaConfig_ModemPreset); 0 when it did not come
-	 * off a radio or the bearer cannot say. On a node with radio heads this
+	 * off a radio or the bearer cannot say. On a node with workers this
 	 * is what tells one radio's traffic from another's.
 	 */
 	uint8_t rx_heard_on;
 	/**
-	 * The attachment this frame leaves by: 0 = this board's own radio, else a
-	 * radio head's id. A reply sets it from the request's rx_attach so it goes
+	 * The radio this frame leaves by: 0 = this board's own radio, else a
+	 * worker's id. A reply sets it from the request's rx_radio so it goes
 	 * back out the radio -- and on the preset -- the request came in on
-	 * (ATTACHMENT-P3-PLAN slice 2). A head that is down or receive-only makes
+	 * (ATTACHMENT-P3-PLAN slice 2). A worker that is down or receive-only makes
 	 * the send fail (-EHOSTUNREACH): a reply on another preset is noise.
 	 *
-	 * MESHTASTIC_ATTACH_ALL: every radio -- this board's own, and one head on
+	 * MESHTASTIC_RADIO_ALL: every radio -- this board's own, and one worker on
 	 * each other preset the node covers. What a node says to everyone (its
 	 * NodeInfo and position beacons) is said on every preset it is on.
 	 */
-	uint8_t tx_attach;
+	uint8_t tx_radio;
 	/** On-air channel hash from the wire header. */
 	uint8_t channel;
 	/**
@@ -337,14 +337,14 @@ struct meshtastic_status {
 	uint32_t rx_decode_bad;
 	/** Frames the receive queue refused (full), from every source. */
 	uint32_t rx_dropped;
-	/** Of rx_dropped, the frames another bearer injected (a head's, over BLE). */
+	/** Of rx_dropped, the frames another bearer injected (a worker's, over BLE). */
 	uint32_t rx_dropped_injected;
 	/** Most frames the receive queue has held at once since boot or `sched reset`;
 	 *  CONFIG_MESHTASTIC_RX_QUEUE_DEPTH means it has been full. */
 	uint32_t rx_queue_peak;
 	uint32_t rx_rearm_failures;
 	/** Our own transmissions heard back through another of our radios (an
-	 *  attachment): counted, never treated as an echo. 0 on a single-radio node. */
+	 *  link): counted, never treated as an echo. 0 on a single-radio node. */
 	uint32_t self_heard;
 	uint32_t last_rx_from;
 	int16_t last_rssi;

@@ -134,10 +134,10 @@ static void text_inbox_print(const struct shell *sh, const struct meshtastic_tex
 		on = meshtastic_preset_display_name(
 			(meshtastic_Config_LoRaConfig_ModemPreset)(e->rx_heard_on - 1U), true);
 	}
-	if (e->rx_attach == 0U) {
+	if (e->rx_radio == 0U) {
 		snprintk(via, sizeof(via), "own");
 	} else {
-		snprintk(via, sizeof(via), "head %u", e->rx_attach);
+		snprintk(via, sizeof(via), "worker %u", e->rx_radio);
 	}
 	for (size_t i = 0; i <= e->len; i++) {
 		unsigned char c = (unsigned char)e->text[i];

@@ -129,7 +129,7 @@ ZTEST(text_inbox, test_a_broadcast_text_is_kept_with_how_it_arrived)
 	zassert_equal(e.to, MESHTASTIC_NODE_BROADCAST);
 	zassert_equal(e.id, 0x71000001U);
 	zassert_equal(e.channel_index, meshtastic_channels_primary_index());
-	zassert_equal(e.rx_attach, 0U, "heard on this board's own radio");
+	zassert_equal(e.rx_radio, 0U, "heard on this board's own radio");
 	zassert_equal(e.rx_heard_on, 1U + meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST,
 		      "heard on the radio's preset, LongFast: got %u", e.rx_heard_on);
 	zassert_equal(e.hops, 2U, "hop_start 3, hop_limit 1");

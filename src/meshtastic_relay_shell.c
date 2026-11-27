@@ -61,7 +61,7 @@ static int cmd_relay_dir(const struct shell *sh, size_t argc, char **argv)
 		if (strcmp(argv[1], relay_dir_names[i]) == 0) {
 			ret = meshtastic_relay_set_direction((enum meshtastic_relay_dir)i);
 			if (ret == -ENOTSUP) {
-				shell_error(sh, "%s needs an ear that transmits (not in v1)",
+				shell_error(sh, "%s needs a worker that transmits (not in v1)",
 					    argv[1]);
 			} else if (ret < 0) {
 				shell_error(sh, "failed (%d)", ret);

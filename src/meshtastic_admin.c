@@ -127,7 +127,7 @@ static struct admin_ctx {
 	uint8_t hop_limit;     /* the request's hop fields: a remote reply's hop */
 	uint8_t hop_start;     /* limit is derived from them, as the reference's */
 	bool remote;	       /* true: reply over the mesh, not PhoneAPI */
-	uint8_t rx_attach;     /* the radio the request came in on: the answer leaves by it */
+	uint8_t rx_radio;     /* the radio the request came in on: the answer leaves by it */
 	bool pki_encrypted; /* the request was PKC: so is the answer (wire hash 0, not index 0) */
 } admin_cur;
 
@@ -207,7 +207,7 @@ static void admin_reboot_work_fn(struct k_work *work)
 
 /* What lives outside the config store, which meshtastic_settings_wipe() empties
  * (agents-ls39.1.5). A factory reset clears it too: the roles this node remembers
- * (the intents registry: peer target, brain, heads, ear, courier, relay, pinned
+ * (the intents registry: peer target, hub, workers, rx-only worker, courier, relay, pinned
  * presets, cluster), the Sparkplug broker and its login (mtspb), the bench LED
  * (mtled); a full device reset also the stored node id (mtid), which a new key
  * re-derives. One list, so agents-ls39.4.3's persistence registry can take it over.
@@ -387,7 +387,7 @@ static void admin_emit_reply(meshtastic_AdminMessage *resp)
 	pkt.to = admin_cur.from;
 	pkt.id = meshtastic_allocate_packet_id();
 	pkt.request_id = admin_cur.id;
-	pkt.tx_attach = MESHTASTIC_REPLY_ATTACH(admin_cur.rx_attach); /* back out the radio the request came in on */
+	pkt.tx_radio = MESHTASTIC_REPLY_RADIO(admin_cur.rx_radio); /* back out the radio the request came in on */
 	pkt.payload = buf;
 	pkt.payload_len = stream.bytes_written;
 
@@ -427,7 +427,7 @@ static void admin_ack_write(meshtastic_Routing_Error err)
 		(void)meshtastic_routing_answer(admin_cur.from, admin_cur.id,
 						admin_cur.channel_index, admin_cur.hop_limit,
 						admin_cur.hop_start, admin_cur.want_ack, err,
-						admin_cur.rx_attach, admin_cur.pki_encrypted);
+						admin_cur.rx_radio, admin_cur.pki_encrypted);
 		return;
 	}
 
@@ -444,7 +444,7 @@ static void admin_ack_write(meshtastic_Routing_Error err)
 	pkt.to = admin_cur.from;
 	pkt.id = meshtastic_allocate_packet_id();
 	pkt.request_id = admin_cur.id;
-	pkt.tx_attach = MESHTASTIC_REPLY_ATTACH(admin_cur.rx_attach); /* back out the radio the request came in on */
+	pkt.tx_radio = MESHTASTIC_REPLY_RADIO(admin_cur.rx_radio); /* back out the radio the request came in on */
 	pkt.channel_index = 0U;
 	pkt.payload = buf;
 	pkt.payload_len = stream.bytes_written;
@@ -2083,7 +2083,7 @@ bool meshtastic_admin_handle_remote(const struct meshtastic_packet *pkt,
 				      .hop_limit = hop_limit,
 				      .hop_start = hop_start,
 				      .remote = true,
-				      .rx_attach = pkt->rx_attach,
+				      .rx_radio = pkt->rx_radio,
 				      .pki_encrypted = pki_encrypted,
 			      },
 			      payload, payload_len);

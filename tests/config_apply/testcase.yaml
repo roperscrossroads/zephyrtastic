@@ -1,4 +1,4 @@
-# agents-ls39.1.7: what a config write reaches. A live-only preset (a head's
+# agents-ls39.1.7: what a config write reaches. A live-only preset (a worker's
 # SET_PRESET, a hop, the scanner) must survive a write to another section.
 common:
   tags:

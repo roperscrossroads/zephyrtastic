@@ -379,8 +379,8 @@ SHELL_SUBCMD_ADD((meshtastic), version, NULL,
 		 SHELL_HELP("Show build id / firmware version.", NULL),
 		 cmd_version_on_work, 0, 0);
 SHELL_SUBCMD_ADD((meshtastic), intents, NULL,
-		 SHELL_HELP("The roles this node remembers across reboots (peer target, brain, "
-		 "heads, ear, courier arm, relay, pinned presets, cluster document); "
+		 SHELL_HELP("The roles this node remembers across reboots (peer target, hub, "
+		 "workers, rx-only worker, courier arm, relay, pinned presets, cluster document); "
 		 "`clear` forgets them all and reboots. Identity, radio, channels and "
 		 "owner are untouched.",
 		 "[clear]"),

@@ -144,7 +144,7 @@ int meshtastic_send_node_info_ex(uint32_t dest, bool want_response, uint32_t res
 	}
 	if (dest == MESHTASTIC_NODE_BROADCAST) {
 		/* Who we are, said to everyone: on every preset we are on. */
-		packet.tx_attach = MESHTASTIC_ATTACH_ALL;
+		packet.tx_radio = MESHTASTIC_RADIO_ALL;
 	}
 
 	return meshtastic_send_packet(&packet, K_FOREVER);
@@ -170,14 +170,14 @@ int meshtastic_send_node_info(uint32_t dest)
  * Returns -EAGAIN when the cooldown suppresses the request; callers treat that
  * as success-equivalent (we already asked this peer recently).
  */
-int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t attach);
+int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t radio);
 
 int meshtastic_nodeinfo_request(uint32_t peer)
 {
 	return meshtastic_nodeinfo_request_via(peer, 0U);
 }
 
-int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t attach)
+int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t radio)
 {
 	uint8_t payload[MESHTASTIC_MAX_PAYLOAD_LEN];
 	struct meshtastic_packet packet;
@@ -216,7 +216,7 @@ int meshtastic_nodeinfo_request_via(uint32_t peer, uint8_t attach)
 
 	/* K_NO_WAIT: callers run on the RX thread, where a blocking send would
 	 * stall inbound processing until the TX queue drains. */
-	packet.tx_attach = MESHTASTIC_REPLY_ATTACH(attach);
+	packet.tx_radio = MESHTASTIC_REPLY_RADIO(radio);
 	return meshtastic_send_packet(&packet, K_NO_WAIT);
 }
 
@@ -319,13 +319,13 @@ static void meshtastic_module_nodeinfo_on_packet(const struct meshtastic_packet 
 			 * we heard it on (the reference's sendOurNodeInfo(from, true,
 			 * p->channel)): a request built on the primary leaves under the
 			 * primary's hash, and a NAMED primary keeps its name's hash on
-			 * every preset -- through a head on MediumFast, a stock node
+			 * every preset -- through a worker on MediumFast, a stock node
 			 * there logged "No channel found for decoding, hash 0xe" and
 			 * never learned us (2026-09-29, rxri / pug2). */
 			if (packet->channel_index < MESHTASTIC_MAX_CHANNELS) {
 				nodeinfo_packet.channel_index = packet->channel_index;
 			}
-			nodeinfo_packet.tx_attach = MESHTASTIC_REPLY_ATTACH(packet->rx_attach);
+			nodeinfo_packet.tx_radio = MESHTASTIC_REPLY_RADIO(packet->rx_radio);
 			(void)meshtastic_send_packet(&nodeinfo_packet, K_NO_WAIT);
 		}
 	}

@@ -10,8 +10,8 @@ common:
     - native_sim/native/64
 tests:
   # The cross-preset relay's bench pair as two images (sysbuild builds both):
-  # a real ear and a real receiving half, joined through the attachment pipe.
-  # The pytest driver is the hub, as for tests/attachment_pipe.
+  # a real rx-only worker and a real receiving half, joined through the link pipe.
+  # The pytest driver is the switchboard, as for tests/link_pipe.
   meshtastic.relay_pipe.native_sim:
     sysbuild: true
     harness: pytest

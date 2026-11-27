@@ -42,7 +42,7 @@ void meshtastic_text_inbox_record(const struct meshtastic_packet *packet)
 	e->rssi = packet->rssi;
 	e->snr = packet->snr;
 	e->channel_index = packet->channel_index;
-	e->rx_attach = packet->rx_attach;
+	e->rx_radio = packet->rx_radio;
 	e->rx_heard_on = packet->rx_heard_on;
 	e->hops = packet->hop_start >= packet->hop_limit
 			  ? (uint8_t)(packet->hop_start - packet->hop_limit)

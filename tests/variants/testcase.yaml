@@ -160,30 +160,30 @@ tests:
     extra_configs:
       - CONFIG_MESHTASTIC_TEXT_INBOX=y
 
-  # The relay's ear, as its image is built: transmit compiled out. That shares
+  # The relay's rx-only worker, as its image is built: transmit compiled out. That shares
   # the scanner's RX-only branch in meshtastic_radio_send_wire_now(), which no
   # -Werror build had compiled until this scenario (its first run found two
   # locals unused in that branch).
-  meshtastic.variants.relay_ear.native_sim:
+  meshtastic.variants.worker_rx.native_sim:
     extra_configs:
-      - CONFIG_MESHTASTIC_RELAY_EAR=y
+      - CONFIG_MESHTASTIC_WORKER_RX=y
 
-  # The brain of a multi-radio node (ATTACHMENT-DESIGN): accepts radio heads'
+  # The hub of a multi-radio node (ATTACHMENT-DESIGN): accepts workers'
   # envelopes over the peer link; here without BLE, so only that it boots.
-  # Note the baseline has no shell: `meshtastic attach` is compiled only by the
-  # hardware images (the class-2 brain build caught an include the sweep could
+  # Note the baseline has no shell: `meshtastic hub` is compiled only by the
+  # hardware images (the class-2 hub build caught an include the sweep could
   # not, 2026-09-28).
-  meshtastic.variants.attachment_brain.native_sim:
+  meshtastic.variants.hub.native_sim:
     extra_configs:
-      - CONFIG_MESHTASTIC_ATTACHMENT_BRAIN=y
+      - CONFIG_MESHTASTIC_HUB=y
 
-  # The keyless radio head (ATTACHMENT-DESIGN S5): the exclusion list of
-  # overlay-attachment-head.conf, minus what the baseline already lacks. It
-  # boots with no router linked; the head test scenario runs the same shape with
+  # The keyless worker (ATTACHMENT-DESIGN S5): the exclusion list of
+  # overlay-worker.conf, minus what the baseline already lacks. It
+  # boots with no router linked; the worker test scenario runs the same shape with
   # the keyless assert on its ELF.
-  meshtastic.variants.attachment_head.native_sim:
+  meshtastic.variants.worker.native_sim:
     extra_configs:
-      - CONFIG_MESHTASTIC_ATTACHMENT_HEAD=y
+      - CONFIG_MESHTASTIC_WORKER=y
       - CONFIG_MESHTASTIC_NODEDB=n
       - CONFIG_MESHTASTIC_CLUSTER=n
       - CONFIG_MESHTASTIC_POSITION=n

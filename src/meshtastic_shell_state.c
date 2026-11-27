@@ -44,11 +44,11 @@
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 #include "meshtastic_admin.h"
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-#include "meshtastic_attachment.h"
+#if defined(CONFIG_MESHTASTIC_HUB)
+#include "meshtastic_hub.h"
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-#include "meshtastic_attachment_head.h"
+#if defined(CONFIG_MESHTASTIC_WORKER)
+#include "meshtastic_worker.h"
 #endif
 #if defined(CONFIG_MESHTASTIC_CLUSTER)
 #include "meshtastic_cluster.h"
@@ -139,11 +139,14 @@ static void st_key(struct st *s, const meshtastic_Channel *ch)
 static void st_features(struct st *s)
 {
 	static const char *const feat[] = {
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
-		"brain",
+#if defined(CONFIG_MESHTASTIC_HUB)
+		"hub",
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-		"head",
+#if defined(CONFIG_MESHTASTIC_WORKER)
+		"worker",
+#endif
+#if defined(CONFIG_MESHTASTIC_WORKER_RX)
+		"worker-rx",
 #endif
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 		"scanner",
@@ -210,7 +213,7 @@ static void st_radio(struct st *s)
 		const meshtastic_Config_LoRaConfig *l = &cfg.payload_variant.lora;
 
 		/* preset is what is STORED and applies at boot; live is what the radio is on
-		 * now (a brain may have retuned a head, a scanner may be hopping). */
+		 * now (a hub may have retuned a worker, a scanner may be hopping). */
 		st_out(s, ",\"lora\":{\"preset\":%d,\"use_preset\":%d,\"live\":%d,", (int)l->modem_preset,
 		       l->use_preset ? 1 : 0, (int)mt.modem_preset);
 		/* chip: did the radio answer at boot (1), not (0), cannot say (-1). */
@@ -262,20 +265,20 @@ static void st_channels(struct st *s)
 
 static void st_roles(struct st *s)
 {
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_BRAIN)
+#if defined(CONFIG_MESHTASTIC_HUB)
 	{
-		struct meshtastic_attachment_info a;
+		struct meshtastic_hub_info a;
 		bool first = true;
 
-		st_out(s, ",\"brain\":{\"max\":%u,\"heads\":[",
-		       (unsigned int)CONFIG_MESHTASTIC_ATTACHMENT_MAX);
-		for (uint8_t id = 1U; id <= CONFIG_MESHTASTIC_ATTACHMENT_MAX; id++) {
-			if (!meshtastic_attachment_get(id, &a)) {
+		st_out(s, ",\"hub\":{\"max\":%u,\"workers\":[",
+		       (unsigned int)CONFIG_MESHTASTIC_HUB_WORKERS_MAX);
+		for (uint8_t id = 1U; id <= CONFIG_MESHTASTIC_HUB_WORKERS_MAX; id++) {
+			if (!meshtastic_hub_get(id, &a)) {
 				continue;
 			}
-			uint8_t w = meshtastic_attachment_wanted_preset(a.node);
+			uint8_t w = meshtastic_hub_wanted_preset(a.node);
 
-			/* p is the preset the head reports, w the one stored for it. */
+			/* a is the radio id, p the preset the worker reports, w the one stored for it. */
 			st_out(s, "%s{\"a\":%u,\"node\":\"0x%08x\",\"p\":%d,", first ? "" : ",",
 			       (unsigned int)a.id, a.node,
 			       a.preset == MESHTASTIC_PRESET_UNKNOWN ? -1 : (int)a.preset);
@@ -286,8 +289,8 @@ static void st_roles(struct st *s)
 		st_out(s, "]}");
 	}
 #endif
-#if defined(CONFIG_MESHTASTIC_ATTACHMENT_HEAD)
-	st_out(s, ",\"head\":{\"brain\":\"0x%08x\"}", meshtastic_attachment_head_get_brain());
+#if defined(CONFIG_MESHTASTIC_WORKER)
+	st_out(s, ",\"worker\":{\"hub\":\"0x%08x\"}", meshtastic_worker_get_hub());
 #endif
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 	{
@@ -315,7 +318,7 @@ static void st_roles(struct st *s)
 }
 
 /* The receive queue: its depth, its high-water mark and what it refused (all
- * sources, and of them the frames a head injected). What sizes the queue. */
+ * sources, and of them the frames a worker injected). What sizes the queue. */
 static void st_rxq(struct st *s)
 {
 	struct meshtastic_status status;

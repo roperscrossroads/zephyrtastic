@@ -27,8 +27,8 @@ config MESHTASTIC_RX_QUEUE_DEPTH
 	range 2 16
 	help
 	  Number of raw LoRa frames buffered between the driver receive
-	  callback and the processing thread; frames a head injects over
-	  BLE on a brain go through the same queue.  Each slot consumes
+	  callback and the processing thread; frames a worker injects over
+	  BLE on a hub go through the same queue.  Each slot consumes
 	  about 260 bytes of RAM.  Size it from what the node reports
 	  (`meshtastic state` "rxq", `meshtastic status`): the high-water
 	  mark, and rx_dropped split by source.  A peak that reaches the
@@ -195,8 +195,8 @@ config MESHTASTIC_TX_HOLD_UNPROVISIONED
 	  Off by default on native_sim (ARCH_POSIX): the sim suites boot fresh nodes
 	  and expect them to transmit; tests/firstboot turns it on to prove the hold.
 
-	  Not applied to a keyless attachment head: it never originates, and its
-	  brain sets its preset without touching this section.
+	  Not applied to a keyless link worker: it never originates, and its
+	  hub sets its preset without touching this section.
 
 config MESHTASTIC_DEFAULT_REBROADCAST_MODE
 	int "Rebroadcast mode seeded on a fresh node"
