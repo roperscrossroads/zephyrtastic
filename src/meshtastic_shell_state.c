@@ -25,6 +25,7 @@
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/util.h>
 
+#include <zephyr/meshtastic/fem.h>
 #include <zephyr/meshtastic/lfclk.h>
 #include <zephyr/meshtastic/meshtastic.h>
 
@@ -171,6 +172,35 @@ static void st_features(struct st *s)
 	st_out(s, "]");
 }
 
+static void st_fem(struct st *s)
+{
+	const char *name = meshtastic_radio_fem_name();
+	char lower[16];
+	size_t i;
+
+	switch (meshtastic_radio_fem_state()) {
+	case MESHTASTIC_FEM_STATE_DETECTED:
+		if (name == NULL) {
+			break;
+		}
+		for (i = 0; (name[i] != '\0') && (i < sizeof(lower) - 1U); i++) {
+			lower[i] = (char)(((name[i] >= 'A') && (name[i] <= 'Z')) ? name[i] + 32 : name[i]);
+		}
+		lower[i] = '\0';
+		st_out(s, "\"fem\":\"%s\",", lower);
+		return;
+	case MESHTASTIC_FEM_STATE_FAILED:
+		st_out(s, "\"fem\":\"failed\",");
+		return;
+	case MESHTASTIC_FEM_STATE_MISMATCH:
+		st_out(s, "\"fem\":\"mismatch\",");
+		return;
+	default:
+		break;
+	}
+	st_out(s, "\"fem\":\"none\",");
+}
+
 static void st_radio(struct st *s)
 {
 	meshtastic_Config cfg;
@@ -185,8 +215,14 @@ static void st_radio(struct st *s)
 		/* chip: did the radio answer at boot (1), not (0), cannot say (-1). */
 		enum meshtastic_radio_tristate chip = meshtastic_radio_chip_present();
 
-		st_out(s, "\"region\":%d,\"pwr\":%d,\"tx\":%d,\"chip\":%d}", (int)l->region,
-		       (int)l->tx_power, l->tx_enabled ? 1 : 0,
+		st_out(s, "\"region\":%d,\"pwr\":%d,\"tx\":%d,", (int)l->region, (int)l->tx_power,
+		       l->tx_enabled ? 1 : 0);
+		/* fem: the front end detected at boot: "none" (the hardware has none),
+		 * the part's name in lower case, "failed" (it has one and detection could
+		 * not say which) or "mismatch" (detection disagreed with the one part the
+		 * board can carry; that part is used). */
+		st_fem(s);
+		st_out(s, "\"chip\":%d}",
 		       chip == MESHTASTIC_RADIO_TRI_ON ? 1 : (chip == MESHTASTIC_RADIO_TRI_OFF ? 0 : -1));
 	}
 	if (meshtastic_config_store_get_config(meshtastic_Config_device_tag, &cfg) == 0) {
