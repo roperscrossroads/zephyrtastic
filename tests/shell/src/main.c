@@ -2631,3 +2631,53 @@ ZTEST(meshtastic_shell, test_rf_profile_of_with_a_switchable_lna)
 	zassert_ok(meshtastic_rf_profile_set(&l, "crowded"));
 	zassert_equal(17, l.tx_power);
 }
+
+#if defined(CONFIG_MESHTASTIC_MQTT) && defined(CONFIG_MESHTASTIC_SPARKPLUG)
+/* A gateway's uplinks: "feat" names what is compiled in, "uplink" says how each is doing, and
+ * of a broker only its host name ever appears: a login set on the Edge Node, its port and its
+ * topics stay off the line. A host as long as the setting allows goes out whole. */
+ZTEST(meshtastic_shell, test_state_reports_the_uplinks_and_never_a_login)
+{
+	/* 63 characters, the longest broker the setting takes. */
+	static const char host[] =
+		"a-broker-name-as-long-as-the-setting-allows-it-example0.invalid";
+	const char *out = NULL;
+	char json[1536];
+	char want[160];
+
+	BUILD_ASSERT(sizeof(host) == 64U, "the longest broker setting");
+	/* The Edge Node loads its settings 3 s after boot; until then its host is empty. */
+	while (k_uptime_get() < 4000) {
+		k_msleep(100);
+	}
+	state_json(json, sizeof(json));
+	zassert_not_null(strstr(json, "\"mqtt\",\"sparkplug\"]"), "%s", json);
+	zassert_is_null(strstr(json, "\"wifi\""), "no WiFi in this build: %s", json);
+	/* The bridge starts only when the app brings a network up, which this suite does not. */
+	zassert_not_null(strstr(json, ",\"uplink\":{\"mqtt\":{\"on\":0,\"px\":0,\"c\":0,"
+				      "\"host\":\"\",\"err\":0},"),
+			 "%s", json);
+	zassert_not_null(strstr(json, "\"sparkplug\":{\"on\":1,\"c\":0,\"tls\":0,"
+				      "\"host\":\"broker.invalid\",\"err\":"),
+			 "%s", json);
+
+	zassert_ok(run_cmd("sparkplug set user edge-login-name", &out), "%s", out);
+	zassert_ok(run_cmd("sparkplug set password not-for-the-line", &out), "%s", out);
+	snprintk(want, sizeof(want), "sparkplug set broker %s", host);
+	zassert_ok(run_cmd(want, &out), "%s", out);
+	state_json(json, sizeof(json));
+	snprintk(want, sizeof(want), "\"sparkplug\":{\"on\":1,\"c\":0,\"tls\":0,\"host\":\"%s\",",
+		 host);
+	zassert_not_null(strstr(json, want), "%s", json);
+	zassert_is_null(strstr(json, "edge-login-name"), "the login: %s", json);
+	zassert_is_null(strstr(json, "not-for-the-line"), "the password: %s", json);
+	zassert_is_null(strstr(json, "1883"), "the port: %s", json);
+	zassert_is_null(strstr(json, "spBv1.0"), "a topic: %s", json);
+	TC_PRINT("state line with both uplinks and a 63-character broker: %u bytes\n",
+		 (unsigned int)strlen(json));
+
+	zassert_ok(run_cmd("sparkplug unset broker", &out), "%s", out);
+	zassert_ok(run_cmd("sparkplug unset user", &out), "%s", out);
+	zassert_ok(run_cmd("sparkplug unset password", &out), "%s", out);
+}
+#endif

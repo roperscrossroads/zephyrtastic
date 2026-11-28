@@ -148,3 +148,32 @@ tests:
   meshtastic.shell.tx_hold.native_sim:
     extra_configs:
       - CONFIG_MESHTASTIC_TX_HOLD_UNPROVISIONED=y
+
+  # A gateway's uplinks in `meshtastic state`: the MQTT bridge and the Sparkplug Edge Node
+  # compiled in (on the host's sockets, as tests/sparkplug's transport build), so "feat" names
+  # them and "uplink" reports each. The broker is a name that never resolves (.invalid), so the
+  # Edge Node's attempts touch nothing on the build host.
+  meshtastic.shell.uplink.native_sim:
+    extra_configs:
+      - CONFIG_MESHTASTIC_SETTINGS=y
+      - CONFIG_SETTINGS=y
+      - CONFIG_FLASH=y
+      - CONFIG_FLASH_MAP=y
+      - CONFIG_NVS=y
+      - CONFIG_SETTINGS_NVS=y
+      - CONFIG_NETWORKING=y
+      - CONFIG_NET_DRIVERS=y
+      - CONFIG_NET_SOCKETS=y
+      - CONFIG_NET_SOCKETS_OFFLOAD=y
+      - CONFIG_NET_NATIVE_OFFLOADED_SOCKETS=y
+      - CONFIG_ETH_NATIVE_TAP=n
+      - CONFIG_NET_IPV4=y
+      - CONFIG_NET_IPV6=n
+      - CONFIG_NET_TCP=y
+      - CONFIG_DNS_RESOLVER=y
+      - CONFIG_NET_MGMT=y
+      - CONFIG_NET_MGMT_EVENT=y
+      - CONFIG_MQTT_LIB=y
+      - CONFIG_MESHTASTIC_MQTT=y
+      - CONFIG_MESHTASTIC_SPARKPLUG=y
+      - CONFIG_MESHTASTIC_SPARKPLUG_BROKER="broker.invalid"
