@@ -103,6 +103,9 @@ static void mqtt_drain_queue(int max_publish);
  * drive WiFi reconnects. */
 static const uint16_t mqtt_backoff_ladder_s[] = {1U, 8U, 32U, 64U, 240U};
 static uint8_t mqtt_backoff_step;
+/* Failed resolves, connects and publishes since boot (`meshtastic state`). The MQTT thread
+ * is the only writer. */
+static uint32_t mqtt_errors;
 static volatile bool mqtt_backoff_skip;
 
 static uint32_t mqtt_backoff_next_ms(void)
@@ -242,6 +245,7 @@ static int mqtt_do_publish(const char *topic, const uint8_t *payload, size_t len
 
 	ret = mqtt_publish(&broker.client, &param);
 	if (ret != 0) {
+		mqtt_errors++;
 		LOG_WRN("mqtt_publish failed (%d)", ret);
 	} else {
 		LOG_DBG("MQTT published %s (%zu bytes)", topic, len);
@@ -638,6 +642,7 @@ static void mqtt_thread_fn(void *p1, void *p2, void *p3)
 			if (ret != 0) {
 				uint32_t backoff_ms = mqtt_backoff_next_ms();
 
+				mqtt_errors++;
 				LOG_DBG("MQTT connect failed (%d), retry in %u ms", ret,
 					backoff_ms);
 				mqtt_backoff_sleep_ms(backoff_ms);
@@ -691,6 +696,11 @@ void meshtastic_mqtt_broker_notify(void)
 bool meshtastic_mqtt_broker_connected(void)
 {
 	return broker.connected;
+}
+
+uint32_t meshtastic_mqtt_broker_errors(void)
+{
+	return mqtt_errors;
 }
 
 int meshtastic_mqtt_broker_start(void)

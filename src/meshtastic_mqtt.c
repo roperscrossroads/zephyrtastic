@@ -796,6 +796,24 @@ void meshtastic_mqtt_on_rx(const struct meshtastic_packet *packet, const uint8_t
 #endif
 }
 
+BUILD_ASSERT(sizeof(((struct meshtastic_mqtt_uplink *)0)->host) >= sizeof(mqtt_ctx.cfg.host),
+	     "the state line's copy of the broker host is never cut short");
+
+void meshtastic_mqtt_uplink_get(struct meshtastic_mqtt_uplink *out)
+{
+	/* cfg is resolved once at init and never changes while the bridge runs. */
+	memset(out, 0, sizeof(*out));
+	out->on = mqtt_ctx.started;
+	out->proxy = mqtt_ctx.proxy;
+	out->connected = meshtastic_mqtt_is_connected();
+#if defined(CONFIG_MESHTASTIC_MQTT_BROKER)
+	out->errors = meshtastic_mqtt_broker_errors();
+#endif
+	if (mqtt_ctx.started && !mqtt_ctx.proxy) {
+		strncpy(out->host, mqtt_ctx.cfg.host, sizeof(out->host) - 1U);
+	}
+}
+
 bool meshtastic_mqtt_is_connected(void)
 {
 	/* A broker session. The proxy has no connection of its own to report: whether

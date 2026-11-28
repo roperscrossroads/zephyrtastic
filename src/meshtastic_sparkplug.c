@@ -84,6 +84,7 @@ static struct mt_spb_node snap[SNAP_MAX];
 static bool connected;
 static uint32_t sessions;
 static int last_err;
+static uint32_t connect_failures;       /* resolves and connects that failed, refused sessions */
 
 /* Stopping on purpose: the request, the thread's answer, and its wake-up from a backoff. */
 static atomic_t stop_req;
@@ -107,6 +108,9 @@ struct spb_cfg {
 	char user[SPB_CRED_MAX];        /* empty: no login */
 	char pass[SPB_CRED_MAX];
 };
+
+/* The state line's copy of the broker setting is never cut short. */
+BUILD_ASSERT(sizeof(((struct meshtastic_sparkplug_uplink *)0)->host) >= SPB_HOST_MAX);
 
 static K_MUTEX_DEFINE(cfg_lock);
 static struct spb_cfg cfg;              /* what the settings say (under cfg_lock) */
@@ -629,9 +633,13 @@ static void spb_thread_fn(void *a, void *b, void *c)
 			mt_spb_disconnected(&sess);
 			/* refused (a login the broker does not take) or no CONNACK: back off as for a
 			 * failed connect, not every 2 s for ever */
+			if (sessions == before) {
+				connect_failures++;
+			}
 			backoff = sessions != before ? 2U : MIN(backoff * 2, 60U);
 		} else {
 			last_err = rc;
+			connect_failures++;
 			backoff = MIN(backoff * 2, 60U);
 		}
 		if (atomic_get(&restart_req)) {
@@ -641,6 +649,18 @@ static void spb_thread_fn(void *a, void *b, void *c)
 			(void)k_sem_take(&wake_sem, K_SECONDS(backoff));
 		}
 	}
+}
+
+void meshtastic_sparkplug_uplink_get(struct meshtastic_sparkplug_uplink *out)
+{
+	memset(out, 0, sizeof(*out));
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	strncpy(out->host, cfg.broker, sizeof(out->host) - 1U);
+	k_mutex_unlock(&cfg_lock);
+	out->on = !stopped;
+	out->connected = connected;
+	out->tls = IS_ENABLED(CONFIG_MESHTASTIC_SPARKPLUG_TLS);
+	out->errors = connect_failures + sess.stats.publish_errors + sess.stats.encode_errors;
 }
 
 static int meshtastic_sparkplug_init(void)

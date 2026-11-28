@@ -30,6 +30,18 @@ void meshtastic_mqtt_proxy_receive(const meshtastic_MqttClientProxyMessage *msg)
 /** True while the MQTT client has a live broker connection. */
 bool meshtastic_mqtt_is_connected(void);
 
+/** The bridge's uplink as `meshtastic state` reports it. The broker's host name only: never
+ * the port, the login or the root topic. */
+struct meshtastic_mqtt_uplink {
+	bool on;            /**< the bridge started (ModuleConfig.mqtt enabled it) */
+	bool proxy;         /**< through the connected client, not a broker connection */
+	bool connected;     /**< a live broker connection (never in proxy mode) */
+	uint32_t errors;    /**< failed resolves, connects and publishes since boot */
+	char host[64];
+};
+
+void meshtastic_mqtt_uplink_get(struct meshtastic_mqtt_uplink *out);
+
 /**
  * DontMqttMeBro consent gate (parity: mqtt #1) — pure, no socket/networking
  * dependency, so it is unit-testable outside CONFIG_MESHTASTIC_MQTT.

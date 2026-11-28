@@ -67,6 +67,9 @@ void meshtastic_mqtt_broker_notify(void);
 
 /** True while the broker session is up. */
 bool meshtastic_mqtt_broker_connected(void);
+
+/* Failed resolves, connects (refused or not answered) and publishes since boot. */
+uint32_t meshtastic_mqtt_broker_errors(void);
 #endif
 
 #endif /* ZEPHYR_SUBSYS_MESHTASTIC_MQTT_INTERNAL_H_ */

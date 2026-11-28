@@ -57,6 +57,15 @@
 #if defined(CONFIG_MESHTASTIC_SCANNER)
 #include "meshtastic_scanner.h"
 #endif
+#if defined(CONFIG_MESHTASTIC_MQTT)
+#include "meshtastic_mqtt.h"
+#endif
+#if defined(CONFIG_MESHTASTIC_SPARKPLUG)
+#include <zephyr/meshtastic/sparkplug.h>
+#endif
+#if defined(CONFIG_WIFI)
+#include <zephyr/net/net_if.h>
+#endif
 
 #include "meshtastic_shell_state.h"
 #if defined(CONFIG_MESHTASTIC_PKI)
@@ -159,6 +168,16 @@ static void st_features(struct st *s)
 #endif
 #if defined(CONFIG_MESHTASTIC_PHONEAPI)
 		"phoneapi",
+#endif
+		/* The uplinks compiled in; how each is doing is the "uplink" object. */
+#if defined(CONFIG_WIFI)
+		"wifi",
+#endif
+#if defined(CONFIG_MESHTASTIC_MQTT)
+		"mqtt",
+#endif
+#if defined(CONFIG_MESHTASTIC_SPARKPLUG)
+		"sparkplug",
 #endif
 		/* A bring-up build (overlay-lora-debug.conf): the bench's recipe adds it as a
 		 * feature, and an image must report what its recipe added, or the bench
@@ -316,6 +335,64 @@ static void st_roles(struct st *s)
 	}
 #endif
 }
+
+#if defined(CONFIG_WIFI) || defined(CONFIG_MESHTASTIC_MQTT) || defined(CONFIG_MESHTASTIC_SPARKPLUG)
+/* The uplinks this image has, one object each, only those compiled in:
+ *
+ *   wifi       c: the station is up and holds an IPv4 address
+ *   mqtt       on: the bridge started; px: through the connected client (then c stays 0, the
+ *              client's broker session is the client's); c: a broker connection; host: the
+ *              broker's host name; err: failed resolves, connects and publishes since boot
+ *   sparkplug  on: not stopped; c: a session with the broker; tls: verified TLS; host; err:
+ *              failed connects, publishes and encodes since boot
+ *
+ * A host is the name alone: never a port, a login, a topic or a URL. It is a setting an
+ * operator typed, so it goes out escaped. */
+static void st_uplink(struct st *s)
+{
+	bool first = true;
+
+	st_out(s, ",\"uplink\":{");
+#if defined(CONFIG_WIFI)
+	{
+		struct net_if *iface = net_if_get_wifi_sta();
+		bool up = net_if_is_up(iface);
+
+#if defined(CONFIG_NET_IPV4)
+		up = up && net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED) != NULL;
+#endif
+		st_out(s, "\"wifi\":{\"c\":%d}", up ? 1 : 0);
+		first = false;
+	}
+#endif
+#if defined(CONFIG_MESHTASTIC_MQTT)
+	{
+		struct meshtastic_mqtt_uplink m;
+
+		meshtastic_mqtt_uplink_get(&m);
+		st_out(s, "%s\"mqtt\":{\"on\":%d,\"px\":%d,\"c\":%d,\"host\":", first ? "" : ",",
+		       m.on ? 1 : 0, m.proxy ? 1 : 0, m.connected ? 1 : 0);
+		st_str(s, m.host);
+		st_out(s, ",\"err\":%u}", m.errors);
+		first = false;
+	}
+#endif
+#if defined(CONFIG_MESHTASTIC_SPARKPLUG)
+	{
+		struct meshtastic_sparkplug_uplink p;
+
+		meshtastic_sparkplug_uplink_get(&p);
+		st_out(s, "%s\"sparkplug\":{\"on\":%d,\"c\":%d,\"tls\":%d,\"host\":",
+		       first ? "" : ",", p.on ? 1 : 0, p.connected ? 1 : 0, p.tls ? 1 : 0);
+		st_str(s, p.host);
+		st_out(s, ",\"err\":%u}", p.errors);
+		first = false;
+	}
+#endif
+	ARG_UNUSED(first);
+	st_out(s, "}");
+}
+#endif
 
 /* The receive queue: its depth, its high-water mark and what it refused (all
  * sources, and of them the frames a worker injected). What sizes the queue. */
@@ -502,6 +579,9 @@ int meshtastic_shell_state(const struct shell *sh)
 	st_roles(&s);
 #if defined(CONFIG_MESHTASTIC_ADMIN)
 	st_out(&s, ",\"managed\":%d", meshtastic_admin_is_managed() ? 1 : 0);
+#endif
+#if defined(CONFIG_WIFI) || defined(CONFIG_MESHTASTIC_MQTT) || defined(CONFIG_MESHTASTIC_SPARKPLUG)
+	st_uplink(&s);
 #endif
 	st_rxq(&s);
 #if defined(CONFIG_MESHTASTIC_PKI)

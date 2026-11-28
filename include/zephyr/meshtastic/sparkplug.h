@@ -5,6 +5,9 @@
 #ifndef ZEPHYR_MESHTASTIC_SPARKPLUG_H_
 #define ZEPHYR_MESHTASTIC_SPARKPLUG_H_
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include <zephyr/kernel.h>
 
 /**
@@ -21,9 +24,20 @@
  *
  * Both are no-ops when CONFIG_MESHTASTIC_SPARKPLUG is off, so reboot paths need no guard.
  */
+/** The Edge Node's uplink as `meshtastic state` reports it. The broker's host name only: never
+ * the port, the login, the group or the edge id. */
+struct meshtastic_sparkplug_uplink {
+	bool on;            /**< not stopped (`sparkplug stop`, a planned reboot) */
+	bool connected;     /**< a live session with the broker */
+	bool tls;           /**< every connection is TLS, the broker verified */
+	uint32_t errors;    /**< failed connects (refused or not answered), publishes and encodes */
+	char host[64];
+};
+
 #if defined(CONFIG_MESHTASTIC_SPARKPLUG)
 int meshtastic_sparkplug_stop(k_timeout_t timeout);
 void meshtastic_sparkplug_start(void);
+void meshtastic_sparkplug_uplink_get(struct meshtastic_sparkplug_uplink *out);
 #else
 static inline int meshtastic_sparkplug_stop(k_timeout_t timeout)
 {
