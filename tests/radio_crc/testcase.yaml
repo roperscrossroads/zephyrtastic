@@ -1,0 +1,12 @@
+common:
+  tags:
+    - meshtastic
+    - radio_crc
+    - native_sim
+  integration_platforms:
+    - native_sim/native/64
+  platform_allow:
+    - native_sim/native/64
+tests:
+  # A frame with a failed CRC on the sim radio: counted, shown as warn.bad_crc, never decoded.
+  meshtastic.radio_crc.native_sim: {}

@@ -1365,6 +1365,12 @@ static int mt_rx_activity_clear(void)
 {
 	return lora_sim_rx_activity_clear(mt.lora_dev);
 }
+
+/* The sim radio's frames with a failed CRC, the SX126x count's stand-in on native_sim. */
+uint32_t meshtastic_radio_crc_error_count(void)
+{
+	return (mt.lora_dev != NULL) ? lora_sim_crc_error_count(mt.lora_dev) : 0U;
+}
 #else
 static int mt_rx_activity_get(bool *preamble, bool *header)
 {

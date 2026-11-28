@@ -299,8 +299,6 @@ uint32_t meshtastic_radio_agc_reset_skipped_count(void);
 uint32_t meshtastic_radio_agc_patch_fail_count(void);
 /** @brief Cumulative wedge-recovery firings this boot (durable; see sx126x.c). */
 uint32_t meshtastic_radio_wedge_reset_count(void);
-/** @brief Frames the driver dropped for a failed payload CRC this boot (carried patch 0025). */
-uint32_t meshtastic_radio_crc_error_count(void);
 void meshtastic_radio_cad_agc_stats_reset(void);
 #else
 static inline uint32_t meshtastic_radio_cad_clear_count(void)
@@ -339,12 +337,22 @@ static inline uint32_t meshtastic_radio_wedge_reset_count(void)
 {
 	return 0U;
 }
+static inline void meshtastic_radio_cad_agc_stats_reset(void)
+{
+}
+#endif
+
+/*
+ * Frames the radio dropped for a failed payload CRC this boot: the SX126x driver's count
+ * (carried patch 0025), or the sim radio's (lora_sim_inject_bad_crc()), so a test sees the
+ * number move. 0 on any other radio.
+ */
+#if defined(CONFIG_LORA_SX126X) || defined(CONFIG_LORA_SIM)
+uint32_t meshtastic_radio_crc_error_count(void);
+#else
 static inline uint32_t meshtastic_radio_crc_error_count(void)
 {
 	return 0U;
-}
-static inline void meshtastic_radio_cad_agc_stats_reset(void)
-{
 }
 #endif
 

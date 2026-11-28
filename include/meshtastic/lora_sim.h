@@ -45,6 +45,22 @@ int lora_sim_inject(const struct device *dev, const uint8_t *data, uint8_t len,
 		    int16_t rssi, int8_t snr);
 
 /**
+ * @brief A frame that arrives with a failed payload CRC: heard, counted, never delivered.
+ *
+ * What the SX126x driver does with RX_DONE plus CRC_ERR (carried patch 0025): the frame is
+ * dropped before the stack's receive callback, and a count goes up. On native_sim that count
+ * is what meshtastic_radio_crc_error_count() reads (`meshtastic state`'s warn.bad_crc). Like
+ * @ref lora_sim_inject it ignores tuning; a co-sited aggressor still blanks it.
+ *
+ * @return 0 if heard (and counted), -EAGAIN if no receiver is armed (not counted),
+ *         -ECANCELED if blanked, -EMSGSIZE if too long.
+ */
+int lora_sim_inject_bad_crc(const struct device *dev, const uint8_t *data, uint8_t len);
+
+/** @brief Frames heard with a failed CRC since the last lora_sim_reset(). */
+uint32_t lora_sim_crc_error_count(const struct device *dev);
+
+/**
  * @brief Deliver a frame transmitted with specific modem settings.
  *
  * Models the property that makes multi-preset work possible at all: LoRa
@@ -162,8 +178,8 @@ int lora_sim_set_cosite(const struct device *victim, const struct device *aggres
 /** @brief Frames lost to the co-sited aggressor since the last reset. */
 uint32_t lora_sim_rx_blanked(const struct device *dev);
 
-/** @brief Clear the capture queue, drop counter, busy state, co-site pairing
- *         and blanked counter (between tests). */
+/** @brief Clear the capture queue, drop counter, busy state, co-site pairing,
+ *         blanked counter and CRC-error counter (between tests). */
 void lora_sim_reset(const struct device *dev);
 
 #ifdef __cplusplus

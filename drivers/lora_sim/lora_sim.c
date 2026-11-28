@@ -52,6 +52,7 @@ struct lora_sim_data {
 	 * which is also what every existing test gets). */
 	const struct device *cosite_aggressor;
 	uint32_t rx_blanked; /* frames lost to the aggressor, since reset */
+	uint32_t crc_errors; /* frames heard with a failed CRC, since reset */
 
 	struct k_msgq txq;
 	char          txq_buf[CONFIG_LORA_SIM_TX_QUEUE_DEPTH *
@@ -254,7 +255,7 @@ static int lora_sim_cad(const struct device *dev, k_timeout_t timeout)
  * switch shows up as a clean -ENOTCONN rather than a flaky near-miss. */
 static int lora_sim_inject_common(const struct device *dev, bool match_tuning, uint32_t freq_hz,
 				  uint8_t sf, uint8_t bw, const uint8_t *data, uint8_t len,
-				  int16_t rssi, int8_t snr)
+				  int16_t rssi, int8_t snr, bool crc_ok)
 {
 	struct lora_sim_data *d = dev->data;
 	lora_recv_cb cb;
@@ -314,6 +315,18 @@ static int lora_sim_inject_common(const struct device *dev, bool match_tuning, u
 		}
 	}
 
+	if (!crc_ok) {
+		/* RX_DONE with CRC_ERR: the SX126x driver counts it (carried patch 0025)
+		 * and drops the frame, since the receive callback has no status to carry
+		 * it in. The flags clear as for any completed frame. */
+		k_mutex_lock(&d->lock, K_FOREVER);
+		d->crc_errors++;
+		d->act_preamble = false;
+		d->act_header = false;
+		k_mutex_unlock(&d->lock);
+		return 0;
+	}
+
 	/* Hand the callback a private, mutable copy, exactly as the real driver
 	 * hands over its RX buffer. Do not hold the lock across the callback: the
 	 * stack may synchronously turn around and transmit a relay/ACK. */
@@ -366,13 +379,29 @@ int lora_sim_rx_activity_clear(const struct device *dev)
 int lora_sim_inject(const struct device *dev, const uint8_t *data, uint8_t len,
 		    int16_t rssi, int8_t snr)
 {
-	return lora_sim_inject_common(dev, false, 0U, 0U, 0U, data, len, rssi, snr);
+	return lora_sim_inject_common(dev, false, 0U, 0U, 0U, data, len, rssi, snr, true);
+}
+
+int lora_sim_inject_bad_crc(const struct device *dev, const uint8_t *data, uint8_t len)
+{
+	return lora_sim_inject_common(dev, false, 0U, 0U, 0U, data, len, 0, 0, false);
+}
+
+uint32_t lora_sim_crc_error_count(const struct device *dev)
+{
+	struct lora_sim_data *d = dev->data;
+	uint32_t n;
+
+	k_mutex_lock(&d->lock, K_FOREVER);
+	n = d->crc_errors;
+	k_mutex_unlock(&d->lock);
+	return n;
 }
 
 int lora_sim_inject_on(const struct device *dev, uint32_t freq_hz, uint8_t sf, uint8_t bw,
 		       const uint8_t *data, uint8_t len, int16_t rssi, int8_t snr)
 {
-	return lora_sim_inject_common(dev, true, freq_hz, sf, bw, data, len, rssi, snr);
+	return lora_sim_inject_common(dev, true, freq_hz, sf, bw, data, len, rssi, snr, true);
 }
 
 int lora_sim_get_tuning(const struct device *dev, uint32_t *freq_hz, uint8_t *sf, uint8_t *bw)
@@ -506,6 +535,7 @@ void lora_sim_reset(const struct device *dev)
 	d->act_header       = false;
 	d->cosite_aggressor = NULL;
 	d->rx_blanked       = 0U;
+	d->crc_errors       = 0U;
 	k_mutex_unlock(&d->lock);
 }
 
